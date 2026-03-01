@@ -7,20 +7,19 @@ import * as Wasm from "./enums";
  * Debug/testing options. Set all values to false in production.
  */
 export const CONFIG = {
-  /** Whether to expose engine to globalThis or not. */
-  exportEngine: true,
-  /** Whether to use verbose logging or not. */
-  verbose: true,
-  /** If set to true, disables alerting on error. */
-  noAlertOnError: true,
+    /** Whether to expose engine to globalThis or not. */
+    exportEngine: true,
+    /** Whether to use verbose logging or not. */
+    verbose: true,
+    /** If set to true, disables alerting on error. */
+    noAlertOnError: true,
 };
 
 const { random } = Math;
 
-/** The URL for the WASM (Zig) code. */
-const WASM_URL = "src/main.wasm";
-/** The URL for the shader to use. */
-const SHADER_URL = "src/shader.wgsl";
+import WASM_URL from "./main.wasm?url";
+import SHADER_SOURCE from "./shader.wgsl?raw";
+
 /** The texture format for WebGPU. */
 const TEXTURE_FORMAT: GPUTextureFormat = "rgba16float";
 
@@ -37,849 +36,892 @@ const INTERNAL_WIDTH = 480;
 const INTERNAL_HEIGHT = 270;
 
 function packTileData(
-  spriteId: number,
-  edgeFlags: number,
-  light: number,
-  variation: number,
+    spriteId: number,
+    edgeFlags: number,
+    light: number,
+    variation: number,
 ): number {
-  return (
-    (spriteId & 0xff) |
-    ((edgeFlags & 0xff) << 8) |
-    ((light & 0xff) << 16) |
-    ((variation & 0xff) << 24)
-  );
+    return (
+        (spriteId & 0xff) |
+        ((edgeFlags & 0xff) << 8) |
+        ((light & 0xff) << 16) |
+        ((variation & 0xff) << 24)
+    );
 }
 
 /** Edge flag constants matching shader. */
 const EdgeFlags = {
-  TOP_LEFT: 0x01,
-  TOP: 0x02,
-  TOP_RIGHT: 0x04,
-  LEFT: 0x08,
-  RIGHT: 0x10,
-  BOTTOM_LEFT: 0x20,
-  BOTTOM: 0x40,
-  BOTTOM_RIGHT: 0x80,
+    TOP_LEFT: 0x01,
+    TOP: 0x02,
+    TOP_RIGHT: 0x04,
+    LEFT: 0x08,
+    RIGHT: 0x10,
+    BOTTOM_LEFT: 0x20,
+    BOTTOM: 0x40,
+    BOTTOM_RIGHT: 0x80,
 } as const;
 
 /** Provides the type of information being sent from Zig. */
 enum PacketType {
-  Particles = 1,
-  Blocks = 2,
-  SaveData = 3,
+    Particles = 1,
+    Blocks = 2,
+    SaveData = 3,
 }
 
 interface TileMap {
-  width: number;
-  height: number;
-  /** Packed tile data: spriteId | edgeFlags << 8 | light << 16 | variation << 24 */
-  data: Uint32Array;
+    width: number;
+    height: number;
+    /** Packed tile data: spriteId | edgeFlags << 8 | light << 16 | variation << 24 */
+    data: Uint32Array;
 }
 
 export class GameEngine {
-  /** The engine module automatically generated from Emscripten. */
-  public readonly engineModule: WebAssembly.WebAssemblyInstantiatedSource;
-  /** The exported functions from the engineModule. */
-  public readonly exports: Wasm.EngineExports;
-  /** The memory from the engineModule. */
-  public readonly memory: WebAssembly.Memory;
-  /** A string representing the game seed (up to 100 characters). */
-  public readonly seed: string;
-  /** The canvas where rendering is presented. */
-  public readonly canvas: HTMLCanvasElement;
-  /** The WebGPU adapter for the system. */
-  public readonly adapter: GPUAdapter;
-  /** The logical WebGPU device. */
-  public readonly device: GPUDevice;
-  /** The WebGPU context for the canvas. */
-  public readonly context: GPUCanvasContext;
-  /** The resize observer for the canvas. */
-  private readonly resizeObserver!: ResizeObserver;
-  /** The sprite tile map. */
-  private tileMap!: TileMap;
-  /** Provides the bind group for WebGPU. */
-  private bindGroup!: GPUBindGroup;
-  /** Determines if the tile buffer is dirty. */
-  private tileBufferDirty: boolean = false;
-  /** Specifies if the GameEngine instance is destroyed (providing a reason string). */
-  private destroyed: string | false = false;
-  /** The GPU buffer for uniform data. */
-  private uniformBuffer!: GPUBuffer;
-  /** The GPU buffer for tile data. */
-  private tileBuffer!: GPUBuffer;
-  /** The GPU buffer for map size data. */
-  private mapSizeBuffer!: GPUBuffer;
-  /** Specifies when the game started. */
-  public startTime: number = performance.now();
-  /** Gives the pointer that describes the memory layout. */
-  public LAYOUT_PTR: Wasm.Pointer;
-  /** X-position of the camera. */
-  public cameraX: number;
-  /** Y-position of the camera. */
-  public cameraY: number;
-  /** Fractional pixels per tile in the internal 480x270 resolution (1:1 by default). */
-  public zoom: number = 1;
-  /** Provides an error object if one was passed to destroy(). */
-  public destroyedError: any = null;
-  /** Determines if the Canvas should force a 16:9 aspect ratio. */
-  public forceAspectRatio: boolean = true;
-  /** Determines the previous state of the 16:9 aspect ratio, internal use for updating the canvas styling when calling renderFrame(). */
-  private forceAspectRatio_previous: boolean | null = null;
+    /** The engine module automatically generated from Emscripten. */
+    public readonly engineModule: WebAssembly.WebAssemblyInstantiatedSource;
+    /** The exported functions from the engineModule. */
+    public readonly exports: Wasm.EngineExports;
+    /** The memory from the engineModule. */
+    public readonly memory: WebAssembly.Memory;
+    /** A string representing the game seed (up to 100 characters). */
+    public readonly seed: string;
+    /** The canvas where rendering is presented. */
+    public readonly canvas: HTMLCanvasElement;
+    /** The WebGPU adapter for the system. */
+    public readonly adapter: GPUAdapter;
+    /** The logical WebGPU device. */
+    public readonly device: GPUDevice;
+    /** The WebGPU context for the canvas. */
+    public readonly context: GPUCanvasContext;
+    /** The resize observer for the canvas. */
+    private readonly resizeObserver!: ResizeObserver;
+    /** The sprite tile map. */
+    private tileMap!: TileMap;
+    /** Provides the bind group for WebGPU. */
+    private bindGroup!: GPUBindGroup;
+    /** Determines if the tile buffer is dirty. */
+    private tileBufferDirty: boolean = false;
+    /** Specifies if the GameEngine instance is destroyed (providing a reason string). */
+    private destroyed: string | false = false;
+    /** The GPU buffer for uniform data. */
+    private uniformBuffer!: GPUBuffer;
+    /** The GPU buffer for tile data. */
+    private tileBuffer!: GPUBuffer;
+    /** The GPU buffer for map size data. */
+    private mapSizeBuffer!: GPUBuffer;
+    /** Specifies when the game started. */
+    public startTime: number = performance.now();
+    /** Gives the pointer that describes the memory layout. */
+    public LAYOUT_PTR: Wasm.Pointer;
+    /** X-position of the camera. */
+    public cameraX: number;
+    /** Y-position of the camera. */
+    public cameraY: number;
+    /** Fractional pixels per tile in the internal 480x270 resolution (1:1 by default). */
+    public zoom: number = 1;
+    /** Provides an error object if one was passed to destroy(). */
+    public destroyedError: any = null;
+    /** Determines if the Canvas should force a 16:9 aspect ratio. */
+    public forceAspectRatio: boolean = true;
+    /** Determines the previous state of the 16:9 aspect ratio, internal use for updating the canvas styling when calling renderFrame(). */
+    private forceAspectRatio_previous: boolean | null = null;
 
-  private readonly renderPipeline: GPURenderPipeline;
-  private readonly encoder = new TextEncoder();
-  private readonly decoder = new TextDecoder();
+    private readonly renderPipeline: GPURenderPipeline;
+    private readonly encoder = new TextEncoder();
+    private readonly decoder = new TextDecoder();
 
-  private constructor(
-    canvas: HTMLCanvasElement,
-    adapter: GPUAdapter,
-    device: GPUDevice,
-    context: GPUCanvasContext,
-    engineModule: WebAssembly.WebAssemblyInstantiatedSource,
-    renderPipeline: GPURenderPipeline,
-  ) {
-    this.canvas = canvas;
-    this.adapter = adapter;
-    this.device = device;
-    this.context = context;
-    this.engineModule = engineModule;
-    this.renderPipeline = renderPipeline;
-    this.exports = engineModule.instance.exports as Wasm.EngineExports;
-    this.memory = engineModule.instance.exports.memory as WebAssembly.Memory;
-    this.LAYOUT_PTR = this.exports.get_memory_layout_ptr();
-    this.seed = GameEngine.makeSeed(12);
-    this.cameraX = 0;
-    this.cameraY = 0;
-  }
-
-  public static async create(
-    canvas?: HTMLCanvasElement | string,
-    options?: Wasm.EngineOptions,
-  ): Promise<GameEngine> {
-    const config = { highPerformance: false, ...options };
-
-    const adapter = await navigator.gpu.requestAdapter({
-      powerPreference: config.highPerformance
-        ? "high-performance"
-        : "low-power",
-    });
-    if (!adapter)
-      throw new DOMException(
-        "Couldn't request WebGPU adapter.",
-        "NotSupportedError",
-      );
-
-    const device = await adapter.requestDevice();
-
-    device.addEventListener("uncapturederror", (e) => {
-      if (!engine.destroyed) {
-        console.error(`A fatal WebGPU error has occured: ${e.error.message}`);
-        engine.destroy("fatal WebGPU error", e.error);
-        return;
-      }
-    });
-
-    device.lost.then((info) =>
-      console.error(`WebGPU Device lost: ${info.message}`),
-    );
-
-    if (canvas === undefined) {
-      canvas = document.getElementsByTagName("canvas")[0];
-      if (canvas === undefined) {
-        throw Error(
-          "No canvas element or ID string provided, and no canvas was not found in the HTML.",
-        );
-      }
-      // Using the first HTML canvas element to create the GameEngine here.
-    } else if (typeof canvas === "string") {
-      const elem = document.getElementById(canvas);
-      if (!(elem instanceof HTMLCanvasElement)) {
-        throw Error(`Element with ID "${canvas}" is not a canvas element.`);
-      }
-      canvas = elem;
-    }
-    const context = canvas.getContext("webgpu");
-    if (!context) {
-      throw Error("Could not get WebGPU context from canvas.");
-    }
-
-    context.configure({
-      device,
-      format: TEXTURE_FORMAT, // Must match the pipeline target below
-      alphaMode: "opaque",
-    });
-
-    // Get shader
-    const fetchPromise = await fetch(SHADER_URL);
-    if (!fetchPromise.ok) {
-      throw new Error(
-        `HTTP error when fetching shader! Status: ${fetchPromise.status}`,
-      );
-    }
-    const shaderCode = await fetchPromise.text();
-    const shaderModule = device.createShaderModule({
-      label: "Main shader",
-      code: shaderCode,
-    });
-
-    // Fetch WASM
-    const engineModule = await WebAssembly.instantiateStreaming(
-      fetch(WASM_URL),
-      {
-        env: {
-          // See how logging works in logging.zig. Logging is guaranteed to return valid arguments.
-          js_message: (ptr: Wasm.Pointer, len: number, category: number) => {
-            const str = engine.decoder.decode(
-              new Uint8Array(memory.buffer, ptr, len),
-            );
-            if (category === 1) {
-              console.info("%c" + str, "font-weight: 600");
-            } else {
-              [console.log, console.info, console.warn, console.error][
-                category
-              ](str);
-            }
-          },
-          // Add other external functions here
-        },
-      },
-    );
-    const memory = engineModule.instance.exports.memory as WebAssembly.Memory;
-
-    // Create pipeline
-    const pipeline = device.createRenderPipeline({
-      label: "Tilemap Pipeline",
-      layout: "auto",
-      vertex: {
-        module: shaderModule,
-        entryPoint: "vs_main",
-      },
-      fragment: {
-        module: shaderModule,
-        entryPoint: "fs_main",
-        targets: [
-          {
-            format: TEXTURE_FORMAT,
-            blend: {
-              color: {
-                srcFactor: "src-alpha",
-                dstFactor: "one-minus-src-alpha",
-              },
-              alpha: {
-                srcFactor: "one",
-                dstFactor: "one-minus-src-alpha",
-              },
-            },
-          },
-        ],
-      },
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "none",
-      },
-    });
-
-    const engine = new GameEngine(
-      canvas,
-      adapter,
-      device,
-      context,
-      engineModule,
-      pipeline,
-    );
-
-    const resizeObserver = new ResizeObserver(engine.onResize);
-    (engine as any).resizeObserver = resizeObserver;
-    engine.updateCanvasStyle();
-
-    try {
-      // Attempt the high-precision physical pixel observer
-      engine.resizeObserver.observe(canvas, {
-        box: "device-pixel-content-box",
-      });
-    } catch (e) {
-      // Fallback for Safari or older browsers ):
-      if (CONFIG.verbose)
-        console.log(
-          "device-pixel-content-box not supported, falling back to content-box.",
-        );
-      engine.resizeObserver.observe(canvas, { box: "content-box" });
-    }
-
-    engine.onResize([
-      {
-        contentRect: {
-          width: canvas.clientWidth,
-          height: canvas.clientHeight,
-        } as DOMRectReadOnly,
-      } as ResizeObserverEntry,
-    ]);
-
-    // Start working on WebGPU stuff
-    const atlasTexture = await GameEngine.loadTexture(device, spriteAtlasUrl);
-
-    // Create sampler (nearest neighbor for pixel art)
-    const pixelSampler = device.createSampler({
-      magFilter: "nearest",
-      minFilter: "nearest",
-      addressModeU: "clamp-to-edge",
-      addressModeV: "clamp-to-edge",
-    });
-
-    // Create uniform buffer (SceneUniforms)
-    // camera: vec2f (8), viewport_size: vec2f (8), time: f32 (4), zoom: f32 (4), padding: vec2u (8)
-    const uniformBuffer = device.createBuffer({
-      label: "SceneUniforms",
-      size: 32, // Aligned to 16 bytes
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
-    // Create map size buffer
-    const mapSizeBuffer = device.createBuffer({
-      label: "Map Size",
-      size: 8, // vec2u
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
-    // Initialize tilemap
-    const tileMap: TileMap = {
-      width: initialMapWidth,
-      height: initialMapHeight,
-      data: new Uint32Array(initialMapWidth * initialMapHeight),
-    };
-    engine.tileMap = tileMap;
-
-    // Fill with test pattern
-    GameEngine.generateTestTilemap(tileMap);
-
-    // Create tile storage buffer
-    const tileBuffer = device.createBuffer({
-      label: "Tile Data",
-      size: tileMap.data.byteLength,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-
-    // Upload initial tile data
-    device.queue.writeBuffer(tileBuffer, 0, tileMap.data.buffer);
-    device.queue.writeBuffer(
-      mapSizeBuffer,
-      0,
-      new Uint32Array([tileMap.width, tileMap.height]),
-    );
-
-    // Create bind group
-    engine.bindGroup = device.createBindGroup({
-      label: "Tilemap Bind Group",
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: uniformBuffer } },
-        { binding: 1, resource: { buffer: tileBuffer } },
-        { binding: 2, resource: atlasTexture.createView() },
-        { binding: 3, resource: pixelSampler },
-        { binding: 4, resource: { buffer: mapSizeBuffer } },
-      ],
-    });
-
-    engine.uniformBuffer = uniformBuffer;
-    engine.tileBuffer = tileBuffer;
-    engine.mapSizeBuffer = mapSizeBuffer;
-    return engine;
-  }
-
-  private static makeSeed(seedLength: number | bigint = 100) {
-    const alphabet = "abcdefghijklmnopqrstuvwxyz";
-    const base = 26n;
-
-    // 26 * (26^100 - 1) / 25
-    const totalPossibilities = (base * (base ** BigInt(seedLength) - 1n)) / 25n;
-
-    const byteLength = 68;
-    const bytes = new Uint8Array(byteLength);
-    const maxRange = 2n ** BigInt(byteLength * 8);
-    const limit = maxRange - (maxRange % totalPossibilities);
-
-    let randomBigInt = 0n;
-
-    while (true) {
-      crypto.getRandomValues(bytes);
-      randomBigInt = 0n;
-      for (let i = 0; i < byteLength; i++) {
-        randomBigInt = (randomBigInt << 8n) | BigInt(bytes[i]);
-      }
-
-      if (randomBigInt < limit) {
-        randomBigInt = randomBigInt % totalPossibilities;
-        break;
-      }
-    }
-
-    let result = "";
-    let temp = randomBigInt;
-
-    while (temp >= 0n) {
-      // bigint to number
-      result += alphabet[Number(temp % base)];
-      temp = temp / base - 1n;
-      if (temp < 0n) break;
-    }
-
-    return result;
-  }
-
-  public destroy(reason = "unknown reason", error: any = null) {
-    this.resizeObserver.disconnect();
-    this.destroyed = reason;
-    this.destroyedError = error;
-  }
-
-  private static async loadTexture(
-    device: GPUDevice,
-    url: string,
-  ): Promise<GPUTexture> {
-    const response = await fetch(url);
-    const blob = await response.blob();
-    const imageBitmap = await createImageBitmap(blob);
-
-    const texture = device.createTexture({
-      label: `Texture: ${url}`,
-      size: [imageBitmap.width, imageBitmap.height],
-      format: "rgba8unorm",
-      usage:
-        GPUTextureUsage.TEXTURE_BINDING |
-        GPUTextureUsage.COPY_DST |
-        GPUTextureUsage.RENDER_ATTACHMENT,
-    });
-
-    device.queue.copyExternalImageToTexture(
-      { source: imageBitmap },
-      { texture },
-      [imageBitmap.width, imageBitmap.height],
-    );
-
-    return texture;
-  }
-
-  private static generateTestTilemap(tileMap: TileMap): void {
-    const { width, height, data } = tileMap;
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const idx = y * width + x;
-
-        // Alternate between sprite 0 and 1 in a checkerboard (0=stone, 1=torch)
-        let spriteId = ((x + y) % 2) as 0 | 1;
-        if (spriteId == 1 && random() < 0.4) spriteId = 0; //40% of torches become stone!
-
-        // Calculate edge flags (which neighbors are "air"/different)
-        let edgeFlags = 0;
-
-        // Check all 8 neighbors
-        const neighbors = [
-          [-1, -1, EdgeFlags.TOP_LEFT],
-          [0, -1, EdgeFlags.TOP],
-          [1, -1, EdgeFlags.TOP_RIGHT],
-          [-1, 0, EdgeFlags.LEFT],
-          [1, 0, EdgeFlags.RIGHT],
-          [-1, 1, EdgeFlags.BOTTOM_LEFT],
-          [0, 1, EdgeFlags.BOTTOM],
-          [1, 1, EdgeFlags.BOTTOM_RIGHT],
-        ] as const;
-
-        for (const [dx, dy, flag] of neighbors) {
-          const nx = x + dx;
-          const ny = y + dy;
-
-          // Edge of map or different sprite type = edge
-          if (
-            nx < 0 ||
-            nx >= width ||
-            ny < 0 ||
-            ny >= height ||
-            (nx + ny) % 2 !== spriteId
-          ) {
-            edgeFlags |= flag;
-          }
-        }
-
-        // Random light value for testing
-        const light = Math.floor(128 + Math.random() * 127);
-
-        // Random variation seed
-        const variation = Math.floor(Math.random() * 256);
-
-        data[idx] = packTileData(spriteId, edgeFlags, light, variation);
-      }
-    }
-  }
-
-  public setTile(
-    x: number,
-    y: number,
-    spriteId: number,
-    edgeFlags?: number,
-    light?: number,
-    variation?: number,
-  ): void {
-    if (x < 0 || x >= this.tileMap.width || y < 0 || y >= this.tileMap.height) {
-      return;
-    }
-
-    const idx = y * this.tileMap.width + x;
-    const existing = this.tileMap.data[idx];
-
-    // Preserve existing values if not specified
-    const newData = packTileData(
-      spriteId,
-      edgeFlags ?? (existing >> 8) & 0xff,
-      light ?? (existing >> 16) & 0xff,
-      variation ?? (existing >> 24) & 0xff,
-    );
-
-    this.tileMap.data[idx] = newData;
-    this.tileBufferDirty = true;
-  }
-
-  public setTileLight(x: number, y: number, light: number): void {
-    if (x < 0 || x >= this.tileMap.width || y < 0 || y >= this.tileMap.height) {
-      return;
-    }
-
-    const idx = y * this.tileMap.width + x;
-    // Clear light bits and set new value
-    this.tileMap.data[idx] =
-      (this.tileMap.data[idx] & 0xff00ffff) | ((light & 0xff) << 16);
-    this.tileBufferDirty = true;
-  }
-
-  public getTileData(
-    x: number,
-    y: number,
-  ): {
-    spriteId: number;
-    edgeFlags: number;
-    light: number;
-    variation: number;
-  } | null {
-    if (x < 0 || x >= this.tileMap.width || y < 0 || y >= this.tileMap.height) {
-      return null;
-    }
-
-    const idx = y * this.tileMap.width + x;
-    const packed = this.tileMap.data[idx];
-
-    return {
-      spriteId: packed & 0xff,
-      edgeFlags: (packed >> 8) & 0xff,
-      light: (packed >> 16) & 0xff,
-      variation: (packed >> 24) & 0xff,
-    };
-  }
-
-  /**
-   * Obtains a TypedArray view into WASM memory.
-   */
-  public getView(
-    typeCode: -8 | 8 | 16 | 32 | -32 | 64 | -64,
-    size: number,
-    offset: number = this.getScratchPtr(),
-  ): ArrayBufferView {
-    const buffer = this.memory.buffer;
-    switch (typeCode) {
-      case -8:
-        return new Uint8ClampedArray(buffer, offset, size);
-      case 8:
-        return new Uint8Array(buffer, offset, size);
-      case 16:
-        return new Uint16Array(buffer, offset, size);
-      case 32:
-        return new Uint32Array(buffer, offset, size);
-      case -32:
-        return new Float32Array(buffer, offset, size);
-      case 64:
-        return new BigUint64Array(buffer, offset, size);
-      case -64:
-        return new Float64Array(buffer, offset, size);
-      default:
-        throw new RangeError(`Unsupported memory type code: ${typeCode}`);
-    }
-  }
-
-  /** Internal property for a temporary access of the scratch view. Value 0 is the pointer, value 1 is the length, value 2 is the max capacity, and values 3-7 are custom properties when necessary. */
-  private _tempScratchView: BigUint64Array | null = null;
-  /** Returns 8 values in the scratch buffer; (zero-indexed) value 0 is the pointer, value 1 is the length, value 2 is the max capacity, and values 3-7 are custom properties when necessary. */
-  public getScratchView() {
-    // Check if we need to (re)create the view
-    if (
-      this._tempScratchView === null ||
-      this._tempScratchView.buffer !== this.memory.buffer // old view due to memory growth
+    private constructor(
+        canvas: HTMLCanvasElement,
+        adapter: GPUAdapter,
+        device: GPUDevice,
+        context: GPUCanvasContext,
+        engineModule: WebAssembly.WebAssemblyInstantiatedSource,
+        renderPipeline: GPURenderPipeline,
     ) {
-      this._tempScratchView = new BigUint64Array(
-        this.memory.buffer,
-        this.LAYOUT_PTR,
-        8,
-      );
+        this.canvas = canvas;
+        this.adapter = adapter;
+        this.device = device;
+        this.context = context;
+        this.engineModule = engineModule;
+        this.renderPipeline = renderPipeline;
+        this.exports = engineModule.instance.exports as Wasm.EngineExports;
+        this.memory = engineModule.instance.exports
+            .memory as WebAssembly.Memory;
+        this.LAYOUT_PTR = this.exports.get_memory_layout_ptr();
+        this.seed = GameEngine.makeSeed(12);
+        this.cameraX = 0;
+        this.cameraY = 0;
     }
-    return this._tempScratchView;
-  }
 
-  /**
-   * Returns the scratch buffer's location in memory (used for passing strings, commands, and data between JS and WASM).
-   */
-  public getScratchPtr() {
-    return Number(this.getScratchView()[0]);
-  }
+    public static async create(
+        canvas?: HTMLCanvasElement | string,
+        options?: Wasm.EngineOptions,
+    ): Promise<GameEngine> {
+        const config = { highPerformance: false, ...options };
 
-  /**
-   * Returns the scratch buffer's current length of data (not capacity).
-   */
-  public getScratchLen() {
-    return Number(this.getScratchView()[1]);
-  }
+        const adapter = await navigator.gpu.requestAdapter({
+            powerPreference: config.highPerformance
+                ? "high-performance"
+                : "low-power",
+        });
+        if (!adapter)
+            throw new DOMException(
+                "Couldn't request WebGPU adapter.",
+                "NotSupportedError",
+            );
 
-  /**
-   * Sets the scratch buffer's current length of data (not capacity).
-   */
-  public setScratchLen(length: number) {
-    this.getScratchView()[1] = BigInt(length);
-  }
+        const device = await adapter.requestDevice();
 
-  /**
-   * Returns the scratch buffer's max capacity.
-   */
-  public getScratchCapacity() {
-    return Number(this.getScratchView()[2]);
-  }
-
-  /**
-   * Determines the properties of the scratch buffer (6 u64 constants from Zig converted to Number). Returns a number if ID of property is provided (0-4) and number[] of all 5 properties if not.
-   */
-  public getScratchProperties(
-    index?: 0 | 1 | 2 | 3 | 4,
-  ): number | [number, number, number, number, number] {
-    let view = this.getScratchView();
-    return index
-      ? Number(view[index - 3])
-      : [
-          Number(view[3]),
-          Number(view[4]),
-          Number(view[5]),
-          Number(view[6]),
-          Number(view[7]),
-        ];
-  }
-
-  /**
-   * Reads a UTF-8 string from WASM memory.
-   */
-  public readStr(
-    offset: number = this.getScratchPtr(),
-    len: number = this.getScratchLen(),
-  ): string {
-    const bytes = new Uint8Array(this.memory.buffer, offset, len);
-    return this.decoder.decode(bytes);
-  }
-
-  /**
-   * Writes a JavaScript string into WASM memory.
-   * Returns the number of bytes actually written.
-   */
-  public writeStr(str: string, offset: number = this.getScratchPtr()): number {
-    let view = this.getScratchView();
-    if (str.length == 0) {
-      view[1] = 0n;
-      return 0;
-    }
-    const capacity = view[2];
-    if (str.length > capacity)
-      throw new RangeError("Scratch data too big to be sent to WASM.");
-    const bytes = new Uint8Array(this.memory.buffer, offset);
-    const result = this.encoder.encodeInto(str, bytes);
-    if (result.read > capacity)
-      throw new RangeError("Scratch data too big to be sent to WASM.");
-    view[1] = BigInt(result.read);
-    return result.written || 0;
-  }
-
-  /** Batch update of tile data. */
-  public updateTileRegion(
-    startX: number,
-    startY: number,
-    regionWidth: number,
-    regionHeight: number,
-    generator: (x: number, y: number) => number, // Returns packed tile data
-  ): void {
-    for (let y = startY; y < startY + regionHeight; y++) {
-      for (let x = startX; x < startX + regionWidth; x++) {
-        if (
-          x >= 0 &&
-          x < this.tileMap.width &&
-          y >= 0 &&
-          y < this.tileMap.height
-        ) {
-          this.tileMap.data[y * this.tileMap.width + x] = generator(x, y);
-        }
-      }
-    }
-    this.tileBufferDirty = true;
-  }
-
-  /** Recalculate edge flags for all tiles based on current sprite IDs */
-  public recalculateEdgeFlags(): void {
-    const { width, height, data } = this.tileMap;
-
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const idx = y * width + x;
-        const spriteId = data[idx] & 0xff;
-        let edgeFlags = 0;
-
-        const neighbors = [
-          [-1, -1, EdgeFlags.TOP_LEFT],
-          [0, -1, EdgeFlags.TOP],
-          [1, -1, EdgeFlags.TOP_RIGHT],
-          [-1, 0, EdgeFlags.LEFT],
-          [1, 0, EdgeFlags.RIGHT],
-          [-1, 1, EdgeFlags.BOTTOM_LEFT],
-          [0, 1, EdgeFlags.BOTTOM],
-          [1, 1, EdgeFlags.BOTTOM_RIGHT],
-        ] as const;
-
-        for (const [dx, dy, flag] of neighbors) {
-          const nx = x + dx;
-          const ny = y + dy;
-
-          if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
-            edgeFlags |= flag; // Map edge = air
-          } else {
-            const neighborSprite = data[ny * width + nx] & 0xff;
-            if (neighborSprite !== spriteId) {
-              edgeFlags |= flag;
+        device.addEventListener("uncapturederror", (e) => {
+            if (!engine.destroyed) {
+                console.error(
+                    `A fatal WebGPU error has occured: ${e.error.message}`,
+                );
+                engine.destroy("fatal WebGPU error", e.error);
+                return;
             }
-          }
+        });
+
+        device.lost.then((info) =>
+            console.error(`WebGPU Device lost: ${info.message}`),
+        );
+
+        if (canvas === undefined) {
+            canvas = document.getElementsByTagName("canvas")[0];
+            if (canvas === undefined) {
+                throw Error(
+                    "No canvas element or ID string provided, and no canvas was not found in the HTML.",
+                );
+            }
+            // Using the first HTML canvas element to create the GameEngine here.
+        } else if (typeof canvas === "string") {
+            const elem = document.getElementById(canvas);
+            if (!(elem instanceof HTMLCanvasElement)) {
+                throw Error(
+                    `Element with ID "${canvas}" is not a canvas element.`,
+                );
+            }
+            canvas = elem;
+        }
+        const context = canvas.getContext("webgpu");
+        if (!context) {
+            throw Error("Could not get WebGPU context from canvas.");
         }
 
-        // Update edge flags, preserve other data
-        data[idx] = (data[idx] & 0xffff00ff) | (edgeFlags << 8);
-      }
+        context.configure({
+            device,
+            format: TEXTURE_FORMAT, // Must match the pipeline target below
+            alphaMode: "opaque",
+        });
+
+        // Get shader
+        const shaderModule = device.createShaderModule({
+            label: "Main shader",
+            code: SHADER_SOURCE,
+        });
+
+        // Fetch WASM
+        const engineModule = await WebAssembly.instantiateStreaming(
+            fetch(WASM_URL),
+            {
+                env: {
+                    // See how logging works in logging.zig. Logging is guaranteed to return valid arguments.
+                    js_message: (
+                        ptr: Wasm.Pointer,
+                        len: number,
+                        category: number,
+                    ) => {
+                        const str = engine.decoder.decode(
+                            new Uint8Array(memory.buffer, ptr, len),
+                        );
+                        if (category === 1) {
+                            console.info("%c" + str, "font-weight: 600");
+                        } else {
+                            [
+                                console.log,
+                                console.info,
+                                console.warn,
+                                console.error,
+                            ][category](str);
+                        }
+                    },
+                    // Add other external functions here
+                },
+            },
+        );
+        const memory = engineModule.instance.exports
+            .memory as WebAssembly.Memory;
+
+        // Create pipeline
+        const pipeline = device.createRenderPipeline({
+            label: "Tilemap Pipeline",
+            layout: "auto",
+            vertex: {
+                module: shaderModule,
+                entryPoint: "vs_main",
+            },
+            fragment: {
+                module: shaderModule,
+                entryPoint: "fs_main",
+                targets: [
+                    {
+                        format: TEXTURE_FORMAT,
+                        blend: {
+                            color: {
+                                srcFactor: "src-alpha",
+                                dstFactor: "one-minus-src-alpha",
+                            },
+                            alpha: {
+                                srcFactor: "one",
+                                dstFactor: "one-minus-src-alpha",
+                            },
+                        },
+                    },
+                ],
+            },
+            primitive: {
+                topology: "triangle-list",
+                cullMode: "none",
+            },
+        });
+
+        const engine = new GameEngine(
+            canvas,
+            adapter,
+            device,
+            context,
+            engineModule,
+            pipeline,
+        );
+
+        const resizeObserver = new ResizeObserver(engine.onResize);
+        (engine as any).resizeObserver = resizeObserver;
+        engine.updateCanvasStyle();
+
+        try {
+            // Attempt the high-precision physical pixel observer
+            engine.resizeObserver.observe(canvas, {
+                box: "device-pixel-content-box",
+            });
+        } catch (e) {
+            // Fallback for Safari or older browsers ):
+            if (CONFIG.verbose)
+                console.log(
+                    "device-pixel-content-box not supported, falling back to content-box.",
+                );
+            engine.resizeObserver.observe(canvas, { box: "content-box" });
+        }
+
+        engine.onResize([
+            {
+                contentRect: {
+                    width: canvas.clientWidth,
+                    height: canvas.clientHeight,
+                } as DOMRectReadOnly,
+            } as ResizeObserverEntry,
+        ]);
+
+        // Start working on WebGPU stuff
+        const atlasTexture = await GameEngine.loadTexture(
+            device,
+            spriteAtlasUrl,
+        );
+
+        // Create sampler (nearest neighbor for pixel art)
+        const pixelSampler = device.createSampler({
+            magFilter: "nearest",
+            minFilter: "nearest",
+            addressModeU: "clamp-to-edge",
+            addressModeV: "clamp-to-edge",
+        });
+
+        // Create uniform buffer (SceneUniforms)
+        // camera: vec2f (8), viewport_size: vec2f (8), time: f32 (4), zoom: f32 (4), padding: vec2u (8)
+        const uniformBuffer = device.createBuffer({
+            label: "SceneUniforms",
+            size: 32, // Aligned to 16 bytes
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        // Create map size buffer
+        const mapSizeBuffer = device.createBuffer({
+            label: "Map Size",
+            size: 8, // vec2u
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+
+        // Initialize tilemap
+        const tileMap: TileMap = {
+            width: initialMapWidth,
+            height: initialMapHeight,
+            data: new Uint32Array(initialMapWidth * initialMapHeight),
+        };
+        engine.tileMap = tileMap;
+
+        // Fill with test pattern
+        GameEngine.generateTestTilemap(tileMap);
+
+        // Create tile storage buffer
+        const tileBuffer = device.createBuffer({
+            label: "Tile Data",
+            size: tileMap.data.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+        });
+
+        // Upload initial tile data
+        device.queue.writeBuffer(tileBuffer, 0, tileMap.data.buffer);
+        device.queue.writeBuffer(
+            mapSizeBuffer,
+            0,
+            new Uint32Array([tileMap.width, tileMap.height]),
+        );
+
+        // Create bind group
+        engine.bindGroup = device.createBindGroup({
+            label: "Tilemap Bind Group",
+            layout: pipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: uniformBuffer } },
+                { binding: 1, resource: { buffer: tileBuffer } },
+                { binding: 2, resource: atlasTexture.createView() },
+                { binding: 3, resource: pixelSampler },
+                { binding: 4, resource: { buffer: mapSizeBuffer } },
+            ],
+        });
+
+        engine.uniformBuffer = uniformBuffer;
+        engine.tileBuffer = tileBuffer;
+        engine.mapSizeBuffer = mapSizeBuffer;
+        return engine;
     }
 
-    this.tileBufferDirty = true;
-  }
+    /** Creates a seed; won't work properly past length 100. */
+    private static makeSeed(seedLength: number | bigint = 100) {
+        const alphabet = "abcdefghijklmnopqrstuvwxyz";
+        const base = 26n;
 
-  /** Updates the canvas CSS style. */
-  private updateCanvasStyle() {
-    if (this.forceAspectRatio === this.forceAspectRatio_previous) return;
-    this.forceAspectRatio_previous = this.forceAspectRatio;
-    if (this.forceAspectRatio) {
-      this.canvas.style.maxWidth = "calc(100vh * (16 / 9))";
-      this.canvas.style.maxHeight = "calc(100vw * (9 / 16))";
-    } else {
-      this.canvas.style.maxWidth = "none";
-      this.canvas.style.maxHeight = "none";
-    }
-  }
+        // 26 * (26^100 - 1) / 25
+        const totalPossibilities =
+            (base * (base ** BigInt(seedLength) - 1n)) / 25n;
 
-  /** Handles resizing of canvas automatically. */
-  private onResize = (entries: ResizeObserverEntry[]) => {
-    const entry = entries[0];
-    let w: number;
-    let h: number;
+        const byteLength = 68;
+        const bytes = new Uint8Array(byteLength);
+        const maxRange = 2n ** BigInt(byteLength * 8);
+        const limit = maxRange - (maxRange % totalPossibilities);
 
-    if (entry.devicePixelContentBoxSize) {
-      w = entry.devicePixelContentBoxSize[0].inlineSize;
-      h = entry.devicePixelContentBoxSize[0].blockSize;
-    } else if (entry.contentBoxSize) {
-      // Use the logical CSS size, manually apply devicePixelRatio
-      const cssW = entry.contentBoxSize[0].inlineSize;
-      const cssH = entry.contentBoxSize[0].blockSize;
+        let randomBigInt = 0n;
 
-      w = Math.round(cssW * devicePixelRatio);
-      h = Math.round(cssH * devicePixelRatio);
-    } else {
-      // final fallback
-      const cssW = entry.contentRect.width;
-      const cssH = entry.contentRect.height;
+        while (true) {
+            crypto.getRandomValues(bytes);
+            randomBigInt = 0n;
+            for (let i = 0; i < byteLength; i++) {
+                randomBigInt = (randomBigInt << 8n) | BigInt(bytes[i]);
+            }
 
-      w = Math.round(cssW * devicePixelRatio);
-      h = Math.round(cssH * devicePixelRatio);
-    }
+            if (randomBigInt < limit) {
+                randomBigInt = randomBigInt % totalPossibilities;
+                break;
+            }
+        }
 
-    // Apply new size only if it has actually changed
-    if (this.canvas.width !== w || this.canvas.height !== h) {
-      this.canvas.width = w;
-      this.canvas.height = h;
-    }
-  };
+        let result = "";
+        let temp = randomBigInt;
 
-  /** Renders a single frame. */
-  public renderFrame(timeDifference: number) {
-    if (this.destroyed) {
-      throw new DOMException(
-        "GameEngine instance was destroyed (due to " + this.destroyed + ").",
-        "InvalidStateError",
-      );
+        while (temp >= 0n) {
+            // bigint to number
+            result += alphabet[Number(temp % base)];
+            temp = temp / base - 1n;
+            if (temp < 0n) break;
+        }
+
+        return result;
     }
 
-    this.updateCanvasStyle();
-
-    // Calculate the multiplier required to map internal 480p units to physical pixels
-    const resolutionScale = this.canvas.width / INTERNAL_WIDTH;
-
-    // Final zoom factor passed to the shader
-    const effectiveZoom = this.zoom * resolutionScale;
-
-    const time = (performance.now() - this.startTime) / 1000.0;
-    const uniformData = new Float32Array([
-      this.cameraX, // camera.x
-      this.cameraY, // camera.y
-      this.canvas.width, // viewport_size.x
-      this.canvas.height, // viewport_size.y
-      time, // time
-      effectiveZoom, // effective zoom
-      0, // padding
-      0, // padding
-    ]);
-
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
-
-    // Update tile buffer if dirty
-    if (this.tileBufferDirty) {
-      this.device.queue.writeBuffer(
-        this.tileBuffer,
-        0,
-        this.tileMap.data.buffer,
-      );
-      this.tileBufferDirty = false;
+    public destroy(reason = "unknown reason", error: any = null) {
+        this.resizeObserver.disconnect();
+        this.destroyed = reason;
+        this.destroyedError = error;
     }
 
-    const commandEncoder = this.device.createCommandEncoder();
-    const textureView = this.context.getCurrentTexture().createView();
+    private static async loadTexture(
+        device: GPUDevice,
+        url: string,
+    ): Promise<GPUTexture> {
+        const response = await fetch(url);
+        const blob = await response.blob();
+        const imageBitmap = await createImageBitmap(blob);
 
-    const renderPass = commandEncoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view: textureView,
-          loadOp: "clear",
-          clearValue: { r: 0.1, g: 0.1, b: 0.15, a: 1.0 },
-          storeOp: "store",
-        },
-      ],
-    });
+        const texture = device.createTexture({
+            label: `Texture: ${url}`,
+            size: [imageBitmap.width, imageBitmap.height],
+            format: "rgba8unorm",
+            usage:
+                GPUTextureUsage.TEXTURE_BINDING |
+                GPUTextureUsage.COPY_DST |
+                GPUTextureUsage.RENDER_ATTACHMENT,
+        });
 
-    renderPass.setPipeline(this.renderPipeline);
-    renderPass.setBindGroup(0, this.bindGroup);
-    renderPass.setViewport(0, 0, this.canvas.width, this.canvas.height, 0, 1);
+        device.queue.copyExternalImageToTexture(
+            { source: imageBitmap },
+            { texture },
+            [imageBitmap.width, imageBitmap.height],
+        );
 
-    // Draw all tiles as instances
-    const instanceCount = this.tileMap.width * this.tileMap.height;
-    renderPass.draw(6, instanceCount);
+        return texture;
+    }
 
-    renderPass.end();
-    this.device.queue.submit([commandEncoder.finish()]);
-  }
+    private static generateTestTilemap(tileMap: TileMap): void {
+        const { width, height, data } = tileMap;
 
-  /** Updates the game's logic state. */
-  public update(iterations: number) {
-    // Zig Physics updates will go here later
-  }
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const idx = y * width + x;
+
+                // Alternate between sprite 0 and 1 in a checkerboard (0=stone, 1=torch)
+                let spriteId = ((x + y) % 2) as 0 | 1;
+                if (spriteId == 1 && random() < 0.4) spriteId = 0; //40% of torches become stone!
+
+                // Calculate edge flags (which neighbors are "air"/different)
+                let edgeFlags = 0;
+
+                // Check all 8 neighbors
+                const neighbors = [
+                    [-1, -1, EdgeFlags.TOP_LEFT],
+                    [0, -1, EdgeFlags.TOP],
+                    [1, -1, EdgeFlags.TOP_RIGHT],
+                    [-1, 0, EdgeFlags.LEFT],
+                    [1, 0, EdgeFlags.RIGHT],
+                    [-1, 1, EdgeFlags.BOTTOM_LEFT],
+                    [0, 1, EdgeFlags.BOTTOM],
+                    [1, 1, EdgeFlags.BOTTOM_RIGHT],
+                ] as const;
+
+                for (const [dx, dy, flag] of neighbors) {
+                    const nx = x + dx;
+                    const ny = y + dy;
+
+                    // Edge of map or different sprite type = edge
+                    if (
+                        nx < 0 ||
+                        nx >= width ||
+                        ny < 0 ||
+                        ny >= height ||
+                        (nx + ny) % 2 !== spriteId
+                    ) {
+                        edgeFlags |= flag;
+                    }
+                }
+
+                // Random light value for testing
+                const light = Math.floor(128 + Math.random() * 127);
+
+                // Random variation seed
+                const variation = Math.floor(Math.random() * 256);
+
+                data[idx] = packTileData(spriteId, edgeFlags, light, variation);
+            }
+        }
+    }
+
+    public setTile(
+        x: number,
+        y: number,
+        spriteId: number,
+        edgeFlags?: number,
+        light?: number,
+        variation?: number,
+    ): void {
+        if (
+            x < 0 ||
+            x >= this.tileMap.width ||
+            y < 0 ||
+            y >= this.tileMap.height
+        ) {
+            return;
+        }
+
+        const idx = y * this.tileMap.width + x;
+        const existing = this.tileMap.data[idx];
+
+        // Preserve existing values if not specified
+        const newData = packTileData(
+            spriteId,
+            edgeFlags ?? (existing >> 8) & 0xff,
+            light ?? (existing >> 16) & 0xff,
+            variation ?? (existing >> 24) & 0xff,
+        );
+
+        this.tileMap.data[idx] = newData;
+        this.tileBufferDirty = true;
+    }
+
+    public setTileLight(x: number, y: number, light: number): void {
+        if (
+            x < 0 ||
+            x >= this.tileMap.width ||
+            y < 0 ||
+            y >= this.tileMap.height
+        ) {
+            return;
+        }
+
+        const idx = y * this.tileMap.width + x;
+        // Clear light bits and set new value
+        this.tileMap.data[idx] =
+            (this.tileMap.data[idx] & 0xff00ffff) | ((light & 0xff) << 16);
+        this.tileBufferDirty = true;
+    }
+
+    public getTileData(
+        x: number,
+        y: number,
+    ): {
+        spriteId: number;
+        edgeFlags: number;
+        light: number;
+        variation: number;
+    } | null {
+        if (
+            x < 0 ||
+            x >= this.tileMap.width ||
+            y < 0 ||
+            y >= this.tileMap.height
+        ) {
+            return null;
+        }
+
+        const idx = y * this.tileMap.width + x;
+        const packed = this.tileMap.data[idx];
+
+        return {
+            spriteId: packed & 0xff,
+            edgeFlags: (packed >> 8) & 0xff,
+            light: (packed >> 16) & 0xff,
+            variation: (packed >> 24) & 0xff,
+        };
+    }
+
+    /**
+     * Obtains a TypedArray view into WASM memory.
+     */
+    public getView(
+        typeCode: -8 | 8 | 16 | 32 | -32 | 64 | -64,
+        size: number,
+        offset: number = this.getScratchPtr(),
+    ): ArrayBufferView {
+        const buffer = this.memory.buffer;
+        switch (typeCode) {
+            case -8:
+                return new Uint8ClampedArray(buffer, offset, size);
+            case 8:
+                return new Uint8Array(buffer, offset, size);
+            case 16:
+                return new Uint16Array(buffer, offset, size);
+            case 32:
+                return new Uint32Array(buffer, offset, size);
+            case -32:
+                return new Float32Array(buffer, offset, size);
+            case 64:
+                return new BigUint64Array(buffer, offset, size);
+            case -64:
+                return new Float64Array(buffer, offset, size);
+            default:
+                throw new RangeError(
+                    `Unsupported memory type code: ${typeCode}`,
+                );
+        }
+    }
+
+    /** Internal property for a temporary access of the scratch view. Value 0 is the pointer, value 1 is the length, value 2 is the max capacity, and values 3-7 are custom properties when necessary. */
+    private _tempScratchView: BigUint64Array | null = null;
+    /** Returns 8 values in the scratch buffer; (zero-indexed) value 0 is the pointer, value 1 is the length, value 2 is the max capacity, and values 3-7 are custom properties when necessary. */
+    public getScratchView() {
+        // Check if we need to (re)create the view
+        if (
+            this._tempScratchView === null ||
+            this._tempScratchView.buffer !== this.memory.buffer // old view due to memory growth
+        ) {
+            this._tempScratchView = new BigUint64Array(
+                this.memory.buffer,
+                this.LAYOUT_PTR,
+                8,
+            );
+        }
+        return this._tempScratchView;
+    }
+
+    /**
+     * Returns the scratch buffer's location in memory (used for passing strings, commands, and data between JS and WASM).
+     */
+    public getScratchPtr() {
+        return Number(this.getScratchView()[0]);
+    }
+
+    /**
+     * Returns the scratch buffer's current length of data (not capacity).
+     */
+    public getScratchLen() {
+        return Number(this.getScratchView()[1]);
+    }
+
+    /**
+     * Sets the scratch buffer's current length of data (not capacity).
+     */
+    public setScratchLen(length: number) {
+        this.getScratchView()[1] = BigInt(length);
+    }
+
+    /**
+     * Returns the scratch buffer's max capacity.
+     */
+    public getScratchCapacity() {
+        return Number(this.getScratchView()[2]);
+    }
+
+    /**
+     * Determines the properties of the scratch buffer (6 u64 constants from Zig converted to Number). Returns a number if ID of property is provided (0-4) and number[] of all 5 properties if not.
+     */
+    public getScratchProperties(
+        index?: 0 | 1 | 2 | 3 | 4,
+    ): number | [number, number, number, number, number] {
+        let view = this.getScratchView();
+        return index
+            ? Number(view[index - 3])
+            : [
+                  Number(view[3]),
+                  Number(view[4]),
+                  Number(view[5]),
+                  Number(view[6]),
+                  Number(view[7]),
+              ];
+    }
+
+    /**
+     * Reads a UTF-8 string from WASM memory.
+     */
+    public readStr(
+        offset: number = this.getScratchPtr(),
+        len: number = this.getScratchLen(),
+    ): string {
+        const bytes = new Uint8Array(this.memory.buffer, offset, len);
+        return this.decoder.decode(bytes);
+    }
+
+    /**
+     * Writes a JavaScript string into WASM memory.
+     * Returns the number of bytes actually written.
+     */
+    public writeStr(
+        str: string,
+        offset: number = this.getScratchPtr(),
+    ): number {
+        let view = this.getScratchView();
+        if (str.length == 0) {
+            view[1] = 0n;
+            return 0;
+        }
+        const capacity = view[2];
+        if (str.length > capacity)
+            throw new RangeError("Scratch data too big to be sent to WASM.");
+        const bytes = new Uint8Array(this.memory.buffer, offset);
+        const result = this.encoder.encodeInto(str, bytes);
+        if (result.read > capacity)
+            throw new RangeError("Scratch data too big to be sent to WASM.");
+        view[1] = BigInt(result.read);
+        return result.written || 0;
+    }
+
+    /** Batch update of tile data. */
+    public updateTileRegion(
+        startX: number,
+        startY: number,
+        regionWidth: number,
+        regionHeight: number,
+        generator: (x: number, y: number) => number, // Returns packed tile data
+    ): void {
+        for (let y = startY; y < startY + regionHeight; y++) {
+            for (let x = startX; x < startX + regionWidth; x++) {
+                if (
+                    x >= 0 &&
+                    x < this.tileMap.width &&
+                    y >= 0 &&
+                    y < this.tileMap.height
+                ) {
+                    this.tileMap.data[y * this.tileMap.width + x] = generator(
+                        x,
+                        y,
+                    );
+                }
+            }
+        }
+        this.tileBufferDirty = true;
+    }
+
+    /** Recalculate edge flags for all tiles based on current sprite IDs */
+    public recalculateEdgeFlags(): void {
+        const { width, height, data } = this.tileMap;
+
+        for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const idx = y * width + x;
+                const spriteId = data[idx] & 0xff;
+                let edgeFlags = 0;
+
+                const neighbors = [
+                    [-1, -1, EdgeFlags.TOP_LEFT],
+                    [0, -1, EdgeFlags.TOP],
+                    [1, -1, EdgeFlags.TOP_RIGHT],
+                    [-1, 0, EdgeFlags.LEFT],
+                    [1, 0, EdgeFlags.RIGHT],
+                    [-1, 1, EdgeFlags.BOTTOM_LEFT],
+                    [0, 1, EdgeFlags.BOTTOM],
+                    [1, 1, EdgeFlags.BOTTOM_RIGHT],
+                ] as const;
+
+                for (const [dx, dy, flag] of neighbors) {
+                    const nx = x + dx;
+                    const ny = y + dy;
+
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+                        edgeFlags |= flag; // Map edge = air
+                    } else {
+                        const neighborSprite = data[ny * width + nx] & 0xff;
+                        if (neighborSprite !== spriteId) {
+                            edgeFlags |= flag;
+                        }
+                    }
+                }
+
+                // Update edge flags, preserve other data
+                data[idx] = (data[idx] & 0xffff00ff) | (edgeFlags << 8);
+            }
+        }
+
+        this.tileBufferDirty = true;
+    }
+
+    /** Updates the canvas CSS style. */
+    private updateCanvasStyle() {
+        if (this.forceAspectRatio === this.forceAspectRatio_previous) return;
+        this.forceAspectRatio_previous = this.forceAspectRatio;
+        if (this.forceAspectRatio) {
+            this.canvas.style.maxWidth = "calc(100vh * (16 / 9))";
+            this.canvas.style.maxHeight = "calc(100vw * (9 / 16))";
+        } else {
+            this.canvas.style.maxWidth = "none";
+            this.canvas.style.maxHeight = "none";
+        }
+    }
+
+    /** Handles resizing of canvas automatically. */
+    private onResize = (entries: ResizeObserverEntry[]) => {
+        const entry = entries[0];
+        let w: number;
+        let h: number;
+
+        if (entry.devicePixelContentBoxSize) {
+            w = entry.devicePixelContentBoxSize[0].inlineSize;
+            h = entry.devicePixelContentBoxSize[0].blockSize;
+        } else if (entry.contentBoxSize) {
+            // Use the logical CSS size, manually apply devicePixelRatio
+            const cssW = entry.contentBoxSize[0].inlineSize;
+            const cssH = entry.contentBoxSize[0].blockSize;
+
+            w = Math.round(cssW * devicePixelRatio);
+            h = Math.round(cssH * devicePixelRatio);
+        } else {
+            // final fallback
+            const cssW = entry.contentRect.width;
+            const cssH = entry.contentRect.height;
+
+            w = Math.round(cssW * devicePixelRatio);
+            h = Math.round(cssH * devicePixelRatio);
+        }
+
+        // Apply new size only if it has actually changed
+        if (this.canvas.width !== w || this.canvas.height !== h) {
+            this.canvas.width = w;
+            this.canvas.height = h;
+        }
+    };
+
+    /** Renders a single frame. */
+    public renderFrame(timeDifference: number) {
+        if (this.destroyed) {
+            throw new DOMException(
+                "GameEngine instance was destroyed (due to " +
+                    this.destroyed +
+                    ").",
+                "InvalidStateError",
+            );
+        }
+
+        this.updateCanvasStyle();
+
+        // Calculate the multiplier required to map internal 480p units to physical pixels
+        const resolutionScale = this.canvas.width / INTERNAL_WIDTH;
+
+        // Final zoom factor passed to the shader
+        const effectiveZoom = this.zoom * resolutionScale;
+
+        const time = (performance.now() - this.startTime) / 1000.0;
+        const uniformData = new Float32Array([
+            this.cameraX, // camera.x
+            this.cameraY, // camera.y
+            this.canvas.width, // viewport_size.x
+            this.canvas.height, // viewport_size.y
+            time, // time
+            effectiveZoom, // effective zoom
+            0, // padding
+            0, // padding
+        ]);
+
+        this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
+
+        // Update tile buffer if dirty
+        if (this.tileBufferDirty) {
+            this.device.queue.writeBuffer(
+                this.tileBuffer,
+                0,
+                this.tileMap.data.buffer,
+            );
+            this.tileBufferDirty = false;
+        }
+
+        const commandEncoder = this.device.createCommandEncoder();
+        const textureView = this.context.getCurrentTexture().createView();
+
+        const renderPass = commandEncoder.beginRenderPass({
+            colorAttachments: [
+                {
+                    view: textureView,
+                    loadOp: "clear",
+                    clearValue: { r: 0.1, g: 0.1, b: 0.15, a: 1.0 },
+                    storeOp: "store",
+                },
+            ],
+        });
+
+        renderPass.setPipeline(this.renderPipeline);
+        renderPass.setBindGroup(0, this.bindGroup);
+        renderPass.setViewport(
+            0,
+            0,
+            this.canvas.width,
+            this.canvas.height,
+            0,
+            1,
+        );
+
+        // Draw all tiles as instances
+        const instanceCount = this.tileMap.width * this.tileMap.height;
+        renderPass.draw(6, instanceCount);
+
+        renderPass.end();
+        this.device.queue.submit([commandEncoder.finish()]);
+    }
+
+    /** Updates the game's logic state. */
+    public update(iterations: number) {
+        // Zig Physics updates will go here later
+    }
 }

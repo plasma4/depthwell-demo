@@ -38,12 +38,12 @@ pub fn main() !void {
         \\ * Configuration options for the GameEngine.
         \\ */
         \\export interface EngineOptions {{
-        \\  highPerformance?: boolean;
+        \\    highPerformance?: boolean;
         \\}}
         \\
         \\// Generated from exported functions (should all be in root.zig):
         \\export interface EngineExports extends WebAssembly.Exports {{
-        \\  readonly memory: WebAssembly.Memory;
+        \\    readonly memory: WebAssembly.Memory;
         \\
     , .{});
 
@@ -54,7 +54,7 @@ pub fn main() !void {
         // Only extract functions
         if (@typeInfo(T) == .@"fn") {
             const fn_info = @typeInfo(T).@"fn";
-            try writer.print("\n  readonly {s}: (", .{decl.name});
+            try writer.print("\n    readonly {s}: (", .{decl.name});
 
             // Zig type reflection does not retain parameter names,
             // so we generate generic names: arg0, arg1, etc.
@@ -78,7 +78,7 @@ pub fn main() !void {
             if (inner_info == .@"enum") {
                 try writer.print("\nexport enum {s} {{\n", .{decl.name});
                 inline for (inner_info.@"enum".fields) |field| {
-                    try writer.print("  {s} = {d},\n", .{ field.name, field.value });
+                    try writer.print("    {s} = {d},\n", .{ field.name, field.value });
                 }
                 try writer.print("}}\n", .{});
             }

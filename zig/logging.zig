@@ -16,7 +16,7 @@ var logging_buffer: [4096]u8 align(memory.MAIN_ALIGN) = undefined;
 /// Logging bridge between JS and WASM.
 extern "env" fn js_message(ptr: [*]const u8, len: usize, message_type: LogCategory) void;
 
-// Private JS import
+// Sends a message (with pointer and length, as well as a message type) to either std.log with the appropriate category or JS.
 inline fn message(ptr: [*]const u8, len: usize, message_type: LogCategory) void {
     if (memory.is_wasm) {
         js_message(ptr, len, message_type);
