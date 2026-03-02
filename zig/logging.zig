@@ -11,7 +11,7 @@ const LogCategory = enum(i32) {
 };
 
 /// Static lgging buffer for messaging JS.
-var logging_buffer: [4096]u8 align(memory.MAIN_ALIGN) = undefined;
+var logging_buffer: [4096]u8 align(memory.MAIN_ALIGN_BYTES) = undefined;
 
 /// Logging bridge between JS and WASM.
 extern "env" fn js_message(ptr: [*]const u8, len: usize, message_type: LogCategory) void;
@@ -33,22 +33,22 @@ inline fn message(ptr: [*]const u8, len: usize, message_type: LogCategory) void 
 
 /// Logs a message in JS.
 pub inline fn log(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype) void {
-    writeLog(src, fmt, args, .log);
+    write_log(src, fmt, args, .log);
 }
 /// Logs an info message in JS.
 pub inline fn info(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype) void {
-    writeLog(src, fmt, args, .info);
+    write_log(src, fmt, args, .info);
 }
 /// Logs a warning message in JS.
 pub inline fn warn(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype) void {
-    writeLog(src, fmt, args, .warn);
+    write_log(src, fmt, args, .warn);
 }
 /// Logs an error message in JS.
 pub inline fn err(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype) void {
-    writeLog(src, fmt, args, .err);
+    write_log(src, fmt, args, .err);
 }
 
-inline fn writeLog(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype, log_category: LogCategory) void {
+inline fn write_log(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype, log_category: LogCategory) void {
     // Add source as comptime
     const prefix = std.fmt.comptimePrint("[{s}:{d}:{d}] ", .{ src.file, src.line, src.column });
     const final_fmt = prefix ++ fmt;
@@ -66,12 +66,12 @@ inline fn writeLog(comptime src: std.builtin.SourceLocation, fmt: []const u8, ar
     }
 }
 
-/// A test function for logging, testing all logging types and truncation.
-pub inline fn runLoggingTest(skipError: bool) void {
+/// A test function for logging, testing all logging types and truncation. (See root.zig for export logic.)
+pub inline fn run_logging_test(skipError: bool) void {
     const logger = @import("logging.zig");
     logger.log(@src(), "This is a normal log.", .{});
     logger.info(@src(), "This is an info log.", .{});
-    logger.warn(@src(), "This is a warning. You should see this when running tests in Zig.", .{});
+    logger.warn(@src(), "This is a warning. You should see this when running tests in Zig, or in the console in JS.", .{});
     if (skipError) {
         logger.err(@src(), "This is an error. Should create an alert() popup if CONFIG.noAlertOnError is false and building for WASM.", .{});
     } else {
@@ -86,5 +86,5 @@ pub inline fn runLoggingTest(skipError: bool) void {
 }
 
 test "native logging output" {
-    runLoggingTest(false);
+    run_logging_test(false);
 }

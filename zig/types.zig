@@ -5,8 +5,14 @@ pub const Command = enum(u32) { Reset, Begin, Exit, SendSeed };
 
 /// Masked data representing keyboard keys in the game.
 pub const KeyBits = struct {
+    // Note: generate_types.zig will skip all functions in KeyBits, including pub ones.
     fn mask(index: u5) u32 {
         return @as(u32, 1) << index;
+    }
+
+    /// Checks if a specific key KeyBit is set within the bitfield.
+    pub fn isSet(bitfield: u32, key_mask: u32) bool {
+        return (bitfield & key_mask) != 0;
     }
 
     /// W, ArrowUp, Space keys
@@ -45,5 +51,7 @@ pub const game_state_offsets = struct {
     pub const player_pos = @offsetOf(GameState, "player_pos");
     pub const camera_pos = @offsetOf(GameState, "camera_pos");
     pub const camera_scale = @offsetOf(GameState, "camera_scale");
+    pub const keys_pressed_mask = @offsetOf(GameState, "keys_pressed_mask");
+    pub const keys_held_mask = @offsetOf(GameState, "keys_held_mask");
     pub const seed = @offsetOf(GameState, "seed");
 };

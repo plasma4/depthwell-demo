@@ -4,10 +4,6 @@ const std = @import("std");
 const dw = @import("Depthwell");
 const logger = @import("logging.zig");
 
-// const MAX_PARTICLES = 5000;
-// export var particle_buffer: [MAX_PARTICLES]Memory.Particle = undefined;
-// export var particle_count: u32 = 0;
-
 /// Initializes the game.
 pub fn init() void {
     logger.log(@src(), "init() called: Hello from Zig!", .{});

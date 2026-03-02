@@ -1,7 +1,8 @@
 "use strict";
 /// <reference types="@webgpu/types" />
-import * as Wasm from "./enums";
+import * as Zig from "./enums";
 import * as Seeding from "./seeding";
+import * as InputManager from "./inputManager";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
@@ -12,9 +13,30 @@ export const CONFIG = {
     exportEngine: true,
     /** Whether to use verbose logging or not. */
     verbose: true,
-    /** If set to true, disables alerting on error. */
+    /** If set to true, disables alerting on error. Error will always show in console regardless of what this value is set to. */
     noAlertOnError: true,
 };
+
+export enum WasmTypeCode {
+    Uint8Clamped = -8,
+    Uint8 = 8,
+    Uint16 = 16,
+    Uint32 = 32,
+    Float32 = -32,
+    Uint64 = 64,
+    Float64 = -64,
+}
+
+// 1. Create a Record that maps the Enum to the specific Constructor
+const WasmTypeMap = {
+    [WasmTypeCode.Uint8Clamped]: Uint8ClampedArray,
+    [WasmTypeCode.Uint8]: Uint8Array,
+    [WasmTypeCode.Uint16]: Uint16Array,
+    [WasmTypeCode.Uint32]: Uint32Array,
+    [WasmTypeCode.Float32]: Float32Array,
+    [WasmTypeCode.Uint64]: BigUint64Array,
+    [WasmTypeCode.Float64]: Float64Array,
+} as const;
 
 const { random } = Math;
 
@@ -64,13 +86,6 @@ const EdgeFlags = {
     BOTTOM_RIGHT: 0x80,
 } as const;
 
-/** Provides the type of information being sent from Zig. */
-enum PacketType {
-    Particles = 1,
-    Blocks = 2,
-    SaveData = 3,
-}
-
 interface TileMap {
     width: number;
     height: number;
@@ -82,7 +97,7 @@ export class GameEngine {
     /** The engine module automatically generated from Emscripten. */
     public readonly engineModule: WebAssembly.WebAssemblyInstantiatedSource;
     /** The exported functions from the engineModule. */
-    public readonly exports: Wasm.EngineExports;
+    public readonly exports: Zig.EngineExports;
     /** The memory from the engineModule. */
     public readonly memory: WebAssembly.Memory;
     /** The canvas where rendering is presented. */
@@ -95,6 +110,8 @@ export class GameEngine {
     public readonly context: GPUCanvasContext;
     /** The resize observer for the canvas. */
     private readonly resizeObserver!: ResizeObserver;
+    /** The input state from keyboard events. */
+    public readonly inputState: InputManager.InputState;
     /** The sprite tile map. */
     private tileMap!: TileMap;
     /** Provides the bind group for WebGPU. */
@@ -112,15 +129,11 @@ export class GameEngine {
     /** Specifies when the game started. */
     public startTime: number = performance.now();
     /** Gives the pointer that describes the memory layout. */
-    public LAYOUT_PTR: Wasm.Pointer;
+    public LAYOUT_PTR: Zig.Pointer;
     /** Gives the pointer to the game state. */
-    private readonly GAME_STATE_PTR: Wasm.Pointer;
+    private readonly GAME_STATE_PTR: Zig.Pointer;
     /** A string representing the game seed (up to 100 characters). */
     public seed!: string;
-    /** X-position of the camera. */
-    public cameraX: number;
-    /** Y-position of the camera. */
-    public cameraY: number;
     /** Fractional pixels per tile in the internal 480x270 resolution (1:1 by default). */
     public zoom: number = 1;
     /** Provides an error object if one was passed to destroy(). */
@@ -148,19 +161,21 @@ export class GameEngine {
         this.context = context;
         this.engineModule = engineModule;
         this.renderPipeline = renderPipeline;
-        this.exports = engineModule.instance.exports as Wasm.EngineExports;
+        this.exports = engineModule.instance.exports as Zig.EngineExports;
         this.memory = engineModule.instance.exports
             .memory as WebAssembly.Memory;
+        this.exports.init();
         this.LAYOUT_PTR = this.exports.get_memory_layout_ptr();
-        this.GAME_STATE_PTR = Number(this.getScratchView()[4]);
+        console.log(this.getScratchView().join(" "));
+        this.GAME_STATE_PTR = Number(this.getScratchView()[3]);
         this.setSeed(Seeding.makeSeed(12));
-        this.cameraX = 0;
-        this.cameraY = 0;
+        this.inputState = InputManager.initInput();
     }
 
+    /** Creates a new GameEngine, setting up WebGPU shaders and calling init() from Zig. */
     public static async create(
         canvas?: HTMLCanvasElement | string,
-        options?: Wasm.EngineOptions,
+        options?: Zig.EngineOptions,
     ): Promise<GameEngine> {
         const config = { highPerformance: false, ...options };
 
@@ -176,13 +191,17 @@ export class GameEngine {
             );
 
         const device = await adapter.requestDevice();
-
+        let engine: GameEngine | null = null;
         device.addEventListener("uncapturederror", (e) => {
-            if (!engine.destroyed) {
-                console.error(
-                    `A fatal WebGPU error has occured: ${e.error.message}`,
-                );
-                engine.destroy("fatal WebGPU error", e.error);
+            const error = e.error;
+            if (engine === null) {
+                if (globalThis.reportError as Function | undefined) {
+                    reportError(error);
+                } else {
+                    throw error;
+                }
+            } else if (!engine.destroyed) {
+                engine.destroy("fatal WebGPU error", error);
                 return;
             }
         });
@@ -232,11 +251,11 @@ export class GameEngine {
                 env: {
                     // See how logging works in logging.zig. Logging is guaranteed to return valid arguments.
                     js_message: (
-                        ptr: Wasm.Pointer,
+                        ptr: Zig.Pointer,
                         len: number,
                         category: number,
                     ) => {
-                        const str = engine.decoder.decode(
+                        const str = new TextDecoder().decode(
                             new Uint8Array(memory.buffer, ptr, len),
                         );
                         if (category === 1) {
@@ -290,7 +309,7 @@ export class GameEngine {
             },
         });
 
-        const engine = new GameEngine(
+        engine = new GameEngine(
             canvas,
             adapter,
             device,
@@ -644,34 +663,20 @@ export class GameEngine {
     /**
      * Obtains a TypedArray view into WASM memory.
      */
-    public getView(
-        typeCode: -8 | 8 | 16 | 32 | -32 | 64 | -64,
-        size: number,
+    public getView<T extends WasmTypeCode>(
+        typeCode: T,
         offset: number = this.getScratchPtr(),
-    ): ArrayBufferView {
+        size: number,
+    ): InstanceType<(typeof WasmTypeMap)[T]> {
         const buffer = this.memory.buffer;
-        switch (typeCode) {
-            case -8:
-                return new Uint8ClampedArray(buffer, offset, size);
-            case 8:
-                return new Uint8Array(buffer, offset, size);
-            case 16:
-                return new Uint16Array(buffer, offset, size);
-            case 32:
-                return new Uint32Array(buffer, offset, size);
-            case -32:
-                return new Float32Array(buffer, offset, size);
-            case 64:
-                return new BigUint64Array(buffer, offset, size);
-            case -64:
-                return new Float64Array(buffer, offset, size);
-            default:
-                throw new RangeError(
-                    `Unsupported memory type code: ${typeCode}`,
-                );
-        }
-    }
+        const Constructor = WasmTypeMap[typeCode];
 
+        if (!Constructor) {
+            throw new RangeError(`Unsupported memory type code: ${typeCode}`);
+        }
+
+        return new Constructor(buffer, offset, size) as any;
+    }
     /** Internal property for a temporary access of the scratch view. Value 0 is the pointer, value 1 is the length, value 2 is the max capacity, value 3 is pointer to the GameState, and values 4-7 are custom properties (as WASM can only return 1 value, this provides 4 extra temporary "slots" to return things). */
     private _tempScratchView: BigUint64Array | null = null;
     /** Returns 8 values in the scratch buffer; (zero-indexed) value 0 is the pointer, value 1 is the length, value 2 is the max capacity, and values 3-7 are custom properties when necessary. */
@@ -747,7 +752,7 @@ export class GameEngine {
     }
 
     /**
-     * Writes a JavaScript string into WASM memory.
+     * Writes a JavaScript string into WASM memory, assuming only ASCII characters.
      * Returns the number of bytes actually written.
      */
     public writeStr(
@@ -762,10 +767,8 @@ export class GameEngine {
         const capacity = view[2];
         if (str.length > capacity)
             throw new RangeError("Scratch data too big to be sent to WASM.");
-        const bytes = new Uint8Array(this.memory.buffer, offset);
+        const bytes = new Uint8Array(this.memory.buffer, offset, str.length);
         const result = this.encoder.encodeInto(str, bytes);
-        if (result.read > capacity)
-            throw new RangeError("Scratch data too big to be sent to WASM.");
         view[1] = BigInt(result.read);
         return result.written || 0;
     }
@@ -775,10 +778,10 @@ export class GameEngine {
         Seeding.seedToMemory(
             seed,
             this.getView(
-                64,
+                WasmTypeCode.Uint64,
+                this.GAME_STATE_PTR + Zig.game_state_offsets.seed,
                 8,
-                this.GAME_STATE_PTR + Wasm.game_state_offsets.seed,
-            ) as BigUint64Array,
+            ),
         );
     }
 
@@ -832,7 +835,7 @@ export class GameEngine {
     };
 
     /** Renders a single frame. */
-    public renderFrame(timeDifference: number) {
+    public renderFrame(perfTime = performance.now()) {
         if (this.destroyed) {
             throw new DOMException(
                 "GameEngine instance was destroyed (due to " +
@@ -844,16 +847,19 @@ export class GameEngine {
 
         this.updateCanvasStyle();
 
-        // Calculate the multiplier required to map internal 480p units to physical pixels
+        // Calculate the multiplier required to map internal 480p units to physical pixels and the zoom
         const resolutionScale = this.canvas.width / INTERNAL_WIDTH;
-
-        // Final zoom factor passed to the shader
         const effectiveZoom = this.zoom * resolutionScale;
 
-        const time = (performance.now() - this.startTime) / 1000.0;
+        const cameraPos = this.getView(
+            WasmTypeCode.Float64,
+            this.GAME_STATE_PTR + Zig.game_state_offsets.camera_pos,
+            2,
+        );
+        const time = (perfTime - this.startTime) / 1000.0;
         const uniformData = new Float32Array([
-            this.cameraX, // camera.x
-            this.cameraY, // camera.y
+            cameraPos[0], // camera.x
+            cameraPos[1], // camera.y
             this.canvas.width, // viewport_size.x
             this.canvas.height, // viewport_size.y
             time, // time
@@ -908,7 +914,16 @@ export class GameEngine {
     }
 
     /** Updates the game's logic state. */
-    public update(iterations: number) {
-        // Zig Physics updates will go here later
+    public tick() {
+        // Internally, key pressing data goes keys_pressed_mask, then keys_held_mask.
+        const inputView = this.getView(
+            WasmTypeCode.Uint32,
+            this.GAME_STATE_PTR + Zig.game_state_offsets.keys_pressed_mask,
+            2,
+        );
+        InputManager.updateInput(this.inputState);
+        inputView[0] = this.inputState.justPressed;
+        inputView[1] = this.inputState.lastFrameHeld;
+        this.exports.tick();
     }
 }

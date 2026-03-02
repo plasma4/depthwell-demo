@@ -19,10 +19,34 @@ if (!adapter) {
     alert("WebGPU is supported, but no compatible GPU was found.");
 }
 
-import { GameEngine, CONFIG } from "./engine.ts";
+import { GameEngine, CONFIG } from "./engine";
+
+declare module "./engine" {
+    interface GameEngine {
+        /** True if Zig is in -Doptimize=Debug mode. */
+        isDebug: boolean;
+        /** Main render loop. */
+        renderLoop: (time: number) => void;
+        /** Main logic loop. */
+        logicLoop: () => void;
+    }
+}
+
+declare global {
+    interface Window {
+        engine?: GameEngine;
+    }
+    // If you use globalThis specifically:
+    var engine: GameEngine | undefined;
+}
 
 if (!CONFIG.noAlertOnError) {
-    const handleFatalError = (error, source, lineno, colno) => {
+    const handleFatalError = (
+        error: any,
+        source?: any,
+        lineno?: any,
+        colno?: any,
+    ) => {
         const actualError = error || {};
         const message = actualError.message || String(error || "Unknown error");
         let errorMessage = `An error occurred: ${message}`;
@@ -38,7 +62,7 @@ if (!CONFIG.noAlertOnError) {
             errorMessage += `\nSource: ${fileName}:${finalLine || "?"}:${finalCol || "?"}`;
         }
 
-        if (globalThis.engine && globalThis.engine.destroyedError) {
+        if (globalThis.engine?.destroyedError) {
             errorMessage += `\nDetails: ${globalThis.engine.destroyedError}`;
         }
 
@@ -71,18 +95,38 @@ if (!CONFIG.noAlertOnError) {
 }
 
 let timestamp = 0;
-const engine = await GameEngine.create();
-if (CONFIG.exportEngine) globalThis.engine = engine;
+let engine = await GameEngine.create();
+let time = performance.now(),
+    frame = 0;
+if (CONFIG.exportEngine) (globalThis as any).engine = engine;
 if (CONFIG.verbose) {
     console.log("Engine initialized successfully:", engine);
     console.log("Exported functions and memory:", engine.exports);
 }
-engine.isDebug = !!engine.exports.isDebug(); // This function is only true if Doptimize=Debug (default with zig build). Note that this property is not defined in the TypeScript.
-engine.exports.init();
-renderLoop(0);
+
+// Add custom properties into the engine object (not handled by TypeScript)
+engine.isDebug = !!engine.exports.isDebug(); // This function is only true if Doptimize=Debug (default with zig build).
+engine.renderLoop = function (time: number) {
+    // Difference between frames
+    let timeDifference = time - timestamp;
+    timestamp = time;
+    engine.renderFrame(timeDifference);
+    requestAnimationFrame(engine.renderLoop);
+};
+
+engine.logicLoop = function () {
+    const startTime = time;
+    time = performance.now();
+    engine.tick();
+    setTimeout(
+        engine.logicLoop,
+        (frame++ % 3 == 2 ? 16 : 17) - time + startTime,
+    );
+};
+
 if (engine.isDebug) {
     console.log(
-        "Zig code is in debug mode. Use engine.exports to see its functions, variables, and memory, such as engine.exports.testLogs.",
+        "Zig code is in debug mode. Use engine.exports to see its functions, variables, and memory, such as engine.exports.test_logs.",
     );
 } else if (CONFIG.verbose) {
     console.log(
@@ -90,10 +134,6 @@ if (engine.isDebug) {
     );
 }
 
-function renderLoop(time) {
-    // Difference between frames
-    let timeDifference = time - timestamp;
-    timestamp = time;
-    engine.renderFrame(timeDifference);
-    requestAnimationFrame(renderLoop, time);
-}
+// Begin the logic
+engine.renderLoop(0);
+setTimeout(engine.logicLoop, 17);

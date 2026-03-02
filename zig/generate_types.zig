@@ -27,7 +27,7 @@ pub fn main() !void {
 
     // Write static TypeScript headers and configurations
     try writer.print(
-        \\// This is a dynamically generated file from generate_types.zig for use in engine.ts. See the folders in /zig for more detailed documentation.
+        \\// This is a dynamically generated file from generate_types.zig for use in engine.ts and should not be manually modified. See types.zig for where type definitions come from.
         \\
         \\/**
         \\ * A pointer in the WASM memory.
@@ -48,17 +48,16 @@ pub fn main() !void {
     , .{});
 
     const root_info = @typeInfo(root);
-    inline for (root_info.@"struct".decls) |decl| {
-        const T = @TypeOf(@field(root, decl.name));
+    inline for (root_info.@"struct".decls) |struct_declaration| {
+        const T = @TypeOf(@field(root, struct_declaration.name));
 
-        // Only extract functions
+        // Extract all functions from root.zig. (ALL functions from root.zig should be marked as "pub".)
         if (@typeInfo(T) == .@"fn") {
             const fn_info = @typeInfo(T).@"fn";
-            try writer.print("\n    readonly {s}: (", .{decl.name});
+            try writer.print("\n    readonly {s}: (", .{struct_declaration.name});
 
-            // Zig type reflection does not retain parameter names,
-            // so we generate generic names: arg0, arg1, etc.
             inline for (fn_info.params, 0..) |param, i| {
+                // Log argument numbers from params
                 if (i > 0) try writer.print(", ", .{});
                 try writer.print("arg{d}: {s}", .{ i, zigTypeToTs(param.type.?) });
             }
@@ -67,26 +66,27 @@ pub fn main() !void {
         }
     }
 
-    try writer.print("\n}}\n\n// Enum data from types.zig:", .{});
+    try writer.print("\n}}\n\n// Generated enum and struct data from types.zig:", .{});
 
     const type_info = @typeInfo(types);
     inline for (type_info.@"struct".decls) |decl| {
         const T = @field(types, decl.name);
 
         if (@TypeOf(T) == type) {
-            const inner_info = @typeInfo(T);
-            if (inner_info == .@"enum") {
+            const inner_type_info = @typeInfo(T);
+            if (inner_type_info == .@"enum") {
                 try writer.print("\nexport enum {s} {{\n", .{decl.name});
-                inline for (inner_info.@"enum".fields) |field| {
+                inline for (inner_type_info.@"enum".fields) |field| {
                     try writer.print("    {s} = {d},\n", .{ field.name, field.value });
                 }
                 try writer.print("}}\n", .{});
-            } else if (inner_info == .@"struct") {
+            } else if (inner_type_info == .@"struct") {
                 try writer.print("\nexport const {s} = {{\n", .{decl.name});
-                inline for (inner_info.@"struct".decls) |s_decl| {
-                    // This grabs the 'pub const' values inside your KeyBits struct
-                    const val = @field(T, s_decl.name);
-                    try writer.print("    {s}: {d},\n", .{ s_decl.name, val });
+                inline for (inner_type_info.@"struct".decls) |struct_declaration| {
+                    const value_within_struct = @field(T, struct_declaration.name);
+                    if (@typeInfo(@TypeOf(value_within_struct)) != .@"fn") {
+                        try writer.print("    {s}: {d},\n", .{ struct_declaration.name, value_within_struct });
+                    }
                 }
                 try writer.print("}} as const;\n", .{});
             }

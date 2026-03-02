@@ -1,0 +1,118 @@
+import * as Zig from "./enums";
+
+/** Represents the state of inputs for external use. */
+export interface InputState {
+    heldMask: number;
+    lastFrameHeld: number;
+    justPressed: number;
+    currentlyHeld: number;
+}
+
+/** An object representing what a keydown/keyup code should map to numerically (as a bit in Zig.KeyBits). */
+const keyMap: Record<string, number> = {
+    ArrowUp: Zig.KeyBits.up,
+    KeyW: Zig.KeyBits.up,
+    ArrowLeft: Zig.KeyBits.left,
+    KeyA: Zig.KeyBits.left,
+    ArrowDown: Zig.KeyBits.down,
+    KeyS: Zig.KeyBits.down,
+    ArrowRight: Zig.KeyBits.right,
+    KeyD: Zig.KeyBits.right,
+    Digit0: Zig.KeyBits.k0,
+    Digit1: Zig.KeyBits.k1,
+    Digit2: Zig.KeyBits.k2,
+    Digit3: Zig.KeyBits.k3,
+    Digit4: Zig.KeyBits.k4,
+    Digit5: Zig.KeyBits.k5,
+    Digit6: Zig.KeyBits.k6,
+    Digit7: Zig.KeyBits.k7,
+    Digit8: Zig.KeyBits.k8,
+    Digit9: Zig.KeyBits.k9,
+};
+
+// A "priority" for each direction.
+let horizontalPriority = 0;
+let verticalPriority = 0;
+
+// Track individual key counts to handle multiple keys mapping to one bit, such as W and KeyUp simulataneously.
+const keyCounts: Record<number, number> = {};
+
+/** Creates an initial InputState and creates event listeners. Should be updated with with updateInput() in a logic loop. */
+export function initInput(): InputState {
+    const state: InputState = {
+        heldMask: 0,
+        lastFrameHeld: 0,
+        justPressed: 0,
+        currentlyHeld: 0,
+    };
+
+    window.addEventListener("keydown", (e: KeyboardEvent) => {
+        if (e.repeat) return; // Optimization: Ignore OS auto-repeat
+        const bit = keyMap[e.code];
+        if (!bit) return;
+
+        state.heldMask |= bit;
+        keyCounts[bit] = (keyCounts[bit] || 0) + 1;
+
+        // Update priority: The most recently pressed key wins
+        if (bit & (Zig.KeyBits.left | Zig.KeyBits.right))
+            horizontalPriority = bit;
+        if (bit & (Zig.KeyBits.up | Zig.KeyBits.down)) verticalPriority = bit;
+    });
+
+    window.addEventListener("keyup", (e: KeyboardEvent) => {
+        const bit = keyMap[e.code];
+        if (!bit) return;
+
+        keyCounts[bit] = Math.max(0, (keyCounts[bit] || 0) - 1);
+
+        // Only clear the bit in the mask if ALL keys mapped to it are released
+        if (keyCounts[bit] === 0) {
+            state.heldMask &= ~bit;
+
+            // If the priority key was released, switch priority to the other key (if held)
+            if (bit === horizontalPriority) {
+                horizontalPriority =
+                    state.heldMask & Zig.KeyBits.left ||
+                    state.heldMask & Zig.KeyBits.right ||
+                    0;
+            }
+            if (bit === verticalPriority) {
+                verticalPriority =
+                    state.heldMask & Zig.KeyBits.up ||
+                    state.heldMask & Zig.KeyBits.down ||
+                    0;
+            }
+        }
+    });
+
+    window.addEventListener("blur", () => {
+        horizontalPriority = 0;
+        verticalPriority = 0;
+        state.currentlyHeld = 0;
+        state.heldMask = 0;
+        state.justPressed = 0;
+    });
+
+    return state;
+}
+
+/** Updates the state object. */
+export function updateInput(state: InputState) {
+    const dirMask =
+        Zig.KeyBits.up |
+        Zig.KeyBits.down |
+        Zig.KeyBits.left |
+        Zig.KeyBits.right;
+
+    // Start with non-directional bits (digits)
+    let cleanHeld = state.heldMask & ~dirMask;
+
+    // Add only the priority directions
+    cleanHeld |= horizontalPriority;
+    cleanHeld |= verticalPriority;
+
+    state.justPressed = cleanHeld & ~state.lastFrameHeld;
+    state.currentlyHeld = cleanHeld;
+    state.lastFrameHeld = cleanHeld;
+}

@@ -1,9 +1,10 @@
-//! Root file. Imports main.zig and handles exporting functions to WASM.
+//! Root file. Imports main.zig and handles exporting functions to WASM. All functions here should export to WASM (with no other exports within other Zig files).
 const std = @import("std");
 const main = @import("main.zig");
 const memory = @import("memory.zig");
-const types = @import("types.zig");
 const seeding = @import("seeding.zig");
+const logging = @import("logging.zig");
+const player = @import("player.zig");
 const commands = @import("commands.zig");
 const colors = @import("color_rgba.zig");
 const builtin = @import("builtin");
@@ -15,7 +16,9 @@ pub export fn reset() void {
     main.reset();
 }
 
-pub export fn tick() void {}
+pub export fn tick() void {
+    player.move();
+}
 
 pub export fn renderFrame() void {}
 
@@ -24,7 +27,7 @@ pub export fn execute_commands() void {
 }
 
 pub export fn wasm_seed_from_string() void {
-    seeding.wasm_seed_from_string(&memory.scratch_buffer, memory.mem.scratch_len, &memory.game.seed);
+    seeding.wasm_seed_from_string(memory.scratch_buffer.ptr, memory.mem.scratch_len, &memory.game.seed);
 }
 
 pub export fn get_memory_layout_ptr() *const memory.MemoryLayout {
@@ -44,6 +47,7 @@ pub export fn scratch_alloc(len: usize) ?[*]u8 {
 }
 
 const in_debug_mode = builtin.mode == .Debug;
+
 /// Returns if code is in debugging mode for JS to see.
 pub export fn isDebug() bool {
     return in_debug_mode;
@@ -52,8 +56,12 @@ pub export fn isDebug() bool {
 // Import debugging API if optimization level is Debug.
 comptime {
     _ = if (in_debug_mode) struct {
-        export fn testLogs() void {
-            @import("logging.zig").runLoggingTest(true);
+        export fn test_logs() void {
+            logging.run_logging_test(true);
+        }
+
+        export fn test_scratch_allocation() void {
+            memory.run_scratch_allocation_tests();
         }
     };
 }
