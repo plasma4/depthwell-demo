@@ -166,7 +166,6 @@ export class GameEngine {
             .memory as WebAssembly.Memory;
         this.exports.init();
         this.LAYOUT_PTR = this.exports.get_memory_layout_ptr();
-        console.log(this.getScratchView().join(" "));
         this.GAME_STATE_PTR = Number(this.getScratchView()[3]);
         this.setSeed(Seeding.makeSeed(12));
         this.inputState = InputManager.initInput();
@@ -922,8 +921,9 @@ export class GameEngine {
             2,
         );
         InputManager.updateInput(this.inputState);
-        inputView[0] = this.inputState.justPressed;
-        inputView[1] = this.inputState.lastFrameHeld;
+        inputView[0] = this.inputState.keysPressed;
+        inputView[1] = this.inputState.keysHeld;
+        // console.log("Keys pressed down this frame: " + inputView[0] + "\nKeys held down: " + inputView[1]);
         this.exports.tick();
     }
 }

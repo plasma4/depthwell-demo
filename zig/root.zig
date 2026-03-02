@@ -69,4 +69,5 @@ comptime {
 test {
     std.testing.refAllDecls(@This());
     std.testing.refAllDecls(@import("color_rgba.zig"));
+    std.testing.refAllDecls(@import("seeding.zig"));
 }

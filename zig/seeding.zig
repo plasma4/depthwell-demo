@@ -172,9 +172,12 @@ pub fn wasm_seed_from_string(str_ptr: [*]const u8, str_len: u64, output_ptr: *[8
 test "bijective seeding uniqueness" {
     var s1: [8]u64 = undefined;
     var s2: [8]u64 = undefined;
+    var s3: [8]u64 = undefined;
     seedFromBase26("a", &s1);
     seedFromBase26("b", &s2);
+    seedFromBase26("c", &s3);
     try testing.expect(!std.mem.eql(u64, &s1, &s2));
+    try testing.expect(!std.mem.eql(u64, &s2, &s3));
 }
 
 test "chunk mixing determinism" {
@@ -183,7 +186,7 @@ test "chunk mixing determinism" {
     const c2 = mixChunkSeed(world_seed, 10, 20, 1);
     const c3 = mixChunkSeed(world_seed, 10, 21, 1);
     try testing.expectEqualSlices(u64, &c1, &c2);
-    try testing.expect(!std.mem.eql(u64, &c1, &c3));
+    try testing.expect(!std.mem.eql(u64, &c2, &c3));
 }
 
 test "Xoshiro512** initialization/consistency" {

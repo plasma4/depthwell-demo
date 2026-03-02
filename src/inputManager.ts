@@ -3,8 +3,8 @@ import * as Zig from "./enums";
 /** Represents the state of inputs for external use. */
 export interface InputState {
     heldMask: number;
-    lastFrameHeld: number;
-    justPressed: number;
+    keysHeld: number;
+    keysPressed: number;
     currentlyHeld: number;
 }
 
@@ -41,8 +41,8 @@ const keyCounts: Record<number, number> = {};
 export function initInput(): InputState {
     const state: InputState = {
         heldMask: 0,
-        lastFrameHeld: 0,
-        justPressed: 0,
+        keysHeld: 0,
+        keysPressed: 0,
         currentlyHeld: 0,
     };
 
@@ -91,7 +91,7 @@ export function initInput(): InputState {
         verticalPriority = 0;
         state.currentlyHeld = 0;
         state.heldMask = 0;
-        state.justPressed = 0;
+        state.keysPressed = 0;
     });
 
     return state;
@@ -112,7 +112,7 @@ export function updateInput(state: InputState) {
     cleanHeld |= horizontalPriority;
     cleanHeld |= verticalPriority;
 
-    state.justPressed = cleanHeld & ~state.lastFrameHeld;
+    state.keysPressed = cleanHeld & ~state.keysHeld;
     state.currentlyHeld = cleanHeld;
-    state.lastFrameHeld = cleanHeld;
+    state.keysHeld = cleanHeld;
 }
