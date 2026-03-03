@@ -1,6 +1,6 @@
 const std = @import("std");
 
-// Run zig build to test, and zig build -Doptimize=ReleaseFast for the final version.
+// Run zig build normally, and zig build -Doptimize=ReleaseFast for the final version. Use zig build enum to automatically construct src/enums.ts and zig build tests to run all tests across the codebase.
 pub fn build(b: *std.Build) void {
     b.install_path = ".";
     const target = b.standardTargetOptions(.{
@@ -26,6 +26,7 @@ pub fn build(b: *std.Build) void {
     exe.rdynamic = true; // export functions with "export" keyword
     exe.entry = .disabled; // No main()
     exe.stack_size = 4 * 65536; // can increase as necessary
+    exe.initial_memory = 16 * 65536; // 4 MiB
     // exe.global_base = 0; // removed in favor of letting Zig manage pointers
     // if (optimize == .Debug) {
     //     exe.use_llvm = false;

@@ -18,23 +18,36 @@ export const CONFIG = {
 };
 
 export enum WasmTypeCode {
-    Uint8Clamped = -8,
     Uint8 = 8,
     Uint16 = 16,
     Uint32 = 32,
-    Float32 = -32,
     Uint64 = 64,
-    Float64 = -64,
+
+    Int8 = -8,
+    Int16 = -16,
+    Int32 = -32,
+    Int64 = -64,
+
+    Uint8Clamped = -80,
+    Float32 = -320,
+    Float64 = -640,
 }
 
-// 1. Create a Record that maps the Enum to the specific Constructor
+globalThis.WasmTypeCode = WasmTypeCode;
+
 const WasmTypeMap = {
-    [WasmTypeCode.Uint8Clamped]: Uint8ClampedArray,
     [WasmTypeCode.Uint8]: Uint8Array,
     [WasmTypeCode.Uint16]: Uint16Array,
     [WasmTypeCode.Uint32]: Uint32Array,
-    [WasmTypeCode.Float32]: Float32Array,
     [WasmTypeCode.Uint64]: BigUint64Array,
+
+    [WasmTypeCode.Int8]: Int8Array,
+    [WasmTypeCode.Int16]: Int16Array,
+    [WasmTypeCode.Int32]: Int32Array,
+    [WasmTypeCode.Int64]: BigInt64Array,
+
+    [WasmTypeCode.Uint8Clamped]: Uint8ClampedArray,
+    [WasmTypeCode.Float32]: Float32Array,
     [WasmTypeCode.Float64]: Float64Array,
 } as const;
 
@@ -59,20 +72,6 @@ const initialMapHeight = 32;
 const INTERNAL_WIDTH = 480;
 /** The logical internal height (scaled with WebGPU). */
 const INTERNAL_HEIGHT = 270;
-
-function packTileData(
-    spriteId: number,
-    edgeFlags: number,
-    light: number,
-    variation: number,
-): number {
-    return (
-        (spriteId & 0xff) |
-        ((edgeFlags & 0xff) << 8) |
-        ((light & 0xff) << 16) |
-        ((variation & 0xff) << 24)
-    );
-}
 
 /** Edge flag constants matching shader. */
 const EdgeFlags = {
@@ -167,7 +166,6 @@ export class GameEngine {
         this.exports.init();
         this.LAYOUT_PTR = this.exports.get_memory_layout_ptr();
         this.GAME_STATE_PTR = Number(this.getScratchView()[3]);
-        this.setSeed(Seeding.makeSeed(12));
         this.inputState = InputManager.initInput();
     }
 
@@ -248,7 +246,7 @@ export class GameEngine {
             fetch(WASM_URL),
             {
                 env: {
-                    // See how logging works in logging.zig. Logging is guaranteed to return valid arguments.
+                    // See how logging works in logger.zig. Logging is guaranteed to return valid arguments.
                     js_message: (
                         ptr: Zig.Pointer,
                         len: number,
@@ -277,7 +275,7 @@ export class GameEngine {
 
         // Create pipeline
         const pipeline = device.createRenderPipeline({
-            label: "Tilemap Pipeline",
+            label: "Tilemap pipeline",
             layout: "auto",
             vertex: {
                 module: shaderModule,
@@ -317,6 +315,7 @@ export class GameEngine {
             pipeline,
         );
 
+        await engine.setSeed(Seeding.makeSeed(12));
         const resizeObserver = new ResizeObserver(engine.onResize);
         (engine as any).resizeObserver = resizeObserver;
         engine.updateCanvasStyle();
@@ -368,7 +367,7 @@ export class GameEngine {
 
         // Create map size buffer
         const mapSizeBuffer = device.createBuffer({
-            label: "Map Size",
+            label: "Map size",
             size: 8, // vec2u
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
@@ -386,7 +385,7 @@ export class GameEngine {
 
         // Create tile storage buffer
         const tileBuffer = device.createBuffer({
-            label: "Tile Data",
+            label: "Tile data",
             size: tileMap.data.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
         });
@@ -401,7 +400,7 @@ export class GameEngine {
 
         // Create bind group
         engine.bindGroup = device.createBindGroup({
-            label: "Tilemap Bind Group",
+            label: "Tilemap bind group",
             layout: pipeline.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: uniformBuffer } },
@@ -425,7 +424,7 @@ export class GameEngine {
     }
 
     // -----
-    // GPU Textures
+    // GPU Textures/Tilemaps
     // -----
 
     private static async loadTexture(
@@ -437,7 +436,7 @@ export class GameEngine {
         const imageBitmap = await createImageBitmap(blob);
 
         const texture = device.createTexture({
-            label: `Texture: ${url}`,
+            label: `Texture from  ${url}`,
             size: [imageBitmap.width, imageBitmap.height],
             format: "rgba8unorm",
             usage:
@@ -497,15 +496,32 @@ export class GameEngine {
                     }
                 }
 
-                // Random light value for testing
+                // Random light value and variation seed
                 const light = Math.floor(128 + Math.random() * 127);
-
-                // Random variation seed
                 const variation = Math.floor(Math.random() * 256);
-
-                data[idx] = packTileData(spriteId, edgeFlags, light, variation);
+                data[idx] = this.packTileData(
+                    spriteId,
+                    edgeFlags,
+                    light,
+                    variation,
+                );
             }
         }
+    }
+
+    /** Packs tile data into 32 bits of data. */
+    public static packTileData(
+        spriteId: number,
+        edgeFlags: number,
+        light: number,
+        variation: number,
+    ): number {
+        return (
+            (spriteId & 0xff) |
+            ((edgeFlags & 0xff) << 8) |
+            ((light & 0xff) << 16) |
+            ((variation & 0xff) << 24)
+        );
     }
 
     public setTile(
@@ -529,7 +545,7 @@ export class GameEngine {
         const existing = this.tileMap.data[idx];
 
         // Preserve existing values if not specified
-        const newData = packTileData(
+        const newData = GameEngine.packTileData(
             spriteId,
             edgeFlags ?? (existing >> 8) & 0xff,
             light ?? (existing >> 16) & 0xff,
@@ -660,26 +676,36 @@ export class GameEngine {
     // -----
 
     /**
-     * Obtains a TypedArray view into WASM memory.
+     * Accesses memory relative to the start of the GameState (by adding this.GAME_STATE_PTR to the offset). Obtains a TypedArray view into WASM game data.
      */
-    public getView<T extends WasmTypeCode>(
+    public getGameView<T extends WasmTypeCode>(
         typeCode: T,
-        offset: number = this.getScratchPtr(),
+        offset: number = 0, // Defaults to start of GameState
         size: number,
     ): InstanceType<(typeof WasmTypeMap)[T]> {
-        const buffer = this.memory.buffer;
-        const Constructor = WasmTypeMap[typeCode];
-
-        if (!Constructor) {
-            throw new RangeError(`Unsupported memory type code: ${typeCode}`);
-        }
-
-        return new Constructor(buffer, offset, size) as any;
+        return new WasmTypeMap[typeCode](
+            this.memory.buffer,
+            this.GAME_STATE_PTR + offset,
+            size,
+        ) as any;
     }
+
+    /**
+     * Accesses TypedArray memory using an absolute WASM pointer.
+     * Used for reading the scratch buffer or raw heap allocations.
+     */
+    public getRawView<T extends WasmTypeCode>(
+        typeCode: T,
+        ptr: number,
+        size: number,
+    ): InstanceType<(typeof WasmTypeMap)[T]> {
+        return new WasmTypeMap[typeCode](this.memory.buffer, ptr, size) as any;
+    }
+
     /** Internal property for a temporary access of the scratch view. Value 0 is the pointer, value 1 is the length, value 2 is the max capacity, value 3 is pointer to the GameState, and values 4-7 are custom properties (as WASM can only return 1 value, this provides 4 extra temporary "slots" to return things). */
     private _tempScratchView: BigUint64Array | null = null;
     /** Returns 8 values in the scratch buffer; (zero-indexed) value 0 is the pointer, value 1 is the length, value 2 is the max capacity, and values 3-7 are custom properties when necessary. */
-    public getScratchView() {
+    public getScratchView(): BigUint64Array {
         // Check if we need to (re)create the view
         if (
             this._tempScratchView === null ||
@@ -726,21 +752,51 @@ export class GameEngine {
      * Determines the properties of the scratch buffer (6 u64 constants from Zig converted to Number). Returns a number if ID of property is provided (0-4) and number[] of all 5 properties if not.
      */
     public getScratchProperties(
-        index?: 0 | 1 | 2 | 3,
-    ): number | [number, number, number, number] {
-        let view = this.getScratchView();
-        return index
-            ? Number(view[index - 4])
-            : [
-                  Number(view[4]),
-                  Number(view[5]),
-                  Number(view[6]),
-                  Number(view[7]),
-              ];
+        index:
+            | 0
+            | 1
+            | 2
+            | 3
+            | 4
+            | 5
+            | 6
+            | 7
+            | 8
+            | 9
+            | 10
+            | 11
+            | 12
+            | 13
+            | 14
+            | 15
+            | 16
+            | 17
+            | 18
+            | 19,
+        asType:
+            | WasmTypeCode.Uint64
+            | WasmTypeCode.Float64 = WasmTypeCode.Uint64,
+    ): number {
+        let view: BigUint64Array | Float64Array = this.getScratchView();
+        if (asType == WasmTypeCode.Float64) {
+            view = new Float64Array(view.buffer, view.byteOffset, view.length);
+        }
+        return Number(view[index - 4]);
     }
 
     /**
-     * Reads a UTF-8 string from WASM memory.
+     * Reads a UTF-8 string from WASM memory. Pass in/request a custom offset by doing something like this:
+     * ```ts
+     * let str1 = "hello", str2 = "hi"
+    // In practice, you would either do the reading or writing from Zig. You would pass the string pointers and lengths to Zig through arguments if you're reading from Zig, and return pointers/lengths with getScratchProperties or some agreed-upon format.
+
+    let ptr1 = engine.writeStr(str1); // Write a string, setting the scratch buffer's length to 5.
+    let ptr2 = engine.writeStr(str2, false); // Append after hello, don't reset!
+
+    console.log(engine.readStr(ptr1, str1.length)); // "hello"
+    console.log(engine.readStr(ptr2, str2.length)); // "hi"
+    console.log(engine.readStr(ptr1, str2.length + 64)); // "hello[...59 null bytes, as Zig aligns data to 64 byte chunks with MAIN_ALIGN_BYTES...]hi"
+     * ```
      */
     public readStr(
         offset: number = this.getScratchPtr(),
@@ -751,34 +807,39 @@ export class GameEngine {
     }
 
     /**
-     * Writes a JavaScript string into WASM memory, assuming only ASCII characters.
-     * Returns the number of bytes actually written.
+     * Writes a JavaScript string into WASM memory.
+     * Returns the pointer for where the data begins. See readStr() for more details on usage.
      */
     public writeStr(
         str: string,
-        offset: number = this.getScratchPtr(),
-    ): number {
-        let view = this.getScratchView();
-        if (str.length == 0) {
-            view[1] = 0n;
-            return 0;
-        }
-        const capacity = view[2];
-        if (str.length > capacity)
-            throw new RangeError("Scratch data too big to be sent to WASM.");
-        const bytes = new Uint8Array(this.memory.buffer, offset, str.length);
+        resetScratchBuffer: boolean = true,
+    ): number | null {
+        const len = str.length;
+        if (len === 0) return null;
+        if (resetScratchBuffer) this.setScratchLen(0);
+        const ptr = this.exports.scratch_alloc(len);
+        if (ptr === 0) return null;
+
+        const bytes = new Uint8Array(this.memory.buffer, ptr, len);
         const result = this.encoder.encodeInto(str, bytes);
-        view[1] = BigInt(result.read);
-        return result.written || 0;
+
+        // If result.read < len, the string contained non-ASCII characters.
+        if (result.read < len && CONFIG.verbose) {
+            throw new RangeError(
+                "String truncated with non-ASCII characters detected.",
+            );
+        }
+
+        return ptr;
     }
 
-    public setSeed(seed: string) {
+    public async setSeed(seed: string) {
         this.seed = seed;
-        Seeding.seedToMemory(
+        await Seeding.seedToMemory(
             seed,
-            this.getView(
+            this.getGameView(
                 WasmTypeCode.Uint64,
-                this.GAME_STATE_PTR + Zig.game_state_offsets.seed,
+                Zig.game_state_offsets.seed,
                 8,
             ),
         );
@@ -850,9 +911,9 @@ export class GameEngine {
         const resolutionScale = this.canvas.width / INTERNAL_WIDTH;
         const effectiveZoom = this.zoom * resolutionScale;
 
-        const cameraPos = this.getView(
+        const cameraPos = this.getGameView(
             WasmTypeCode.Float64,
-            this.GAME_STATE_PTR + Zig.game_state_offsets.camera_pos,
+            Zig.game_state_offsets.camera_pos,
             2,
         );
         const time = (perfTime - this.startTime) / 1000.0;
@@ -915,9 +976,9 @@ export class GameEngine {
     /** Updates the game's logic state. */
     public tick() {
         // Internally, key pressing data goes keys_pressed_mask, then keys_held_mask.
-        const inputView = this.getView(
+        const inputView = this.getGameView(
             WasmTypeCode.Uint32,
-            this.GAME_STATE_PTR + Zig.game_state_offsets.keys_pressed_mask,
+            Zig.game_state_offsets.keys_pressed_mask,
             2,
         );
         InputManager.updateInput(this.inputState);

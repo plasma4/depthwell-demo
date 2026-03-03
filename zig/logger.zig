@@ -66,10 +66,10 @@ inline fn write_log(comptime src: std.builtin.SourceLocation, fmt: []const u8, a
     }
 }
 
-/// A test function for logging, testing all logging types and truncation. (See root.zig for export logic.)
-pub inline fn run_logging_test(skipError: bool) void {
-    const logger = @import("logging.zig");
-    logger.log(@src(), "This is a normal log.", .{});
+/// A test function for logging, testing all four logging types and truncation. (See root.zig for export logic.)
+pub inline fn test_logs(skipError: bool) void {
+    const logger = @import("logger.zig");
+    logger.log(@src(), "This is a {s}.", .{"normal log"});
     logger.info(@src(), "This is an info log.", .{});
     logger.warn(@src(), "This is a warning. You should see this when running tests in Zig, or in the console in JS.", .{});
     if (skipError) {
@@ -79,12 +79,11 @@ pub inline fn run_logging_test(skipError: bool) void {
     }
     logger.log(@src(), "This log should be multiple lines.\n-----\nTesting logging with a truncated string below:", .{});
 
-    // Test truncation
-    var long_data: [5000]u8 = undefined;
-    @memset(&long_data, 'a');
+    // Test truncation by taking a test hex string and making it longer than 4,096 bytes
+    const long_data = ("0123456789abcdef" ** (5000 / 16 + 1))[0..5000];
     logger.log(@src(), "{s}", .{long_data});
 }
 
 test "native logging output" {
-    run_logging_test(false);
+    test_logs(false);
 }

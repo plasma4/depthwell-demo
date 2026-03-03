@@ -66,6 +66,17 @@ struct VertexOutput {
     @location(5) local_uv: vec2f, // 0-1 within tile for edge calculations
 };
 
+struct Particle {
+    position: vec2f,
+    d_position: vec2f,
+    color: u32,       // Assumes ColorRGBA is a packed u32
+    size: f32,
+    rotation: f32,
+    d_rotation: f32,
+    time: i32,
+    effect: u32,
+};
+
 @vertex
 fn vs_main(
     @builtin(vertex_index) vertex_index: u32,

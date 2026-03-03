@@ -3,9 +3,8 @@ const std = @import("std");
 const main = @import("main.zig");
 const memory = @import("memory.zig");
 const seeding = @import("seeding.zig");
-const logging = @import("logging.zig");
+const logger = @import("logger.zig");
 const player = @import("player.zig");
-const commands = @import("commands.zig");
 const colors = @import("color_rgba.zig");
 const builtin = @import("builtin");
 
@@ -21,10 +20,6 @@ pub export fn tick() void {
 }
 
 pub export fn renderFrame() void {}
-
-pub export fn execute_commands() void {
-    commands.execute_commands();
-}
 
 pub export fn wasm_seed_from_string() void {
     seeding.wasm_seed_from_string(memory.scratch_buffer.ptr, memory.mem.scratch_len, &memory.game.seed);
@@ -57,13 +52,20 @@ pub export fn isDebug() bool {
 comptime {
     _ = if (in_debug_mode) struct {
         export fn test_logs() void {
-            logging.run_logging_test(true);
+            logger.test_logs(true);
         }
 
         export fn test_scratch_allocation() void {
             memory.run_scratch_allocation_tests();
         }
     };
+}
+
+/// Custom panic function. Note that you can press the arrow for any warnings/errors to see more detailed information (so you might be able to see details such as $debug.FullPanic((function 'panic')).integerOverflow)
+pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    const addr = ret_addr orelse 0;
+    logger.err(@src(), "PANIC [addr: 0x{x}]: {s}", .{ addr, msg });
+    @trap();
 }
 
 test {

@@ -36,9 +36,19 @@ declare global {
     interface Window {
         engine?: GameEngine;
     }
-    // If you use globalThis specifically:
     var engine: GameEngine | undefined;
+    var WasmTypeCode: object;
+    var Zig: object;
 }
+
+/*
+    These global exports allow you to access stuff like memory views from engine.ts easily from the console:
+    engine.getGameView(
+        WasmTypeCode.Uint64,
+        Zig.game_state_offsets.seed,
+        8,
+    )
+*/
 
 if (!CONFIG.noAlertOnError) {
     const handleFatalError = (
@@ -124,6 +134,8 @@ engine.logicLoop = function () {
     );
 };
 
+import { KeyBits, game_state_offsets } from "./enums";
+globalThis.Zig = { KeyBits, game_state_offsets };
 if (engine.isDebug) {
     console.log(
         "Zig code is in debug mode. Use engine.exports to see its functions, variables, and memory, such as engine.exports.test_logs.",

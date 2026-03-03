@@ -12,10 +12,42 @@ fn zigTypeToTs(comptime T: type) []const u8 {
         .pointer => return "Pointer",
         .optional => |opt| {
             if (@typeInfo(opt.child) == .pointer) return "Pointer";
-            return "unknown";
+            return zigTypeToTs(opt.child); // Simplified for this example
         },
+
+        .error_set => return "ErrorSet",
+        .@"enum" => return "number",
         else => return "unknown",
     }
+}
+
+/// Generates a struct where each field is a `usize` representing
+/// the offset of that field in the provided `T`.
+pub fn GenerateOffsets(comptime T: type) type {
+    const info = @typeInfo(T).@"struct";
+    var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
+
+    inline for (info.fields, 0..) |field, i| {
+        //Make comptime constant of type usize to give the value a layout
+        const offset_value: usize = @offsetOf(T, field.name);
+
+        fields[i] = .{
+            .name = field.name,
+            .type = usize,
+            .default_value_ptr = &offset_value,
+            .is_comptime = false,
+            .alignment = @alignOf(usize),
+        };
+    }
+
+    return @Type(.{
+        .@"struct" = .{
+            .layout = .auto,
+            .fields = &fields,
+            .decls = &[_]std.builtin.Type.Declaration{},
+            .is_tuple = false,
+        },
+    });
 }
 
 pub fn main() !void {
@@ -30,9 +62,14 @@ pub fn main() !void {
         \\// This is a dynamically generated file from generate_types.zig for use in engine.ts and should not be manually modified. See types.zig for where type definitions come from.
         \\
         \\/**
-        \\ * A pointer in the WASM memory.
+        \\ * A pointer in the WASM memory. Equals 0 to represent a null value.
         \\ */
         \\export type Pointer = number;
+        \\
+        \\/**
+        \\ * Represents a set of errors from Zig.
+        \\ */
+        \\export type ErrorSet = number;
         \\
         \\/**
         \\ * Configuration options for the GameEngine.
@@ -54,15 +91,17 @@ pub fn main() !void {
         // Extract all functions from root.zig. (ALL functions from root.zig should be marked as "pub".)
         if (@typeInfo(T) == .@"fn") {
             const fn_info = @typeInfo(T).@"fn";
-            try writer.print("\n    readonly {s}: (", .{struct_declaration.name});
+            if (!std.mem.eql(u8, struct_declaration.name, "panic")) {
+                try writer.print("\n    readonly {s}: (", .{struct_declaration.name});
 
-            inline for (fn_info.params, 0..) |param, i| {
-                // Log argument numbers from params
-                if (i > 0) try writer.print(", ", .{});
-                try writer.print("arg{d}: {s}", .{ i, zigTypeToTs(param.type.?) });
+                inline for (fn_info.params, 0..) |param, i| {
+                    // Log argument numbers from params
+                    if (i > 0) try writer.print(", ", .{});
+                    try writer.print("arg{d}: {s}", .{ i, zigTypeToTs(param.type.?) });
+                }
+
+                try writer.print(") => {s};", .{zigTypeToTs(fn_info.return_type.?)});
             }
-
-            try writer.print(") => {s};", .{zigTypeToTs(fn_info.return_type.?)});
         }
     }
 
@@ -70,24 +109,41 @@ pub fn main() !void {
 
     const type_info = @typeInfo(types);
     inline for (type_info.@"struct".decls) |decl| {
-        const T = @field(types, decl.name);
+        const value = @field(types, decl.name);
+        const ValueType = @TypeOf(value);
 
-        if (@TypeOf(T) == type) {
-            const inner_type_info = @typeInfo(T);
-            if (inner_type_info == .@"enum") {
+        if (ValueType == type) {
+            const inner_info = @typeInfo(value);
+            if (inner_info == .@"enum") {
                 try writer.print("\nexport enum {s} {{\n", .{decl.name});
-                inline for (inner_type_info.@"enum".fields) |field| {
+
+                inline for (inner_info.@"enum".fields) |field| {
                     try writer.print("    {s} = {d},\n", .{ field.name, field.value });
                 }
+
                 try writer.print("}}\n", .{});
-            } else if (inner_type_info == .@"struct") {
+            } else if (inner_info == .@"struct") {
+                // Handle types like KeyBits that contain constants
                 try writer.print("\nexport const {s} = {{\n", .{decl.name});
-                inline for (inner_type_info.@"struct".decls) |struct_declaration| {
-                    const value_within_struct = @field(T, struct_declaration.name);
-                    if (@typeInfo(@TypeOf(value_within_struct)) != .@"fn") {
-                        try writer.print("    {s}: {d},\n", .{ struct_declaration.name, value_within_struct });
+                inline for (inner_info.@"struct".decls) |struct_decl| {
+                    const field_value = @field(value, struct_decl.name);
+                    // Only export it if it's a number (skips functions like mask())
+                    if (@TypeOf(field_value) == comptime_int or @TypeOf(field_value) == u32) {
+                        try writer.print("    {s}: {d},\n", .{ struct_decl.name, field_value });
                     }
                 }
+                try writer.print("}} as const;\n", .{});
+            }
+        } else {
+            const inner_info = @typeInfo(ValueType);
+            if (inner_info == .@"struct") {
+                try writer.print("\nexport const {s} = {{\n", .{decl.name});
+
+                inline for (inner_info.@"struct".fields) |field| {
+                    const field_value = @field(value, field.name);
+                    try writer.print("    {s}: {d},\n", .{ field.name, field_value });
+                }
+
                 try writer.print("}} as const;\n", .{});
             }
         }

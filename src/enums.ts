@@ -1,7 +1,7 @@
 // This is a dynamically generated file from generate_types.zig for use in engine.ts and should not be manually modified. See types.zig for where type definitions come from.
 
 /**
- * A pointer in the WASM memory.
+ * A pointer in the WASM memory. Equals 0 to represent a null value.
  */
 export type Pointer = number;
 
@@ -20,7 +20,6 @@ export interface EngineExports extends WebAssembly.Exports {
     readonly reset: () => void;
     readonly tick: () => void;
     readonly renderFrame: () => void;
-    readonly execute_commands: () => void;
     readonly wasm_seed_from_string: () => void;
     readonly get_memory_layout_ptr: () => Pointer;
     readonly wasm_alloc: (arg0: number) => Pointer;
@@ -32,12 +31,12 @@ export interface EngineExports extends WebAssembly.Exports {
 // Generated enum and struct data from types.zig:
 export enum Command {
     Reset = 0,
-    Begin = 1,
-    Exit = 2,
-    SendSeed = 3,
+    Exit = 1,
+    SendSeed = 2,
 }
 
 export const KeyBits = {
+    drop: 32768,
     up: 2048,
     left: 4096,
     down: 8192,
@@ -56,9 +55,10 @@ export const KeyBits = {
 
 export const game_state_offsets = {
     player_pos: 0,
-    camera_pos: 16,
-    camera_scale: 32,
-    keys_pressed_mask: 40,
-    keys_held_mask: 44,
-    seed: 48,
+    player_d: 16,
+    camera_pos: 32,
+    camera_scale: 48,
+    keys_pressed_mask: 56,
+    keys_held_mask: 60,
+    seed: 64,
 } as const;

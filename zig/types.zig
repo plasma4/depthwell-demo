@@ -1,7 +1,9 @@
 //! Lists enums for communication between JS and WASM, or important misc ones.
+const std = @import("std");
 const GameState = @import("memory.zig").GameState;
-/// Lists possible command keys.
-pub const Command = enum(u32) { Reset, Begin, Exit, SendSeed };
+const GenerateOffsets = @import("generate_types.zig").GenerateOffsets;
+/// Lists possible command types.
+pub const Command = enum(u32) { Reset, Exit, SendSeed };
 
 /// Masked data representing keyboard keys in the game.
 pub const KeyBits = struct {
@@ -14,6 +16,9 @@ pub const KeyBits = struct {
     pub fn isSet(bitfield: u32, key_mask: u32) bool {
         return (bitfield & key_mask) != 0;
     }
+
+    /// Q key
+    pub const drop = mask(15);
 
     /// W, ArrowUp, Space keys
     pub const up = mask(11);
@@ -47,11 +52,4 @@ pub const KeyBits = struct {
 };
 
 /// Represents location of items in GameState (in memory.zig), for use in JS.
-pub const game_state_offsets = struct {
-    pub const player_pos = @offsetOf(GameState, "player_pos");
-    pub const camera_pos = @offsetOf(GameState, "camera_pos");
-    pub const camera_scale = @offsetOf(GameState, "camera_scale");
-    pub const keys_pressed_mask = @offsetOf(GameState, "keys_pressed_mask");
-    pub const keys_held_mask = @offsetOf(GameState, "keys_held_mask");
-    pub const seed = @offsetOf(GameState, "seed");
-};
+pub const game_state_offsets = GenerateOffsets(GameState){};

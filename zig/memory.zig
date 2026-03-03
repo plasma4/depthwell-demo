@@ -1,7 +1,7 @@
 //! Manages memory for WASM.
 const std = @import("std");
 const builtin = @import("builtin");
-const logger = @import("logging.zig");
+const logger = @import("logger.zig");
 const ColorRGBA = @import("color_rgba.zig").ColorRGBA;
 pub const is_wasm = builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
 
@@ -18,7 +18,10 @@ else if (builtin.is_test)
 else
     gpa.allocator();
 
-/// 64 bytes is a good alignment size.
+/// Start the scratch buffer with 256 KiB when allocating for the first time.
+const STARTING_SCRATCH_BUFFER_SIZE = 256 * MemorySizes.KiB;
+
+/// 64 bytes is ana all-round good alignment size.
 pub const MAIN_ALIGN_BYTES: usize = 64;
 /// 64 bytes for WebGPU alignment.
 pub const GPU_ALIGN_BYTES: usize = 64;
@@ -73,25 +76,26 @@ const Particle = extern struct {
     size: f32,
     rotation: f32,
     d_rotation: f32,
+    time: i32,
+    effect: u32,
 };
 
-// var particle_buffer: [MAX_PARTICLES]Memory.Particle = undefined;
+// var particle_buffer: [MAX_PARTICLES]Particle align(GPU_ALIGN) = undefined;
 // var particle_count: u32 = 0;
 
-/// A dynamically expandable scratch buffer for fast one-time passing through of data like strings or temporary particle data. Assumes fully single-thread communication. A separate, smaller logging_buffer is used in memory.zig.
-/// The initial, static scratch buffer. Guarantees zero-allocation startup and perfect SIMD alignment.
-var default_scratch_buffer: [256 * MemorySizes.KiB]u8 align(MAIN_ALIGN_BYTES) = undefined;
-
-pub var scratch_buffer: []align(MAIN_ALIGN_BYTES) u8 = &default_scratch_buffer;
+/// A dynamically expandable scratch buffer for fast one-time passing through of data like strings or temporary particle data. Assumes fully single-thread communication. A separate, smaller logging_buffer is used in logger.zig.
+pub var scratch_buffer: []align(MAIN_ALIGN_BYTES) u8 = &[_]u8{};
 var is_dynamic_scratch: bool = false;
 
 /// Data is reserved for numbers or positions that are guaranteed to take a constant amount of memory, or pointers.
 /// Important data is meant to be placed at the start with less important data later. See game_state_offsets in types.zig for export to JS.
 pub const GameState = extern struct {
     /// Represents the player's position.
-    player_pos: @Vector(2, f64) align(MAIN_ALIGN_BYTES) = .{ 0.0, 0.0 },
+    player_pos: @Vector(2, i64) align(MAIN_ALIGN_BYTES) = .{ 0, 0 },
+    /// Represents the player's current movement.
+    player_d: @Vector(2, i64) = .{ 0, 0 },
     /// Represents the camera's position.
-    camera_pos: @Vector(2, f64) = .{ 0.0, 0.0 },
+    camera_pos: @Vector(2, f64) = .{ 0, 0 },
     /// Represents the camera's zoom scale.
     camera_scale: f64 = 1.0,
     /// Represents the keys that were pressed THIS FRAME. (On the next frame, this will be reset to 0.)
@@ -117,7 +121,7 @@ pub const GameState = extern struct {
     seed: [8]u64 align(16) = std.mem.zeroes([8]u64),
 };
 
-/// The state of the current game.
+/// The state of the current game, containing pre-allocated properties.
 pub var game: GameState = .{};
 
 /// The layout structure shared with TypeScript. The MemoryLayout instance will not change locations, but its properties may.
@@ -129,9 +133,9 @@ pub const MemoryLayout = extern struct {
     /// The total capacity of the fixed scratch buffer (4MB).
     scratch_capacity: u64,
     /// Pointer to the GameState. (Can safely be pointer instead of u64 as it is the LAST property.)
-    mem_ptr: *GameState,
+    game_ptr: u64,
     /// Additional properties for configuring the scratch buffer's meaning (with types.zig and commands.zig) if necessary.
-    scratch_properties: [4]u64,
+    scratch_properties: [20]u64,
 };
 
 /// Global static instance of the layout so the pointer remains valid for JS. Starts near the start of a WASM page.
@@ -139,8 +143,8 @@ pub var mem: MemoryLayout align(MAIN_ALIGN_BYTES) = .{
     .scratch_ptr = 0, // pointer is set in main.zig's init
     .scratch_len = 0,
     .scratch_capacity = 0,
-    .mem_ptr = &game,
-    .scratch_properties = std.mem.zeroes([4]u64), // start with empty
+    .game_ptr = 0,
+    .scratch_properties = std.mem.zeroes([20]u64), // start with empty
 };
 
 /// Returns the pointer to the memory layout for TypeScript to consume.
@@ -166,96 +170,83 @@ pub fn scratch_alloc(len: usize) ?[*]u8 {
     const aligned_addr = std.mem.alignForward(usize, current_addr, MAIN_ALIGN_BYTES);
     const new_scratch_len = (aligned_addr - base_addr) + len;
 
-    // Fast path: fits in the current contiguous buffer.
-    if (new_scratch_len <= scratch_buffer.len) {
-        @branchHint(.likely);
-        mem.scratch_len = @intCast(new_scratch_len);
-        return @ptrFromInt(aligned_addr);
+    if (!is_dynamic_scratch or new_scratch_len > scratch_buffer.len) {
+        @branchHint(.cold);
+        const growth_150_percent = scratch_buffer.len + (scratch_buffer.len >> 1);
+        const clamped_growth = @min(growth_150_percent, scratch_buffer.len + (32 * MemorySizes.MiB));
+
+        // Final capacity: (256KiB, 1.5x growth, the requested length), whichever is greater.
+        const new_cap = @max(@max(STARTING_SCRATCH_BUFFER_SIZE, clamped_growth), new_scratch_len);
+        const current_used: usize = @intCast(mem.scratch_len);
+
+        if (!is_dynamic_scratch) {
+            scratch_buffer = allocator.alignedAlloc(u8, MAIN_ALIGN, new_cap) catch return null;
+            is_dynamic_scratch = true;
+        } else {
+            scratch_buffer = allocator.realloc(scratch_buffer, new_cap) catch return null;
+        }
+
+        // Update JS metadata
+        mem.scratch_ptr = @intFromPtr(scratch_buffer.ptr);
+        mem.scratch_capacity = scratch_buffer.len;
+
+        // Re-calculate the return pointer based on the new base address
+        const updated_base = @intFromPtr(scratch_buffer.ptr);
+        const updated_aligned = std.mem.alignForward(usize, updated_base + current_used, MAIN_ALIGN_BYTES);
+        mem.scratch_len = @intCast((updated_aligned - updated_base) + len);
+        return @ptrFromInt(updated_aligned);
     }
 
-    // Expansion: memory and pointers will move, and capacity will increase.
-    // Expand an extra 50% of current length, up to +32MiB (or new scratch length, whichever is higher).
-    const growth_1_5 = scratch_buffer.len + (scratch_buffer.len / 2);
-    const clamped_growth = @min(growth_1_5, scratch_buffer.len + (32 * MemorySizes.MiB));
-    const new_cap = @max(clamped_growth, new_scratch_len);
-    const scratch_length_usize: usize = @intCast(mem.scratch_len);
+    // Fast Path: Fits in existing buffer
+    mem.scratch_len = @intCast(new_scratch_len);
+    return @ptrFromInt(aligned_addr);
+}
 
-    if (!is_dynamic_scratch) {
-        // Transition from static array to heap. This technically requires memory to grow twice because it's not an in-place copy.
-        const new_slice = allocator.alignedAlloc(u8, MAIN_ALIGN, new_cap) catch return null;
-        @memcpy(new_slice[0..scratch_length_usize], scratch_buffer[0..scratch_length_usize]);
-        scratch_buffer = new_slice;
-        is_dynamic_scratch = true;
-    } else {
-        // Use realloc to allow the allocator to grow in-place if possible (this also keeps alignment).
-        scratch_buffer = allocator.realloc(scratch_buffer, new_cap) catch return null;
-    }
+/// Allocates a typed slice in the scratch buffer.
+/// This is the ideal way to write structural data (like `Particle`) directly into the buffer.
+pub fn scratch_alloc_slice(comptime T: type, count: usize) ?[]T {
+    const byte_count = count * @sizeOf(T);
+    const ptr = scratch_alloc(byte_count) orelse return null;
+    return @as([*]T, @ptrCast(@alignCast(ptr)))[0..count];
+}
 
-    // Update JS state
-    mem.scratch_ptr = @intFromPtr(scratch_buffer.ptr);
-    mem.scratch_capacity = scratch_buffer.len;
-
-    // Recalculate based on potentially new base pointer
-    const updated_base = @intFromPtr(scratch_buffer.ptr);
-    const updated_aligned = std.mem.alignForward(usize, updated_base + scratch_length_usize, MAIN_ALIGN_BYTES);
-    mem.scratch_len = @intCast((updated_aligned - updated_base) + len);
-
-    return @ptrFromInt(updated_aligned);
+/// Views the entirely used portion of the scratch buffer as a single typed slice.
+/// Note: This will panic if `mem.scratch_len` is not an exact multiple of `@sizeOf(T)`.
+/// Only use this if the entire frame's scratch buffer contains a single data type.
+pub fn scratch_as_slice(comptime T: type) []T {
+    const bytes = scratch_buffer[0..mem.scratch_len];
+    return std.mem.bytesAsSlice(T, bytes);
 }
 
 /// Runs a set of tests (which should be called from JS) for the scratch allocation. (See root.zig for export logic.)
 pub fn run_scratch_allocation_tests() void {
     scratch_reset();
 
-    const initial_capacity = scratch_buffer.len;
+    // Force 0-to-256KiB scratch allocation.
+    const len1 = 100;
+    _ = scratch_alloc(len1) orelse @panic("Bootstrap allocation failed");
 
-    // Allocate initial chunk and track its offset (we use offsets because pointers dangle on expansion!)
-    _ = scratch_alloc(100) orelse @panic("Alloc 1 failed");
-    const offset1 = 0;
-    @memset(scratch_buffer[offset1..100], 0xAA); // first allocation memory value
+    const heap_cap = scratch_buffer.len;
+    const current_used = std.mem.alignForward(usize, @intCast(mem.scratch_len), MAIN_ALIGN_BYTES);
+    if (STARTING_SCRATCH_BUFFER_SIZE < len1 or scratch_buffer.len != STARTING_SCRATCH_BUFFER_SIZE) @panic("Scratch buffer length does not match starting buffer size");
 
-    // Request the exact fit necessary
-    const current_len: usize = @intCast(mem.scratch_len);
-    const current_addr = @intFromPtr(scratch_buffer.ptr) + current_len;
-    const aligned_addr = std.mem.alignForward(usize, current_addr, MAIN_ALIGN_BYTES);
-    const padding = aligned_addr - current_addr;
-    const remaining = initial_capacity - current_len - padding;
+    if (heap_cap <= current_used) @panic("Bootstrap failed to provide excess capacity");
+    const rem = heap_cap - current_used;
 
-    _ = scratch_alloc(remaining) orelse @panic("Alloc 2 failed");
-    const offset2 = current_len + padding;
-    @memset(scratch_buffer[offset2 .. offset2 + remaining], 0xBB); // second allocation memory value
+    // Fill to the exact amount of capacity
+    _ = scratch_alloc(rem) orelse @panic("Fill allocation failed");
+    if (scratch_buffer.len != heap_cap) @panic("Buffer expanded before reaching capacity");
+    logger.log(@src(), "Requested {d} bytes successfully without buffer expansion.", .{rem});
 
-    // Verify it did not prematurely expand
-    if (scratch_buffer.len != initial_capacity) {
-        @panic("Buffer expanded prematurely");
-    }
+    // force expansion and reallocate
+    const len_exp = 64;
+    _ = scratch_alloc(len_exp) orelse @panic("Expansion allocation failed");
 
-    // Force expansion
-    const ptr3 = scratch_alloc(64) orelse @panic("Alloc 3 (expansion) failed");
-    @memset(ptr3[0..64], 0xCC); // third allocation memory value
+    if (scratch_buffer.len <= heap_cap) @panic("Buffer failed to grow after exceeding capacity");
+    if (mem.scratch_ptr != @intFromPtr(scratch_buffer.ptr)) @panic("JS pointer desync");
 
-    if (scratch_buffer.len <= initial_capacity) {
-        @panic("Buffer did not expand when exceeding capacity");
-    }
-
-    if (mem.scratch_ptr != @intFromPtr(scratch_buffer.ptr)) {
-        @panic("JS memory pointer was not successfully updated");
-    }
-
-    for (scratch_buffer[offset1..100]) |val| {
-        if (val != 0xAA) @panic("Slice 1 value corrupted after expansion");
-    }
-    for (scratch_buffer[offset2 .. offset2 + remaining]) |val| {
-        if (val != 0xBB) @panic("Slice 2 value corrupted after expansion");
-    }
-    for (ptr3[0..64]) |val| {
-        if (val != 0xCC) @panic("Slice 3 value corrupted");
-    }
-
-    // Cleanup so state is cleanly reset for the next frame
     scratch_reset();
-    if (mem.scratch_len != 0) @panic("Scratch buffer's reported data length was not reset");
-    logger.log(@src(), "Scratch allocation tests passed! Capacity of scratch_buffer grew from {d} to {d} bytes.", .{ initial_capacity, scratch_buffer.len });
+    logger.log(@src(), "Scratch tests passed! Final capacity: {d} bytes.", .{scratch_buffer.len});
 }
 
 /// Allocates space in scratch buffer and copies the provided data into it if necessary.
@@ -271,6 +262,9 @@ pub inline fn scratch_reset() void {
 }
 
 const _ = {
+    if (STARTING_SCRATCH_BUFFER_SIZE <= 0 || (STARTING_SCRATCH_BUFFER_SIZE % @alignOf(@TypeOf(scratch_buffer)) != 0)) {
+        @compileError("Buffer size must be a positive multiple of its alignment.");
+    }
     if (MAIN_ALIGN_BYTES < 16 || (MAIN_ALIGN_BYTES % 16 > 0)) {
         @compileError("MAIN_ALIGN_BYTES should be a positive multiple of 16 for SIMD alignment.");
     }

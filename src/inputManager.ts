@@ -10,6 +10,7 @@ export interface InputState {
 
 /** An object representing what a keydown/keyup code should map to numerically (as a bit in Zig.KeyBits). */
 const keyMap: Record<string, number> = {
+    q: Zig.KeyBits.drop,
     ArrowUp: Zig.KeyBits.up,
     KeyW: Zig.KeyBits.up,
     ArrowLeft: Zig.KeyBits.left,

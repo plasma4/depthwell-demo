@@ -3,28 +3,46 @@
 const std = @import("std");
 const testing = std.testing;
 
-/// Xoshiro512** (StarStar)
+test "full usage example" {
+    const allocator = std.testing.allocator;
+
+    // Start with an arbitrary seed
+    var world_seed: [8]u64 = undefined;
+    seedFromBytes("my-game-seed", &world_seed);
+
+    // Derive a unique seed for a specific chunk
+    const chunk_seed = mixChunkSeed(world_seed, 10, -5, 20);
+    var rng = Xoshiro512.init(chunk_seed);
+
+    // Fill a buffer for block light levels (u4 = 0-15)
+    const light_buffer = try allocator.alloc(u4, 16 * 16 * 16);
+    defer allocator.free(light_buffer);
+    rng.fillU4(light_buffer);
+
+    // Verify we got data
+    try std.testing.expect(light_buffer[0] <= 15);
+}
+
+/// Xoshiro512** (StarStar), public domain
 /// A high-performance, all-purpose generator with a period of 2^512 - 1.
 pub const Xoshiro512 = struct {
     state: [8]u64,
 
-    const Self = @This();
-
-    /// Create a new generator from a 512-bit seed.
-    pub fn init(seed_data: [8]u64) Self {
-        return Self{ .state = seed_data };
+    pub fn init(seed_data: [8]u64) Xoshiro512 {
+        var state = seed_data;
+        var check: u64 = 0;
+        for (state) |s| check |= s;
+        if (check == 0) {
+            state[0] = 0xbf58476d1ce4e5b9; // fill with some random constant (technically not needed with seeding.ts logic being sound)
+        }
+        return .{ .state = state };
     }
 
-    /// Rotates x left by k bits.
-    inline fn rotl(x: u64, k: u64) u64 {
-        return (x << k) | (x >> (64 - k));
-    }
-
-    /// Generate the next 64 bits of randomness.
-    pub fn next(self: *Self) u64 {
+    pub fn next(self: *Xoshiro512) u64 {
         const result = std.math.rotl(u64, self.state[1] *% 5, 7) *% 9;
-        const t = self.state[1] << 11;
 
+        // Xoshiro512 state transition
+        const t = self.state[1] << 11;
         self.state[2] ^= self.state[0];
         self.state[5] ^= self.state[1];
         self.state[1] ^= self.state[2];
@@ -33,50 +51,34 @@ pub const Xoshiro512 = struct {
         self.state[4] ^= self.state[5];
         self.state[0] ^= self.state[6];
         self.state[6] ^= self.state[7];
-
         self.state[6] ^= t;
         self.state[7] = std.math.rotl(u64, self.state[7], 21);
 
         return result;
     }
 
-    /// Highly optimized batch generation of u4 values.
-    pub fn fillU4(self: *Self, buffer: []u4) void {
-        var i: usize = 0;
-        const len = buffer.len;
-
-        while (i + 16 <= len) {
-            const r = self.next();
-            buffer[i + 0] = @truncate(r);
-            buffer[i + 1] = @truncate(r >> 4);
-            buffer[i + 2] = @truncate(r >> 8);
-            buffer[i + 3] = @truncate(r >> 12);
-            buffer[i + 4] = @truncate(r >> 16);
-            buffer[i + 5] = @truncate(r >> 20);
-            buffer[i + 6] = @truncate(r >> 24);
-            buffer[i + 7] = @truncate(r >> 28);
-            buffer[i + 8] = @truncate(r >> 32);
-            buffer[i + 9] = @truncate(r >> 36);
-            buffer[i + 10] = @truncate(r >> 40);
-            buffer[i + 11] = @truncate(r >> 44);
-            buffer[i + 12] = @truncate(r >> 48);
-            buffer[i + 13] = @truncate(r >> 52);
-            buffer[i + 14] = @truncate(r >> 56);
-            buffer[i + 15] = @truncate(r >> 60);
-            i += 16;
-        }
-
-        if (i < len) {
-            var r = self.next();
-            while (i < len) : (i += 1) {
-                buffer[i] = @truncate(r);
-                r >>= 4;
-            }
-        }
+    pub fn checkpoint(self: Xoshiro512) Xoshiro512 {
+        return self;
     }
 
-    pub fn checkpoint(self: Self) Self {
-        return self;
+    pub fn fillU4(self: *Xoshiro512, buffer: []u4) void {
+        var i: usize = 0;
+        // Process 16 elements at a time contiguously for better SIMD optimization
+        while (i + 16 <= buffer.len) : (i += 16) {
+            const r = self.next();
+            inline for (0..16) |j| {
+                buffer[i + j] = @truncate(r >> @intCast(j * 4));
+            }
+        }
+        // Cleanup remaining elements
+        if (i < buffer.len) {
+            const r = self.next();
+            var rem: usize = 0;
+            while (i < buffer.len) : (i += 1) {
+                buffer[i] = @truncate(r >> @intCast(rem * 4));
+                rem += 1;
+            }
+        }
     }
 };
 
@@ -87,50 +89,33 @@ inline fn staffordMix13(z_in: u64) u64 {
     return z ^ (z >> 31);
 }
 
-/// Takes a 512-bit world seed and mixes it with chunk coordinates and depth.
-/// This O(1) mixer uses a 3-round Substitution-Permutation Network.
+/// Takes a 512-bit world seed and mixes it with chunk coordinates and depth using SplitMix64.
 pub fn mixChunkSeed(base_seed: [8]u64, x: i32, y: i32, depth: i32) [8]u64 {
     var state = base_seed;
+    state[0] +%= staffordMix13(@bitCast(@as(i64, x)));
+    state[1] +%= staffordMix13(@bitCast(@as(i64, y)));
+    state[2] +%= staffordMix13(@bitCast(@as(i64, depth)));
 
-    // Weyl constants for coordinate spread
-    const px = @as(u64, @bitCast(@as(i64, x))) *% 0x9e3779b97f4a7c15;
-    const py = @as(u64, @bitCast(@as(i64, y))) *% 0xbf58476d1ce4e5b9;
-    const pz = @as(u64, @bitCast(@as(i64, depth))) *% 0x94d049bb133111eb;
-
-    state[0] +%= px;
-    state[1] ^= py;
-    state[2] +%= pz;
-    state[3] ^= px;
-    state[4] +%= py;
-    state[5] ^= pz;
-    state[6] +%= (px ^ py);
-    state[7] ^= (py ^ pz);
-
-    inline for (0..3) |_| {
-        inline for (0..8) |i| state[i] = staffordMix13(state[i]);
-        const t0 = state[0];
-        state[0] +%= state[7];
-        state[1] ^= state[0];
-        state[2] +%= state[1];
-        state[3] ^= state[2];
-        state[4] +%= state[3];
-        state[5] ^= state[4];
-        state[6] +%= state[5];
-        state[7] ^= state[6] +% t0;
+    const old = state; // Capture state to break the dependency chain
+    inline for (0..8) |i| {
+        state[i] = staffordMix13(old[i] ^ old[(i + 1) % 8]);
     }
     return state;
 }
 
-/// Mixes O(N) chunk data using BLAKE3 (Fastest WASM-friendly hash).
+/// Mixes chunk data using BLAKE3 (fast and WASM-friendly).
 pub fn mixLargeChunkData(world_seed: [8]u64, data: []const u8) [8]u64 {
     var hasher = std.crypto.hash.Blake3.init(.{});
     hasher.update(std.mem.asBytes(&world_seed));
     hasher.update(data);
+
     var out: [64]u8 = undefined;
     hasher.final(&out);
+
     return @bitCast(out);
 }
 
+/// BROKEN WHEN EXPORTING, DO NOT USE. JS LOGIC EXISTS ALREADY. Converts a base-26 [a-z]-only string to 64 bytes. Input should be no larger than 100 characters.
 pub fn seedFromBase26(input: []const u8, out_seed: *[8]u64) void {
     // Initialize out_seed to 0
     @memset(out_seed, 0);
@@ -235,7 +220,7 @@ test "bulk u4 generation" {
 }
 
 /// Hashes an arbitrary string into a 512-bit seed directly into the destination (using Sha512).
-pub fn seedFromBytes(input: []const u8, out_seed: *[8]u64) void {
+fn seedFromBytes(input: []const u8, out_seed: *[8]u64) void {
     var hash_out: [64]u8 = undefined;
     std.crypto.hash.sha2.Sha512.hash(input, &hash_out, .{});
 

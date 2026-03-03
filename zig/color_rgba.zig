@@ -9,7 +9,7 @@ pub const ColorRGBA = extern union {
     word: u32,
     /// SIMD-ready vector access. Subject to different values based on endianness.
     v: @Vector(4, u8),
-    /// Component access via .channels.r, etc.
+    /// Access individual RGBA components through channels.
     channels: extern struct {
         /// Red component of color (0-255).
         r: u8 = 0,

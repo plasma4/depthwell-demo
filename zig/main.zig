@@ -2,21 +2,14 @@
 const memory = @import("memory.zig");
 const std = @import("std");
 const dw = @import("Depthwell");
-const logger = @import("logging.zig");
+const logger = @import("logger.zig");
 
 /// Initializes the game.
 pub fn init() void {
     logger.log(@src(), "init() called: Hello from Zig!", .{});
+    memory.mem.game_ptr = @intFromPtr(&memory.game);
     memory.mem.scratch_ptr = @intFromPtr(&memory.scratch_buffer);
 }
 
 /// Resets the game state.
 pub fn reset() void {}
-
-pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
-    _ = error_return_trace;
-    _ = ret_addr;
-
-    logger.err(@src(), "PANIC: {s}", .{msg});
-    @trap();
-}
