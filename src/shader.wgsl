@@ -105,7 +105,7 @@ fn vs_main(
     // Cull empty sprite
     if (tile.sprite_id == 0u) {
         var out: VertexOutput;
-        out.position = vec4f(0, 0, 0, 0);
+        out.position = vec4f(2.0, 2.0, 2.0, 1.0); // ideal outcode
         return out;
     }
 

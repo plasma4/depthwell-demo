@@ -425,7 +425,11 @@ export class GameEngine {
         // Blocks are 64 bits each
         const tileCount = chunkSize * chunkSize;
         const u32Count = tileCount * 2;
-        const wasmView = new Uint32Array(this.memory.buffer, Number(ptr), u32Count);
+        const wasmView = new Uint32Array(
+            this.memory.buffer,
+            Number(ptr),
+            u32Count,
+        );
 
         // Ensure the GPU buffer is large enough, recreating if necessary
         if (!this.tileBuffer || this.tileBuffer.size !== wasmView.byteLength) {
