@@ -51,5 +51,26 @@ pub const KeyBits = struct {
     pub const k9 = mask(9);
 };
 
+/// Bitmask flags used to identify the presence of neighboring blocks
+/// relative to a central coordinate in a 2D grid.
+pub const EdgeFlags = struct {
+    /// Neighboring block is to the top-left (Northwest)
+    pub const TOP_LEFT = 0x01;
+    /// Neighboring block is directly above (North)
+    pub const TOP = 0x02;
+    /// Neighboring block is to the top-right (Northeast)
+    pub const TOP_RIGHT = 0x04;
+    /// Neighboring block is to the immediate left (West)
+    pub const LEFT = 0x08;
+    /// Neighboring block is to the immediate right (East)
+    pub const RIGHT = 0x10;
+    /// Neighboring block is to the bottom-left (Southwest)
+    pub const BOTTOM_LEFT = 0x20;
+    /// Neighboring block is directly below (South)
+    pub const BOTTOM = 0x40;
+    /// Neighboring block is to the bottom-right (Southeast)
+    pub const BOTTOM_RIGHT = 0x80;
+};
+
 /// Represents location of items in GameState (in memory.zig), for use in JS.
 pub const game_state_offsets = GenerateOffsets(GameState){};

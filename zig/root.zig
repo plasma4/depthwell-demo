@@ -1,4 +1,4 @@
-//! Root file. Imports main.zig and handles exporting functions to WASM. All functions here should export to WASM (with no other exports within other Zig files).
+//! Root file. Imports main.zig and handles exporting functions to WASM. All functions here (excluding internal ones like panic) should be pub export to expose functions to generate_types.zig and WASM (with no other exports within other Zig files).
 const std = @import("std");
 const main = @import("main.zig");
 const memory = @import("memory.zig");
@@ -6,6 +6,7 @@ const seeding = @import("seeding.zig");
 const logger = @import("logger.zig");
 const player = @import("player.zig");
 const colors = @import("color_rgba.zig");
+const chunk = @import("chunk.zig");
 const builtin = @import("builtin");
 
 pub export fn init() void {
@@ -18,28 +19,54 @@ pub export fn reset() void {
 pub export fn tick() void {
     player.move();
 }
-
 pub export fn renderFrame() void {}
 
 pub export fn wasm_seed_from_string() void {
     seeding.wasm_seed_from_string(memory.scratch_buffer.ptr, memory.mem.scratch_len, &memory.game.seed);
 }
 
+var test_chunk: memory.Chunk = std.mem.zeroInit(memory.Chunk, .{});
+var test_coord: chunk.ScaleCoord = .{
+    .depth_stack = &[_]u64{ 0x0, 0x0 },
+    .pos = .{ 10, -5 },
+};
+
+/// Generate a test chunk with the given seed. Returns pointer to tile data.
+pub export fn generate_chunk() [*]u32 {
+    chunk.generate_chunk(&test_chunk, test_coord);
+    return chunk.get_tile_ptr(&test_chunk);
+}
+
+/// Get pointer to the current test chunk tile data
+pub export fn get_test_chunk_ptr() [*]u32 {
+    return chunk.get_tile_ptr(&test_chunk);
+}
+
+/// Get total chunk size (width * height)
+pub export fn get_chunk_size() u32 {
+    return memory.CHUNK_SIZE;
+}
+
+/// Recalculate edge flags for the test chunk (after manual modifications)
+pub export fn recalculate_test_chunk_edges() void {
+    chunk.recalculate_edge_flags(&test_chunk);
+}
+
+// Layout logic
 pub export fn get_memory_layout_ptr() *const memory.MemoryLayout {
     return memory.get_memory_layout_ptr();
 }
-
 pub export fn wasm_alloc(len: usize) ?[*]u8 {
     return memory.wasm_alloc(len);
 }
-
 pub export fn wasm_free(ptr: [*]u8, len: usize) void {
     memory.wasm_free(ptr, len);
 }
-
 pub export fn scratch_alloc(len: usize) ?[*]u8 {
     return memory.scratch_alloc(len);
 }
+
+// Debug/testing logic
 
 const in_debug_mode = builtin.mode == .Debug;
 
@@ -73,6 +100,6 @@ test {
     _ = @import("internal/png/png_to_binary.zig");
     _ = @import("color_rgba.zig");
     _ = @import("seeding.zig");
+    _ = @import("logger.zig");
     _ = @import("math.zig");
-    std.testing.refAllDecls(@This());
 }

@@ -1,9 +1,11 @@
 //! Manages seeding calculations for the game.
 // seeding yippeeeeee
 const std = @import("std");
+const chunk = @import("chunk.zig");
 const testing = std.testing;
 
 test "full usage example" {
+    const logger = @import("logger.zig");
     const allocator = std.testing.allocator;
 
     // Start with an arbitrary seed
@@ -11,19 +13,21 @@ test "full usage example" {
     seedFromBytes("my-game-seed", &world_seed);
 
     // Derive a unique seed for a specific chunk
-    const chunk_seed = mixChunkSeed(world_seed, 10, -5, 20);
+    const chunk_seed = mixChunkSeed(world_seed, [_]u64{ 10, 20 });
     var rng = Xoshiro512.init(chunk_seed);
 
-    // Fill a buffer for block light levels (u4 = 0-15)
+    // Fill a buffer of data
     const light_buffer = try allocator.alloc(u4, 16 * 16 * 16);
     defer allocator.free(light_buffer);
-    rng.fillU4(light_buffer);
+
+    // Log or use this float value
+    logger.quick(rng.float(f32));
 
     // Verify we got data
     try std.testing.expect(light_buffer[0] <= 15);
 }
 
-/// Xoshiro512** (StarStar), public domain
+/// Xoshiro512** (StarStar), public domain randomness function.
 /// A high-performance, all-purpose generator with a period of 2^512 - 1.
 pub const Xoshiro512 = struct {
     state: [8]u64,
@@ -33,6 +37,7 @@ pub const Xoshiro512 = struct {
         var check: u64 = 0;
         for (state) |s| check |= s;
         if (check == 0) {
+            @branchHint(.unlikely);
             state[0] = 0xbf58476d1ce4e5b9; // fill with some random constant (technically not needed with seeding.ts logic being sound)
         }
         return .{ .state = state };
@@ -57,46 +62,96 @@ pub const Xoshiro512 = struct {
         return result;
     }
 
-    pub fn checkpoint(self: Xoshiro512) Xoshiro512 {
-        return self;
+    pub fn float(self: *Xoshiro512, comptime T: type) T {
+        if (T == f64) {
+            // Use 53 bits of entropy (mantissa size for f64)
+            return @as(f64, @floatFromInt(self.next() >> 11)) * (1.0 / 9007199254740992.0);
+        } else if (T == f32) {
+            // Use 24 bits of entropy (mantissa size for f32)
+            return @as(f32, @floatFromInt(self.next() >> 40)) * (1.0 / 16777216.0);
+        }
+        @compileError("Only f32 and f64 floats are supported.");
     }
 
-    pub fn fillU4(self: *Xoshiro512, buffer: []u4) void {
-        var i: usize = 0;
-        // Process 16 elements at a time contiguously for better SIMD optimization
-        while (i + 16 <= buffer.len) : (i += 16) {
-            const r = self.next();
-            inline for (0..16) |j| {
-                buffer[i + j] = @truncate(r >> @intCast(j * 4));
-            }
-        }
-        // Cleanup remaining elements
-        if (i < buffer.len) {
-            const r = self.next();
-            var rem: usize = 0;
-            while (i < buffer.len) : (i += 1) {
-                buffer[i] = @truncate(r >> @intCast(rem * 4));
-                rem += 1;
-            }
-        }
+    pub fn checkpoint(self: Xoshiro512) Xoshiro512 {
+        return self;
     }
 };
 
 /// Stafford Mix 13 for 64-bit entropy avalanching.
-inline fn staffordMix13(z_in: u64) u64 {
+pub inline fn staffordMix13(z_in: u64) u64 {
     var z = (z_in ^ (z_in >> 30)) *% 0xbf58476d1ce4e5b9;
     z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
     return z ^ (z >> 31);
 }
 
-/// Takes a 512-bit world seed and mixes it with chunk coordinates and depth using SplitMix64.
-pub fn mixChunkSeed(base_seed: [8]u64, x: i32, y: i32, depth: i32) [8]u64 {
+/// Takes a 512-bit starting seed and mixes it with a compile-time tuple or vector using staffordMix13.
+pub inline fn mixChunkSeed(base_seed: [8]u64, inputs: anytype) [8]u64 {
     var state = base_seed;
-    state[0] +%= staffordMix13(@bitCast(@as(i64, x)));
-    state[1] +%= staffordMix13(@bitCast(@as(i64, y)));
-    state[2] +%= staffordMix13(@bitCast(@as(i64, depth)));
+    const ArgsType = @TypeOf(inputs);
+    const info = @typeInfo(ArgsType);
 
-    const old = state; // Capture state to break the dependency chain
+    switch (info) {
+        .@"struct" => |s| {
+            inline for (s.fields, 0..) |field, i| {
+                validateAndMix(&state, i % 8, field.type, inputs[i]);
+            }
+        },
+        .array => |a| {
+            inline for (0..a.len) |i| {
+                validateAndMix(&state, i % 8, a.child, inputs[i]);
+            }
+        },
+        else => @compileError("mixChunkSeed requires a struct, tuple, or array. Found: " ++ @typeName(ArgsType)),
+    }
+
+    // Final diffusion pass
+    const old = state;
+    inline for (0..8) |i| {
+        state[i] = staffordMix13(old[i] ^ old[(i + 1) % 8]);
+    }
+    return state;
+}
+
+/// Validates mixChunkSeed and performs the mixing
+inline fn validateAndMix(state: *[8]u64, idx: usize, comptime T: type, val: anytype) void {
+    if (T != u64 and T != i64) {
+        @compileError("mixChunkSeed only accepts u64 or i64. Found: " ++ @typeName(T));
+    }
+    const casted_val: u64 = if (T == i64) @bitCast(val) else val;
+    state[idx] +%= staffordMix13(casted_val);
+}
+
+/// Mixes a ScaleCoord into the base seed.
+pub fn mixScaleCoord(base_seed: [8]u64, coord: chunk.ScaleCoord) [8]u64 {
+    var state = base_seed;
+
+    // Mix the spatial vector
+    state[0] +%= staffordMix13(@bitCast(coord.pos[0]));
+    state[1] +%= staffordMix13(@bitCast(coord.pos[1]));
+
+    // Mix the unbounded depth stack (packing u4s into u64s for fast mixing)
+    var current_val: u64 = 0;
+    var shift: u6 = 0;
+    var state_idx: usize = 2; // Start after pos mix
+
+    for (coord.depth_stack) |nibble| {
+        current_val |= @as(u64, nibble) << shift;
+        shift +%= 4;
+
+        if (shift == 0) { // 16 nibbles (64 bits) accumulated
+            state[state_idx % 8] +%= staffordMix13(current_val);
+            state_idx += 1;
+            current_val = 0;
+        }
+    }
+    // Mix remaining nibbles
+    if (shift > 0) {
+        state[state_idx % 8] +%= staffordMix13(current_val);
+    }
+
+    // Final diffusion pass
+    const old = state;
     inline for (0..8) |i| {
         state[i] = staffordMix13(old[i] ^ old[(i + 1) % 8]);
     }
@@ -115,7 +170,7 @@ pub fn mixLargeChunkData(world_seed: [8]u64, data: []const u8) [8]u64 {
     return @bitCast(out);
 }
 
-/// BROKEN WHEN EXPORTING, DO NOT USE. JS LOGIC EXISTS ALREADY. Converts a base-26 [a-z]-only string to 64 bytes. Input should be no larger than 100 characters.
+/// BROKEN WHEN EXPORTING, DO NOT USE. JS LOGIC EXISTS ALREADY. Converts a base-26 [a-z]-only string to 64 bytes. Input should  too no larger than 100 characters.
 pub fn seedFromBase26(input: []const u8, out_seed: *[8]u64) void {
     // Initialize out_seed to 0
     @memset(out_seed, 0);
@@ -167,9 +222,11 @@ test "bijective seeding uniqueness" {
 
 test "chunk mixing determinism" {
     const world_seed = [_]u64{ 1, 2, 3, 4, 5, 6, 7, 8 };
-    const c1 = mixChunkSeed(world_seed, 10, 20, 1);
-    const c2 = mixChunkSeed(world_seed, 10, 20, 1);
-    const c3 = mixChunkSeed(world_seed, 10, 21, 1);
+    const input_1 = [_]u64{ 10, 20, 1 };
+    const input_2 = [_]u64{ 10, 21, 1 };
+    const c1 = mixChunkSeed(world_seed, input_1);
+    const c2 = mixChunkSeed(world_seed, input_1);
+    const c3 = mixChunkSeed(world_seed, input_2);
     try testing.expectEqualSlices(u64, &c1, &c2);
     try testing.expect(!std.mem.eql(u64, &c2, &c3));
 }
@@ -183,6 +240,7 @@ test "Xoshiro512** initialization/consistency" {
     // Both generators should produce identical output
     try testing.expectEqual(rng1.next(), rng2.next());
     try testing.expectEqual(rng1.next(), rng2.next());
+    try testing.expectEqual(rng1.float(f32), rng2.float(f32));
 }
 
 test "branching check" {
@@ -190,8 +248,9 @@ test "branching check" {
     seedFromBytes("test", &seed);
     var rng_main = Xoshiro512.init(seed);
 
-    var branch_a = rng_main.checkpoint(); // Value copy
-    var branch_b = rng_main.checkpoint(); // Value copy
+    // Make value copies of the state
+    var branch_a = rng_main.checkpoint();
+    var branch_b = rng_main.checkpoint();
 
     const val_a = branch_a.next();
     const val_b = branch_b.next();
@@ -204,22 +263,8 @@ test "branching check" {
     try testing.expect(branch_a.next() != branch_b.next());
 }
 
-test "bulk u4 generation" {
-    var seed: [8]u64 = undefined;
-    seedFromBytes("u4_test", &seed);
-    var rng = Xoshiro512.init(seed);
-
-    // Buffer size not divisible by 16 to test edge cases
-    var buf: [35]u4 = undefined;
-    rng.fillU4(&buf);
-
-    // Just ensure data is actually written (probabilistic)
-    var sum: u32 = 0;
-    for (buf) |val| sum += val;
-    try testing.expect(sum > 0);
-}
-
 /// Hashes an arbitrary string into a 512-bit seed directly into the destination (using Sha512).
+/// Used for testing only; actual seeding uses a string with only [a-z] characters and using Sha512 would be too slow for practical use.
 fn seedFromBytes(input: []const u8, out_seed: *[8]u64) void {
     var hash_out: [64]u8 = undefined;
     std.crypto.hash.sha2.Sha512.hash(input, &hash_out, .{});

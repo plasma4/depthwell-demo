@@ -62,9 +62,19 @@ pub fn main() !void {
         \\// This is a dynamically generated file from generate_types.zig for use in engine.ts and should not be manually modified. See types.zig for where type definitions come from.
         \\
         \\/**
-        \\ * A pointer in the WASM memory. Equals 0 to represent a null value.
+        \\ * A pointer in the WASM memory. Equals 0/0n to represent a null value.
         \\ */
-        \\export type Pointer = number;
+        \\export type Pointer = number | bigint;
+        \\
+        \\/**
+        \\ * Represents a length.
+        \\ */
+        \\export type LengthLike = number | bigint;
+        \\
+        \\/**
+        \\ * A pointer in the WASM memory (converted to number).
+        \\ */
+        \\export type PointerLike = number;
         \\
         \\/**
         \\ * Represents a set of errors from Zig.

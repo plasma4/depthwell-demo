@@ -5,6 +5,8 @@ const logger = @import("logger.zig");
 const ColorRGBA = @import("color_rgba.zig").ColorRGBA;
 pub const is_wasm = builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
 
+pub const CHUNK_SIZE = 16;
+
 // Only create an actual GPA instance if building for native.
 var gpa = if (!is_wasm and !builtin.is_test)
     std.heap.GeneralPurposeAllocator(.{}){}
@@ -44,44 +46,59 @@ pub const MemorySizes = struct {
     pub const wasm_page = 64 * 1024;
 };
 
-/// Tightly packed data for a block to be sent to WebGPU.
-const BlockInstance = extern struct {
-    /// Position in screen-space pixels (after camera transform)
-    location: @Vector(2, f32),
-    /// Which sprite to use (index into texture atlas)
-    sprite_id: u16,
-    /// Edge flags: which neighbors are air (for edge darkening shader).
-    /// Starts from top left, then middle left, and ending at bottom right (skipping itself).
-    edge_flags: u8,
-    /// Light level (0-255, shader interpretation TODO)
+/// A single block within a chunk.
+pub const Block = packed struct {
+    /// Internal sprite ID
+    id: u20,
+    /// The brightness of the tile.
     light: u8,
-    /// Per-block seed for procedural variation in shader. Separate from seeding when zooming in/time-based changes in lighting or shaders.
-    variation_seed: u32,
+    /// Mining progression for animation
+    hp: u4,
 
-    /// Returns x-coordinate of a block's location.
-    pub inline fn x(self: anytype) f32 {
-        return self.location[0];
-    }
-    /// Returns x-coordinate of a block's location.
-    pub inline fn y(self: anytype) f32 {
-        return self.location[1];
+    /// Per-block seed for procedural variation in the shader.
+    seed: u24,
+    /// Edge flags: which neighbors are air (for edge-darkening and culling).
+    /// Starts from top left, then middle left, and ending at bottom right (skipping itself).
+    flags: u8,
+};
+
+/// 16x16 fixed grid of blocks.
+pub const Chunk = struct {
+    blocks: [256]Block,
+    /// 256 bits representing which blocks have been modified from the base procedural generation.
+    modified_mask: [4]u64,
+
+    pub inline fn getIndex(x: u4, y: u4) u8 {
+        return (@as(u8, y) << 4) | @as(u8, x);
     }
 };
 
 /// Tightly packed data for a square particle to be sent to WebGPU.
-const Particle = extern struct {
+const Particle = packed struct {
+    /// Current position.
     position: @Vector(2, f32),
-    d_position: @Vector(2, f32),
-    color: ColorRGBA,
-    size: f32,
-    rotation: f32,
-    d_rotation: f32,
-    time: i32,
-    effect: u32,
-};
 
-// var particle_buffer: [MAX_PARTICLES]Particle align(GPU_ALIGN) = undefined;
-// var particle_count: u32 = 0;
+    /// Velocity vector for position.
+    d_position: @Vector(2, f32),
+
+    /// The color of the particle (alpha is multiplied by time and how long the particle lasts)
+    color: ColorRGBA,
+    /// The size of the particle
+    size: u24,
+    /// The opacity of the particle (based on time start/end)
+    opacity: u8,
+
+    /// The rotation of the particle (radians)
+    rotation: f32,
+    /// The rate of change of rotation of the particle (radians)
+    d_rotation: f32,
+
+    /// The time at which the particle spawned in from.
+    time_start: f64,
+
+    /// The time at which the particle will disappear.
+    time_end: f64,
+};
 
 /// A dynamically expandable scratch buffer for fast one-time passing through of data like strings or temporary particle data. Assumes fully single-thread communication. A separate, smaller logging_buffer is used in logger.zig.
 pub var scratch_buffer: []align(MAIN_ALIGN_BYTES) u8 = &[_]u8{};
@@ -263,5 +280,8 @@ const _ = {
     }
     if (GPU_ALIGN_BYTES < 64 || (GPU_ALIGN_BYTES % 64 > 0)) {
         @compileError("GPU_ALIGN_BYTES should be a positive multiple of 64 for WebGPU alignment.");
+    }
+    if (@sizeOf(Block) != 8) {
+        @compileError("Memory size for each block should be 8 bytes.");
     }
 };

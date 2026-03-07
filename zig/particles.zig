@@ -64,6 +64,6 @@ pub const ParticleSystem = struct {
         }
 
         // Tell JS exactly how many bytes to read
-        layout.scratch_len = total_bytes;
+        memory.mem.scratch_len = total_bytes;
     }
 };

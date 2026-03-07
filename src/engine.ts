@@ -5,18 +5,6 @@ import * as Seeding from "./seeding";
 import * as InputManager from "./inputManager";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-/**
- * Debug/testing options. Set all values to false in production.
- */
-export const CONFIG = {
-    /** Whether to expose engine to globalThis or not. */
-    exportEngine: true,
-    /** Whether to use verbose logging or not. */
-    verbose: true,
-    /** If set to true, disables alerting on error. Error will always show in console regardless of what this value is set to. */
-    noAlertOnError: true,
-};
-
 export enum WasmTypeCode {
     Uint8 = 8,
     Uint16 = 16,
@@ -51,8 +39,6 @@ const WasmTypeMap = {
     [WasmTypeCode.Float64]: Float64Array,
 } as const;
 
-const { random } = Math;
-
 /** The URL for the WebAssembly code (compiled from zig build). */
 import WASM_URL from "./main.wasm?url";
 /** The URL for the WebGPU shader code. */
@@ -63,27 +49,10 @@ import SPRITE_SHEET_URL from "./assets/main.png?url";
 /** The texture format for WebGPU. */
 const TEXTURE_FORMAT: GPUTextureFormat = "rgba16float";
 
-/** The width for the sprite sheet tilemap. */
-const initialMapWidth = 32;
-/** The height for the sprite sheet tilemap. */
-const initialMapHeight = 32;
-
 /** The logical internal width (scaled with WebGPU). */
 const INTERNAL_WIDTH = 480;
 /** The logical internal height (scaled with WebGPU). */
 const INTERNAL_HEIGHT = 270;
-
-/** Edge flag constants matching shader. */
-const EdgeFlags = {
-    TOP_LEFT: 0x01,
-    TOP: 0x02,
-    TOP_RIGHT: 0x04,
-    LEFT: 0x08,
-    RIGHT: 0x10,
-    BOTTOM_LEFT: 0x20,
-    BOTTOM: 0x40,
-    BOTTOM_RIGHT: 0x80,
-} as const;
 
 interface TileMap {
     width: number;
@@ -125,18 +94,24 @@ export class GameEngine {
     private tileBuffer!: GPUBuffer;
     /** The GPU buffer for map size data. */
     private mapSizeBuffer!: GPUBuffer;
+    /** The cached texture view for the sprite atlas. */
+    private atlasTextureView!: GPUTextureView;
+    /** The cached nearest-neighbor sampler. */
+    private pixelSampler!: GPUSampler;
     /** Specifies when the game started. */
     public startTime: number = performance.now();
     /** Gives the pointer that describes the memory layout. */
-    public LAYOUT_PTR: Zig.Pointer;
+    public LAYOUT_PTR: Zig.PointerLike;
     /** Gives the pointer to the game state. */
-    private readonly GAME_STATE_PTR: Zig.Pointer;
+    private readonly GAME_STATE_PTR: Zig.PointerLike;
     /** A string representing the game seed (up to 100 characters). */
     public seed!: string;
     /** Fractional pixels per tile in the internal 480x270 resolution (1:1 by default). */
     public zoom: number = 1;
     /** Provides an error object if one was passed to destroy(). */
     public destroyedError: any = null;
+    /** Determines the opacity of wireframes (not rendered if set to 0). */
+    public wireframeOpacity: number = 0.0;
     /** Determines if the Canvas should force a 16:9 aspect ratio. */
     public forceAspectRatio: boolean = true;
     /** Determines the previous state of the 16:9 aspect ratio, internal use for updating the canvas styling when calling renderFrame(). */
@@ -164,7 +139,7 @@ export class GameEngine {
         this.memory = engineModule.instance.exports
             .memory as WebAssembly.Memory;
         this.exports.init();
-        this.LAYOUT_PTR = this.exports.get_memory_layout_ptr();
+        this.LAYOUT_PTR = Number(this.exports.get_memory_layout_ptr());
         this.GAME_STATE_PTR = Number(this.getScratchView()[3]);
         this.inputState = InputManager.initInput();
     }
@@ -249,11 +224,15 @@ export class GameEngine {
                     // See how logging works in logger.zig. Logging is guaranteed to return valid arguments.
                     js_message: (
                         ptr: Zig.Pointer,
-                        len: number,
+                        len: Zig.LengthLike,
                         category: number,
                     ) => {
                         const str = new TextDecoder().decode(
-                            new Uint8Array(memory.buffer, ptr, len),
+                            new Uint8Array(
+                                memory.buffer,
+                                Number(ptr),
+                                Number(len),
+                            ),
                         );
                         if (category === 1) {
                             console.info("%c" + str, "font-weight: 600");
@@ -301,8 +280,9 @@ export class GameEngine {
                 ],
             },
             primitive: {
-                topology: "triangle-list",
+                topology: "triangle-strip",
                 cullMode: "none",
+                stripIndexFormat: "uint16",
             },
         });
 
@@ -327,10 +307,9 @@ export class GameEngine {
             });
         } catch (e) {
             // Fallback for Safari or older browsers ):
-            if (CONFIG.verbose)
-                console.log(
-                    "device-pixel-content-box not supported, falling back to content-box.",
-                );
+            console.log(
+                "ResizeObserver property device-pixel-content-box not supported, falling back to content-box.",
+            );
             engine.resizeObserver.observe(canvas, { box: "content-box" });
         }
 
@@ -357,6 +336,9 @@ export class GameEngine {
             addressModeV: "clamp-to-edge",
         });
 
+        engine.atlasTextureView = atlasTexture.createView();
+        engine.pixelSampler = pixelSampler;
+
         // Create uniform buffer (SceneUniforms)
         // camera: vec2f (8), viewport_size: vec2f (8), time: f32 (4), zoom: f32 (4), padding: vec2u (8)
         const uniformBuffer = device.createBuffer({
@@ -364,6 +346,7 @@ export class GameEngine {
             size: 32, // Aligned to 16 bytes
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
+        engine.uniformBuffer = uniformBuffer;
 
         // Create map size buffer
         const mapSizeBuffer = device.createBuffer({
@@ -371,49 +354,26 @@ export class GameEngine {
             size: 8, // vec2u
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
+        engine.mapSizeBuffer = mapSizeBuffer;
 
         // Initialize tilemap
-        const tileMap: TileMap = {
-            width: initialMapWidth,
-            height: initialMapHeight,
-            data: new Uint32Array(initialMapWidth * initialMapHeight),
+        const tileMap = {
+            width: 0,
+            height: 0,
+            data: new Uint32Array(0),
         };
         engine.tileMap = tileMap;
 
-        // Fill with test pattern
-        GameEngine.generateTestTilemap(tileMap);
-
-        // Create tile storage buffer
-        const tileBuffer = device.createBuffer({
-            label: "Tile data",
-            size: tileMap.data.byteLength,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-        });
+        engine.loadChunkData();
 
         // Upload initial tile data
-        device.queue.writeBuffer(tileBuffer, 0, tileMap.data.buffer);
+        device.queue.writeBuffer(engine.tileBuffer, 0, tileMap.data.buffer);
         device.queue.writeBuffer(
             mapSizeBuffer,
             0,
             new Uint32Array([tileMap.width, tileMap.height]),
         );
 
-        // Create bind group
-        engine.bindGroup = device.createBindGroup({
-            label: "Tilemap bind group",
-            layout: pipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: uniformBuffer } },
-                { binding: 1, resource: { buffer: tileBuffer } },
-                { binding: 2, resource: atlasTexture.createView() },
-                { binding: 3, resource: pixelSampler },
-                { binding: 4, resource: { buffer: mapSizeBuffer } },
-            ],
-        });
-
-        engine.uniformBuffer = uniformBuffer;
-        engine.tileBuffer = tileBuffer;
-        engine.mapSizeBuffer = mapSizeBuffer;
         return engine;
     }
 
@@ -454,221 +414,53 @@ export class GameEngine {
         return texture;
     }
 
-    private static generateTestTilemap(tileMap: TileMap): void {
-        const { width, height, data } = tileMap;
+    /**
+     * Generates a chunk in Zig, reads the memory pointer, and uploads directly to WebGPU.
+     */
+    public loadChunkData(): void {
+        // Generate chunk and get WASM memory pointer
+        const ptr = this.exports.generate_chunk();
+        const chunkSize = this.exports.get_chunk_size();
 
-        for (let y = 0; y < height; y++) {
-            for (let x = 0; x < width; x++) {
-                const idx = y * width + x;
+        // Blocks are 64 bits each
+        const tileCount = chunkSize * chunkSize;
+        const u32Count = tileCount * 2;
+        const wasmView = new Uint32Array(this.memory.buffer, Number(ptr), u32Count);
 
-                // Alternate between sprite 0 and 1 in a checkerboard (0=stone, 1=torch)
-                let spriteId = ((x + y) % 2) as 0 | 1;
-                if (spriteId == 1 && random() < 0.4) spriteId = 0; //40% of torches become stone!
+        // Ensure the GPU buffer is large enough, recreating if necessary
+        if (!this.tileBuffer || this.tileBuffer.size !== wasmView.byteLength) {
+            if (this.tileBuffer) this.tileBuffer.destroy();
+            this.tileBuffer = this.device.createBuffer({
+                label: "Tile data (Zig)",
+                size: wasmView.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
 
-                // Calculate edge flags (which neighbors are "air"/different)
-                let edgeFlags = 0;
-
-                // Check all 8 neighbors
-                const neighbors = [
-                    [-1, -1, EdgeFlags.TOP_LEFT],
-                    [0, -1, EdgeFlags.TOP],
-                    [1, -1, EdgeFlags.TOP_RIGHT],
-                    [-1, 0, EdgeFlags.LEFT],
-                    [1, 0, EdgeFlags.RIGHT],
-                    [-1, 1, EdgeFlags.BOTTOM_LEFT],
-                    [0, 1, EdgeFlags.BOTTOM],
-                    [1, 1, EdgeFlags.BOTTOM_RIGHT],
-                ] as const;
-
-                for (const [dx, dy, flag] of neighbors) {
-                    const nx = x + dx;
-                    const ny = y + dy;
-
-                    // Edge of map or different sprite type = edge
-                    if (
-                        nx < 0 ||
-                        nx >= width ||
-                        ny < 0 ||
-                        ny >= height ||
-                        (nx + ny) % 2 !== spriteId
-                    ) {
-                        edgeFlags |= flag;
-                    }
-                }
-
-                // Random light value and variation seed
-                const light = Math.floor(128 + Math.random() * 127);
-                const variation = Math.floor(Math.random() * 256);
-                data[idx] = this.packTileData(
-                    spriteId,
-                    edgeFlags,
-                    light,
-                    variation,
-                );
-            }
-        }
-    }
-
-    /** Packs tile data into 32 bits of data. */
-    public static packTileData(
-        spriteId: number,
-        edgeFlags: number,
-        light: number,
-        variation: number,
-    ): number {
-        return (
-            (spriteId & 0xff) |
-            ((edgeFlags & 0xff) << 8) |
-            ((light & 0xff) << 16) |
-            ((variation & 0xff) << 24)
-        );
-    }
-
-    public setTile(
-        x: number,
-        y: number,
-        spriteId: number,
-        edgeFlags?: number,
-        light?: number,
-        variation?: number,
-    ): void {
-        if (
-            x < 0 ||
-            x >= this.tileMap.width ||
-            y < 0 ||
-            y >= this.tileMap.height
-        ) {
-            return;
+            // Rebuild bind group since the buffer reference changed
+            this.bindGroup = this.device.createBindGroup({
+                label: "Tilemap bind group",
+                layout: this.renderPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: this.uniformBuffer } },
+                    { binding: 1, resource: { buffer: this.tileBuffer } },
+                    { binding: 2, resource: this.atlasTextureView },
+                    { binding: 3, resource: this.pixelSampler },
+                    { binding: 4, resource: { buffer: this.mapSizeBuffer } },
+                ],
+            });
         }
 
-        const idx = y * this.tileMap.width + x;
-        const existing = this.tileMap.data[idx];
-
-        // Preserve existing values if not specified
-        const newData = GameEngine.packTileData(
-            spriteId,
-            edgeFlags ?? (existing >> 8) & 0xff,
-            light ?? (existing >> 16) & 0xff,
-            variation ?? (existing >> 24) & 0xff,
+        // Upload data to GPU
+        this.device.queue.writeBuffer(this.tileBuffer, 0, wasmView);
+        this.device.queue.writeBuffer(
+            this.mapSizeBuffer,
+            0,
+            new Uint32Array([chunkSize, chunkSize]),
         );
 
-        this.tileMap.data[idx] = newData;
-        this.tileBufferDirty = true;
-    }
-
-    public setTileLight(x: number, y: number, light: number): void {
-        if (
-            x < 0 ||
-            x >= this.tileMap.width ||
-            y < 0 ||
-            y >= this.tileMap.height
-        ) {
-            return;
-        }
-
-        const idx = y * this.tileMap.width + x;
-        // Clear light bits and set new value
-        this.tileMap.data[idx] =
-            (this.tileMap.data[idx] & 0xff00ffff) | ((light & 0xff) << 16);
-        this.tileBufferDirty = true;
-    }
-
-    public getTileData(
-        x: number,
-        y: number,
-    ): {
-        spriteId: number;
-        edgeFlags: number;
-        light: number;
-        variation: number;
-    } | null {
-        if (
-            x < 0 ||
-            x >= this.tileMap.width ||
-            y < 0 ||
-            y >= this.tileMap.height
-        ) {
-            return null;
-        }
-
-        const idx = y * this.tileMap.width + x;
-        const packed = this.tileMap.data[idx];
-
-        return {
-            spriteId: packed & 0xff,
-            edgeFlags: (packed >> 8) & 0xff,
-            light: (packed >> 16) & 0xff,
-            variation: (packed >> 24) & 0xff,
-        };
-    }
-
-    /** Batch update of tile data. */
-    public updateTileRegion(
-        startX: number,
-        startY: number,
-        regionWidth: number,
-        regionHeight: number,
-        generator: (x: number, y: number) => number, // Returns packed tile data
-    ): void {
-        for (let y = startY; y < startY + regionHeight; y++) {
-            for (let x = startX; x < startX + regionWidth; x++) {
-                if (
-                    x >= 0 &&
-                    x < this.tileMap.width &&
-                    y >= 0 &&
-                    y < this.tileMap.height
-                ) {
-                    this.tileMap.data[y * this.tileMap.width + x] = generator(
-                        x,
-                        y,
-                    );
-                }
-            }
-        }
-        this.tileBufferDirty = true;
-    }
-
-    /** Recalculate edge flags for all tiles based on current sprite IDs */
-    public recalculateEdgeFlags(): void {
-        const { width, height, data } = this.tileMap;
-
-        for (let y = 0; y < height; y++) {
-            for (let x = 0; x < width; x++) {
-                const idx = y * width + x;
-                const spriteId = data[idx] & 0xff;
-                let edgeFlags = 0;
-
-                const neighbors = [
-                    [-1, -1, EdgeFlags.TOP_LEFT],
-                    [0, -1, EdgeFlags.TOP],
-                    [1, -1, EdgeFlags.TOP_RIGHT],
-                    [-1, 0, EdgeFlags.LEFT],
-                    [1, 0, EdgeFlags.RIGHT],
-                    [-1, 1, EdgeFlags.BOTTOM_LEFT],
-                    [0, 1, EdgeFlags.BOTTOM],
-                    [1, 1, EdgeFlags.BOTTOM_RIGHT],
-                ] as const;
-
-                for (const [dx, dy, flag] of neighbors) {
-                    const nx = x + dx;
-                    const ny = y + dy;
-
-                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
-                        edgeFlags |= flag; // Map edge = air
-                    } else {
-                        const neighborSprite = data[ny * width + nx] & 0xff;
-                        if (neighborSprite !== spriteId) {
-                            edgeFlags |= flag;
-                        }
-                    }
-                }
-
-                // Update edge flags, preserve other data
-                data[idx] = (data[idx] & 0xffff00ff) | (edgeFlags << 8);
-            }
-        }
-
-        this.tileBufferDirty = true;
+        // update variables (might get rid of)
+        this.tileMap.width = chunkSize;
+        this.tileMap.height = chunkSize;
     }
 
     // -----
@@ -787,15 +579,15 @@ export class GameEngine {
     /**
      * Reads a UTF-8 string from WASM memory. Pass in/request a custom offset by doing something like this:
      * ```ts
-     * let str1 = "hello", str2 = "hi"
-    // In practice, you would either do the reading or writing from Zig. You would pass the string pointers and lengths to Zig through arguments if you're reading from Zig, and return pointers/lengths with getScratchProperties or some agreed-upon format.
+        let str1 = "hello", str2 = "hi"
+        // In practice, you would either do the reading or writing from Zig. You would pass the string pointers and lengths to Zig through arguments if you're reading from Zig, and return pointers/lengths with getScratchProperties or some agreed-upon format.
 
-    let ptr1 = engine.writeStr(str1); // Write a string, setting the scratch buffer's length to 5.
-    let ptr2 = engine.writeStr(str2, false); // Append after hello, don't reset!
+        let ptr1 = engine.writeStr(str1); // Write a string, setting the scratch buffer's length to 5.
+        let ptr2 = engine.writeStr(str2, false); // Append after hello, don't reset!
 
-    console.log(engine.readStr(ptr1, str1.length)); // "hello"
-    console.log(engine.readStr(ptr2, str2.length)); // "hi"
-    console.log(engine.readStr(ptr1, str2.length + 64)); // "hello[...59 null bytes, as Zig aligns data to 64 byte chunks with MAIN_ALIGN_BYTES...]hi"
+        console.log(engine.readStr(ptr1, str1.length)); // "hello"
+        console.log(engine.readStr(ptr2, str2.length)); // "hi"
+        console.log(engine.readStr(ptr1, str2.length + 64)); // "hello[...59 null bytes, as Zig aligns data to 64 byte chunks with MAIN_ALIGN_BYTES...]hi"
      * ```
      */
     public readStr(
@@ -820,17 +612,17 @@ export class GameEngine {
         const ptr = this.exports.scratch_alloc(len);
         if (ptr === 0) return null;
 
-        const bytes = new Uint8Array(this.memory.buffer, ptr, len);
+        const bytes = new Uint8Array(this.memory.buffer, Number(ptr), len);
         const result = this.encoder.encodeInto(str, bytes);
 
         // If result.read < len, the string contained non-ASCII characters.
-        if (result.read < len && CONFIG.verbose) {
+        if (result.read < len) {
             throw new RangeError(
                 "String truncated with non-ASCII characters detected.",
             );
         }
 
-        return ptr;
+        return Number(ptr);
     }
 
     public async setSeed(seed: string) {
@@ -918,13 +710,13 @@ export class GameEngine {
         );
         const time = (perfTime - this.startTime) / 1000.0;
         const uniformData = new Float32Array([
-            cameraPos[0], // camera.x
-            cameraPos[1], // camera.y
+            cameraPos[0] / 16, // camera.x
+            cameraPos[1] / 16, // camera.y
             this.canvas.width, // viewport_size.x
             this.canvas.height, // viewport_size.y
             time, // time
             effectiveZoom, // effective zoom
-            0, // padding
+            this.wireframeOpacity, // whether to show wireframes or not
             0, // padding
         ]);
 
@@ -965,9 +757,9 @@ export class GameEngine {
             1,
         );
 
-        // Draw all tiles as instances
+        // Draw all tiles as instances. Uses a triangle-strip so 4 args instead of 6.
         const instanceCount = this.tileMap.width * this.tileMap.height;
-        renderPass.draw(6, instanceCount);
+        renderPass.draw(4, instanceCount);
 
         renderPass.end();
         this.device.queue.submit([commandEncoder.finish()]);

@@ -19,7 +19,19 @@ if (!adapter) {
     alert("WebGPU is supported, but no compatible GPU was found.");
 }
 
-import { GameEngine, CONFIG } from "./engine";
+import { GameEngine } from "./engine";
+
+/**
+ * Debug/testing options. Set all values to false in production.
+ */
+export const CONFIG = {
+    /** Whether to expose engine to globalThis or not. */
+    exportEngine: true,
+    /** Whether to use verbose logging or not. */
+    verbose: true,
+    /** If set to true, disables alerting on error. Error will always show in console regardless of what this value is set to. */
+    noAlertOnError: false,
+};
 
 declare module "./engine" {
     interface GameEngine {
@@ -72,8 +84,9 @@ if (!CONFIG.noAlertOnError) {
             errorMessage += `\nSource: ${fileName}:${finalLine || "?"}:${finalCol || "?"}`;
         }
 
+        let err = globalThis.engine?.destroyedError;
         if (globalThis.engine?.destroyedError) {
-            errorMessage += `\nDetails: ${globalThis.engine.destroyedError}`;
+            errorMessage += `\nDetails: ${err.message || err}`;
         }
 
         if (actualError.stack) {
@@ -106,6 +119,8 @@ if (!CONFIG.noAlertOnError) {
 
 let timestamp = 0;
 let engine = await GameEngine.create();
+engine.wireframeOpacity = 0.5;
+
 let time = performance.now(),
     frame = 0;
 if (CONFIG.exportEngine) (globalThis as any).engine = engine;
