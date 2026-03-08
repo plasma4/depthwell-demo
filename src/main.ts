@@ -30,7 +30,7 @@ export const CONFIG = {
     /** Whether to use verbose logging or not. */
     verbose: true,
     /** If set to true, disables alerting on error. Error will always show in console regardless of what this value is set to. */
-    noAlertOnError: false,
+    noAlertOnError: true,
 };
 
 declare module "./engine" {
@@ -117,9 +117,19 @@ if (!CONFIG.noAlertOnError) {
     };
 }
 
+document.addEventListener(
+    "wheel",
+    function (e) {
+        if (e.ctrlKey) {
+            e.preventDefault();
+        }
+    },
+    { passive: false },
+);
+
 let timestamp = 0;
 let engine = await GameEngine.create();
-engine.wireframeOpacity = 0.5;
+engine.wireframeOpacity = 1;
 
 let time = performance.now(),
     frame = 0;

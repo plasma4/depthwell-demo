@@ -95,11 +95,21 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, ret_addr: ?usize) nor
     @trap();
 }
 
-test {
-    // I have to remember to add more as necessary...
+// Comment this test out if you lack access to internal files.
+test "internal imports" {
     _ = @import("internal/png/png_to_binary.zig");
-    _ = @import("color_rgba.zig");
-    _ = @import("seeding.zig");
-    _ = @import("logger.zig");
-    _ = @import("math.zig");
+}
+
+// Runs tests from other files. I have to remember to add more as necessary...
+test "main_tests" {
+    const modules = .{
+        @import("color_rgba.zig"),
+        @import("seeding.zig"),
+        @import("logger.zig"),
+        @import("math.zig"),
+    };
+
+    inline for (modules) |mod| {
+        std.testing.refAllDecls(mod);
+    }
 }

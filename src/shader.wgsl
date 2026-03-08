@@ -2,7 +2,7 @@
  * Main shader for the program.
  */
 // Sprite sheet constants. Sprites are saved as a .png, and each asset is 16x16.
-// Current sprites: [Stone, Torch, Player]
+// Current sprites: [void, stone, stone2, yellowstone, stoneores, greenstone, pinkore, torch, torchwall, player]
 const TILES_PER_ROW: f32 = 10.0;
 const TILES_PER_COLUMN: f32 = 1.0;
 
@@ -46,6 +46,39 @@ struct UnpackedTile {
     edge_flags: u32,
 };
 
+fn linear_srgb_to_oklab(c: vec3f) -> vec3f {
+    let l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+    let m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+    let s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+
+    let l_ = pow(l, 1.0 / 3.0);
+    let m_ = pow(m, 1.0 / 3.0);
+    let s_ = pow(s, 1.0 / 3.0);
+
+    return vec3f(
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086758031 * s_
+    );
+}
+
+fn oklab_to_linear_srgb(c: vec3f) -> vec3f {
+    let l_ = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;
+    let m_ = c.x - 0.1055613458 * c.y - 0.0638541728 * c.z;
+    let s_ = c.x - 0.0894841775 * c.y - 1.2914855480 * c.z;
+
+    let l = l_ * l_ * l_;
+    let m = m_ * m_ * m_;
+    let s = s_ * s_ * s_;
+
+    return vec3f(
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+       -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+       -0.0041960863 * l - 0.7034186147 * m + 1.7076127010 * s
+    );
+}
+
+
 @group(0) @binding(0) var<uniform> scene: SceneUniforms;
 @group(0) @binding(1) var<storage, read> tiles: array<TileData>;
 @group(0) @binding(2) var sprite_atlas: texture_2d<f32>;
@@ -57,13 +90,14 @@ fn unpack_tile(data: TileData) -> UnpackedTile {
     var out: UnpackedTile;
 
     // Word 0: [0..19] id, [20..27] light, [28..31] hp
-    out.sprite_id = data.word0 & 0xFFFFFu;
-    out.light = f32((data.word0 >> 20u) & 0xFFu) / 255.0; // Normalize 0-255 to 0.0-1.0
-    out.hp = (data.word0 >> 28u) & 0xFu;
+    out.sprite_id = extractBits(data.word0, 0u, 20u);
+    let light_u = extractBits(data.word0, 20u, 8u);
+    out.light = f32(light_u) / 255.0;
+    out.hp = extractBits(data.word0, 28u, 4u);
 
-    // Word 1: [0..23] seed,[24..31] edge_flags
-    out.seed = data.word1 & 0xFFFFFFu;
-    out.edge_flags = (data.word1 >> 24u) & 0xFFu;
+    // Word 1: [0..23] seed, [24..31] edge_flags
+    out.seed = extractBits(data.word1, 0u, 24u);
+    out.edge_flags = extractBits(data.word1, 24u, 8u);
 
     return out;
 }
@@ -74,7 +108,6 @@ struct VertexOutput {
     @location(0) uv: vec2f,
 
     // @interpolate(flat) tells the GPU NOT to blend these values between the 4 corners of the quad.
-    // This is vital for performance and correctness when passing IDs.
     @location(1) @interpolate(flat) sprite_id: u32,
     @location(2) @interpolate(flat) edge_flags: u32,
     @location(3) @interpolate(flat) light: f32,
@@ -109,12 +142,10 @@ fn vs_main(
         return out;
     }
 
-    // Apply continuous float positioning and zooming.
-    // This allows sub-pixel camera movement (smooth panning).
     let world_pos = vec2f(f32(tile_x), f32(tile_y)) * TILE_SIZE + local_pos * TILE_SIZE;
     let screen_pos = (world_pos - scene.camera) * scene.zoom;
 
-    // Convert to Normalized Device Coordinates (-1.0 to 1.0 mapping for the viewport)
+    // normalize
     let ndc = vec2f(
         (screen_pos.x / scene.viewport_size.x) * 2.0 - 1.0,
         1.0 - (screen_pos.y / scene.viewport_size.y) * 2.0
@@ -124,8 +155,7 @@ fn vs_main(
     let sprite_col = f32(tile.sprite_id % u32(TILES_PER_ROW));
     let sprite_row = f32(tile.sprite_id / u32(TILES_PER_ROW));
 
-    // Epsilon shrinking prevents "texture bleeding" where the GPU accidentally samples
-    // a pixel from the neighboring sprite in the atlas due to float precision errors.
+    // Prevent "texture bleeding"
     let epsilon = 0.5 / ATLAS_WIDTH;
     let safe_local_pos = clamp(local_pos, vec2f(epsilon), vec2f(1.0 - epsilon));
 
@@ -146,22 +176,50 @@ fn vs_main(
     return out;
 }
 
-// A standard, fast integer hash function for procedural pixel generation.
-fn hash(n: u32) -> f32 {
-    var x = n;
-    x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-    x = ((x >> 16u) ^ x) * 0x45d9f3bu;
-    x = (x >> 16u) ^ x;
-    return f32(x) * (1.0 / 4294967296.0); // Multiplication is faster than division
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    var tex_color = textureSample(sprite_atlas, pixel_sampler, in.uv);
+    if (scene.wireframe_opacity > 0.0) {
+        // render wireframe due to being at the edge?
+        let pixel_size_uv = 1.1 / (TILE_SIZE * scene.zoom);
+        if (in.local_uv.x < pixel_size_uv || in.local_uv.x > 1.0 - pixel_size_uv ||
+            in.local_uv.y < pixel_size_uv || in.local_uv.y > 1.0 - pixel_size_uv) {
+            return vec4f(1.0, 0.0, 0.0, scene.wireframe_opacity);
+        }
+    }
+
+    // too transparent?
+    if (tex_color.a < 0.01) { discard; }
+
+    // convert to oklab and nudge values with seed
+    var lab = linear_srgb_to_oklab(tex_color.rgb);
+
+    // we use 10 out of the 24 seed bits here
+    let l_nudge = f32(extractBits(in.seed, 0u, 4u)) / 15.0;
+    let a_nudge = f32(extractBits(in.seed, 4u, 3u)) / 7.0;
+    let b_nudge = f32(extractBits(in.seed, 7u, 3u)) / 7.0;
+
+    // shift lightness
+    lab.x += (l_nudge - 0.5) * 0.1;
+    // shift hue/chroma
+    lab.y += (a_nudge - 0.5) * 0.04;
+    lab.z += (b_nudge - 0.5) * 0.04;
+
+    // add the edge darkening and base light value, giving the func 6 bits of seeding
+    let darkening = calculate_edge_darkening(in.local_uv, in.edge_flags, in.seed);
+    lab.x *= (1.0 - darkening) * in.light;
+
+    let final_rgb = oklab_to_linear_srgb(lab);
+    return vec4f(final_rgb, tex_color.a);
 }
 
 // Calculates edge darkening procedurally based on flags calculated in Zig.
-fn calculate_edge_darkening(local_uv: vec2f, edge_flags: u32) -> f32 {
+fn calculate_edge_darkening(local_uv: vec2f, edge_flags: u32, seed: u32) -> f32 {
     var darkening = 0.0;
-    let edge_width = 0.25;
-    let edge_strength = 0.4;
+    let edge_width = 0.125 + (f32(extractBits(seed, 10u, 3u)) / 32.0);
+    let edge_strength = 0.03 + f32(extractBits(seed, 13u, 3u)) / 50.0;
 
-    // Smoothstep creates a curved gradient for the shadows
+    // Curvy shadow gradient
     if ((edge_flags & EDGE_TOP) != 0u) {
         darkening = max(darkening, (1.0 - smoothstep(0.0, edge_width, local_uv.y)) * edge_strength);
     }
@@ -194,54 +252,4 @@ fn calculate_edge_darkening(local_uv: vec2f, edge_flags: u32) -> f32 {
     }
 
     return darkening;
-}
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    // textureSample is required here because sub-pixel camera movement
-    // combined with a non-integer zoom scale means you cannot reliably use integer texel coordinates.
-    var color = textureSample(sprite_atlas, pixel_sampler, in.uv);
-
-    if (scene.wireframe_opacity > 0) {
-        // Calculate the UV distance of exactly 1 physical screen pixel dynamically 
-        // based on the tile size and the current continuous camera zoom
-        let pixel_size_uv = 1.0 / (TILE_SIZE * scene.zoom);
-        
-        // If the coordinate is on the block's outer border, draw solid red
-        if (in.local_uv.x < pixel_size_uv || in.local_uv.x > 1.0 - pixel_size_uv ||
-            in.local_uv.y < pixel_size_uv || in.local_uv.y > 1.0 - pixel_size_uv) {
-            return vec4f(1.0, 0.0, 0.0, scene.wireframe_opacity);
-        }
-    }
-
-    // Discard blocks rendering execution on this pixel immediately.
-    // Useful for non-square objects (like the player sprite or torches).
-    if (color.a < 0.01) {
-        discard;
-    }
-
-    // Procedural color variation to break up tiling artifacts.
-    // Uses the isolated `seed` block parameter.
-    let var_hash = hash(in.seed);
-    let variation_tint = vec3f(
-        1.0 + (var_hash - 0.5) * 0.1,
-        1.0 + (hash(in.seed + 1u) - 0.5) * 0.1,
-        1.0 + (hash(in.seed + 2u) - 0.5) * 0.1
-    );
-    color = vec4f(color.rgb * variation_tint, color.a);
-
-    // Apply geometric edge darkening (ambient occlusion fake)
-    // You should expand this ID check when you have more solid blocks than just ID 0.
-    if (in.sprite_id == 0u) {
-        color = vec4f(color.rgb * (1.0 - calculate_edge_darkening(in.local_uv, in.edge_flags)), color.a);
-    }
-
-    // Apply Lighting
-    // Uses an exponential curve (pow 1.5) because human perception of light is non-linear.
-    let light_factor = pow(in.light, 1.5);
-    let ambient = 0.05;
-    let final_light = ambient + light_factor * (1.0 - ambient);
-    color = vec4f(color.rgb * final_light, color.a);
-
-    return color;
 }

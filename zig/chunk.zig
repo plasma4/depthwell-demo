@@ -154,14 +154,15 @@ pub fn generate_chunk(chunk: *Chunk, coord: ScaleCoord) void {
         // This is extremely robust and avoids "pattern bleeding"
         var sprite_id: u20 = @truncate(entropy % 16); // bits 0..19
         const variation: u24 = @truncate(entropy >> 20); // bits 20..43
-        const light_val: u7 = @truncate(entropy >> 44); // bits 44..50
+        // const dark_val: u6 = @truncate(entropy >> 44); // bits 44..50
+        const dark_val: u6 = 0;
         if (sprite_id >= 12) sprite_id = 0;
         if (sprite_id >= 10) sprite_id = 1;
 
         chunk.blocks[idx] = .{
             .id = sprite_id,
             .seed = variation,
-            .light = 255 - @as(u8, @intCast(light_val)),
+            .light = 255 - @as(u8, @intCast(dark_val)),
             .hp = 15,
             .flags = 0, // Calculated in Pass 2
         };
