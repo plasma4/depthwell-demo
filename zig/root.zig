@@ -3,10 +3,10 @@ const std = @import("std");
 const main = @import("main.zig");
 const memory = @import("memory.zig");
 const seeding = @import("seeding.zig");
+const procedural = @import("internal/procedural.zig");
 const logger = @import("logger.zig");
 const player = @import("player.zig");
 const colors = @import("color_rgba.zig");
-const chunk = @import("chunk.zig");
 const builtin = @import("builtin");
 
 pub export fn init() void {
@@ -15,41 +15,16 @@ pub export fn init() void {
 pub export fn reset() void {
     main.reset();
 }
-
-pub export fn tick() void {
-    player.move();
+pub export fn prepare_visible_chunks() void {
+    main.prepare_visible_chunks();
 }
-pub export fn renderFrame() void {}
+
+pub export fn tick(speed: f64) void {
+    player.move(speed);
+}
 
 pub export fn wasm_seed_from_string() void {
     seeding.wasm_seed_from_string(memory.scratch_buffer.ptr, memory.mem.scratch_len, &memory.game.seed);
-}
-
-var test_chunk: memory.Chunk = std.mem.zeroInit(memory.Chunk, .{});
-var test_coord: chunk.ScaleCoord = .{
-    .depth_stack = &[_]u64{ 0x0, 0x0 },
-    .pos = .{ 10, -5 },
-};
-
-/// Generate a test chunk with the given seed. Returns pointer to tile data.
-pub export fn generate_chunk() [*]u32 {
-    chunk.generate_chunk(&test_chunk, test_coord);
-    return chunk.get_tile_ptr(&test_chunk);
-}
-
-/// Get pointer to the current test chunk tile data
-pub export fn get_test_chunk_ptr() [*]u32 {
-    return chunk.get_tile_ptr(&test_chunk);
-}
-
-/// Get total chunk size (width * height)
-pub export fn get_chunk_size() u32 {
-    return memory.CHUNK_SIZE;
-}
-
-/// Recalculate edge flags for the test chunk (after manual modifications)
-pub export fn recalculate_test_chunk_edges() void {
-    chunk.recalculate_edge_flags(&test_chunk);
 }
 
 // Layout logic
@@ -85,6 +60,11 @@ comptime {
         export fn test_scratch_allocation() void {
             memory.run_scratch_allocation_tests();
         }
+
+        // Comment this test out if you lack access to internal files.
+        export fn test_procedural() void {
+            procedural.run_tests();
+        }
     };
 }
 
@@ -97,7 +77,13 @@ pub fn panic(msg: []const u8, _: ?*std.builtin.StackTrace, ret_addr: ?usize) nor
 
 // Comment this test out if you lack access to internal files.
 test "internal imports" {
-    _ = @import("internal/png/png_to_binary.zig");
+    const modules = .{
+        @import("internal/png/png_to_binary.zig"),
+    };
+
+    inline for (modules) |mod| {
+        std.testing.refAllDecls(mod);
+    }
 }
 
 // Runs tests from other files. I have to remember to add more as necessary...

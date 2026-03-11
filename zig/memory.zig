@@ -6,6 +6,11 @@ const ColorRGBA = @import("color_rgba.zig").ColorRGBA;
 pub const is_wasm = builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
 
 pub const CHUNK_SIZE = 16;
+pub const CHUNK_SIZE_FLOAT = 16.0;
+pub const CHUNK_SIZE_SQUARED = CHUNK_SIZE * CHUNK_SIZE;
+pub const SUBPIXELS_IN_CHUNK = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
+
+pub const AIR_BLOCK: Block = .{ .id = @import("world.zig").SPRITE_VOID, .seed = 0, .light = 255, .hp = 0, .flags = 0 };
 
 // Only create an actual GPA instance if building for native.
 var gpa = if (!is_wasm and !builtin.is_test)
@@ -34,6 +39,9 @@ pub const MAIN_ALIGN = std.mem.Alignment.fromByteUnits(MAIN_ALIGN_BYTES);
 /// Derived from `MAIN_ALIGN_BYTES`.
 pub const GPU_ALIGN = std.mem.Alignment.fromByteUnits(MAIN_ALIGN_BYTES);
 
+/// Simple enum allowing for easy representation of x/y
+pub const Axis = enum { x, y };
+
 /// Struct for various memory sizes.
 pub const MemorySizes = struct {
     /// Represents 1,024 bytes.
@@ -50,12 +58,12 @@ pub const MemorySizes = struct {
 pub const Block = packed struct {
     /// Internal sprite ID
     id: u20,
-    /// The brightness of the tile.
+    /// The brightness of the tile
     light: u8,
     /// Mining progression for animation
     hp: u4,
 
-    /// Per-block seed for procedural variation in the shader.
+    /// Per-block seed for procedural variation in the shader
     seed: u24,
     /// Edge flags: which neighbors are air (for edge-darkening and culling).
     /// Starts from top left, then middle left, and ending at bottom right (skipping itself).
@@ -64,7 +72,7 @@ pub const Block = packed struct {
 
 /// 16x16 fixed grid of blocks.
 pub const Chunk = struct {
-    blocks: [256]Block,
+    blocks: [CHUNK_SIZE_SQUARED]Block,
     /// 256 bits representing which blocks have been modified from the base procedural generation.
     modified_mask: [4]u64,
 
@@ -105,16 +113,29 @@ pub var scratch_buffer: []align(MAIN_ALIGN_BYTES) u8 = &[_]u8{};
 var is_dynamic_scratch: bool = false;
 
 /// Data is reserved for numbers or positions that are guaranteed to take a constant amount of memory, or pointers.
-/// Important data is meant to be placed at the start with less important data later. See game_state_offsets in types.zig for export to JS.
-pub const GameState = extern struct {
-    /// Represents the player's position.
-    player_pos: @Vector(2, i64) align(MAIN_ALIGN_BYTES) = .{ 0, 0 },
+/// Important data is meant to be placed at the start with less important data later. Data MAY be rearranged but requires using the zig build enum command for numbers to be reflected in TypeScript. See game_state_offsets in types.zig for enum export details.
+pub const GameState = struct {
+    /// Represents the player's subpixel position within the CURRENT chunk (0 to 4095).
+    player_pos: @Vector(2, i64) align(MAIN_ALIGN_BYTES) = .{ 2048, 2048 },
+    /// Represents the player's infinite active chunk coordinate.
+    active_chunk: @Vector(2, u64) = .{ 0, 0 },
     /// Represents the player's current movement.
     player_velocity: @Vector(2, f64) = .{ 0, 0 },
     /// Represents the camera's position.
     camera_pos: @Vector(2, f64) = .{ 0, 0 },
     /// Represents the camera's zoom scale.
     camera_scale: f64 = 1.0,
+    /// Represents the camera's zoom scale change rate (multiplier).
+    camera_scale_change: f64 = 1.0,
+    /// Represents where the player should be rendered for WGSL.
+    player_screen_offset: @Vector(2, f32) = .{ 0, 0 },
+    /// Represents if the grid needs to be recalculated/passed to WGSL.
+    grid_dirty: bool = true,
+    last_grid_min_bx: u32 = 0,
+    last_grid_min_by: u32 = 0,
+    last_active_chunk_x: u64 = 0,
+    last_active_chunk_y: u64 = 0,
+    current_depth: i64 = 0,
     /// Represents the keys that were pressed THIS FRAME. (On the next frame, this will be reset to 0.)
     ///
     /// Example:
@@ -166,6 +187,8 @@ pub var mem: MemoryLayout align(MAIN_ALIGN_BYTES) = .{
 
 /// Returns the pointer to the memory layout for TypeScript to consume.
 pub fn get_memory_layout_ptr() *align(MAIN_ALIGN_BYTES) const MemoryLayout {
+    mem.scratch_ptr = @intFromPtr(&scratch_buffer);
+    mem.game_ptr = @intFromPtr(&game);
     return &mem;
 }
 

@@ -5,9 +5,9 @@ const GenerateOffsets = @import("generate_types.zig").GenerateOffsets;
 /// Lists possible command types.
 pub const Command = enum(u32) { Reset, Exit, SendSeed };
 
-/// Masked data representing keyboard keys in the game.
+/// Masked data representing keyboard key inputs in the game.
 pub const KeyBits = struct {
-    // Note: generate_types.zig will skip all functions in KeyBits, including pub ones.
+    // Note: generate_types.zig will skip all functions in structs, including pub ones (why would you have them here anyway??).
     fn mask(index: u5) u32 {
         return @as(u32, 1) << index;
     }
@@ -18,7 +18,12 @@ pub const KeyBits = struct {
     }
 
     /// Q key
-    pub const drop = mask(15);
+    pub const drop = mask(17);
+
+    /// Minus (or underscore) key
+    pub const minus = mask(15);
+    /// Plus (or equals) key
+    pub const plus = mask(16);
 
     /// W, ArrowUp, Space keys
     pub const up = mask(11);
@@ -51,8 +56,7 @@ pub const KeyBits = struct {
     pub const k9 = mask(9);
 };
 
-/// Bitmask flags used to identify the presence of neighboring blocks
-/// relative to a central coordinate in a 2D grid.
+/// Bitmask flags used to identify the presence of neighboring blocks.
 pub const EdgeFlags = struct {
     /// Neighboring block is to the top-left (Northwest)
     pub const TOP_LEFT = 0x01;

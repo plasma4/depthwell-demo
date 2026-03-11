@@ -73,7 +73,6 @@ test "zero_if_less_than with vectors" {
 
     const result = zero_if_less_than(input, threshold);
 
-    // Expected: { 0.0, 10.0, 0.0, 8.0 }
     try std.testing.expectEqual(result[0], 0.0);
     try std.testing.expectEqual(result[1], 10.0);
     try std.testing.expectEqual(result[2], 0.0);

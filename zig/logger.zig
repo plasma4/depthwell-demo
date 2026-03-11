@@ -31,6 +31,60 @@ inline fn message(ptr: [*]const u8, len: usize, message_type: LogCategory) void 
     }
 }
 
+/// Logs a message in JS.
+pub inline fn log(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype) void {
+    write_log(src, fmt, args, .log);
+}
+/// Logs an info message in JS.
+pub inline fn info(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype) void {
+    write_log(src, fmt, args, .info);
+}
+/// Logs a warning message in JS.
+pub inline fn warn(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype) void {
+    write_log(src, fmt, args, .warn);
+}
+/// Logs an error message in JS.
+pub inline fn err(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype) void {
+    write_log(src, fmt, args, .err);
+}
+
+inline fn write_log(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype, log_category: LogCategory) void {
+    // Add source as comptime. WASM handles the [...url... part of the string
+    const prefix_fmt = if (memory.is_wasm) "{s}:{d}:{d}] " else "[zig/{s}:{d}:{d}] ";
+    const prefix = std.fmt.comptimePrint(prefix_fmt, .{ src.file, src.line, src.column });
+    const final_fmt = prefix ++ fmt;
+    const cutoff = "... [rest of log cut off]";
+
+    if (std.fmt.bufPrint(&logging_buffer, final_fmt, args)) |res| {
+        message(res.ptr, res.len, log_category);
+    } else |e| {
+        // add the cutoff log
+        if (e == error.NoSpaceLeft) {
+            const safe_ptr = logging_buffer.len - cutoff.len;
+            @memcpy(logging_buffer[safe_ptr..], cutoff);
+            message(&logging_buffer, logging_buffer.len, log_category);
+        }
+    }
+}
+
+/// A test function for logging, testing all four logging types and truncation. (See root.zig for export logic.)
+pub inline fn test_logs(skipError: bool) void {
+    const logger = @import("logger.zig");
+    logger.log(@src(), "This is a {s}.", .{"normal log"});
+    logger.info(@src(), "This is an info log.", .{});
+    logger.warn(@src(), "This is a warning. You should see this when running tests in Zig, or in the console in JS.", .{});
+    if (skipError) {
+        logger.err(@src(), "This is an error. Should create an alert() popup if CONFIG.noAlertOnError is false and building for WASM.", .{});
+    } else {
+        logger.log(@src(), "Skipping error test.", .{});
+    }
+    logger.log(@src(), "This log should be multiple lines.\n-----\nTesting logging with a truncated string below:", .{});
+
+    // Test truncation by taking a test hex string and making it longer than 4,096 bytes
+    const long_data = ("0123456789abcdef" ** (5000 / 16 + 1))[0..5000];
+    logger.log(@src(), "{s}", .{long_data});
+}
+
 /// Quickly logs a message for testing. Use .log() with proper arguments for non-temporary logging.
 pub inline fn quick(args: anytype) void {
     const ArgsType = @TypeOf(args);
@@ -38,7 +92,7 @@ pub inline fn quick(args: anytype) void {
 
     var stream = std.io.fixedBufferStream(&logging_buffer);
     const writer = stream.writer();
-    writer.print("", .{}) catch {};
+    writer.print(if (memory.is_wasm) "]" else "", .{}) catch {};
 
     // Use an inline switch to handle types at compile-time
     switch (args_type_info) {
@@ -144,59 +198,6 @@ inline fn writeValue(writer: anytype, val: anytype) void {
             writer.print("{any}", .{val}) catch {};
         },
     }
-}
-
-/// Logs a message in JS.
-pub inline fn log(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype) void {
-    write_log(src, fmt, args, .log);
-}
-/// Logs an info message in JS.
-pub inline fn info(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype) void {
-    write_log(src, fmt, args, .info);
-}
-/// Logs a warning message in JS.
-pub inline fn warn(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype) void {
-    write_log(src, fmt, args, .warn);
-}
-/// Logs an error message in JS.
-pub inline fn err(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype) void {
-    write_log(src, fmt, args, .err);
-}
-
-inline fn write_log(comptime src: std.builtin.SourceLocation, fmt: []const u8, args: anytype, log_category: LogCategory) void {
-    // Add source as comptime
-    const prefix = std.fmt.comptimePrint("[{s}:{d}:{d}] ", .{ src.file, src.line, src.column });
-    const final_fmt = prefix ++ fmt;
-    const cutoff = "... [rest of log cut off]";
-
-    if (std.fmt.bufPrint(&logging_buffer, final_fmt, args)) |res| {
-        message(res.ptr, res.len, log_category);
-    } else |e| {
-        // add the cutoff log
-        if (e == error.NoSpaceLeft) {
-            const safe_ptr = logging_buffer.len - cutoff.len;
-            @memcpy(logging_buffer[safe_ptr..], cutoff);
-            message(&logging_buffer, logging_buffer.len, log_category);
-        }
-    }
-}
-
-/// A test function for logging, testing all four logging types and truncation. (See root.zig for export logic.)
-pub inline fn test_logs(skipError: bool) void {
-    const logger = @import("logger.zig");
-    logger.log(@src(), "This is a {s}.", .{"normal log"});
-    logger.info(@src(), "This is an info log.", .{});
-    logger.warn(@src(), "This is a warning. You should see this when running tests in Zig, or in the console in JS.", .{});
-    if (skipError) {
-        logger.err(@src(), "This is an error. Should create an alert() popup if CONFIG.noAlertOnError is false and building for WASM.", .{});
-    } else {
-        logger.log(@src(), "Skipping error test.", .{});
-    }
-    logger.log(@src(), "This log should be multiple lines.\n-----\nTesting logging with a truncated string below:", .{});
-
-    // Test truncation by taking a test hex string and making it longer than 4,096 bytes
-    const long_data = ("0123456789abcdef" ** (5000 / 16 + 1))[0..5000];
-    logger.log(@src(), "{s}", .{long_data});
 }
 
 test "native logging output" {

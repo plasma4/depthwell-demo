@@ -6,12 +6,15 @@ export interface InputState {
     keysHeld: number;
     keysPressed: number;
     currentlyHeld: number;
+    plusMinusPriority: number;
     horizontalPriority: number;
     verticalPriority: number;
 }
 
 /** An object representing what a keydown/keyup code should map to numerically (as a bit in Zig.KeyBits). */
 const keyMap: Record<string, number> = {
+    Minus: Zig.KeyBits.minus,
+    Equal: Zig.KeyBits.plus,
     KeyQ: Zig.KeyBits.drop,
     ArrowUp: Zig.KeyBits.up,
     KeyW: Zig.KeyBits.up,
@@ -46,10 +49,24 @@ export function initInput(): InputState {
         // "Last-win" input priority
         horizontalPriority: 0,
         verticalPriority: 0,
+        plusMinusPriority: 0,
     };
 
+    function reset() {
+        state.horizontalPriority = 0;
+        state.verticalPriority = 0;
+        state.plusMinusPriority = 0;
+        state.currentlyHeld = 0;
+        state.heldMask = 0;
+        state.keysPressed = 0;
+    }
+
     window.addEventListener("keydown", (e: KeyboardEvent) => {
-        if (e.repeat) return;
+        if (e.ctrlKey || e.metaKey) {
+            reset();
+        }
+        if (e.repeat || e.ctrlKey || e.metaKey) return;
+        // console.log(e.code);
         const bit = keyMap[e.code]; // apparently .code is more robust as it's based on physical keyboard locations, which is what we want here
         if (!bit) return;
 
@@ -61,6 +78,8 @@ export function initInput(): InputState {
             state.horizontalPriority = bit;
         if (bit & (Zig.KeyBits.up | Zig.KeyBits.down))
             state.verticalPriority = bit;
+        if (bit & (Zig.KeyBits.plus | Zig.KeyBits.minus))
+            state.plusMinusPriority = bit;
     });
 
     window.addEventListener("keyup", (e: KeyboardEvent) => {
@@ -86,16 +105,16 @@ export function initInput(): InputState {
                     state.heldMask & Zig.KeyBits.down ||
                     0;
             }
+            if (bit === state.plusMinusPriority) {
+                state.plusMinusPriority =
+                    state.heldMask & Zig.KeyBits.plus ||
+                    state.heldMask & Zig.KeyBits.minus ||
+                    0;
+            }
         }
     });
 
-    window.addEventListener("blur", () => {
-        state.horizontalPriority = 0;
-        state.verticalPriority = 0;
-        state.currentlyHeld = 0;
-        state.heldMask = 0;
-        state.keysPressed = 0;
-    });
+    window.addEventListener("blur", reset);
 
     return state;
 }
@@ -114,6 +133,7 @@ export function updateInput(state: InputState) {
     // Add only the priority directions
     cleanHeld |= state.horizontalPriority;
     cleanHeld |= state.verticalPriority;
+    cleanHeld |= state.plusMinusPriority;
 
     state.keysPressed = cleanHeld & ~state.keysHeld;
     state.currentlyHeld = cleanHeld;

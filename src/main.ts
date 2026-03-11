@@ -41,6 +41,24 @@ declare module "./engine" {
         renderLoop: (time: number) => void;
         /** Main logic loop. */
         logicLoop: () => void;
+        /**
+         * Returns the timeout time between logic frames in milliseconds. Note that the actual logic accounts for lag.
+         * Customize the frame rate and timeout to test frame interpolation with this:
+            ```ts
+            engine.getTimeoutLength = () => 500;
+            engine.getFrameRate = () => 2;
+            ```
+         */
+        getTimeoutLength: () => number;
+        /**
+         * Returns the target logic frame rate.
+         * Customize the frame rate and timeout to test frame interpolation with this:
+            ```ts
+            engine.getTimeoutLength = () => 500;
+            engine.getFrameRate = () => 2;
+            ```
+         */
+        getFrameRate: () => number;
     }
 }
 
@@ -127,7 +145,6 @@ document.addEventListener(
     { passive: false },
 );
 
-let timestamp = 0;
 let engine = await GameEngine.create();
 engine.wireframeOpacity = 1;
 
@@ -141,22 +158,30 @@ if (CONFIG.verbose) {
 
 // Add custom properties into the engine object (not handled by TypeScript)
 engine.isDebug = !!engine.exports.isDebug(); // This function is only true if Doptimize=Debug (default with zig build).
-engine.renderLoop = function (time: number) {
+engine.renderLoop = function (_t: number) {
     // Difference between frames
-    let timeDifference = time - timestamp;
-    timestamp = time;
-    engine.renderFrame(timeDifference);
+    let timeDifference = performance.now() - time;
+    let timeInterpolated = Math.min(
+        (timeDifference * engine.getFrameRate()) / 1000,
+        0.99,
+    );
+    engine.renderFrame(timeInterpolated, time);
     requestAnimationFrame(engine.renderLoop);
 };
 
+engine.getTimeoutLength = function () {
+    return ++frame % 3 == 2 ? 16 : 17;
+};
+
+engine.getFrameRate = function () {
+    return 60;
+};
+
 engine.logicLoop = function () {
-    const startTime = time;
+    const startTime = performance.now();
+    engine.tick(60 / engine.getFrameRate());
     time = performance.now();
-    engine.tick();
-    setTimeout(
-        engine.logicLoop,
-        (frame++ % 3 == 2 ? 16 : 17) - time + startTime,
-    );
+    setTimeout(engine.logicLoop, engine.getTimeoutLength() - time + startTime);
 };
 
 import { KeyBits, game_state_offsets } from "./enums";
@@ -172,5 +197,7 @@ if (engine.isDebug) {
 }
 
 // Begin the logic
-engine.renderLoop(0);
-setTimeout(engine.logicLoop, 17);
+setTimeout(function () {
+    engine.logicLoop();
+    engine.renderLoop(0);
+}, 17);

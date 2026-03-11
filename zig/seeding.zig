@@ -1,12 +1,10 @@
 //! Manages seeding calculations for the game.
 // seeding yippeeeeee
 const std = @import("std");
-const chunk = @import("chunk.zig");
 const testing = std.testing;
 
 test "full usage example" {
     const logger = @import("logger.zig");
-    const allocator = std.testing.allocator;
 
     // Start with an arbitrary seed
     var world_seed: [8]u64 = undefined;
@@ -16,15 +14,29 @@ test "full usage example" {
     const chunk_seed = mixChunkSeed(world_seed, [_]u64{ 10, 20 });
     var rng = Xoshiro512.init(chunk_seed);
 
-    // Fill a buffer of data
-    const light_buffer = try allocator.alloc(u4, 16 * 16 * 16);
-    defer allocator.free(light_buffer);
-
     // Log or use this float value
     logger.quick(rng.float(f32));
+    logger.quick(rng.next());
+}
 
-    // Verify we got data
-    try std.testing.expect(light_buffer[0] <= 15);
+/// A 512-bit seed state
+pub const LayerSeed = [8]u64;
+
+/// Absorbs new coordinate data into the 512-bit seed and forces a full avalanche.
+/// This guarantees that every depth layer irreversibly entangles the entropy.
+pub fn mix_512(base_seed: LayerSeed, x_val: u64, y_val: u64) LayerSeed {
+    var state = base_seed;
+
+    state[0] +%= staffordMix13(x_val);
+    state[1] +%= staffordMix13(y_val);
+
+    const old = state;
+    inline for (0..8) |i| {
+        // Use this mixing to ensure full cascading
+        state[i] = staffordMix13(old[i] ^ old[(i + 1) % 8]);
+    }
+
+    return state;
 }
 
 /// Xoshiro512** (StarStar), public domain randomness function.
@@ -120,42 +132,6 @@ inline fn validateAndMix(state: *[8]u64, idx: usize, comptime T: type, val: anyt
     }
     const casted_val: u64 = if (T == i64) @bitCast(val) else val;
     state[idx] +%= staffordMix13(casted_val);
-}
-
-/// Mixes a ScaleCoord into the base seed.
-pub fn mixScaleCoord(base_seed: [8]u64, coord: chunk.ScaleCoord) [8]u64 {
-    var state = base_seed;
-
-    // Mix the spatial vector
-    state[0] +%= staffordMix13(@bitCast(coord.pos[0]));
-    state[1] +%= staffordMix13(@bitCast(coord.pos[1]));
-
-    // Mix the unbounded depth stack (packing u4s into u64s for fast mixing)
-    var current_val: u64 = 0;
-    var shift: u6 = 0;
-    var state_idx: usize = 2; // Start after pos mix
-
-    for (coord.depth_stack) |nibble| {
-        current_val |= @as(u64, nibble) << shift;
-        shift +%= 4;
-
-        if (shift == 0) { // 16 nibbles (64 bits) accumulated
-            state[state_idx % 8] +%= staffordMix13(current_val);
-            state_idx += 1;
-            current_val = 0;
-        }
-    }
-    // Mix remaining nibbles
-    if (shift > 0) {
-        state[state_idx % 8] +%= staffordMix13(current_val);
-    }
-
-    // Final diffusion pass
-    const old = state;
-    inline for (0..8) |i| {
-        state[i] = staffordMix13(old[i] ^ old[(i + 1) % 8]);
-    }
-    return state;
 }
 
 /// Mixes chunk data using BLAKE3 (fast and WASM-friendly).
@@ -274,4 +250,71 @@ fn seedFromBytes(input: []const u8, out_seed: *[8]u64) void {
         const start = i * 8;
         out_seed[i] = std.mem.readInt(u64, hash_out[start .. start + 8], .little);
     }
+}
+
+/// Hashes 2D integer coordinates to a float in [0, 1).
+/// Quality is critical — this feeds into all noise functions.
+pub fn hash_2d(seed: u64, x: i32, y: i32) f32 {
+    var h: u64 = seed;
+    h ^= @as(u64, @bitCast(@as(i64, x))) *% 0x517cc1b727220a95;
+    h ^= @as(u64, @bitCast(@as(i64, y))) *% 0x6c62272e07bb0142;
+    h = staffordMix13(h);
+    return @as(f32, @floatFromInt(h >> 40)) / 16777216.0; // 24 bits → [0, 1)
+}
+
+/// 2D value noise with smoothstep interpolation. Returns [0, 1).
+/// `scale` = feature size in blocks. 4–8 recommended for 16-block chunks.
+/// Continuous across chunk boundaries (operates in world-space).
+pub fn value_noise_2d(seed: u64, x: i32, y: i32, scale: i32) f32 {
+    const s = @max(scale, 2);
+    const gx = @divFloor(x, s);
+    const gy = @divFloor(y, s);
+    const fx: f32 = @as(f32, @floatFromInt(@mod(x, s))) / @as(f32, @floatFromInt(s));
+    const fy: f32 = @as(f32, @floatFromInt(@mod(y, s))) / @as(f32, @floatFromInt(s));
+
+    const v00 = hash_2d(seed, gx, gy);
+    const v10 = hash_2d(seed, gx + 1, gy);
+    const v01 = hash_2d(seed, gx, gy + 1);
+    const v11 = hash_2d(seed, gx + 1, gy + 1);
+
+    // Smoothstep (C1 continuous, no visible grid artifacts)
+    const sx = fx * fx * (3.0 - 2.0 * fx);
+    const sy = fy * fy * (3.0 - 2.0 * fy);
+
+    const top = v00 + (v10 - v00) * sx;
+    const bot = v01 + (v11 - v01) * sx;
+    return top + (bot - top) * sy;
+}
+
+/// Fractal Brownian Motion: layers multiple octaves of value noise.
+/// 2 octaves = fast and decent. 3 = nicer caves. 4+ = diminishing returns.
+/// Returns [0, ~1) — not exactly normalized but close enough.
+pub fn fbm_2d(seed: u64, x: i32, y: i32, octaves: u32) f32 {
+    var value: f32 = 0;
+    var amp: f32 = 0.5;
+    var s: u64 = seed;
+    var scale: i32 = 8;
+    for (0..octaves) |_| {
+        value += value_noise_2d(s, x, y, @max(scale, 2)) * amp;
+        amp *= 0.5;
+        scale = @max(@divFloor(scale, 2), 2);
+        s +%= 0x9E3779B97F4A7C15;
+    }
+    return value;
+}
+
+test "noise basic sanity" {
+    // Same input gives same output (crazy testing)
+    const a = value_noise_2d(42, 10, 20, 6);
+    const b = value_noise_2d(42, 10, 20, 6);
+    try testing.expectEqual(a, b);
+
+    const c = value_noise_2d(42, 11, 20, 6);
+    try testing.expect(a != c);
+
+    // I would hope it doesn't equal exactly 0.0
+    try testing.expect(a > 0.0 and a < 1.0);
+
+    const f = fbm_2d(42, 10, 20, 3);
+    try testing.expect(f >= 0.0 and f < 1.0);
 }

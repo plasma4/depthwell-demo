@@ -67,7 +67,7 @@ pub fn main() !void {
         \\export type Pointer = number | bigint;
         \\
         \\/**
-        \\ * Represents a length.
+        \\ * Represents a length from Zig.
         \\ */
         \\export type LengthLike = number | bigint;
         \\

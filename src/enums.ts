@@ -6,7 +6,7 @@
 export type Pointer = number | bigint;
 
 /**
- * Represents a length.
+ * Represents a length from Zig.
  */
 export type LengthLike = number | bigint;
 
@@ -33,13 +33,9 @@ export interface EngineExports extends WebAssembly.Exports {
 
     readonly init: () => void;
     readonly reset: () => void;
-    readonly tick: () => void;
-    readonly renderFrame: () => void;
+    readonly prepare_visible_chunks: () => void;
+    readonly tick: (arg0: number) => void;
     readonly wasm_seed_from_string: () => void;
-    readonly generate_chunk: () => Pointer;
-    readonly get_test_chunk_ptr: () => Pointer;
-    readonly get_chunk_size: () => number;
-    readonly recalculate_test_chunk_edges: () => void;
     readonly get_memory_layout_ptr: () => Pointer;
     readonly wasm_alloc: (arg0: number) => Pointer;
     readonly wasm_free: (arg0: Pointer, arg1: number) => void;
@@ -55,7 +51,9 @@ export enum Command {
 }
 
 export const KeyBits = {
-    drop: 32768,
+    drop: 131072,
+    minus: 32768,
+    plus: 65536,
     up: 2048,
     left: 4096,
     down: 8192,
@@ -85,10 +83,19 @@ export const EdgeFlags = {
 
 export const game_state_offsets = {
     player_pos: 0,
-    player_velocity: 16,
-    camera_pos: 32,
-    camera_scale: 48,
-    keys_pressed_mask: 56,
-    keys_held_mask: 60,
+    active_chunk: 16,
+    player_velocity: 32,
+    camera_pos: 48,
+    camera_scale: 128,
+    camera_scale_change: 136,
+    player_screen_offset: 144,
+    grid_dirty: 192,
+    last_grid_min_bx: 176,
+    last_grid_min_by: 180,
+    last_active_chunk_x: 152,
+    last_active_chunk_y: 160,
+    current_depth: 168,
+    keys_pressed_mask: 184,
+    keys_held_mask: 188,
     seed: 64,
 } as const;

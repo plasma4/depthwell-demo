@@ -2,8 +2,8 @@
  * Main shader for the program.
  */
 // Sprite sheet constants. Sprites are saved as a .png, and each asset is 16x16.
-// Current sprites: [void, stone, stone2, yellowstone, stoneores, greenstone, pinkore, torch, torchwall, player]
-const TILES_PER_ROW: f32 = 10.0;
+// Current sprites: [void, player, void stone, stone, greenstone, bloodstone, torch, mushrooms, mushrooms 2]
+const TILES_PER_ROW: f32 = 13.0;
 const TILES_PER_COLUMN: f32 = 1.0;
 
 
@@ -29,7 +29,7 @@ struct SceneUniforms {
     time: f32,
     zoom: f32,
     wireframe_opacity: f32,
-    _padding: f32,
+    chunk_opacity: f32,
 };
 
 struct TileData {
@@ -83,7 +83,7 @@ fn oklab_to_linear_srgb(c: vec3f) -> vec3f {
 @group(0) @binding(1) var<storage, read> tiles: array<TileData>;
 @group(0) @binding(2) var sprite_atlas: texture_2d<f32>;
 @group(0) @binding(3) var pixel_sampler: sampler;
-@group(0) @binding(4) var<uniform> map_size: vec2u;
+@group(0) @binding(4) var<uniform> map_size: vec4u;
 
 // Extracts the specific bit ranges defined in the Zig `packed struct(u64)`.
 fn unpack_tile(data: TileData) -> UnpackedTile {
@@ -92,12 +92,16 @@ fn unpack_tile(data: TileData) -> UnpackedTile {
     // Word 0: [0..19] id, [20..27] light, [28..31] hp
     out.sprite_id = extractBits(data.word0, 0u, 20u);
     let light_u = extractBits(data.word0, 20u, 8u);
-    out.light = f32(light_u) / 255.0;
+    out.light = sqrt(f32(light_u) / 240.0); // not 255.0, to allow for light > 1, also square-rooted to allow lower light values like 128 to still be fairly visible
     out.hp = extractBits(data.word0, 28u, 4u);
 
     // Word 1: [0..23] seed, [24..31] edge_flags
     out.seed = extractBits(data.word1, 0u, 24u);
     out.edge_flags = extractBits(data.word1, 24u, 8u);
+
+    if (out.sprite_id == 7 && (extractBits(out.seed, 16u, 2u) == 0)) { // extract bits 16-18 for random modifications
+        out.sprite_id++;
+    }
 
     return out;
 }
@@ -201,16 +205,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
     // shift lightness
     lab.x += (l_nudge - 0.5) * 0.1;
-    // shift hue/chroma
-    lab.y += (a_nudge - 0.5) * 0.04;
-    lab.z += (b_nudge - 0.5) * 0.04;
+    // shift green-red and blue-yellow
+    lab.y += (a_nudge - 0.5) * 0.02;
+    lab.z += (b_nudge - 0.5) * 0.02;
 
-    // add the edge darkening and base light value, giving the func 6 bits of seeding
+    // add the edge darkening and base light value, with the function using bits 10-16
     let darkening = calculate_edge_darkening(in.local_uv, in.edge_flags, in.seed);
     lab.x *= (1.0 - darkening) * in.light;
 
     let final_rgb = oklab_to_linear_srgb(lab);
-    return vec4f(final_rgb, tex_color.a);
+    return vec4f(final_rgb, tex_color.a * scene.chunk_opacity);
 }
 
 // Calculates edge darkening procedurally based on flags calculated in Zig.
