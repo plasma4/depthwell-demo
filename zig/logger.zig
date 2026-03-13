@@ -141,7 +141,7 @@ pub inline fn quickWarn(args: anytype) void {
     message(&logging_buffer, written, .warn);
 }
 
-inline fn writeValue(writer: anytype, val: anytype) void {
+fn writeValue(writer: anytype, val: anytype) void {
     const T = @TypeOf(val);
     const type_info = @typeInfo(T);
 

@@ -30,6 +30,7 @@ struct SceneUniforms {
     zoom: f32,
     wireframe_opacity: f32,
     chunk_opacity: f32,
+    player_screen_pos: vec2f,
 };
 
 struct TileData {
@@ -45,39 +46,6 @@ struct UnpackedTile {
     seed: u32,
     edge_flags: u32,
 };
-
-fn linear_srgb_to_oklab(c: vec3f) -> vec3f {
-    let l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
-    let m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
-    let s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
-
-    let l_ = pow(l, 1.0 / 3.0);
-    let m_ = pow(m, 1.0 / 3.0);
-    let s_ = pow(s, 1.0 / 3.0);
-
-    return vec3f(
-        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
-        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
-        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086758031 * s_
-    );
-}
-
-fn oklab_to_linear_srgb(c: vec3f) -> vec3f {
-    let l_ = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;
-    let m_ = c.x - 0.1055613458 * c.y - 0.0638541728 * c.z;
-    let s_ = c.x - 0.0894841775 * c.y - 1.2914855480 * c.z;
-
-    let l = l_ * l_ * l_;
-    let m = m_ * m_ * m_;
-    let s = s_ * s_ * s_;
-
-    return vec3f(
-        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
-       -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-       -0.0041960863 * l - 0.7034186147 * m + 1.7076127010 * s
-    );
-}
-
 
 @group(0) @binding(0) var<uniform> scene: SceneUniforms;
 @group(0) @binding(1) var<storage, read> tiles: array<TileData>;
@@ -135,19 +103,43 @@ fn vs_main(
         f32((vertex_index >> 1u) & 1u)
     );
 
+    let total_tiles = map_size.x * map_size.y;
 
-    let tile_x = instance_index % map_size.x;
-    let tile_y = instance_index / map_size.x;
+    var out: VertexOutput;
+    if (instance_index >= total_tiles) {
+        let screen_pos = (scene.player_screen_pos + local_pos * TILE_SIZE) * scene.zoom;
+        let ndc = vec2f(
+            (screen_pos.x / scene.viewport_size.x) * 2.0 - 1.0,
+            1.0 - (screen_pos.y / scene.viewport_size.y) * 2.0
+        );
+        
+        // Prevent "texture bleeding"
+        let epsilon = 0.5 / ATLAS_WIDTH;
+        let safe_local_pos = clamp(local_pos, vec2f(epsilon), vec2f(1.0 - epsilon));
+
+        let atlas_uv = vec2f(
+            (1 + safe_local_pos.x) * ATLAS_TILE_SIZE / ATLAS_WIDTH,
+            (0 + safe_local_pos.y) * ATLAS_TILE_SIZE / ATLAS_HEIGHT
+        );
+
+        out.position = vec4f(ndc, 0.0, 1.0);
+        out.uv = atlas_uv;
+        out.sprite_id = 1u;
+        out.light = 1;
+        out.local_uv = local_pos;
+        return out;
+    }
 
     let tile = unpack_tile(tiles[instance_index]);
 
     // Cull empty sprite
     if (tile.sprite_id == 0u && scene.wireframe_opacity == 0) {
-        var out: VertexOutput;
         out.position = vec4f(2.0, 2.0, 2.0, 1.0); // ideal outcode
         return out;
     }
 
+    let tile_x = instance_index % map_size.x;
+    let tile_y = instance_index / map_size.x;
     let world_pos = vec2f(f32(tile_x), f32(tile_y)) * TILE_SIZE + local_pos * TILE_SIZE;
     let screen_pos = (world_pos - scene.camera) * scene.zoom;
 
@@ -170,7 +162,6 @@ fn vs_main(
         (sprite_row + safe_local_pos.y) * ATLAS_TILE_SIZE / ATLAS_HEIGHT
     );
 
-    var out: VertexOutput;
     out.position = vec4f(ndc, 0.0, 1.0);
     out.uv = atlas_uv;
     out.sprite_id = tile.sprite_id;
@@ -181,6 +172,17 @@ fn vs_main(
     out.local_uv = local_pos;
 
     return out;
+}
+
+fn calculate_atlas_uv(id: u32, local_pos: vec2f) -> vec2f {
+    let col = f32(id % u32(TILES_PER_ROW));
+    let row = f32(id / u32(TILES_PER_ROW));
+    let epsilon = 0.5 / ATLAS_WIDTH;
+    let safe_pos = clamp(local_pos, vec2f(epsilon), vec2f(1.0 - epsilon));
+    return vec2f(
+        (col + safe_pos.x) * ATLAS_TILE_SIZE / ATLAS_WIDTH,
+        (row + safe_pos.y) * ATLAS_TILE_SIZE / ATLAS_HEIGHT
+    );
 }
 
 @fragment
@@ -197,6 +199,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
             let y_mod = in.tile_coords.y & 15;
             let is_chunk_edge_x = (x_mod == 0u && in.local_uv.x < pixel_size) || (x_mod == 15u && in.local_uv.x > (1.0 - pixel_size));
             let is_chunk_edge_y = (y_mod == 0u && in.local_uv.y < pixel_size) || (y_mod == 15u && in.local_uv.y > (1.0 - pixel_size));
+            if (in.sprite_id == 1) {
+                return vec4f(1.0, 0.5, 0.0, 1.0);
+            }
             if (is_chunk_edge_x || is_chunk_edge_y) {
                 return vec4f(1.0, 1.0, 0.0, 1.0);
             }
@@ -270,4 +275,39 @@ fn calculate_edge_darkening(local_uv: vec2f, edge_flags: u32, seed: u32) -> f32 
     }
 
     return darkening;
+}
+
+
+
+// OKLAB stuff
+fn linear_srgb_to_oklab(c: vec3f) -> vec3f {
+    let l = 0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b;
+    let m = 0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b;
+    let s = 0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b;
+
+    let l_ = pow(l, 1.0 / 3.0);
+    let m_ = pow(m, 1.0 / 3.0);
+    let s_ = pow(s, 1.0 / 3.0);
+
+    return vec3f(
+        0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+        1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+        0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086758031 * s_
+    );
+}
+
+fn oklab_to_linear_srgb(c: vec3f) -> vec3f {
+    let l_ = c.x + 0.3963377774 * c.y + 0.2158037573 * c.z;
+    let m_ = c.x - 0.1055613458 * c.y - 0.0638541728 * c.z;
+    let s_ = c.x - 0.0894841775 * c.y - 1.2914855480 * c.z;
+
+    let l = l_ * l_ * l_;
+    let m = m_ * m_ * m_;
+    let s = s_ * s_ * s_;
+
+    return vec3f(
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+       -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+       -0.0041960863 * l - 0.7034186147 * m + 1.7076127010 * s
+    );
 }

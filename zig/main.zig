@@ -6,8 +6,8 @@ const seeding = @import("seeding.zig");
 const world = @import("world.zig");
 const World = world.World;
 
-const CHUNK_SIZE = memory.CHUNK_SIZE;
-const CHUNK_SIZE_FLOAT = memory.CHUNK_SIZE_FLOAT;
+const SIDE = memory.SIDE;
+const SIDE_FLOAT = memory.SIDE_FLOAT;
 const SUBPIXELS_IN_CHUNK = memory.SUBPIXELS_IN_CHUNK;
 const SCREEN_WIDTH = 480;
 const SCREEN_HEIGHT = 270;
@@ -20,37 +20,31 @@ pub fn init() void {
     logger.log(@src(), "init() called: Hello from Zig!", .{});
 
     world_state = World.init(memory.allocator, memory.game.seed);
-    const game = &memory.game;
-    game.active_chunk = .{ 0, 0 };
-    game.player_pos = .{ 0, 0 };
-    game.camera_pos = .{ 0, 0 };
-    // game.grid_dirty = true;
 }
 
 pub fn prepare_visible_chunks() void {
     const w = if (world_state) |*ws| ws else return;
     const game = &memory.game;
 
-    const cam_bx: i32 = @intFromFloat(game.camera_pos[0] / (CHUNK_SIZE_FLOAT * CHUNK_SIZE_FLOAT));
-    const cam_by: i32 = @intFromFloat(game.camera_pos[1] / (CHUNK_SIZE_FLOAT * CHUNK_SIZE_FLOAT));
+    const cam_bx: i32 = @intFromFloat(game.camera_pos[0] / (SIDE_FLOAT * SIDE_FLOAT));
+    const cam_by: i32 = @intFromFloat(game.camera_pos[1] / (SIDE_FLOAT * SIDE_FLOAT));
 
-    const half_w: i32 = @intFromFloat((SCREEN_WIDTH_HALF / CHUNK_SIZE_FLOAT) / game.camera_scale);
-    const half_h: i32 = @intFromFloat((SCREEN_HEIGHT_HALF / CHUNK_SIZE_FLOAT) / game.camera_scale);
+    const half_w: i32 = @intFromFloat((SCREEN_WIDTH_HALF / SIDE_FLOAT) / game.camera_scale);
+    const half_h: i32 = @intFromFloat((SCREEN_HEIGHT_HALF / SIDE_FLOAT) / game.camera_scale);
 
-    const min_cx: i32 = @divFloor(cam_bx - half_w, CHUNK_SIZE) - 1;
-    const min_cy: i32 = @divFloor(cam_by - half_h, CHUNK_SIZE) - 1;
-    const max_cx: i32 = @divFloor(cam_bx + half_w, CHUNK_SIZE) + 1;
-    const max_cy: i32 = @divFloor(cam_by + half_h, CHUNK_SIZE) + 1;
+    const min_cx: i32 = @divFloor(cam_bx - half_w, SIDE) - 1;
+    const min_cy: i32 = @divFloor(cam_by - half_h, SIDE) - 1;
+    const max_cx: i32 = @divFloor(cam_bx + half_w, SIDE) + 1;
+    const max_cy: i32 = @divFloor(cam_by + half_h, SIDE) + 1;
 
     const cw: u32 = @intCast(max_cx - min_cx + 1);
     const ch: u32 = @intCast(max_cy - min_cy + 1);
-    const wb = cw * CHUNK_SIZE;
-    const hb = ch * CHUNK_SIZE;
+    const wb = cw * SIDE;
+    const hb = ch * SIDE;
 
     const moved_chunk = game.active_chunk[0] != game.last_active_chunk_x or game.active_chunk[1] != game.last_active_chunk_y;
-
     if (!game.grid_dirty and !moved_chunk and game.last_grid_min_bx == @as(u32, @bitCast(min_cx))) {
-        update_props(game, wb, hb, min_cx, min_cy);
+        update_render_properties(game, wb, hb, min_cx, min_cy);
         return;
     }
 
@@ -60,8 +54,8 @@ pub fn prepare_visible_chunks() void {
     memory.scratch_reset();
     const out = memory.scratch_alloc_slice(memory.Block, wb * hb) orelse return;
 
-    const world_limit: u64 = if (game.current_depth < CHUNK_SIZE)
-        (@as(u64, 1) << @intCast(game.current_depth * std.math.log2(CHUNK_SIZE)))
+    const world_limit: u64 = if (game.current_depth < SIDE)
+        (@as(u64, 1) << @intCast(game.current_depth * memory.SIDE_LOG2))
     else
         std.math.maxInt(u64);
 
@@ -81,58 +75,61 @@ pub fn prepare_visible_chunks() void {
             // If abs_cx < 0, u_abs_cx will be massive (wrapping), thus > world_limit.
             if (u_abs_cx < world_limit and u_abs_cy < world_limit) {
                 const chunk = w.get_chunk(@intCast(abs_cx), @intCast(abs_cy));
-                for (0..CHUNK_SIZE) |ly| {
-                    @memcpy(out[(gy * CHUNK_SIZE + ly) * wb + gx * CHUNK_SIZE ..][0..CHUNK_SIZE], chunk.blocks[ly * CHUNK_SIZE ..][0..CHUNK_SIZE]);
+                for (0..SIDE) |ly| {
+                    @memcpy(out[(gy * SIDE + ly) * wb + gx * SIDE ..][0..SIDE], chunk.blocks[ly * SIDE ..][0..SIDE]);
                 }
             } else {
-                for (0..CHUNK_SIZE) |ly| {
-                    const row_start = (gy * CHUNK_SIZE + ly) * wb + gx * CHUNK_SIZE;
-                    @memset(out[row_start .. row_start + CHUNK_SIZE], memory.AIR_BLOCK);
+                for (0..SIDE) |ly| {
+                    const row_start = (gy * SIDE + ly) * wb + gx * SIDE;
+                    @memset(out[row_start .. row_start + SIDE], memory.AIR_BLOCK);
                 }
             }
         }
     }
-    update_props(game, wb, hb, min_cx, min_cy);
+    update_render_properties(game, wb, hb, min_cx, min_cy);
 }
 
-inline fn update_props(game: *memory.GameState, wb: u32, hb: u32, min_cx: i32, min_cy: i32) void {
+inline fn update_render_properties(game: *memory.GameState, wb: u32, hb: u32, min_cx: i32, min_cy: i32) void {
     memory.mem.scratch_properties[0] = @intCast(wb);
     memory.mem.scratch_properties[1] = @intCast(hb);
 
     const suffix_x = @as(i64, @bitCast(game.active_chunk[0]));
     const suffix_y = @as(i64, @bitCast(game.active_chunk[1]));
 
+    // the absolute subpixel coordinate of the top-left of the visible grid
     const origin_x = (suffix_x +% @as(i64, min_cx)) *% memory.SUBPIXELS_IN_CHUNK;
     const origin_y = (suffix_y +% @as(i64, min_cy)) *% memory.SUBPIXELS_IN_CHUNK;
 
     memory.mem.scratch_properties[2] = @bitCast(origin_x);
     memory.mem.scratch_properties[3] = @bitCast(origin_y);
 
-    // scratch_properties[4..] are f64 for smooth interpolation
-    memory.mem.scratch_properties[4] = @bitCast(game.camera_pos[0]);
-    memory.mem.scratch_properties[5] = @bitCast(game.camera_pos[1]);
-    memory.mem.scratch_properties[6] = @bitCast(game.player_velocity[0]);
-    memory.mem.scratch_properties[7] = @bitCast(game.player_velocity[1]);
-    memory.mem.scratch_properties[8] = @bitCast(game.camera_scale);
+    // relative offset of player from camera center in pixels
+    const screen_px_x = (@as(f64, @floatFromInt(game.player_pos[0])) - game.camera_pos[0]) / 16.0;
+    const screen_px_y = (@as(f64, @floatFromInt(game.player_pos[1])) - game.camera_pos[1]) / 16.0;
+    memory.mem.scratch_properties[4] = @bitCast(screen_px_x);
+    memory.mem.scratch_properties[5] = @bitCast(screen_px_y);
+
+    // current camera "delta" (how much it moved this tick) for interpolation
+    memory.mem.scratch_properties[6] = @bitCast(game.camera_pos[0] - game.last_camera_pos[0]);
+    memory.mem.scratch_properties[7] = @bitCast(game.camera_pos[1] - game.last_camera_pos[1]);
 }
 
 pub fn portal_zoom_in(bx: u32, by: u32) void {
     const w = if (world_state) |*ws| ws else return;
     const game = &memory.game;
 
-    // Identify parent block before clearing cache
     const chunk = w.get_chunk(game.active_chunk[0], game.active_chunk[1]);
-    const parent_id = chunk.blocks[(by % CHUNK_SIZE) * CHUNK_SIZE + (bx % CHUNK_SIZE)].id;
+    const parent_id = chunk.blocks[(by % SIDE) * SIDE + (bx % SIDE)].id;
 
-    // Push world coords
-    w.push_layer(@intCast(game.active_chunk[0]), @intCast(game.active_chunk[1]), parent_id);
+    // This is the source of truth. push_layer clears caches and invalidates the Quad-Cache.
+    w.push_layer(game.active_chunk[0], game.active_chunk[1], parent_id);
 
-    // The portal block (bx, by) becomes the starting chunk of the new depth.
-    // bx and by are 0-15. This is the new Active Suffix.
-    game.active_chunk = .{ @intCast(bx), @intCast(by) };
+    // Sync the UI-visible depth
+    game.current_depth = @intCast(w.path.stack.items.len);
 
     // TODO player_pos rearrangement logic
-    game.current_depth += 1;
+    game.active_chunk = .{ 0, 0 };
+    game.player_pos = .{ 2048, 2048 };
     game.grid_dirty = true;
 }
 

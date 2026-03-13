@@ -167,6 +167,7 @@ engine.renderLoop = function (_t: number) {
     );
     engine.renderFrame(timeInterpolated, time);
     requestAnimationFrame(engine.renderLoop);
+    // setTimeout(engine.renderLoop, 100);
 };
 
 engine.getTimeoutLength = function () {

@@ -36,51 +36,58 @@ function seedToBigInt(seed: string): bigint {
 }
 
 /**
- * Bijective 512-bit Mixer using HMAC-SHA256 in a Feistel Network.
+ * Bijective 512-bit mixer using HMAC-SHA256 in a Feistel Network. This isn't your typical string-to-binary algorithm as it preserves true bijectivity while being cryptographically secure...why not.
  */
 export async function seedToMemory(
     seed: string,
     outArray: BigUint64Array,
 ): Promise<BigUint64Array> {
     const total = seedToBigInt(seed);
+    const view = new DataView(new ArrayBuffer(64));
 
-    const buffer = new Uint8Array(64);
-    for (let i = 0; i < 64; i++) {
-        buffer[63 - i] = Number((total >> BigInt(i * 8)) & 0xffn);
+    // Efficiently pack the BigInt
+    for (let i = 0; i < 8; i++) {
+        view.setBigUint64(
+            i * 8,
+            (total >> BigInt((7 - i) * 64)) & 0xffffffffffffffffn,
+        );
     }
 
-    // Split into lower and upper halves
-    let L = buffer.slice(0, 32);
-    let R = buffer.slice(32, 64);
+    let L = new Uint8Array(view.buffer, 0, 32);
+    let R = new Uint8Array(view.buffer, 32, 32);
 
-    // Now run 4 rounds of Feistel
-    // 4 rounds with a cryptographic hash is sufficient for complete diffusion.
-    for (let i = 0; i < 4; i++) {
-        const roundKey = await crypto.subtle.importKey(
-            "raw",
-            new Uint8Array([i]), // Using round index as the key
-            { name: "HMAC", hash: "SHA-256" },
-            false,
-            ["sign"],
+    // pre-import keys
+    const keys = await Promise.all(
+        [0, 1, 2, 3].map((i) =>
+            crypto.subtle.importKey(
+                "raw",
+                new Uint8Array([i]),
+                { name: "HMAC", hash: "SHA-256" },
+                false,
+                ["sign"],
+            ),
+        ),
+    );
+
+    for (const roundKey of keys) {
+        const fR = new Uint8Array(
+            await crypto.subtle.sign("HMAC", roundKey, R),
         );
 
-        // Calculate F(R)
-        const hmacSignature = await crypto.subtle.sign("HMAC", roundKey, R);
-        const F_R = new Uint8Array(hmacSignature);
-
-        // L_next = R
-        // R_next = L ^ F(R)
         const nextR = new Uint8Array(32);
         for (let j = 0; j < 32; j++) {
-            nextR[j] = L[j] ^ F_R[j];
+            nextR[j] = L[j] ^ fR[j];
         }
 
         L = R;
         R = nextR;
     }
 
-    // Combine and return
-    outArray.set(new BigUint64Array(L.buffer));
-    outArray.set(new BigUint64Array(R.buffer), 4);
+    // Direct copy-to-output
+    const finalBuffer = new Uint8Array(64);
+    finalBuffer.set(L, 0);
+    finalBuffer.set(R, 32);
+    outArray.set(new BigUint64Array(finalBuffer.buffer));
+
     return outArray;
 }

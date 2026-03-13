@@ -18,18 +18,45 @@ test "basic usage example" {
 /// A 512-bit seed state
 pub const LayerSeed = [8]u64;
 
-/// Mixes a 512-bit seed with an x and y coordinate into a performant BLAKE3 sponge construction algorithm.
-pub fn mix_layer_blake3(parent_seed: LayerSeed, x: u64, y: u64, depth: u32) LayerSeed {
-    var hasher = std.crypto.hash.Blake3.init(.{});
+/// A fast 64-bit to 64-bit generator for avalanching the X/Y offsets.
+inline fn split_mix_64(state: *u64) u64 {
+    state.* +%= 0x9E3779B97F4A7C15;
+    var z = state.*;
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
+    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
+    return z ^ (z >> 31);
+}
 
-    hasher.update(std.mem.asBytes(&parent_seed));
-    hasher.update(std.mem.asBytes(&x));
-    hasher.update(std.mem.asBytes(&y));
-    hasher.update(std.mem.asBytes(&depth));
+/// BLAKE3 mix specifically for Macro-Regions. Includes domain separation
+/// to prevent collisions with the Layer Depth hashes.
+pub fn mix_macro_seed_blake3(layer_seed: LayerSeed, mx: u64, my: u64) LayerSeed {
+    var hasher = std.crypto.hash.Blake3.init(.{});
+    hasher.update("MACRO_REGION_DOMAIN"); // Domain separation
+    hasher.update(std.mem.asBytes(&layer_seed));
+    hasher.update(std.mem.asBytes(&mx));
+    hasher.update(std.mem.asBytes(&my));
 
     var out_bytes: [64]u8 = undefined;
     hasher.final(&out_bytes);
     return @bitCast(out_bytes);
+}
+
+/// Bijective mixer for generating Chunk seeds from a Macro-Seed.
+/// cx and cy are local chunk offsets within a Macro-Region.
+pub fn mix_chunk_seed(macro_seed: LayerSeed, local_cx: u64, local_cy: u64) LayerSeed {
+    // Combine local coordinates into a single 64-bit state.
+    const combined_offset = (local_cy << 32) | local_cx;
+
+    // Avalanche the offset into a robust 64-bit state
+    var prng_state = stafford_mix_13(combined_offset);
+
+    var out = macro_seed;
+    // Generate 512 bits of avalanched noise and strictly XOR it (maintaining bijectivity)
+    inline for (0..8) |i| {
+        out[i] ^= split_mix_64(&prng_state);
+    }
+
+    return out;
 }
 
 /// Xoshiro512** (StarStar), public domain randomness function.

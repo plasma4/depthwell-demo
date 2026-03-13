@@ -204,7 +204,7 @@ export async function create(
     // camera: vec2f (8), viewport_size: vec2f (8), time: f32 (4), zoom: f32 (4), padding: vec2u (8)
     const uniformBuffer = device.createBuffer({
         label: "SceneUniforms",
-        size: 32,
+        size: 48,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     engine.uniformBuffer = uniformBuffer;

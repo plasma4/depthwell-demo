@@ -5,10 +5,12 @@ const logger = @import("logger.zig");
 const ColorRGBA = @import("color_rgba.zig").ColorRGBA;
 pub const is_wasm = builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
 
-pub const CHUNK_SIZE = 16;
-pub const CHUNK_SIZE_FLOAT = 16.0;
-pub const CHUNK_SIZE_SQUARED = CHUNK_SIZE * CHUNK_SIZE;
-pub const SUBPIXELS_IN_CHUNK = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
+pub const SIDE_LOG2: comptime_int = 4;
+pub const SIDE: comptime_int = 16;
+pub const SIDE_FLOAT: comptime_float = 16.0;
+pub const SIDE_FLOAT_SQ: comptime_float = SIDE_FLOAT * SIDE_FLOAT;
+pub const SIDE_SQ: comptime_int = SIDE * SIDE;
+pub const SUBPIXELS_IN_CHUNK: comptime_int = SIDE * SIDE * SIDE;
 
 pub const AIR_BLOCK: Block = .{ .id = @import("world.zig").SPRITE_VOID, .seed = 0, .light = 255, .hp = 0, .flags = 0 };
 
@@ -72,7 +74,7 @@ pub const Block = packed struct {
 
 /// 16x16 fixed grid of blocks.
 pub const Chunk = struct {
-    blocks: [CHUNK_SIZE_SQUARED]Block,
+    blocks: [SIDE_SQ]Block,
     /// 256 bits representing which blocks have been modified from the base procedural generation.
     modified_mask: [4]u64,
 
@@ -113,19 +115,21 @@ pub var scratch_buffer: []align(MAIN_ALIGN_BYTES) u8 = &[_]u8{};
 var is_dynamic_scratch: bool = false;
 
 /// Data is reserved for numbers or positions that are guaranteed to take a constant amount of memory, or pointers.
-/// Important data is meant to be placed at the start with less important data later. Data MAY be rearranged but requires using the zig build enum command for numbers to be reflected in TypeScript. See game_state_offsets in types.zig for enum export details.
-pub const GameState = struct {
+/// Important data is meant to be placed at the start with less important data later. Data can be rearranged, but requires using the --Dgen-enums for pointer locations to be reflected in TypeScript. See game_state_offsets in types.zig for enum export details.
+pub const GameState = extern struct {
     /// Represents the player's subpixel position within the CURRENT chunk (0 to 4095).
-    player_pos: @Vector(2, i64) align(MAIN_ALIGN_BYTES) = .{ 2048, 2048 },
+    player_pos: @Vector(2, i64) align(MAIN_ALIGN_BYTES) = .{ 0, 0 },
     /// Represents the player's infinite active chunk coordinate.
     active_chunk: @Vector(2, u64) = .{ 0, 0 },
     /// Represents the player's current movement.
     player_velocity: @Vector(2, f64) = .{ 0, 0 },
     /// Represents the camera's position.
     camera_pos: @Vector(2, f64) = .{ 0, 0 },
+    /// Represents the camera's movement in a frame (derivative of camera_pos).
+    last_camera_pos: @Vector(2, f64) = .{ 0, 0 },
     /// Represents the camera's zoom scale.
     camera_scale: f64 = 1.0,
-    /// Represents the camera's zoom scale change rate (multiplier).
+    /// Represents the camera's zoom scale change rate (multiplier, acts as derivative of camera_scale change).
     camera_scale_change: f64 = 1.0,
     /// Represents where the player should be rendered for WGSL.
     player_screen_offset: @Vector(2, f32) = .{ 0, 0 },

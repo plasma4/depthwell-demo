@@ -5,10 +5,10 @@ const seeding = @import("seeding.zig");
 
 const Chunk = memory.Chunk;
 const Block = memory.Block;
-const CHUNK_SIZE = memory.CHUNK_SIZE;
+const SIDE = memory.SIDE;
 
 pub const WORLD_CHUNKS = 4096;
-const PLAYER_EDGE: i64 = 4096 * memory.CHUNK_SIZE;
+const PLAYER_EDGE: i64 = 4096 * memory.SIDE;
 
 // Sprite IDs
 pub const SPRITE_VOID = 0;
@@ -72,11 +72,61 @@ pub inline fn generate_initial_block(rng: *seeding.Xoshiro512, x: u64, y: u64) u
     return block_id;
 }
 
+/// Defines the size of a Macro-Region in chunks.
+/// Shift 8 = 256 chunks (4,096 blocks). A 2x2 cache covers a 512x512 chunk area.
+const MACRO_SHIFT: u6 = 8;
+const MACRO_MASK: u64 = (1 << MACRO_SHIFT) - 1;
+
+/// A 2x2 grid of 512-bit Macro-Seeds.
+pub const QuadCache = struct {
+    origin_x: u64,
+    origin_y: u64,
+    seeds: [4]seeding.LayerSeed,
+    /// Indicates if the cache has been initialized for the current layer.
+    is_valid: bool,
+
+    /// Retrieves the $O(1)$ chunk seed, rebuilding the cache safely if the chunk is out of bounds.
+    pub fn get_chunk_seed(self: *QuadCache, layer_seed: seeding.LayerSeed, cx: u64, cy: u64) seeding.LayerSeed {
+        const mx = cx >> MACRO_SHIFT;
+        const my = cy >> MACRO_SHIFT;
+
+        // Unsigned wrapping subtraction. If mx < origin_x, it wraps to maxInt(u64),
+        // which is > 1, immediately triggering a rebuild. This elegantly handles negative coordinate wrapping.
+        const rel_x = mx -% self.origin_x;
+        const rel_y = my -% self.origin_y;
+
+        if (!self.is_valid or rel_x > 1 or rel_y > 1) {
+            self.rebuild(layer_seed, mx, my);
+            // Re-evaluate relative positions after rebuild (they will now be 0)
+            const new_rel_x = mx -% self.origin_x;
+            const new_rel_y = my -% self.origin_y;
+            const index = (new_rel_y * 2) + new_rel_x;
+            return seeding.mix_chunk_seed(self.seeds[@as(usize, @intCast(index))], cx & MACRO_MASK, cy & MACRO_MASK);
+        }
+
+        const index = (rel_y * 2) + rel_x;
+        return seeding.mix_chunk_seed(self.seeds[@as(usize, @intCast(index))], cx & MACRO_MASK, cy & MACRO_MASK);
+    }
+
+    /// Calculates the 4 Macro-Seeds covering the 2x2 grid originating at (mx, my).
+    fn rebuild(self: *QuadCache, layer_seed: seeding.LayerSeed, mx: u64, my: u64) void {
+        self.origin_x = mx;
+        self.origin_y = my;
+
+        self.seeds[0] = seeding.mix_macro_seed_blake3(layer_seed, mx, my);
+        self.seeds[1] = seeding.mix_macro_seed_blake3(layer_seed, mx +% 1, my);
+        self.seeds[2] = seeding.mix_macro_seed_blake3(layer_seed, mx, my +% 1);
+        self.seeds[3] = seeding.mix_macro_seed_blake3(layer_seed, mx +% 1, my +% 1);
+
+        self.is_valid = true;
+    }
+};
+
 pub const World = struct {
     alloc: std.mem.Allocator,
     path: CoordinatePath,
     chunk_cache: std.AutoHashMap(u64, *Chunk),
-    macro_seed_cache: std.AutoHashMap(u64, seeding.LayerSeed),
+    quad_cache: QuadCache,
 
     pub fn init(alloc: std.mem.Allocator, base_seed: seeding.LayerSeed) World {
         var self = World{
@@ -86,7 +136,12 @@ pub const World = struct {
                 .root_seed = base_seed,
             },
             .chunk_cache = std.AutoHashMap(u64, *Chunk).init(alloc),
-            .macro_seed_cache = std.AutoHashMap(u64, seeding.LayerSeed).init(alloc),
+            .quad_cache = .{
+                .origin_x = 0,
+                .origin_y = 0,
+                .seeds = undefined,
+                .is_valid = false,
+            },
         };
 
         // Initial spawn: 3 layers deep at the center of the root sectors (8, 8)
@@ -99,25 +154,48 @@ pub const World = struct {
     pub fn deinit(self: *World) void {
         self.clear_caches();
         self.chunk_cache.deinit();
-        self.macro_seed_cache.deinit();
         self.path.deinit();
     }
 
-    /// Wipes the physical chunk cache. Called automatically when zooming in/out.
+    /// Wipes the physical chunk cache and invalidates the Quad-Cache.
     pub fn clear_caches(self: *World) void {
         var it = self.chunk_cache.valueIterator();
         while (it.next()) |chunk_ptr| {
             self.alloc.destroy(chunk_ptr.*);
         }
         self.chunk_cache.clearRetainingCapacity();
-        self.macro_seed_cache.clearRetainingCapacity();
+        self.quad_cache.is_valid = false;
+    }
+
+    pub fn get_chunk(self: *World, cx: u64, cy: u64) *Chunk {
+        const key = chunk_key(cx, cy);
+        if (self.chunk_cache.get(key)) |c| return c;
+
+        const chunk = self.alloc.create(Chunk) catch @panic("chunk alloc failed");
+        const current_depth = memory.game.current_depth;
+        const layer_seed = self.path.get_current_seed();
+
+        // Fetch the perfectly avalanched chunk seed via the O(1) Quad-Cache lookup
+        const chunk_seed = self.quad_cache.get_chunk_seed(layer_seed, cx, cy);
+
+        generate_chunk(chunk, chunk_seed, cx, cy, current_depth);
+
+        self.chunk_cache.put(key, chunk) catch @panic("chunk cache put failed");
+        return chunk;
+    }
+
+    pub inline fn chunk_key(cx: u64, cy: u64) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        hasher.update(std.mem.asBytes(&cx));
+        hasher.update(std.mem.asBytes(&cy));
+        return hasher.final();
     }
 
     /// Zooms IN to a specific block.
     pub fn push_layer(self: *World, target_x: u32, target_y: u32, parent_id: u20) void {
         const current_seed = self.path.get_current_seed();
         // Mix the coordinates of the block we are zooming into to create the new universe seed
-        const new_seed = seeding.mix_layer_blake3(current_seed, target_x, target_y, memory.game.current_depth);
+        const new_seed = seeding.mix_macro_seed_blake3(current_seed, target_x, target_y);
 
         self.path.stack.append(self.alloc, .{
             .parent_block_id = parent_id,
@@ -142,34 +220,6 @@ pub const World = struct {
         }
     }
 
-    pub fn get_chunk(self: *World, cx: u64, cy: u64) *Chunk {
-        const key = chunk_key(cx, cy);
-
-        if (self.chunk_cache.get(key)) |c| return c;
-
-        const chunk = self.alloc.create(Chunk) catch @panic("chunk alloc failed");
-
-        // Depth is the number of layers currently on the stack. This value starts at 3.
-        const current_depth = memory.game.current_depth;
-        // Generate chunk seed directly from the current layer seed and chunk coordinates
-        const layer_seed = self.path.get_current_seed();
-        const chunk_seed = seeding.mix_layer_blake3(layer_seed, cx, cy, current_depth);
-
-        // Call generate_chunk with the 5 required arguments
-        generate_chunk(chunk, chunk_seed, cx, cy, current_depth);
-
-        self.chunk_cache.put(key, chunk) catch @panic("chunk cache put failed");
-        return chunk;
-    }
-
-    pub inline fn chunk_key(cx: u64, cy: u64) u64 {
-        // Hash the two u64s into a single u64 for the HashMap key
-        var hasher = std.hash.Wyhash.init(0);
-        hasher.update(std.mem.asBytes(&cx));
-        hasher.update(std.mem.asBytes(&cy));
-        return hasher.final();
-    }
-
     /// Remixes the seeds down the chain
     fn recalculate_seeds_from(self: *World, start_index: usize) void {
         var i = start_index;
@@ -190,16 +240,16 @@ pub fn generate_chunk(chunk: *Chunk, chunk_seed: seeding.LayerSeed, abs_cx: u64,
     var rng = seeding.Xoshiro512.init(chunk_seed);
 
     // Calculate limits in blocks
-    const world_limit_chunks: u64 = if (depth < CHUNK_SIZE) (@as(u64, 1) << @intCast(depth * std.math.log2(CHUNK_SIZE))) else std.math.maxInt(u64);
-    const max_block: u64 = (world_limit_chunks * CHUNK_SIZE) - 1;
+    const world_limit_chunks: u64 = if (depth < SIDE) (@as(u64, 1) << @intCast(depth * memory.SIDE_LOG2)) else std.math.maxInt(u64);
+    const max_block: u64 = (world_limit_chunks * SIDE) - 1;
 
-    for (0..CHUNK_SIZE) |ly| {
-        for (0..CHUNK_SIZE) |lx| {
-            const idx = ly * CHUNK_SIZE + lx;
+    for (0..SIDE) |ly| {
+        for (0..SIDE) |lx| {
+            const idx = ly * SIDE + lx;
 
             // Absolute block coordinates in the current world layer
-            const gbx = (abs_cx * CHUNK_SIZE) + lx;
-            const gby = (abs_cy * CHUNK_SIZE) + ly;
+            const gbx = (abs_cx * SIDE) + lx;
+            const gby = (abs_cy * SIDE) + ly;
 
             // Edge of the world is stone
             if (gbx == 0 or gbx == max_block or gby == 0 or gby == max_block) {
@@ -225,10 +275,10 @@ pub fn generate_chunk(chunk: *Chunk, chunk_seed: seeding.LayerSeed, abs_cx: u64,
         }
     }
 
-    for (0..CHUNK_SIZE - 1) |ly| {
-        for (0..CHUNK_SIZE) |lx| {
-            const idx = ly * CHUNK_SIZE + lx;
-            const block_below = chunk.blocks[(ly + 1) * CHUNK_SIZE + lx].id;
+    for (0..SIDE - 1) |ly| {
+        for (0..SIDE) |lx| {
+            const idx = ly * SIDE + lx;
+            const block_below = chunk.blocks[(ly + 1) * SIDE + lx].id;
 
             if (chunk.blocks[idx].id == SPRITE_VOID and
                 block_below != SPRITE_VOID and block_below != SPRITE_TORCH and block_below != SPRITE_MUSHROOM)
@@ -262,5 +312,5 @@ pub fn generate_chunk(chunk: *Chunk, chunk_seed: seeding.LayerSeed, abs_cx: u64,
 //     const block_y = @divFloor(@mod(world_subpixel_y, 4096), 256);
 
 //     // Returns exact block coordinate. @floor() this to get the integer block index.
-//     return .{ world_x / CHUNK_SIZE, world_y / CHUNK_SIZE };
+//     return .{ world_x / SIDE, world_y / SIDE };
 // }

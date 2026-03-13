@@ -8,6 +8,7 @@ pub const Command = enum(u32) { Reset, Exit, SendSeed };
 /// Masked data representing keyboard key inputs in the game.
 pub const KeyBits = struct {
     // Note: generate_types.zig will skip all functions in structs, including pub ones (why would you have them here anyway??).
+    /// Returns 2^index.
     fn mask(index: u5) u32 {
         return @as(u32, 1) << index;
     }

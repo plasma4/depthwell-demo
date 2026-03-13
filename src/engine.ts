@@ -5,7 +5,7 @@ import * as Seeding from "./seeding";
 import * as InputManager from "./inputManager";
 import * as EngineMaker from "./engineConfig";
 
-const CHUNK_SIZE = 16;
+const SIDE = 16;
 
 export enum WasmTypeCode {
     Uint8 = 8,
@@ -106,10 +106,6 @@ export class GameEngine {
     public forceAspectRatio: boolean = true;
     /** Determines the previous state of the 16:9 aspect ratio. Internal use for updating the canvas styling when calling renderFrame(). */
     private previousForceAspectRatio: boolean | null = null;
-    public gridOriginX: number = 0;
-    public gridOriginY: number = 0;
-    public mainCameraX: number = 0;
-    public mainCameraY: number = 0;
 
     public readonly renderPipeline: GPURenderPipeline;
     public readonly encoder = new TextEncoder();
@@ -205,10 +201,6 @@ export class GameEngine {
         // Read metadata from scratch_properties, matching from prepare_visible_chunks
         const widthBlocks = Number(viewU64[0 + 4]);
         const heightBlocks = Number(viewU64[1 + 4]);
-        this.gridOriginX = viewF64[2 + 4]; // f64, grid origin in blocks
-        this.gridOriginY = viewF64[3 + 4];
-        this.mainCameraX = viewF64[4 + 4]; // f64, exact locked camera X
-        this.mainCameraY = viewF64[5 + 4];
 
         const u32Count = widthBlocks * heightBlocks * 2;
         const wasmView = new Uint32Array(
@@ -478,6 +470,7 @@ export class GameEngine {
         this.updateCanvasStyle();
         this.uploadVisibleChunks();
 
+        // Access these neat little scratch properties!
         const scratchU64 = this.getScratchView();
         const scratchF64 = new Float64Array(
             scratchU64.buffer,
@@ -490,53 +483,72 @@ export class GameEngine {
             scratchU64.length,
         );
 
-        const resolutionScale = this.canvas.width / INTERNAL_WIDTH;
-        const effectiveZoom = scratchF64[8 + 4] * resolutionScale;
-
-        const player_pos = this.getGameView(
-            WasmTypeCode.Int64,
-            Zig.game_state_offsets.player_pos,
-            2,
-        );
-        const active_view = this.getGameView(
-            WasmTypeCode.Int64,
-            Zig.game_state_offsets.active_chunk,
-            2,
-        );
-        const velocity = this.getGameView(
+        // use game view to get some values
+        const camera_pos = this.getGameView(
             WasmTypeCode.Float64,
-            Zig.game_state_offsets.player_velocity,
+            Zig.game_state_offsets.camera_pos,
+            2,
+        );
+        const camera_scale_and_change = this.getGameView(
+            WasmTypeCode.Float64,
+            Zig.game_state_offsets.camera_scale,
             2,
         );
 
-        // Absolute Global Subpixel Position
-        const globalX = Number(active_view[0]) * 4096 + Number(player_pos[0]);
-        const globalY = Number(active_view[1]) * 4096 + Number(player_pos[1]);
+        const resolutionScale = this.canvas.width / INTERNAL_WIDTH;
+        const effectiveZoom =
+            camera_scale_and_change[0] *
+            camera_scale_and_change[1] ** (timeInterpolated - 1) *
+            resolutionScale;
+        console.log(effectiveZoom);
 
-        // Interpolated Subpixel Position
-        const x = globalX + velocity[0] * (timeInterpolated - 1);
-        const y = globalY + velocity[1] * (timeInterpolated - 1);
+        // logic-frame camera position
+        const baseCamX = camera_pos[0];
+        const baseCamY = camera_pos[1];
 
-        // Grid Origin in subpixels (from scratch_properties[2..3])
-        const originX = Number(scratchI64[2 + 4]);
-        const originY = Number(scratchI64[3 + 4]);
+        // camera's velocity (delta)
+        const camVelX = scratchF64[6 + 4];
+        const camVelY = scratchF64[7 + 4];
 
-        const half_width_px = this.canvas.width / 2 / effectiveZoom;
-        const half_height_px = this.canvas.height / 2 / effectiveZoom;
+        // interpolated camera
+        const interpCamX =
+            baseCamX +
+            camVelX * (timeInterpolated - 1) -
+            (INTERNAL_WIDTH * SIDE) / 2;
+        const interpCamY =
+            baseCamY +
+            camVelY * (timeInterpolated - 1) -
+            (INTERNAL_HEIGHT * SIDE) / 2;
 
-        // Final Camera Position in Pixels (16 subpixels = 1 pixel)
-        const camX = (x - originX) / 16 - half_width_px;
-        const camY = (y - originY) / 16 - half_height_px;
+        // grid origin in subpixerls
+        const originX = scratchI64[2 + 4];
+        const originY = scratchI64[3 + 4];
 
+        // Calculated final camera position for the shader
+        const camX = Number(BigInt(Math.round(interpCamX)) - originX) / SIDE;
+        const camY = Number(BigInt(Math.round(interpCamY)) - originY) / SIDE;
+
+        // Actual player position
+        const realPlayerX = scratchF64[4 + 4];
+        const realPlayerY = scratchF64[5 + 4];
+
+        // Since the shader centers the camera, the center of the viewport is (Width/2, Height/2)
+        // Adjust for sprite size (SIDE=16) to center the sprite on its pivot
+        const playerX = INTERNAL_WIDTH / 2 + realPlayerX;
+        const playerY = INTERNAL_HEIGHT / 2 + realPlayerY;
+
+        // Send data to WebGPU
         const uniformData = new Float32Array([
             camX,
             camY,
             this.canvas.width,
             this.canvas.height,
-            currentTime / 1000,
+            currentTime,
             effectiveZoom,
             this.wireframeOpacity,
-            1.0,
+            1.0, // chunk opacity
+            playerX,
+            playerY,
         ]);
 
         this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
@@ -576,8 +588,8 @@ export class GameEngine {
             1,
         );
 
-        // Draw all tiles as instances. Uses a triangle-strip so 4 args instead of 6.
-        const instanceCount = this.tileMap.width * this.tileMap.height;
+        // Draw all tiles as instances. Uses a triangle-strip so 4 vextexCount instead of 6. Also add 1 more instance for the player!
+        const instanceCount = this.tileMap.width * this.tileMap.height + 1;
         renderPass.draw(4, instanceCount);
 
         renderPass.end();
