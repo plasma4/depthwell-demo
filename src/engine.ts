@@ -500,7 +500,6 @@ export class GameEngine {
             camera_scale_and_change[0] *
             camera_scale_and_change[1] ** (timeInterpolated - 1) *
             resolutionScale;
-        console.log(effectiveZoom);
 
         // logic-frame camera position
         const baseCamX = camera_pos[0];

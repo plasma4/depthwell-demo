@@ -30,8 +30,8 @@ const CAMERA_CHANGE_SPEED = 1.02;
 /// How fast camera smoothing should be. Larger means faster.
 const CAMERA_SMOOTHING = 0.1;
 /// How far the player has to move before actually panning the camera.
-const CAMERA_DEADZONE_X = 4 * memory.SIDE_FLOAT_SQ; // 4 blocks
-const CAMERA_DEADZONE_Y = 6 * memory.SIDE_FLOAT_SQ; // 6 blocks
+const CAMERA_DEADZONE_X = 10 * memory.SIDE_FLOAT_SQ; // 4 blocks
+const CAMERA_DEADZONE_Y = 5 * memory.SIDE_FLOAT_SQ; // 6 blocks
 
 const pixel_mult: v2f64 = .{ @floatFromInt(SIDE), @floatFromInt(SIDE) };
 var subpixel_accum: v2f64 = .{ 0.0, 0.0 }; // note that vectors are smartly aligned already

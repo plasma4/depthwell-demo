@@ -175,9 +175,8 @@ pub const World = struct {
         const current_depth = memory.game.current_depth;
         const layer_seed = self.path.get_current_seed();
 
-        // Fetch the perfectly avalanched chunk seed via the O(1) Quad-Cache lookup
+        // Fetch the perfectly avalanched chunk seed via the O(1) quad-cache lookup
         const chunk_seed = self.quad_cache.get_chunk_seed(layer_seed, cx, cy);
-
         generate_chunk(chunk, chunk_seed, cx, cy, current_depth);
 
         self.chunk_cache.put(key, chunk) catch @panic("chunk cache put failed");

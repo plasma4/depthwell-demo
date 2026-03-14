@@ -8,6 +8,7 @@
         html {
             background-color: black;
             color: white;
+            user-select: none;
         }
 
         canvas {
@@ -25,15 +26,43 @@
             height: 100%;
         }
 
-        #text {
-            position: absolute;
-            top: 2px;
-            left: 2px;
+        #text1,
+        #text2,
+        #text3,
+        #text4 {
+            position: fixed;
             font-family: monospace;
             font-size: 18px;
+            padding: 2px;
+            margin: 4px;
             line-height: 1.1;
-            background-color: black;
+            background-color: #0006;
             border-radius: 4px;
+            white-space: pre-wrap;
+        }
+
+        #text1 {
+            color: oklch(60.541% 0.22463 23.873);
+            top: 2px;
+            left: 2px;
+        }
+
+        #text2 {
+            color: oklch(80.741% 0.16209 86);
+            top: 2px;
+            right: 2px;
+        }
+
+        #text3 {
+            color: oklch(66.092% 0.19864 145);
+            bottom: 2px;
+            left: 2px;
+        }
+
+        #text4 {
+            color: oklch(0.5971 0.1875 245);
+            bottom: 2px;
+            right: 2px;
         }
     </style>
     <script type="module" src="src/main.ts"></script>
@@ -41,7 +70,10 @@
 
 <body>
     <canvas></canvas>
-    <div id="text">Hi</div>
+    <span id="text1"></span>
+    <span id="text2"></span>
+    <span id="text3"></span>
+    <span id="text4"></span>
 </body>
 
 </html>

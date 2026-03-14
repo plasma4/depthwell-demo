@@ -17,9 +17,8 @@ pub var world_state: ?World = null;
 
 /// Initializes the game.
 pub fn init() void {
-    logger.log(@src(), "init() called: Hello from Zig!", .{});
-
     world_state = World.init(memory.allocator, memory.game.seed);
+    logger.log(@src(), "Hello from Zig!", .{});
 }
 
 pub fn prepare_visible_chunks() void {
@@ -108,6 +107,8 @@ inline fn update_render_properties(game: *memory.GameState, wb: u32, hb: u32, mi
     const screen_px_y = (@as(f64, @floatFromInt(game.player_pos[1])) - game.camera_pos[1]) / 16.0;
     memory.mem.scratch_properties[4] = @bitCast(screen_px_x);
     memory.mem.scratch_properties[5] = @bitCast(screen_px_y);
+    logger.clear(0);
+    logger.write(0, .{ "{h}Camera data", screen_px_x, screen_px_y });
 
     // current camera "delta" (how much it moved this tick) for interpolation
     memory.mem.scratch_properties[6] = @bitCast(game.camera_pos[0] - game.last_camera_pos[0]);

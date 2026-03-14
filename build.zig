@@ -3,6 +3,7 @@ const std = @import("std");
 // Run zig build normally, and zig build -Doptimize=ReleaseFast for the final version. Use zig build --Dgen-enums as well to automatically construct src/enums.ts and zig test "zig/root.zig" to run all tests across the codebase.
 pub fn build(b: *std.Build) void {
     b.install_path = ".";
+    const gen_enums = b.option(bool, "gen-enums", "Regenerate TypeScript enum definitions") orelse false; // -Dgen-enums
     const target = b.standardTargetOptions(.{
         .default_target = .{
             .cpu_arch = .wasm32, // WASM 32-bit. Should work with 64-bit too (if Memory64 is needed for some reason).
@@ -39,7 +40,6 @@ pub fn build(b: *std.Build) void {
         "main.wasm",
     );
     b.getInstallStep().dependOn(&install_wasm.step); // install
-    const gen_enums = b.option(bool, "gen-enums", "Regenerate TypeScript enum definitions") orelse false;
     var is_enum_requested = false;
     if (gen_enums) {
         is_enum_requested = checkFilesChanged(b, &[_][]const u8{ "zig/root.zig", "zig/types.zig" });
@@ -90,7 +90,6 @@ fn checkFilesChanged(b: *std.Build, paths: []const []const u8) bool {
     var current_hash: [32]u8 = undefined;
     hasher.final(&current_hash);
 
-    // Use bytesToHex which returns [64]u8 as per your std/fmt.zig line 782
     const current_hash_hex: []const u8 = &std.fmt.bytesToHex(current_hash, .lower);
     const old_hash_hex: []const u8 = std.fs.cwd().readFileAlloc(b.allocator, cache_path, 64) catch |err| blk: {
         if (err != error.FileNotFound) {
@@ -98,15 +97,14 @@ fn checkFilesChanged(b: *std.Build, paths: []const []const u8) bool {
         }
         break :blk b.allocator.alloc(u8, 0) catch "";
     };
-    // @import("zig/logger.zig").quickWarn(.{ current_hash_hex, old_hash_hex, std.mem.eql(u8, current_hash_hex, old_hash_hex) });
+    // @import("zig/logger.zig").quick_warn(.{ current_hash_hex, old_hash_hex, std.mem.eql(u8, current_hash_hex, old_hash_hex) });
     defer if (old_hash_hex.len > 0) b.allocator.free(old_hash_hex);
 
-    // Compare the array [64]u8 against the slice []u8
+    // compare array to slice and update content hash if necessary
     if (std.mem.eql(u8, current_hash_hex, old_hash_hex)) {
         return false;
     }
 
-    // Update the cache
     std.fs.cwd().makePath(cache_root) catch {};
     std.fs.cwd().writeFile(.{ .sub_path = cache_path, .data = current_hash_hex }) catch {};
     return true;

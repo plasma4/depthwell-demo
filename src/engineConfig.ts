@@ -111,7 +111,15 @@ export async function create(
                         ][category](str);
                     }
                 },
-                // Add other external functions here
+                js_write_text: (id: number, ptr: number, len: number) => {
+                    const bytes = new Uint8Array(memory.buffer, ptr, len);
+                    const str = new TextDecoder().decode(bytes);
+
+                    const el = document.getElementById(`text${id + 1}`);
+                    if (el) {
+                        el.textContent = str;
+                    }
+                },
             },
         },
     );
