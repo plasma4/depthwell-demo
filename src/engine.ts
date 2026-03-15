@@ -5,7 +5,7 @@ import * as Seeding from "./seeding";
 import * as InputManager from "./inputManager";
 import * as EngineMaker from "./engineMaker";
 
-const SIDE = 16;
+const SPAN = 16;
 
 export enum WasmTypeCode {
     Uint8 = 8,
@@ -513,26 +513,26 @@ export class GameEngine {
         const interpCamX =
             baseCamX +
             camVelX * (timeInterpolated - 1) -
-            (INTERNAL_WIDTH * SIDE) / 2;
+            (INTERNAL_WIDTH * SPAN) / 2;
         const interpCamY =
             baseCamY +
             camVelY * (timeInterpolated - 1) -
-            (INTERNAL_HEIGHT * SIDE) / 2;
+            (INTERNAL_HEIGHT * SPAN) / 2;
 
         // grid origin in subpixerls
         const originX = scratchI64[2 + 4];
         const originY = scratchI64[3 + 4];
 
         // Calculated final camera position for the shader
-        const camX = Number(BigInt(Math.round(interpCamX)) - originX) / SIDE;
-        const camY = Number(BigInt(Math.round(interpCamY)) - originY) / SIDE;
+        const camX = Number(BigInt(Math.round(interpCamX)) - originX) / SPAN;
+        const camY = Number(BigInt(Math.round(interpCamY)) - originY) / SPAN;
 
         // Actual player position
         const realPlayerX = scratchF64[4 + 4];
         const realPlayerY = scratchF64[5 + 4];
 
         // Since the shader centers the camera, the center of the viewport is (Width/2, Height/2)
-        // Adjust for sprite size (SIDE=16) to center the sprite on its pivot
+        // Adjust for sprite size (SPAN=16) to center the sprite on its pivot
         const playerX = INTERNAL_WIDTH / 2 + realPlayerX;
         const playerY = INTERNAL_HEIGHT / 2 + realPlayerY;
 

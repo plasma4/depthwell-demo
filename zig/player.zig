@@ -4,8 +4,8 @@ const logger = @import("logger.zig");
 const KeyBits = @import("types.zig").KeyBits;
 const main = @import("main.zig");
 const world = @import("world.zig");
-const SIDE = memory.SIDE;
-const SIDE_SQ = memory.SIDE_SQ;
+const SPAN = memory.SPAN;
+const SPAN_SQ = memory.SPAN_SQ;
 const SUBPIXELS_IN_CHUNK = memory.SUBPIXELS_IN_CHUNK;
 
 const v2i64 = @Vector(2, i64);
@@ -29,15 +29,15 @@ const CAMERA_CHANGE_SPEED = 1.02;
 /// How fast camera smoothing should be. Larger means faster.
 const CAMERA_SMOOTHING = 0.1;
 /// How far the player has to move before actually panning the camera.
-const CAMERA_DEADZONE_X = 10 * memory.SIDE_FLOAT_SQ; // 4 blocks
-const CAMERA_DEADZONE_Y = 5 * memory.SIDE_FLOAT_SQ; // 6 blocks
+const CAMERA_DEADZONE_X = 10 * memory.SPAN_FLOAT_SQ; // 4 blocks
+const CAMERA_DEADZONE_Y = 5 * memory.SPAN_FLOAT_SQ; // 6 blocks
 
-const pixel_mult: v2f64 = .{ @floatFromInt(SIDE), @floatFromInt(SIDE) };
+const pixel_mult: v2f64 = .{ @floatFromInt(SPAN), @floatFromInt(SPAN) };
 var subpixel_accum: v2f64 = .{ 0.0, 0.0 }; // note that vectors are smartly aligned already
 
 pub fn move(logic_speed: f64) void {
     const game = &memory.game;
-    const player_speed = logic_speed * PLAYER_BASE_SPEED * SIDE;
+    const player_speed = logic_speed * PLAYER_BASE_SPEED * SPAN;
     var input_dir: v2f64 = .{ 0.0, 0.0 };
 
     const old_camera_scale = game.camera_scale;
@@ -141,18 +141,18 @@ fn is_colliding(px: i64, py: i64, w: *world.World) bool {
 
     for (corners) |c| {
         // Convert subpixel units to Block coordinates (1 block = 256 units)
-        const bx: i32 = @intCast(@divFloor(c[0], SIDE_SQ));
-        const by: i32 = @intCast(@divFloor(c[1], SIDE_SQ));
+        const bx: i32 = @intCast(@divFloor(c[0], SPAN_SQ));
+        const by: i32 = @intCast(@divFloor(c[1], SPAN_SQ));
 
         // Get the relative chunk (-1, 0, or 1 relative to player center)
-        const cx = @divFloor(bx, SIDE);
-        const cy = @divFloor(by, SIDE);
+        const cx = @divFloor(bx, SPAN);
+        const cy = @divFloor(by, SPAN);
         const chunk = w.get__chunk(cx, cy);
 
         // Get the block within that chunk
-        const lx: u4 = @intCast(@mod(bx, SIDE));
-        const ly: u4 = @intCast(@mod(by, SIDE));
-        const block = chunk.blocks[ly * SIDE + lx];
+        const lx: u4 = @intCast(@mod(bx, SPAN));
+        const ly: u4 = @intCast(@mod(by, SPAN));
+        const block = chunk.blocks[ly * SPAN + lx];
 
         if (block.id != world.SPRITE_VOID and block.id != world.SPRITE_MUSHROOM) {
             return true;

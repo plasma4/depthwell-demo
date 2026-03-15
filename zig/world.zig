@@ -6,10 +6,10 @@ const seeding = @import("seeding.zig");
 
 const Chunk = memory.Chunk;
 const Block = memory.Block;
-const SIDE = memory.SIDE;
+const SPAN = memory.SPAN;
 
 pub const WORLD_CHUNKS = 4096;
-const PLAYER_EDGE: i64 = 4096 * memory.SIDE;
+const PLAYER_EDGE: i64 = 4096 * memory.SPAN;
 
 /// Sprite IDs, based on src/main.png
 pub const Sprite = enum(u20) {
@@ -253,11 +253,11 @@ pub fn generate_chunk(chunk: *Chunk, chunk_seed: seeding.LayerSeed, abs_cx: u64,
     const world_limit_blocks: u64 = if (has_boundary) (@as(u64, 1) << @intCast(depth * 4)) else 0;
     const max_block: u64 = if (has_boundary) (world_limit_blocks - 1) else 0;
 
-    for (0..SIDE) |ly| {
-        for (0..SIDE) |lx| {
-            const idx = ly * SIDE + lx;
-            const gbx = (abs_cx * SIDE) + lx;
-            const gby = (abs_cy * SIDE) + ly;
+    for (0..SPAN) |ly| {
+        for (0..SPAN) |lx| {
+            const idx = ly * SPAN + lx;
+            const gbx = (abs_cx * SPAN) + lx;
+            const gby = (abs_cy * SPAN) + ly;
 
             // Hard boundary check for finite worlds
             if (has_boundary) {
@@ -280,10 +280,10 @@ pub fn generate_chunk(chunk: *Chunk, chunk_seed: seeding.LayerSeed, abs_cx: u64,
         }
     }
 
-    for (0..SIDE - 1) |ly| {
-        for (0..SIDE) |lx| {
-            const idx = ly * SIDE + lx;
-            const block_below = chunk.blocks[(ly + 1) * SIDE + lx].id;
+    for (0..SPAN - 1) |ly| {
+        for (0..SPAN) |lx| {
+            const idx = ly * SPAN + lx;
+            const block_below = chunk.blocks[(ly + 1) * SPAN + lx].id;
 
             if (chunk.blocks[idx].id == Sprite.none and
                 block_below != Sprite.none and block_below != Sprite.torch and block_below != Sprite.mushroom)
@@ -317,5 +317,5 @@ pub fn generate_chunk(chunk: *Chunk, chunk_seed: seeding.LayerSeed, abs_cx: u64,
 //     const block_y = @divFloor(@mod(world_subpixel_y, 4096), 256);
 
 //     // Returns exact block coordinate. @floor() this to get the integer block index.
-//     return .{ world_x / SIDE, world_y / SIDE };
+//     return .{ world_x / SPAN, world_y / SPAN };
 // }

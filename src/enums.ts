@@ -11,7 +11,7 @@ export type Pointer = number | bigint;
 export type LengthLike = number | bigint;
 
 /**
- * A pointer in the WASM memory (converted to number).
+ * A pointer in the WASM memory (converted from potential BigInt to number).
  */
 export type PointerLike = number;
 

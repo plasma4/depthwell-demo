@@ -6,18 +6,18 @@ const ColorRGBA = @import("color_rgba.zig").ColorRGBA;
 const World = @import("world.zig");
 pub const is_wasm = builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
 
-/// Represents log2(SIDE).
-pub const SIDE_LOG2: comptime_int = 4;
+/// Represents log2(SPAN).
+pub const SPAN_LOG2: comptime_int = 4;
 /// The main number (as an integer) representing the number of blocks in a chunk, number of pixels in a block, and number of subpixels in a pixel.
-pub const SIDE: comptime_int = 16;
+pub const SPAN: comptime_int = 16;
 /// The main number (as a float) representing the number of blocks in a chunk, number of pixels in a block, and number of subpixels in a pixel.
-pub const SIDE_FLOAT: comptime_float = 16.0;
+pub const SPAN_FLOAT: comptime_float = 16.0;
 /// An integer representing the number of subpixels in a block, pixels in a chunk, number of blocks in a chunk, number of pixels in a block, and number of possible subpixel positions within a pixel.
-pub const SIDE_SQ: comptime_int = SIDE * SIDE;
+pub const SPAN_SQ: comptime_int = SPAN * SPAN;
 /// A float representing the number of subpixels in a block, pixels in a chunk, number of blocks in a chunk, number of pixels in a block, and number of possible subpixel positions within a pixel.
-pub const SIDE_FLOAT_SQ: comptime_float = SIDE_FLOAT * SIDE_FLOAT;
+pub const SPAN_FLOAT_SQ: comptime_float = SPAN_FLOAT * SPAN_FLOAT;
 /// An integer representing the number of subpixels within a chunk. The player's X and Y coordinate should wrap around such that it is between 0 and this value (inclusive).
-pub const SUBPIXELS_IN_CHUNK: comptime_int = SIDE * SIDE * SIDE;
+pub const SUBPIXELS_IN_CHUNK: comptime_int = SPAN * SPAN * SPAN;
 
 // Only create an actual GPA instance if building for native.
 var gpa = if (!is_wasm and !builtin.is_test)
@@ -76,7 +76,7 @@ pub const Block = packed struct {
 
 /// 16x16 fixed grid of blocks.
 pub const Chunk = struct {
-    blocks: [SIDE_SQ]Block,
+    blocks: [SPAN_SQ]Block,
     /// 256 bits representing which blocks have been modified from the base procedural generation.
     modified_mask: [4]u64,
 

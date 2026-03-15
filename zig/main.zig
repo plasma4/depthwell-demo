@@ -6,8 +6,8 @@ const seeding = @import("seeding.zig");
 const world = @import("world.zig");
 const World = world.World;
 
-const SIDE = memory.SIDE;
-const SIDE_FLOAT = memory.SIDE_FLOAT;
+const SPAN = memory.SPAN;
+const SPAN_FLOAT = memory.SPAN_FLOAT;
 const SUBPIXELS_IN_CHUNK = memory.SUBPIXELS_IN_CHUNK;
 const SCREEN_WIDTH = 480;
 const SCREEN_HEIGHT = 270;
@@ -25,21 +25,21 @@ pub fn prepare_visible_chunks() void {
     const w = if (world_state) |*ws| ws else return;
     const game = &memory.game;
 
-    const cam_bx: i32 = @intFromFloat(game.camera_pos[0] / (SIDE_FLOAT * SIDE_FLOAT));
-    const cam_by: i32 = @intFromFloat(game.camera_pos[1] / (SIDE_FLOAT * SIDE_FLOAT));
+    const cam_bx: i32 = @intFromFloat(game.camera_pos[0] / (SPAN_FLOAT * SPAN_FLOAT));
+    const cam_by: i32 = @intFromFloat(game.camera_pos[1] / (SPAN_FLOAT * SPAN_FLOAT));
 
-    const half_w: i32 = @intFromFloat((SCREEN_WIDTH_HALF / SIDE_FLOAT) / game.camera_scale);
-    const half_h: i32 = @intFromFloat((SCREEN_HEIGHT_HALF / SIDE_FLOAT) / game.camera_scale);
+    const half_w: i32 = @intFromFloat((SCREEN_WIDTH_HALF / SPAN_FLOAT) / game.camera_scale);
+    const half_h: i32 = @intFromFloat((SCREEN_HEIGHT_HALF / SPAN_FLOAT) / game.camera_scale);
 
-    const min_cx: i32 = @divFloor(cam_bx - half_w, SIDE) - 1;
-    const min_cy: i32 = @divFloor(cam_by - half_h, SIDE) - 1;
-    const max_cx: i32 = @divFloor(cam_bx + half_w, SIDE) + 1;
-    const max_cy: i32 = @divFloor(cam_by + half_h, SIDE) + 1;
+    const min_cx: i32 = @divFloor(cam_bx - half_w, SPAN) - 1;
+    const min_cy: i32 = @divFloor(cam_by - half_h, SPAN) - 1;
+    const max_cx: i32 = @divFloor(cam_bx + half_w, SPAN) + 1;
+    const max_cy: i32 = @divFloor(cam_by + half_h, SPAN) + 1;
 
     const cw: u32 = @intCast(max_cx - min_cx + 1);
     const ch: u32 = @intCast(max_cy - min_cy + 1);
-    const wb = cw * SIDE;
-    const hb = ch * SIDE;
+    const wb = cw * SPAN;
+    const hb = ch * SPAN;
 
     const moved_chunk = game.active_chunk[0] != game.last_active_chunk_x or game.active_chunk[1] != game.last_active_chunk_y;
     if (!game.grid_dirty and !moved_chunk and game.last_grid_min_bx == @as(u32, @bitCast(min_cx))) {
@@ -53,8 +53,8 @@ pub fn prepare_visible_chunks() void {
     memory.scratch_reset();
     const out = memory.scratch_alloc_slice(memory.Block, wb * hb) orelse return;
 
-    const world_limit: u64 = if (game.current_depth < SIDE)
-        (@as(u64, 1) << @intCast(game.current_depth * memory.SIDE_LOG2))
+    const world_limit: u64 = if (game.current_depth < SPAN)
+        (@as(u64, 1) << @intCast(game.current_depth * memory.SPAN_LOG2))
     else
         std.math.maxInt(u64);
 
@@ -74,13 +74,13 @@ pub fn prepare_visible_chunks() void {
             // If abs_cx < 0, u_abs_cx will be massive (wrapping), thus > world_limit.
             if (u_abs_cx < world_limit and u_abs_cy < world_limit) {
                 const chunk = w.get_chunk(@intCast(abs_cx), @intCast(abs_cy));
-                for (0..SIDE) |ly| {
-                    @memcpy(out[(gy * SIDE + ly) * wb + gx * SIDE ..][0..SIDE], chunk.blocks[ly * SIDE ..][0..SIDE]);
+                for (0..SPAN) |ly| {
+                    @memcpy(out[(gy * SPAN + ly) * wb + gx * SPAN ..][0..SPAN], chunk.blocks[ly * SPAN ..][0..SPAN]);
                 }
             } else {
-                for (0..SIDE) |ly| {
-                    const row_start = (gy * SIDE + ly) * wb + gx * SIDE;
-                    @memset(out[row_start .. row_start + SIDE], world.AIR_BLOCK);
+                for (0..SPAN) |ly| {
+                    const row_start = (gy * SPAN + ly) * wb + gx * SPAN;
+                    @memset(out[row_start .. row_start + SPAN], world.AIR_BLOCK);
                 }
             }
         }
@@ -120,7 +120,7 @@ pub fn portal_zoom_in(bx: u32, by: u32) void {
     const game = &memory.game;
 
     const chunk = w.get_chunk(game.active_chunk[0], game.active_chunk[1]);
-    const parent_id = chunk.blocks[(by % SIDE) * SIDE + (bx % SIDE)].id;
+    const parent_id = chunk.blocks[(by % SPAN) * SPAN + (bx % SPAN)].id;
 
     // This is the source of truth. push_layer clears caches and invalidates the Quad-Cache.
     w.push_layer(game.active_chunk[0], game.active_chunk[1], parent_id);

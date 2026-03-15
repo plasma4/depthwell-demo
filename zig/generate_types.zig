@@ -25,16 +25,24 @@ fn zigTypeToTs(comptime T: type) []const u8 {
 /// the offset of that field in the provided `T`.
 pub fn GenerateOffsets(comptime T: type) type {
     const info = @typeInfo(T).@"struct";
+    const Storage = struct {
+        const offsets = blk: {
+            var values: [info.fields.len]usize = undefined;
+            for (info.fields, 0..) |field, i| {
+                values[i] = @offsetOf(T, field.name);
+            }
+            break :blk values;
+        };
+    };
+
     var fields: [info.fields.len]std.builtin.Type.StructField = undefined;
 
     inline for (info.fields, 0..) |field, i| {
-        //Make comptime constant of type usize to give the value a layout
-        const offset_value: usize = @offsetOf(T, field.name);
-
         fields[i] = .{
             .name = field.name,
             .type = usize,
-            .default_value_ptr = &offset_value,
+            // Point to the stable memory in our Storage struct
+            .default_value_ptr = @ptrCast(&Storage.offsets[i]),
             .is_comptime = false,
             .alignment = @alignOf(usize),
         };
@@ -72,7 +80,7 @@ pub fn main() !void {
         \\export type LengthLike = number | bigint;
         \\
         \\/**
-        \\ * A pointer in the WASM memory (converted to number).
+        \\ * A pointer in the WASM memory (converted from potential BigInt to number).
         \\ */
         \\export type PointerLike = number;
         \\
@@ -159,14 +167,18 @@ pub fn main() !void {
         }
     }
 
+    const stdout = std.fs.File.stdout();
+    try stdout.writeAll(bw.written());
+
     const args = try std.process.argsAlloc(allocator);
+    if (args.len < 4) {
+        std.log.warn("Missing cache arguments. Skipping cache write.", .{});
+        return; // Exit function without error
+    }
     defer std.process.argsFree(allocator, args);
     const cache_root = args[1];
     const cache_path = args[2];
     const current_hash_hex = args[3];
     std.fs.cwd().makePath(cache_root) catch {};
     std.fs.cwd().writeFile(.{ .sub_path = cache_path, .data = current_hash_hex }) catch {};
-
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll(bw.written());
 }
