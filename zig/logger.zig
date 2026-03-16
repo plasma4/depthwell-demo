@@ -140,12 +140,7 @@ fn write_value(writer: anytype, val: anytype) void {
             writer.print("{d}", .{val}) catch {};
         },
         .float, .comptime_float => {
-            // At least 1 decimal place
-            if (val == @floor(val)) {
-                writer.print("{d}.0", .{val}) catch {};
-            } else {
-                writer.print("{d}", .{val}) catch {};
-            }
+            writer.print("{d:.5}", .{val}) catch {}; // 5 decimal places
         },
         .bool => {
             writer.print("{}", .{val}) catch {};
@@ -160,6 +155,20 @@ fn write_value(writer: anytype, val: anytype) void {
                 writer.writeAll("null") catch {};
             }
         },
+        .vector => |ptr_info| {
+            writer.writeAll("(") catch {};
+
+            // Vectors have a fixed length known at compile-time
+            comptime var i: usize = 0;
+            inline while (i < ptr_info.len) : (i += 1) {
+                if (i > 0) writer.writeAll(", ") catch {};
+
+                // Recursively call write_value for each element
+                write_value(writer, val[i]);
+            }
+
+            writer.writeAll(")") catch {};
+        },
         .pointer => |ptr_info| {
             if (ptr_info.size == .one) {
                 // De-reference single pointers and try again
@@ -169,15 +178,20 @@ fn write_value(writer: anytype, val: anytype) void {
                 writer.print("{*}", .{val}) catch {};
             }
         },
-        .@"struct" => {
-            // Check for ArrayList or similar 'items' containers
+        .@"struct" => |ptr_info| {
             if (@hasField(T, "items") and comptime isString(@TypeOf(val.items))) {
                 writer.print("{s}", .{val.items}) catch {};
             } else {
-                writer.print("{any}", .{val}) catch {};
+                writer.writeAll("{ ") catch {};
+                inline for (ptr_info.fields, 0..) |field, i| {
+                    if (i > 0) writer.writeAll(", ") catch {};
+                    writer.print(".{s} = ", .{field.name}) catch {};
+                    write_value(writer, @field(val, field.name));
+                }
+
+                writer.writeAll(" }") catch {};
             }
-        },
-        // Fallback for everything else (unions, error sets, etc)
+        }, // Fallback for everything else (unions, error sets, etc)
         else => {
             writer.print("{any}", .{val}) catch {};
         },
@@ -215,7 +229,7 @@ fn format_args(writer: anytype, args: anytype) !void {
         // Header logic on the first field
         if (i == 0 and comptime isString(@TypeOf(val))) {
             const str: []const u8 = val;
-            if (std.mem.startsWith(u8, str, "{h}")) {
+            if (str.len >= 3 and std.mem.startsWith(u8, str, "{h}")) {
                 has_header = true;
                 skip_val = true;
                 try writer.writeAll(str[3..]);
@@ -285,7 +299,7 @@ fn writer_truncate(stream: anytype, args: anytype) bool {
     return true;
 }
 
-/// Clears the text from a specific UI buffer (id 0-3).
+/// Clears the text from a specific UI buffer (id 0-3). No-op in release modes.
 pub inline fn clear(id: u2) void {
     if (builtin.mode != .Debug) return;
     text_lengths[id] = 0;

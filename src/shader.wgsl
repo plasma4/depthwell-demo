@@ -1,11 +1,10 @@
 /*
- * Main shader for the program.
+ * Main shader for the Depthwell.
  */
-// Sprite sheet constants. Sprites are saved as a .png, and each asset is 16x16.
+// Sprite sheet constants. Sprites are saved as a .png, and each asset is 16x16. Currently, there are some sprites further to the right that are unused (due to being bad or unnecessary).
 // Current sprites: [void, player, void stone, stone, greenstone, bloodstone, torch, mushrooms, mushrooms 2]
 const TILES_PER_ROW: f32 = 15.0;
 const TILES_PER_COLUMN: f32 = 1.0;
-
 
 const TILE_SIZE: f32 = 16.0;
 const ATLAS_TILE_SIZE: f32 = 16.0;
@@ -107,12 +106,15 @@ fn vs_main(
 
     var out: VertexOutput;
     if (instance_index >= total_tiles) {
-        let screen_pos = (scene.player_screen_pos + local_pos * TILE_SIZE) * scene.zoom;
+        // There's intentionally one more instance than the number of tiles to render the player!
+        let world_pos = scene.player_screen_pos + local_pos * TILE_SIZE;
+        let screen_pos = (world_pos - scene.camera) * scene.zoom + (scene.viewport_size * 0.5);
+
         let ndc = vec2f(
             (screen_pos.x / scene.viewport_size.x) * 2.0 - 1.0,
             1.0 - (screen_pos.y / scene.viewport_size.y) * 2.0
         );
-        
+
         // Prevent "texture bleeding"
         let epsilon = 0.5 / ATLAS_WIDTH;
         let safe_local_pos = clamp(local_pos, vec2f(epsilon), vec2f(1.0 - epsilon));
@@ -140,8 +142,12 @@ fn vs_main(
 
     let tile_x = instance_index % map_size.x;
     let tile_y = instance_index / map_size.x;
-    let world_pos = vec2f(f32(tile_x), f32(tile_y)) * TILE_SIZE + local_pos * TILE_SIZE;
-    let screen_pos = (world_pos - scene.camera) * scene.zoom;
+    let world_pixel_pos = vec2f(f32(tile_x), f32(tile_y)) * TILE_SIZE + local_pos * TILE_SIZE;
+
+    // get offset from camera center in world pixels
+    let offset_from_cam = world_pixel_pos - scene.camera;
+    // scale that offset by zoom, then add the screen center
+    let screen_pos = (offset_from_cam * scene.zoom) + (scene.viewport_size * 0.5);
 
     // normalize
     let ndc = vec2f(
@@ -189,31 +195,41 @@ fn calculate_atlas_uv(id: u32, local_pos: vec2f) -> vec2f {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var tex_color = textureSample(sprite_atlas, pixel_sampler, in.uv);
-    
+
     var is_wireframe = false;
     var wire_color = vec4f(0.0);
 
     if (scene.wireframe_opacity > 0.0) {
-        // render wireframe due to being at the edge?
-        let pixel_size = 1.001 / (TILE_SIZE * scene.zoom);
-        // Is this pixel on the edge of the CURRENT BLOCK?
-        let is_block_edge = in.local_uv.x < pixel_size || in.local_uv.x > (1.0 - pixel_size) || in.local_uv.y < pixel_size || in.local_uv.y > (1.0 - pixel_size);
+        // render wireframe due to being at the edge of a block?
+        let inv_tile_scale = 1.00001 / (TILE_SIZE * scene.zoom);
+        let is_block_edge = any(in.local_uv < vec2f(inv_tile_scale)) || any(in.local_uv > vec2f(1.0 - inv_tile_scale));
 
         if (is_block_edge) {
             is_wireframe = true;
-            let x_mod = in.tile_coords.x & 15;
-            let y_mod = in.tile_coords.y & 15;
-            let is_chunk_edge_x = (x_mod == 0u && in.local_uv.x < pixel_size) || (x_mod == 15u && in.local_uv.x > (1.0 - pixel_size));
-            let is_chunk_edge_y = (y_mod == 0u && in.local_uv.y < pixel_size) || (y_mod == 15u && in.local_uv.y > (1.0 - pixel_size));
-            
+            let x_mod = in.tile_coords.x & 15u;
+            let y_mod = in.tile_coords.y & 15u;
+
             if (in.sprite_id == 1u) {
                 wire_color = vec4f(1.0, 0.5, 0.0, 1.0);
-            } else if (is_chunk_edge_x || is_chunk_edge_y) {
-                wire_color = vec4f(1.0, 1.0, 0.0, 1.0);
             } else {
-                // fancy schmancy coloring looks cool but is harder to visually distinguish
-                wire_color = vec4f(1.0, f32(x_mod) * 0.0625, f32(y_mod) * 0.0625, scene.wireframe_opacity);
-                // wire_color = vec4f(1.0, 0.0, 0.0, scene.wireframe_opacity);
+                // Is this pixel on the edge of a CHUNK?
+                let is_chunk_edge =
+                    (x_mod == 0u && in.local_uv.x < inv_tile_scale) ||
+                    (x_mod == 15u && in.local_uv.x > (1.0 - inv_tile_scale)) ||
+                    (y_mod == 0u && in.local_uv.y < inv_tile_scale) ||
+                    (y_mod == 15u && in.local_uv.y > (1.0 - inv_tile_scale));
+
+                if (is_chunk_edge) {
+                    wire_color = vec4f(1.0, 1.0, 0.0, min(1, scene.wireframe_opacity * 2.5));
+                } else {
+                    // wire_color = vec4f(1.0, 0.0, 0.0, scene.wireframe_opacity);
+
+                    // neat fancy wireframe coloring
+                    let r = f32(x_mod) * 0.0625;
+                    let g = f32(y_mod) * 0.0625;
+                    let b = 0.5 + f32(x_mod ^ y_mod) * 0.03125;
+                    wire_color = vec4f(r, g, b, scene.wireframe_opacity);
+                }
             }
         }
     }
@@ -224,27 +240,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var final_rgb = vec3f(0.0);
     var final_a = 0.0;
 
-    if (tex_color.a >= 0.01) {
-        // convert to oklab and nudge values with seed
-        var lab = linear_srgb_to_oklab(tex_color.rgb);
-        // we use 10 out of the 24 seed bits here
-        let l_nudge = f32(extractBits(in.seed, 0u, 4u)) / 15.0;
-        let a_nudge = f32(extractBits(in.seed, 4u, 3u)) / 7.0;
-        let b_nudge = f32(extractBits(in.seed, 7u, 3u)) / 7.0;
+    // convert to oklab and nudge values with seed
+    var lab = linear_srgb_to_oklab(tex_color.rgb);
+    // we use 10 out of the 24 seed bits here
+    let l_nudge = f32(extractBits(in.seed, 0u, 4u)) / 15.0;
+    let a_nudge = f32(extractBits(in.seed, 4u, 3u)) / 7.0;
+    let b_nudge = f32(extractBits(in.seed, 7u, 3u)) / 7.0;
 
-        // shift lightness
-        lab.x += (l_nudge - 0.5) * 0.1;
-        // shift green-red and blue-yellow
-        lab.y += (a_nudge - 0.5) * 0.02;
-        lab.z += (b_nudge - 0.5) * 0.02;
+    // shift lightness
+    lab.x += (l_nudge - 0.5) * 0.1;
+    // shift green-red and blue-yellow
+    lab.y += (a_nudge - 0.5) * 0.02;
+    lab.z += (b_nudge - 0.5) * 0.02;
 
-        // add the edge darkening and base light value, with the function using bits 10-16
-        let darkening = calculate_edge_darkening(in.local_uv, in.edge_flags, in.seed);
-        lab.x *= (1.0 - darkening) * in.light;
+    // add the edge darkening and base light value, with the function using bits 10-16
+    let darkening = calculate_edge_darkening(in.local_uv, in.edge_flags, in.seed);
+    lab.x *= (1.0 - darkening) * in.light;
 
-        final_rgb = oklab_to_linear_srgb(lab);
-        final_a = tex_color.a * scene.chunk_opacity;
-    }
+    final_rgb = oklab_to_linear_srgb(lab);
+    final_a = tex_color.a * scene.chunk_opacity;
 
     if (is_wireframe) {
         // Correctly mix the wireframe dynamically depending on whether the block exists below it.
@@ -334,4 +348,14 @@ fn oklab_to_linear_srgb(c: vec3f) -> vec3f {
        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
        -0.0041960863 * l - 0.7034186147 * m + 1.7076127010 * s
     );
+}
+
+fn oklab_to_oklch(lab: vec3f) -> vec3f {
+    let chroma = length(lab.yz);
+    let hue = atan2(lab.z, lab.y);
+    return vec3f(lab.x, chroma, hue);
+}
+
+fn oklch_to_oklab(lch: vec3f) -> vec3f {
+    return vec3f(lch.x, lch.y * cos(lch.z), lch.y * sin(lch.z));
 }

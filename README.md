@@ -39,8 +39,6 @@ When zooming in, a new value is pushed to either the cache (if `current_depth` i
 
 ### Known issues
 
-- Enum regeneration changes hash even if building failed
-- Player wrapping is weird, make sure it works correctly with spring-damper camera
 - Individual block seeding algorithm mismatch with architecture explanation
 - Architecture of quad-cache not fully implemented properly
 

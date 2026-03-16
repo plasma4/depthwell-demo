@@ -41,7 +41,7 @@ pub fn build(b: *std.Build) void {
     );
     b.getInstallStep().dependOn(&install_wasm.step); // install
     if (gen_enums) {
-        generateEnums(b, &[_][]const u8{ "zig/root.zig", "zig/types.zig" });
+        generateEnums(b, &[_][]const u8{ "zig/root.zig", "zig/types.zig", "zig/memory.zig" });
     }
 }
 

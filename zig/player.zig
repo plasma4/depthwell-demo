@@ -1,3 +1,4 @@
+//! Handles the main player movement and camera logic.
 const std = @import("std");
 const memory = @import("memory.zig");
 const logger = @import("logger.zig");
@@ -8,8 +9,8 @@ const SPAN = memory.SPAN;
 const SPAN_SQ = memory.SPAN_SQ;
 const SUBPIXELS_IN_CHUNK = memory.SUBPIXELS_IN_CHUNK;
 
-const v2i64 = @Vector(2, i64);
-const v2f64 = @Vector(2, f64);
+const v2i64 = memory.v2i64;
+const v2f64 = memory.v2f64;
 
 const GRAVITY: f64 = 0.5;
 const JUMP_FORCE: f64 = -8.0; // idk TODO
@@ -24,17 +25,25 @@ const PLAYER_BASE_SPEED = 5;
 /// Half the size of the player's hitbox.
 const PLAYER_HITBOX_HALF = 96;
 
+/// Minimum camera zoom/scale allowed.
+const CAMERA_MIN_ZOOM = 0.1;
+/// Maximum camera zoom/scale allowed.
+const CAMERA_MAX_ZOOM = 1;
+
 /// The zoom in/out keys change the zoom multipler this fast per frame.
-const CAMERA_CHANGE_SPEED = 1.02;
+const CAMERA_CHANGE_SPEED = 1.05;
 /// How fast camera smoothing should be. Larger means faster.
 const CAMERA_SMOOTHING = 0.1;
-/// How far the player has to move before actually panning the camera.
-const CAMERA_DEADZONE_X = 10 * memory.SPAN_FLOAT_SQ; // 4 blocks
-const CAMERA_DEADZONE_Y = 5 * memory.SPAN_FLOAT_SQ; // 6 blocks
+
+/// How far the player has to move before actually panning the camera (x-axis).
+const CAMERA_DEADZONE_X = 10 * memory.SPAN_SQ; // 10 blocks
+/// How far the player has to move before actually panning the camera (y-axis).
+const CAMERA_DEADZONE_Y = 4 * memory.SPAN_SQ; // 4 blocks
 
 const pixel_mult: v2f64 = .{ @floatFromInt(SPAN), @floatFromInt(SPAN) };
 var subpixel_accum: v2f64 = .{ 0.0, 0.0 }; // note that vectors are smartly aligned already
 
+/// Moves the player, handling camera changes.
 pub fn move(logic_speed: f64) void {
     const game = &memory.game;
     const player_speed = logic_speed * PLAYER_BASE_SPEED * SPAN;
@@ -42,10 +51,10 @@ pub fn move(logic_speed: f64) void {
 
     const old_camera_scale = game.camera_scale;
     if (KeyBits.isSet(KeyBits.plus, game.keys_held_mask)) {
-        game.camera_scale = @min(game.camera_scale * CAMERA_CHANGE_SPEED, 4);
+        game.camera_scale = @min(game.camera_scale * CAMERA_CHANGE_SPEED, CAMERA_MAX_ZOOM);
     }
     if (KeyBits.isSet(KeyBits.minus, game.keys_held_mask)) {
-        game.camera_scale = @max(game.camera_scale / CAMERA_CHANGE_SPEED, 0.25);
+        game.camera_scale = @max(game.camera_scale / CAMERA_CHANGE_SPEED, CAMERA_MIN_ZOOM);
     }
     game.camera_scale_change = game.camera_scale / old_camera_scale;
 
@@ -63,6 +72,7 @@ pub fn move(logic_speed: f64) void {
 
     // Extract integer movement
     const move_vec = @as(v2i64, @intFromFloat(@floor(subpixel_accum)));
+    game.last_player_pos = game.player_pos;
     game.player_pos += move_vec;
     subpixel_accum -= @as(v2f64, @floatFromInt(move_vec));
 
@@ -74,7 +84,10 @@ pub fn move(logic_speed: f64) void {
 
             // Keep the player position within 0-4095 and rebase the camera
             game.player_pos[i] = @mod(game.player_pos[i], SUBPIXELS_IN_CHUNK);
-            const shift_amount = @as(f64, @floatFromInt(carry * SUBPIXELS_IN_CHUNK));
+
+            // Shift these variables since they're relative
+            const shift_amount = carry * SUBPIXELS_IN_CHUNK;
+            game.last_player_pos[i] -= shift_amount;
             game.camera_pos[i] -= shift_amount;
             game.last_camera_pos[i] -= shift_amount;
 
@@ -97,36 +110,34 @@ pub fn move(logic_speed: f64) void {
         }
     }
 
-    const player_world_x = @as(f64, @floatFromInt(game.player_pos[0]));
-    const player_world_y = @as(f64, @floatFromInt(game.player_pos[1]));
-
     game.last_camera_pos = game.camera_pos;
 
     // Calculate the current edges of the camera's "deadzone window"
-    const window_left = game.camera_pos[0] - CAMERA_DEADZONE_X;
-    const window_right = game.camera_pos[0] + CAMERA_DEADZONE_X;
-    const window_top = game.camera_pos[1] - CAMERA_DEADZONE_Y;
-    const window_bottom = game.camera_pos[1] + CAMERA_DEADZONE_Y;
+    const window_left = game.camera_pos[0] - @as(i64, @intFromFloat(CAMERA_DEADZONE_X / game.camera_scale));
+    const window_right = game.camera_pos[0] + @as(i64, @intFromFloat(CAMERA_DEADZONE_X / game.camera_scale));
+    const window_top = game.camera_pos[1] - @as(i64, @intFromFloat(CAMERA_DEADZONE_Y / game.camera_scale));
+    const window_bottom = game.camera_pos[1] + @as(i64, @intFromFloat(CAMERA_DEADZONE_Y / game.camera_scale));
 
     // Determine how much the player is "pushing" outside the window
-    var shift_x: f64 = 0;
-    var shift_y: f64 = 0;
+    var shift_x: i64 = 0;
+    var shift_y: i64 = 0;
 
-    if (player_world_x < window_left) {
-        shift_x = player_world_x - window_left;
-    } else if (player_world_x > window_right) {
-        shift_x = player_world_x - window_right;
+    if (game.player_pos[0] < window_left) {
+        shift_x = game.player_pos[0] - window_left;
+    } else if (game.player_pos[0] > window_right) {
+        shift_x = game.player_pos[0] - window_right;
     }
 
-    if (player_world_y < window_top) {
-        shift_y = player_world_y - window_top;
-    } else if (player_world_y > window_bottom) {
-        shift_y = player_world_y - window_bottom;
+    if (game.player_pos[1] < window_top) {
+        shift_y = game.player_pos[1] - window_top;
+    } else if (game.player_pos[1] > window_bottom) {
+        shift_y = game.player_pos[1] - window_bottom;
     }
 
-    // actually move
-    game.camera_pos[0] += shift_x * CAMERA_SMOOTHING;
-    game.camera_pos[1] += shift_y * CAMERA_SMOOTHING;
+    // actually move! since camera speed does not influence logic, std.math.pow can be non-deterministic
+    const smooth_speed = 1.0 - std.math.pow(f64, 1.0 - CAMERA_SMOOTHING, logic_speed);
+    game.camera_pos[0] += @intFromFloat(@as(f64, @floatFromInt(shift_x)) * smooth_speed);
+    game.camera_pos[1] += @intFromFloat(@as(f64, @floatFromInt(shift_y)) * smooth_speed);
 }
 
 /// AABB check against the world grid
@@ -147,7 +158,7 @@ fn is_colliding(px: i64, py: i64, w: *world.World) bool {
         // Get the relative chunk (-1, 0, or 1 relative to player center)
         const cx = @divFloor(bx, SPAN);
         const cy = @divFloor(by, SPAN);
-        const chunk = w.get__chunk(cx, cy);
+        const chunk = w.get_chunk(cx, cy);
 
         // Get the block within that chunk
         const lx: u4 = @intCast(@mod(bx, SPAN));

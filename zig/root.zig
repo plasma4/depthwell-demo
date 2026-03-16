@@ -15,8 +15,8 @@ pub export fn init() void {
 pub export fn reset() void {
     main.reset();
 }
-pub export fn prepare_visible_chunks() void {
-    main.prepare_visible_chunks();
+pub export fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f64) void {
+    main.prepare_visible_chunks(time_interpolated, canvas_w, canvas_h);
 }
 
 pub export fn tick(speed: f64) void {

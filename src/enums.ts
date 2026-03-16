@@ -33,7 +33,7 @@ export interface EngineExports extends WebAssembly.Exports {
 
     readonly init: () => void;
     readonly reset: () => void;
-    readonly prepare_visible_chunks: () => void;
+    readonly prepare_visible_chunks: (arg0: number, arg1: number, arg2: number) => void;
     readonly tick: (arg0: number) => void;
     readonly wasm_seed_from_string: () => void;
     readonly get_memory_layout_ptr: () => Pointer;
@@ -77,20 +77,21 @@ export const EdgeFlags = {
 
 export const game_state_offsets = {
     player_pos: 0,
-    active_chunk: 16,
-    player_velocity: 32,
-    camera_pos: 48,
-    last_camera_pos: 64,
-    camera_scale: 80,
-    camera_scale_change: 88,
-    player_screen_offset: 96,
-    grid_dirty: 104,
-    last_grid_min_bx: 108,
-    last_grid_min_by: 112,
-    last_active_chunk_x: 120,
-    last_active_chunk_y: 128,
-    current_depth: 136,
-    keys_pressed_mask: 140,
-    keys_held_mask: 144,
-    seed: 160,
+    last_player_pos: 16,
+    active_chunk: 32,
+    player_velocity: 48,
+    camera_pos: 64,
+    last_camera_pos: 80,
+    camera_scale: 96,
+    camera_scale_change: 104,
+    player_screen_offset: 112,
+    grid_dirty: 120,
+    last_grid_min_bx: 124,
+    last_grid_min_by: 128,
+    last_active_chunk_x: 136,
+    last_active_chunk_y: 144,
+    current_depth: 152,
+    keys_pressed_mask: 156,
+    keys_held_mask: 160,
+    seed: 176,
 } as const;

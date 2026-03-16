@@ -183,24 +183,20 @@ export class GameEngine {
     }
 
     /** Processes all chunks from Zig and uploads them to WGSL. */
-    public uploadVisibleChunks(): void {
-        this.exports.prepare_visible_chunks();
+    public uploadVisibleChunks(timeInterpolated: number): void {
+        this.exports.prepare_visible_chunks(
+            timeInterpolated,
+            this.canvas.width,
+            this.canvas.height,
+        );
 
         const scratchPtr = this.getScratchPtr();
         const scratchLen = this.getScratchLen();
         if (scratchLen === 0) return;
 
-        // Access the shared memory layout directly
-        const viewU64 = this.getScratchView();
-        const viewF64 = new Float64Array(
-            viewU64.buffer,
-            viewU64.byteOffset,
-            viewU64.length,
-        );
-
         // Read metadata from scratch_properties, matching from prepare_visible_chunks
-        const widthBlocks = Number(viewU64[0 + 4]);
-        const heightBlocks = Number(viewU64[1 + 4]);
+        const widthBlocks = Number(this.getScratchProperty(0));
+        const heightBlocks = Number(this.getScratchProperty(1));
 
         const u32Count = widthBlocks * heightBlocks * 2;
         const wasmView = new Uint32Array(
@@ -322,36 +318,27 @@ export class GameEngine {
      * Determines the properties of the scratch buffer (6 u64 constants from Zig converted to Number). Returns a number if ID of property is provided (0-4) and number[] of all 5 properties if not.
      */
     public getScratchProperty(
-        index:
-            | 0
-            | 1
-            | 2
-            | 3
-            | 4
-            | 5
-            | 6
-            | 7
-            | 8
-            | 9
-            | 10
-            | 11
-            | 12
-            | 13
-            | 14
-            | 15
-            | 16
-            | 17
-            | 18
-            | 19,
+        index: number,
         asType:
             | WasmTypeCode.Uint64
             | WasmTypeCode.Float64 = WasmTypeCode.Uint64,
     ): number {
-        let view: BigUint64Array | Float64Array = this.getScratchView();
+        if (
+            this._tempScratchView === null ||
+            this._tempScratchView.buffer !== this.memory.buffer // old view due to memory growth
+        ) {
+            this._tempScratchView = new BigUint64Array(
+                this.memory.buffer,
+                this.LAYOUT_PTR,
+                24,
+            );
+        }
+
+        let view: BigUint64Array | Float64Array = this._tempScratchView;
         if (asType == WasmTypeCode.Float64) {
             view = new Float64Array(view.buffer, view.byteOffset, view.length);
         }
-        return Number(view[index - 4]);
+        return Number(view[index + 4]);
     }
 
     /**
@@ -468,73 +455,14 @@ export class GameEngine {
         if (this.destroyed) return;
 
         this.updateCanvasStyle();
-        this.uploadVisibleChunks();
+        this.uploadVisibleChunks(timeInterpolated);
 
-        // Access these neat little scratch properties!
-        const scratchU64 = this.getScratchView();
-        const scratchF64 = new Float64Array(
-            scratchU64.buffer,
-            scratchU64.byteOffset,
-            scratchU64.length,
-        );
-        const scratchI64 = new BigInt64Array(
-            scratchU64.buffer,
-            scratchU64.byteOffset,
-            scratchU64.length,
-        );
-
-        // use game view to get some values
-        const camera_pos = this.getGameView(
-            WasmTypeCode.Float64,
-            Zig.game_state_offsets.camera_pos,
-            2,
-        );
-        const camera_scale_and_change = this.getGameView(
-            WasmTypeCode.Float64,
-            Zig.game_state_offsets.camera_scale,
-            2,
-        );
-
-        const resolutionScale = this.canvas.width / INTERNAL_WIDTH;
-        const effectiveZoom =
-            camera_scale_and_change[0] *
-            camera_scale_and_change[1] ** (timeInterpolated - 1) *
-            resolutionScale;
-
-        // logic-frame camera position
-        const baseCamX = camera_pos[0];
-        const baseCamY = camera_pos[1];
-
-        // camera's velocity (delta)
-        const camVelX = scratchF64[6 + 4];
-        const camVelY = scratchF64[7 + 4];
-
-        // interpolated camera
-        const interpCamX =
-            baseCamX +
-            camVelX * (timeInterpolated - 1) -
-            (INTERNAL_WIDTH * SPAN) / 2;
-        const interpCamY =
-            baseCamY +
-            camVelY * (timeInterpolated - 1) -
-            (INTERNAL_HEIGHT * SPAN) / 2;
-
-        // grid origin in subpixerls
-        const originX = scratchI64[2 + 4];
-        const originY = scratchI64[3 + 4];
-
-        // Calculated final camera position for the shader
-        const camX = Number(BigInt(Math.round(interpCamX)) - originX) / SPAN;
-        const camY = Number(BigInt(Math.round(interpCamY)) - originY) / SPAN;
-
-        // Actual player position
-        const realPlayerX = scratchF64[4 + 4];
-        const realPlayerY = scratchF64[5 + 4];
-
-        // Since the shader centers the camera, the center of the viewport is (Width/2, Height/2)
-        // Adjust for sprite size (SPAN=16) to center the sprite on its pivot
-        const playerX = INTERNAL_WIDTH / 2 + realPlayerX;
-        const playerY = INTERNAL_HEIGHT / 2 + realPlayerY;
+        // Read calculated values directly from Zig.
+        const camX = this.getScratchProperty(2, WasmTypeCode.Float64);
+        const camY = this.getScratchProperty(3, WasmTypeCode.Float64);
+        const effectiveZoom = this.getScratchProperty(4, WasmTypeCode.Float64);
+        const playerX = this.getScratchProperty(5, WasmTypeCode.Float64);
+        const playerY = this.getScratchProperty(6, WasmTypeCode.Float64);
 
         // Send data to WebGPU
         const uniformData = new Float32Array([
@@ -570,7 +498,7 @@ export class GameEngine {
                 {
                     view: textureView,
                     loadOp: "clear",
-                    clearValue: { r: 0.1, g: 0.1, b: 0.15, a: 1.0 },
+                    clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }, // color to use when clearing the background
                     storeOp: "store",
                 },
             ],

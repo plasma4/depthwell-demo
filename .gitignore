@@ -1,11 +1,7 @@
 /build
 compile_commands.json
 **/.DS_Store
-
-/.zig-cache/*
-!/.zig-cache/
-!/.zig-cache/content_hashes.txt
-
+/.zig-cache
 /node_modules
 /src/assets/main.aseprite
 /zig/internal

@@ -26,13 +26,18 @@
             height: 100%;
         }
 
+        ::selection {
+            background-color: white;
+        }
+
         #text1,
         #text2,
         #text3,
         #text4 {
             position: fixed;
             font-family: monospace;
-            font-size: 18px;
+            user-select: text;
+            font-size: 20px;
             padding: 2px;
             margin: 4px;
             line-height: 1.1;

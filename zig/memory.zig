@@ -19,6 +19,9 @@ pub const SPAN_FLOAT_SQ: comptime_float = SPAN_FLOAT * SPAN_FLOAT;
 /// An integer representing the number of subpixels within a chunk. The player's X and Y coordinate should wrap around such that it is between 0 and this value (inclusive).
 pub const SUBPIXELS_IN_CHUNK: comptime_int = SPAN * SPAN * SPAN;
 
+pub const v2i64 = @Vector(2, i64);
+pub const v2f64 = @Vector(2, f64);
+
 // Only create an actual GPA instance if building for native.
 var gpa = if (!is_wasm and !builtin.is_test)
     std.heap.GeneralPurposeAllocator(.{}){}
@@ -121,15 +124,17 @@ var is_dynamic_scratch: bool = false;
 /// Important data is meant to be placed at the start with less important data later. Data can be rearranged, but requires using the --Dgen-enums for pointer locations to be reflected in TypeScript. See game_state_offsets in types.zig for enum export details.
 pub const GameState = extern struct {
     /// Represents the player's subpixel position within the CURRENT chunk (0 to 4095).
-    player_pos: @Vector(2, i64) align(MAIN_ALIGN_BYTES) = .{ 0, 0 },
+    player_pos: @Vector(2, i64) align(MAIN_ALIGN_BYTES) = .{ 256, 256 },
+    /// Represents the player's position. Importantly, this is not necessarily equal to the player's velocity, as this handles teleports!
+    last_player_pos: @Vector(2, i64) = .{ 256, 256 },
     /// Represents the player's infinite active chunk coordinate.
     active_chunk: @Vector(2, u64) = .{ 0, 0 },
     /// Represents the player's current movement.
     player_velocity: @Vector(2, f64) = .{ 0, 0 },
     /// Represents the camera's position.
-    camera_pos: @Vector(2, f64) = .{ 0, 0 },
+    camera_pos: @Vector(2, i64) = .{ 256, 256 },
     /// Represents the camera's movement in a frame (derivative of camera_pos).
-    last_camera_pos: @Vector(2, f64) = .{ 0, 0 },
+    last_camera_pos: @Vector(2, i64) = .{ 256, 256 },
     /// Represents the camera's zoom scale.
     camera_scale: f64 = 1.0,
     /// Represents the camera's zoom scale change rate (multiplier, acts as derivative of camera_scale change).
