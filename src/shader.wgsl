@@ -1,5 +1,5 @@
 /*
- * Main shader for the Depthwell.
+ * Main shader for Depthwell.
  */
 // Sprite sheet constants. Sprites are saved as a .png, and each asset is 16x16. Currently, there are some sprites further to the right that are unused (due to being bad or unnecessary).
 // Current sprites: [void, player, void stone, stone, greenstone, bloodstone, torch, mushrooms, mushrooms 2]
@@ -242,16 +242,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
     // convert to oklab and nudge values with seed
     var lab = linear_srgb_to_oklab(tex_color.rgb);
+    var lch = oklab_to_oklch(lab);
     // we use 10 out of the 24 seed bits here
     let l_nudge = f32(extractBits(in.seed, 0u, 4u)) / 15.0;
     let a_nudge = f32(extractBits(in.seed, 4u, 3u)) / 7.0;
     let b_nudge = f32(extractBits(in.seed, 7u, 3u)) / 7.0;
 
-    // shift lightness
-    lab.x += (l_nudge - 0.5) * 0.1;
-    // shift green-red and blue-yellow
-    lab.y += (a_nudge - 0.5) * 0.02;
-    lab.z += (b_nudge - 0.5) * 0.02;
+    lch.x += (l_nudge - 0.5) * 0.1; // shift lightness (0-1)
+    lch.y += a_nudge * 0.01; // shift chroma, which acts similar to saturation (0-1)
+    lch.z += (b_nudge - 0.5) * 0.15; // shift hue (in RADIANS)
+
+    lab = oklch_to_oklab(lch);
 
     // add the edge darkening and base light value, with the function using bits 10-16
     let darkening = calculate_edge_darkening(in.local_uv, in.edge_flags, in.seed);

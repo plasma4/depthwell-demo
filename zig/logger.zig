@@ -13,16 +13,20 @@ const LogCategory = enum(i32) {
 /// Static logging buffer for messaging JS.
 var logging_buffer: [4096]u8 align(memory.MAIN_ALIGN_BYTES) = undefined;
 
-/// Logging buffer for text.
+/// Logging buffer for HTML text elements; split into four parts.
 var text_buffer: [4096]u8 align(memory.MAIN_ALIGN_BYTES) = undefined;
 const text_1 = text_buffer[0..1024];
 const text_2 = text_buffer[1024..2048];
 const text_3 = text_buffer[2048..3072];
 const text_4 = text_buffer[3072..4096];
+/// Represents the lengths of the strings in each text buffer (rendered to HTML elements).
 var text_lengths: [4]usize = .{ 0, 0, 0, 0 };
 
 /// Logging bridge between JS and WASM.
 extern "env" fn js_message(ptr: [*]const u8, len: usize, message_type: LogCategory) void;
+
+/// Logging bridge between JS and WASM for writing to specific text elements.
+extern "env" fn js_write_text(id: u8, ptr: [*]const u8, len: usize) void;
 
 // Sends a message (with pointer and length, as well as a message type) to either std.log with the appropriate category or JS.
 inline fn message(ptr: [*]const u8, len: usize, message_type: LogCategory) void {
@@ -126,6 +130,7 @@ pub inline fn quick_warn(args: anytype) void {
     message(&logging_buffer, written, .warn);
 }
 
+/// Internal helper to convert an argument of various types to consistent strings.
 fn write_value(writer: anytype, val: anytype) void {
     const T = @TypeOf(val);
     const type_info = @typeInfo(T);
@@ -245,9 +250,6 @@ fn format_args(writer: anytype, args: anytype) !void {
         }
     }
 }
-
-/// JS bridge for writing to specific text elements.
-extern "env" fn js_write_text(id: u8, ptr: [*]const u8, len: usize) void;
 
 /// Writes formatted text to one of the four UI text buffers. No-op in release modes.
 pub inline fn write(id: u2, args: anytype) void {

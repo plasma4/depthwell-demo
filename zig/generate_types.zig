@@ -3,7 +3,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const root = @import("root.zig");
 
-/// Maps primitive Zig types to TypeScript types.
+/// Maps primitive Zig types to TypeScript type names.
 fn zigTypeToTs(comptime T: type) []const u8 {
     switch (@typeInfo(T)) {
         .void => return "void",

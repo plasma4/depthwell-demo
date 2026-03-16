@@ -348,7 +348,7 @@ test "ColorRGBA saturation" {
     try std.testing.expectEqual(@as(u8, 0), ColorRGBA.white.saturation());
     try std.testing.expectEqual(@as(u8, 0), ColorRGBA.black.saturation());
 
-    // Max is 200, Min is 100. Saturation = (100 * 255) / 200 = 127.5 -> truncated to 127
+    // (100 * 255) / 200 becomes 127 when rounding down
     try std.testing.expectEqual(@as(u8, 127), ColorRGBA.init(200, 100, 100, 255).saturation());
 }
 
@@ -372,7 +372,7 @@ test "ColorRGBA brightness" {
     try std.testing.expectEqual(@as(u8, 255), ColorRGBA.white.brightness());
     try std.testing.expectEqual(@as(u8, 0), ColorRGBA.black.brightness());
 
-    // Pure green: sqrt((255^2 * 150) >> 8) = sqrt(38100) = 195.19 -> 195
+    // sqrt((255^2 * 150) >> 8) = 195
     try std.testing.expectEqual(@as(u8, 195), ColorRGBA.init(0, 255, 0, 255).brightness());
 }
 
@@ -396,14 +396,14 @@ test "ColorRGBA invert and grayscale" {
     try std.testing.expectEqual(@as(u8, 205), inv.channels.r);
     try std.testing.expectEqual(@as(u8, 155), inv.channels.g);
     try std.testing.expectEqual(@as(u8, 105), inv.channels.b);
-    try std.testing.expectEqual(@as(u8, 200), inv.channels.a); // Alpha must be maintained
+    try std.testing.expectEqual(@as(u8, 200), inv.channels.a);
 
     const grey = c.to_grayscale();
     const l = c.luminance();
     try std.testing.expectEqual(l, grey.channels.r);
     try std.testing.expectEqual(l, grey.channels.g);
     try std.testing.expectEqual(l, grey.channels.b);
-    try std.testing.expectEqual(@as(u8, 200), grey.channels.a); // Alpha must be maintained
+    try std.testing.expectEqual(@as(u8, 200), grey.channels.a);
 }
 
 test "ColorRGBA composite_over" {

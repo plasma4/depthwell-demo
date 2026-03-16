@@ -5,7 +5,14 @@ import * as Seeding from "./seeding";
 import * as InputManager from "./inputManager";
 import * as EngineMaker from "./engineMaker";
 
+// Note: constants where most of the game logic resides are in Zig. These are currently unused in JS.
+/* The main number (as an integer) representing the number of blocks in a chunk, number of pixels in a block, and number of subpixels in a pixel. */
 const SPAN = 16;
+
+/** The logical internal width (scaled with WebGPU). */
+const INTERNAL_WIDTH = 480;
+/** The logical internal height (scaled with WebGPU). */
+const INTERNAL_HEIGHT = 270;
 
 export enum WasmTypeCode {
     Uint8 = 8,
@@ -40,11 +47,6 @@ const WasmTypeMap = {
     [WasmTypeCode.Float32]: Float32Array,
     [WasmTypeCode.Float64]: Float64Array,
 } as const;
-
-/** The logical internal width (scaled with WebGPU). */
-const INTERNAL_WIDTH = 480;
-/** The logical internal height (scaled with WebGPU). */
-const INTERNAL_HEIGHT = 270;
 
 interface TileMap {
     width: number;
