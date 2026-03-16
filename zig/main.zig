@@ -1,4 +1,4 @@
-//! Contains important functions and imports other files. See root.zig for exporting these functions (and others) to WASM.
+//! Contains initialization and render update functions. See root.zig for exporting these functions (and others) to WASM.
 const memory = @import("memory.zig");
 const std = @import("std");
 const logger = @import("logger.zig");

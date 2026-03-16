@@ -191,10 +191,20 @@ if (engine.isDebug) {
     console.log(
         "Zig code is in debug mode. Use engine.exports to see its functions, variables, and memory, such as engine.exports.test_logs.",
     );
-} else if (CONFIG.verbose) {
-    console.log(
-        'Note: engine is in verbose mode, but Zig code is not in -Doptimize=Debug; run just "zig build" to enable additional testing features and safety checks if possible.',
-    );
+} else {
+    (document.getElementById("text1") as HTMLSpanElement).style.display =
+        "none";
+    (document.getElementById("text2") as HTMLSpanElement).style.display =
+        "none";
+    (document.getElementById("text3") as HTMLSpanElement).style.display =
+        "none";
+    (document.getElementById("text4") as HTMLSpanElement).style.display =
+        "none";
+    if (CONFIG.verbose) {
+        console.log(
+            'Note: engine is in verbose mode, but Zig code is not in -Doptimize=Debug; run just "zig build" to enable additional testing features and safety checks if possible.',
+        );
+    }
 }
 
 // Begin the logic

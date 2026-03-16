@@ -183,7 +183,7 @@ export class GameEngine {
     }
 
     /** Processes all chunks from Zig and uploads them to WGSL. */
-    public uploadVisibleChunks(timeInterpolated: number): void {
+    public uploadVisibleChunks(timeInterpolated: number = 1): void {
         this.exports.prepare_visible_chunks(
             timeInterpolated,
             this.canvas.width,

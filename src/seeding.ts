@@ -1,9 +1,9 @@
 const alphabet = "abcdefghijklmnopqrstuvwxyz";
 const base = 26n;
 
-/** Creates a seed; won't work properly past length 100. */
+/** Creates a seed up from 1 to seedLength characters; won't work properly past length 100. */
 export function makeSeed(seedLength = 100) {
-    // 68 bytes > 2*10^173. Max seeds possible around ~3.14*10^141, so this is a sufficient amount of bytes.
+    // 68 bytes > 2*10^173. The amount of possible seed combinations is around ~3.29*10^141, so this is a sufficient amount of bytes.
     const bytes = new Uint8Array(72);
     crypto.getRandomValues(bytes);
 

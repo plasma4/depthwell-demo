@@ -224,7 +224,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
                 } else {
                     // wire_color = vec4f(1.0, 0.0, 0.0, scene.wireframe_opacity);
 
-                    // neat fancy wireframe coloring
+                    // neat-lookin' fancy wireframe coloring
                     let r = f32(x_mod) * 0.0625;
                     let g = f32(y_mod) * 0.0625;
                     let b = 0.5 + f32(x_mod ^ y_mod) * 0.03125;
