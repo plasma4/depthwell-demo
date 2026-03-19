@@ -37,6 +37,8 @@ declare module "./engine" {
     interface GameEngine {
         /** True if Zig is in -Doptimize=Debug mode. */
         isDebug: boolean;
+        /** A multipier for how fast logic speed is. */
+        baseSpeed: number;
         /** Main render loop. */
         renderLoop: (time: number) => void;
         /** Main logic loop. */
@@ -163,7 +165,7 @@ engine.renderLoop = function (_t: number) {
     let timeDifference = performance.now() - time;
     let timeInterpolated = Math.min(
         (timeDifference * engine.getFrameRate()) / 1000,
-        0.99,
+        1,
     );
     engine.renderFrame(timeInterpolated, time);
     requestAnimationFrame(engine.renderLoop);
@@ -178,9 +180,11 @@ engine.getFrameRate = function () {
     return 60;
 };
 
+engine.baseSpeed = 1;
+
 engine.logicLoop = function () {
     const startTime = performance.now();
-    engine.tick(60 / engine.getFrameRate());
+    engine.tick((60 / engine.getFrameRate()) * engine.baseSpeed);
     time = performance.now();
     setTimeout(engine.logicLoop, engine.getTimeoutLength() - time + startTime);
 };

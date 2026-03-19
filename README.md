@@ -58,6 +58,8 @@ Now, we move on to locations (which also has some technical jargon, but I'll exp
 - **Active suffix (`u64`):** The spatial chunk-coordinate at the current depth. (`u64` means 64-bit unsigned integer, allowing $2^{64}$ possible values.) This is really `[16]u4` (16 numbers between 0-15) squashed together.
 - **Quadrant ID (`u2`):** Identifies which of the 4 static $2^{64}$-wide quad-caches we are "using" for the prefix stack. Each Quad-Cache (QC) references a specific Prefix Stack.
 
+The reason all this quadrant logic works is because of one essential fact: **_The `depth` can only INCREASE!_** The player can't zoom out, which is the main reason this quad-cache assumption is safe.
+
 You can imagine the actual location of something as a "smashed together version" of the specific QC's prefix stack. Consider an example where the maximum active suffix length is 4 (so like `[4]u4`.
 
 To clarify, `[4]u4` isn't some weird Zig magic, it just represents an array (or collection) of 4 values, between 0-15. So, `[1, 2, 3, 4]` would be an example of the `[4]u4` type.
@@ -81,22 +83,22 @@ And here would be the `SpatialCoord` (again, assuming that the active suffix is 
 
 (Note that "expanding" these cached values is invalid in practice. These are really just one larger number, but it helps to separate these out when explaining. Also, this glosses over some details when the prefix stack is empty because the active suffix can successfully represent all possible places the player is in.)
 
-When zooming in, a new value is pushed to either the cache (if `current_depth` is at least 16) or it's just added to each of the quad-caches if not. The game starts out with the `current_depth` at 3. You can find specific implementations of the quad-cache in `zig/world.zig`.
+When zooming in, a new value is pushed to either the cache (if `depth` is at least 16) or it's just added to each of the quad-caches if not. The game starts out with the `depth` at 3. You can find specific implementations of the quad-cache in `zig/world.zig`.
 
 This explanation also highlights why we need 4 quad-caches: the player might be juuuust in between two possible prefix stacks for X, and two other possible ones for Y. Of course, the player doesn't have to worry about all this when enjoying the game. But sometimes it's nice to peek behind the curtain!
 
 #### Depths
 
-There's some details the previous explanation glossed over. You might have wondered how exactly that cached X and Y is stored, and it's internally stored as a `u64`, plus a length (`usize`, although the meaning of this isn't important) representing how large the cache is. And going back to this example: `([9, 15, 15, 15, 15, 15], [3, 0, 0, 0, 1, 1])`, the `current_depth` would equal 6. If the active suffix was a `u16` instead of a `u64`, this would technically be stored as this:
+There's some details the previous explanation glossed over. You might have wondered how exactly that cached X and Y is stored, and it's internally stored as a `u64`, plus a length (`usize`, although the meaning of this isn't important) representing how large the cache is. And going back to this example: `([9, 15, 15, 15, 15, 15], [3, 0, 0, 0, 1, 1])`, the `depth` would equal 6. If the active suffix was a `u16` instead of a `u64`, this would technically be stored as this:
 
 **In the `QuadCache`:**
 
 - \[$9\times 16^1+15\times 16^0$, $10\times 16^1+0\times 16^0$] for the two cached X values.
     - Implied length of $2$, as $6-4=2$. The active suffix can represent 4 `u4` values, so this is where the number comes from.
 - \[$2\times 16^1+15\times 16^0$, $3\times 16^1+0\times 16^0$] for cached Y, same implied length
-- Recall again these are stored as 4 combinations, each with their own 512-bit seed. However, the cache also stores the "type" of block it represents. So each of the 4 caches would store what block type $X_aY_b$ corresponded to (the block type is a `u20`, see below for exact implementation).
+- Recall again these are stored as 4 combinations, each with their own 512-bit seed. However, the cache also stores the "type" of block it represents. So each of the 4 caches would store what block type $X_aY_b$ corresponded to (the block type is used for `ModificationStore`, keep reading for more details).
 
-**In the specific `SpatialCoord`:**
+**In the specific example `SpatialCoord`:**
 
 - Coordinate X: $9\times 16^3+15\times 16^2+15\times 16^1+15\times 16^0$.
 - Coordinate Y: $3\times 16^3+0\times 16^2+1\times 16^1+1\times 16^0$.
@@ -107,7 +109,7 @@ There's some details the previous explanation glossed over. You might have wonde
 
 #### Deterministic seeding
 
-**This part requires an understanding of PRNGs and is not strictly important for architecture understanding.** To support $O(1)$ seeding generation per chunk at arbitrary depths, Zig maintains four `LayerSeed` constants (512-bit), for each quadrant of the QC. This then gets mixed along with the suffixes with Blake3.
+**This part requires an understanding of PRNGs and is not strictly important for understanding.** To support $O(1)$ seeding generation per chunk at arbitrary depths, Zig maintains four `LayerSeed` constants (512-bit), for each quadrant of the QC. This then gets mixed along with the suffixes with Blake3.
 
 - **Static Bounds:** Again, the QCs are fixed at depth-change. Moving across the $2^{64}$ boundary simply toggles the `u2` quadrant ID.
 - **Mixing:** `ChunkSeed`, to oversimplify details slightly, is `BLAKE3(seed of QC determined by the quadrant ID, SuffixX, SuffixY)`. The seed of the QC itself is determined by the _initial_ seed from the string provided (specific bijective logic is rather complex, but see `src/seeding.ts` for details) and is mixed with the 4 bits of data (a "nibble") that is added to the prefix stack of each quadrant (after depth 16, where the prefix data becomes non-empty).
@@ -178,9 +180,11 @@ By storing the resulting 512-bit `seed` at every level of the stack, the game no
 
 #### Storing chunks with a simulation distance
 
-The "simulation distance" is 16x16 chunks, so a dedicated buffer of 256 chunks exists at all times (stored in the `SimBuffer`. This buffer basically follows the player around with an algorithm that maximizes the distance (the "above/below" average algorithm), and if something is in it such as an enemy then it is simulated. It's possible, however, that the camera might move super fast, so the game will first try to find if a chunk is in the array of simulation chunks, and if it isn't then it will dynamically generate it temporarily (which is fairly fast).
+The "simulation distance" is 16x16 chunks, so a dedicated buffer of 256 chunks exists at all times (stored in the `SimBuffer`. This buffer basically follows the player around with an algorithm that maximizes the distance (the "above/below" average algorithm), and if something is in it such as an enemy then it is simulated.
 
-Groups of objects such as enemies are stored in a `MultiArrayList` with properties and a `CoordinatePath` for ideal performance.
+It's possible, however, that the camera might move super fast in a frame and temporarily cause renders outside the standard `SimBuffer` (which is around the player, and the only existing chunk buffer), so the game will first try to find if a chunk is in the array of simulation chunks, and if it isn't then it will dynamically generate it temporarily (which is still fairly fast, since we're using data-oriented design).
+
+Groups of objects such as enemies are stored in a `MultiArrayList` with properties and a `SpatialCoord` for ideal performance.
 
 #### Procedural generation
 

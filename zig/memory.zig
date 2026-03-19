@@ -3,7 +3,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const logger = @import("logger.zig");
 const ColorRGBA = @import("color_rgba.zig").ColorRGBA;
-const World = @import("world.zig");
+const world = @import("world.zig");
 pub const is_wasm = builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
 
 /// Represents log2(SPAN).
@@ -20,6 +20,7 @@ pub const SPAN_FLOAT_SQ: comptime_float = SPAN_FLOAT * SPAN_FLOAT;
 pub const SUBPIXELS_IN_CHUNK: comptime_int = SPAN * SPAN * SPAN;
 
 pub const v2i64 = @Vector(2, i64);
+pub const v2u64 = @Vector(2, u64);
 pub const v2f64 = @Vector(2, f64);
 
 // Only create an actual GPA instance if building for native.
@@ -64,7 +65,7 @@ pub const MemorySizes = struct {
 /// A single block within a chunk.
 pub const Block = packed struct {
     /// Internal sprite ID
-    id: World.Sprite,
+    id: world.Sprite,
     /// The brightness of the tile
     light: u8,
     /// Mining progression for animation
@@ -90,12 +91,27 @@ pub const Chunk = struct {
 
 /// Represents a coordinate, relative to a quad-cache. Stores the "active suffix" (see README for definitions).
 pub const SpatialCoord = packed struct {
-    // Active suffix X
-    sx: u64,
-    // Active suffix Y
-    sy: u64,
-    /// Quadrant ID (00: NW, 1: NE, 2: SW, 3: SE)
-    cid: u2,
+    // Active suffix (stored as a vector).
+    suffix: v2u64,
+    /// Quadrant ID (00: NW, 1: NE, 2: SW, 3: SE).
+    quadrant: u2,
+};
+
+/// Dense storage for a modified chunk.
+pub const ModifiedChunk = struct {
+    /// 256 bits representing which blocks have been modified.
+    /// Bit index corresponds to (y * 16 + x).
+    modified_mask: [4]u64,
+    /// The specific modified block IDs. Only indices with a 1 in `modified_mask` are valid.
+    blocks: [SPAN_SQ]world.Sprite,
+
+    /// Helper to check if a specific local block is modified
+    pub inline fn is_modified(self: *const ModifiedChunk, lx: u4, ly: u4) bool {
+        const index = (@as(u8, ly) << 4) | @as(u8, lx);
+        const slot = index >> 6;
+        const bit = @as(u6, @truncate(index));
+        return (self.modified_mask[slot] & (@as(u64, 1) << bit)) != 0;
+    }
 };
 
 /// Tightly packed data for a square particle to be sent to WebGPU.
@@ -134,17 +150,17 @@ var is_dynamic_scratch: bool = false;
 /// Important data is meant to be placed at the start with less important data later. Data can be rearranged, but requires using the --Dgen-enums for pointer locations to be reflected in TypeScript. See game_state_offsets in types.zig for enum export details.
 pub const GameState = extern struct {
     /// Represents the player's subpixel position within the CURRENT chunk (0 to 4095).
-    player_pos: @Vector(2, i64) align(MAIN_ALIGN_BYTES) = .{ 256, 256 },
+    player_pos: v2i64 align(MAIN_ALIGN_BYTES) = .{ 256, 256 },
     /// Represents the player's position. Importantly, this is not necessarily equal to the player's velocity, as this handles teleports!
-    last_player_pos: @Vector(2, i64) = .{ 256, 256 },
+    last_player_pos: v2i64 = .{ 256, 256 },
     /// Represents the player's infinite active chunk coordinate.
-    active_chunk: @Vector(2, u64) = .{ 0, 0 },
+    player_chunk: v2u64 = .{ 0, 0 },
     /// Represents the player's current movement.
-    player_velocity: @Vector(2, f64) = .{ 0, 0 },
+    player_velocity: v2f64 = .{ 0, 0 },
     /// Represents the camera's position.
-    camera_pos: @Vector(2, i64) = .{ 256, 256 },
+    camera_pos: v2i64 = .{ 256, 256 },
     /// Represents the camera's movement in a frame (derivative of camera_pos).
-    last_camera_pos: @Vector(2, i64) = .{ 256, 256 },
+    last_camera_pos: v2i64 = .{ 256, 256 },
     /// Represents the camera's zoom scale.
     camera_scale: f64 = 1.0,
     /// Represents the camera's zoom scale change rate (multiplier, acts as derivative of camera_scale change).
@@ -155,11 +171,11 @@ pub const GameState = extern struct {
     grid_dirty: bool = true,
     last_grid_min_bx: u32 = 0,
     last_grid_min_by: u32 = 0,
-    last_active_chunk_x: u64 = 0,
-    last_active_chunk_y: u64 = 0,
+    last_player_chunk_x: u64 = 0,
+    last_player_chunk_y: u64 = 0,
 
     /// Represents how many layers deep the player is (defaults to 3).
-    current_depth: u64 = 0,
+    depth: u64 = 0,
     /// Represents the keys that were pressed THIS FRAME. (On the next frame, this will be reset to 0.)
     ///
     /// Example:

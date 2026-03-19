@@ -26,19 +26,19 @@ const PLAYER_BASE_SPEED = 5;
 const PLAYER_HITBOX_HALF = 96;
 
 /// Minimum camera zoom/scale allowed. This is strategically calculated to make sure the default render distance is safe.
-const CAMERA_MIN_ZOOM = 1.0 / 3.0;
+const CAMERA_MIN_ZOOM = 1.0 / 100.0; // one third, set to much smaller for testing
 /// Maximum camera zoom/scale allowed. This is strategically calculated to make sure the player always remains in the viewport.
 const CAMERA_MAX_ZOOM = 1;
 
-/// The zoom in/out keys change the zoom multipler this fast per frame.
-const CAMERA_CHANGE_SPEED = 1.05;
+/// The zoom in/out keys change the zoom multiplier this fast per frame.
+const CAMERA_CHANGE_SPEED = 1.02;
 /// How fast camera smoothing should be. Larger means faster.
 const CAMERA_SMOOTHING = 0.1;
 
-/// How far the player has to move before actually panning the camera (x-axis).
-const CAMERA_DEADZONE_X = 10 * memory.SPAN_SQ; // 10 blocks
-/// How far the player has to move before actually panning the camera (y-axis).
-const CAMERA_DEADZONE_Y = 4 * memory.SPAN_SQ; // 4 blocks
+/// How far the player has to move before actually panning the camera in sub-pixels (x-axis).
+const CAMERA_DEADZONE_X = 10 * memory.SPAN_SQ; // memory.SPAN_SQ means 1 block, basically
+/// How far the player has to move before actually panning the camera in sub-pixels (y-axis).
+const CAMERA_DEADZONE_Y = 4 * memory.SPAN_SQ;
 
 const pixel_mult: v2f64 = .{ @floatFromInt(SPAN), @floatFromInt(SPAN) };
 var subpixel_accum: v2f64 = .{ 0.0, 0.0 }; // note that vectors are smartly aligned already
@@ -80,7 +80,7 @@ pub fn move(logic_speed: f64) void {
         const carry = @divFloor(game.player_pos[i], SUBPIXELS_IN_CHUNK);
         if (carry != 0) {
             // Treat the signed carry as bits and add to the unsigned suffix
-            game.active_chunk[i] +%= @bitCast(carry);
+            game.player_chunk[i] +%= @bitCast(carry);
 
             // Keep the player position within 0-4095 and rebase the camera
             game.player_pos[i] = @mod(game.player_pos[i], SUBPIXELS_IN_CHUNK);
@@ -94,12 +94,12 @@ pub fn move(logic_speed: f64) void {
             game.grid_dirty = true;
 
             // Hard limit check for depth 3 (TODO verify acacuracy at deeper depths)
-            if (game.active_chunk[i] >= SUBPIXELS_IN_CHUNK) {
+            if (game.player_chunk[i] >= SUBPIXELS_IN_CHUNK) {
                 // If it wrapped or exceeded, clamp it
-                if (@as(i64, @bitCast(game.active_chunk[i])) < 0) {
-                    game.active_chunk[i] = 0;
+                if (@as(i64, @bitCast(game.player_chunk[i])) < 0) {
+                    game.player_chunk[i] = 0;
                 } else {
-                    game.active_chunk[i] = SUBPIXELS_IN_CHUNK - 1;
+                    game.player_chunk[i] = SUBPIXELS_IN_CHUNK - 1;
                 }
                 game.player_pos[i] = std.math.clamp(game.player_pos[i], 0, SUBPIXELS_IN_CHUNK - 1);
                 game.player_velocity[i] = 0;
@@ -112,11 +112,17 @@ pub fn move(logic_speed: f64) void {
 
     game.last_camera_pos = game.camera_pos;
 
-    // Calculate the current edges of the camera's "deadzone window"
-    const window_left = game.camera_pos[0] - @as(i64, @intFromFloat(CAMERA_DEADZONE_X / game.camera_scale));
-    const window_right = game.camera_pos[0] + @as(i64, @intFromFloat(CAMERA_DEADZONE_X / game.camera_scale));
-    const window_top = game.camera_pos[1] - @as(i64, @intFromFloat(CAMERA_DEADZONE_Y / game.camera_scale));
-    const window_bottom = game.camera_pos[1] + @as(i64, @intFromFloat(CAMERA_DEADZONE_Y / game.camera_scale));
+    // Calculate the current edges of the camera's "deadzone window", making sure it's based on the player's sprite center
+    const x_deadzone = @as(i64, @intFromFloat(CAMERA_DEADZONE_X / game.camera_scale));
+    const y_deadzone = @as(i64, @intFromFloat(CAMERA_DEADZONE_Y / game.camera_scale));
+    // const player_size_half = memory.SPAN_SQ / 2;
+    const window_left = game.camera_pos[0] - x_deadzone;
+    const window_right = game.camera_pos[0] + x_deadzone - memory.SPAN_SQ;
+    const window_top = game.camera_pos[1] - y_deadzone;
+    const window_bottom = game.camera_pos[1] + y_deadzone - memory.SPAN_SQ;
+    // Example logs (note how the numbers are funky due to us wanting the center player to be centered in the deadzone logic): (256, 256) | (256, 256) | -2304 | 2560 | -768 | 1024
+    // logger.clear(3);
+    // logger.write(3, .{ game.player_pos, game.camera_pos, window_left, window_right, window_top, window_bottom });
 
     // Determine how much the player is "pushing" outside the window
     var shift_x: i64 = 0;

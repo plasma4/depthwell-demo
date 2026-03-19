@@ -234,8 +234,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         }
     }
 
-    // too transparent?
-    if (tex_color.a < 0.01 && !is_wireframe) { discard; }
+    // too transparent? return a transparent pixel (which is faster than discarding, probably)
+    if (tex_color.a < 0.01 && !is_wireframe) { return vec4f(0.0, 0.0, 0.0, 0.0); }
 
     var final_rgb = vec3f(0.0);
     var final_a = 0.0;
@@ -243,6 +243,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     // convert to oklab and nudge values with seed
     var lab = linear_srgb_to_oklab(tex_color.rgb);
     var lch = oklab_to_oklch(lab);
+
     // we use 10 out of the 24 seed bits here
     let l_nudge = f32(extractBits(in.seed, 0u, 4u)) / 15.0;
     let a_nudge = f32(extractBits(in.seed, 4u, 3u)) / 7.0;
@@ -258,7 +259,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let darkening = calculate_edge_darkening(in.local_uv, in.edge_flags, in.seed);
     lab.x *= (1.0 - darkening) * in.light;
 
-    final_rgb = saturate(oklab_to_linear_srgb(lab));
+    final_rgb = max(oklab_to_linear_srgb(lab), vec3f(0.0));
     final_a = tex_color.a * scene.chunk_opacity;
 
     if (is_wireframe) {
@@ -279,7 +280,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 fn calculate_edge_darkening(local_uv: vec2f, edge_flags: u32, seed: u32) -> f32 {
     var darkening = 0.0;
     let edge_width = 0.125 + (f32(extractBits(seed, 10u, 3u)) / 32.0);
-    let edge_strength = 0.03 + f32(extractBits(seed, 13u, 3u)) / 50.0;
+    let edge_strength = 0.03 + f32(extractBits(seed, 13u, 3u)) / 12.0;
+    let corner_width = 0.15;
 
     // Curvy shadow gradient
     if ((edge_flags & EDGE_TOP) != 0u) {
@@ -295,7 +297,6 @@ fn calculate_edge_darkening(local_uv: vec2f, edge_flags: u32, seed: u32) -> f32 
         darkening = max(darkening, (1.0 - smoothstep(0.0, edge_width, 1.0 - local_uv.x)) * edge_strength);
     }
 
-    let corner_width = 0.15;
     if ((edge_flags & EDGE_TOP_LEFT) != 0u || ((edge_flags & EDGE_TOP) != 0u && (edge_flags & EDGE_LEFT) != 0u)) {
         let corner_dist = length(local_uv);
         darkening = max(darkening, (1.0 - smoothstep(0.0, corner_width * 1.414, corner_dist)) * edge_strength * 1.2);

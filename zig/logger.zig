@@ -28,6 +28,19 @@ extern "env" fn js_message(ptr: [*]const u8, len: usize, message_type: LogCatego
 /// Logging bridge between JS and WASM for writing to specific text elements.
 extern "env" fn js_write_text(id: u8, ptr: [*]const u8, len: usize) void;
 
+/// Returns the current time (calling performance.now())
+extern "env" fn js_get_time() f64;
+
+/// Gets a time in milliseconds. Time is not guaranteed to start from 0 or standard UNIX timestamp when program execution begins.
+pub inline fn get_time() f64 {
+    if (memory.is_wasm) {
+        return js_get_time();
+    } else {
+        const ns = std.time.nanoTimestamp();
+        return @as(f64, @floatFromInt(ns)) / 1_000_000.0; // wow, fancy _ symbol!
+    }
+}
+
 // Sends a message (with pointer and length, as well as a message type) to either std.log with the appropriate category or JS.
 inline fn message(ptr: [*]const u8, len: usize, message_type: LogCategory) void {
     if (memory.is_wasm) {
@@ -216,7 +229,7 @@ fn isString(comptime T: type) bool {
     return false;
 }
 
-/// Internal helper to format arguments. Returns true if first argument is a header.
+/// Internal helper to format arguments. Contains some of the logic to deal with {h} headers.
 fn format_args(writer: anytype, args: anytype) !void {
     const ArgsType = @TypeOf(args);
     const type_info = @typeInfo(ArgsType);
@@ -251,38 +264,44 @@ fn format_args(writer: anytype, args: anytype) !void {
     }
 }
 
-/// Writes formatted text to one of the four UI text buffers. No-op in release modes.
-pub inline fn write(id: u2, args: anytype) void {
+/// Writes formatted text to one of the four UI text buffers. No-op in release modes. Argument can be a simple literal, complex nested struct, and most other things.
+pub inline fn write(buffer_id: u2, args: anytype) void {
     if (builtin.mode != .Debug) return;
 
     const targets = [4][]u8{ text_1, text_2, text_3, text_4 };
-    const buf = targets[id];
+    const buf = targets[buffer_id];
     var stream = std.io.fixedBufferStream(buf);
 
     // Resume from previous length
-    stream.pos = text_lengths[id];
+    stream.pos = text_lengths[buffer_id];
 
     // Attempt to write. If it fails, clear and try again.
     if (attempt_write(&stream, args)) {
-        text_lengths[id] = stream.pos;
+        text_lengths[buffer_id] = stream.pos;
     } else {
         // Overflow! Clear the buffer and write a single line.
         stream.pos = 0;
         _ = stream.writer().writeAll("[BUFFER CLEARED]\n") catch {};
 
         if (attempt_write(&stream, args)) {
-            text_lengths[id] = stream.pos;
+            text_lengths[buffer_id] = stream.pos;
         } else {
             // Truncate to fit this extremely long line
             stream.pos = 0;
             _ = writer_truncate(&stream, args);
-            text_lengths[id] = stream.pos;
+            text_lengths[buffer_id] = stream.pos;
         }
     }
 
     if (memory.is_wasm) {
-        js_write_text(@intCast(id), buf.ptr, text_lengths[id]);
+        js_write_text(@intCast(buffer_id), buf.ptr, text_lengths[buffer_id]);
     }
+}
+
+/// Same as write(), but clears the buffer beforehand.
+pub inline fn write_once(buffer_id: u2, args: anytype) void {
+    clear(buffer_id);
+    write(buffer_id, args);
 }
 
 fn attempt_write(stream: anytype, args: anytype) bool {

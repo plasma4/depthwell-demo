@@ -121,6 +121,7 @@ export async function create(
                     ) as HTMLSpanElement;
                     el.textContent = str;
                 },
+                js_get_time: () => performance.now(),
             },
         },
     );

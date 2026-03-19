@@ -48,12 +48,11 @@ pub fn build(b: *std.Build) void {
 fn generateEnums(b: *std.Build, paths: []const []const u8) void {
     const cache_root = b.cache_root.path orelse ".";
     const cache_path = b.pathJoin(&.{ cache_root, "content_hashes.txt" });
-
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
 
     for (paths) |path| {
         const content = std.fs.cwd().readFileAlloc(b.allocator, path, 1024 * 1024 * 50) catch |err| {
-            std.debug.print("Warning: skipping enum generation due to being unable to read {s}: {any}\n", .{ path, err });
+            std.debug.panic("Warning: skipping enum generation due to being unable to read {s}: {any}\n", .{ path, err });
             return;
         };
         defer b.allocator.free(content);
@@ -66,14 +65,14 @@ fn generateEnums(b: *std.Build, paths: []const []const u8) void {
     const current_hash_hex: []const u8 = &std.fmt.bytesToHex(current_hash_binary, .lower);
     const old_hash_hex: []const u8 = std.fs.cwd().readFileAlloc(b.allocator, cache_path, 64) catch |err| blk: {
         if (err != error.FileNotFound) {
-            std.debug.print("Warning: Could not read cache: {any}\n", .{err});
+            std.debug.panic("Warning: Could not read cache: {any}\n", .{err});
         }
         break :blk b.allocator.alloc(u8, 0) catch "";
     };
     // @import("zig/logger.zig").quick_warn(.{ current_hash_hex, old_hash_hex, std.mem.eql(u8, current_hash_hex, old_hash_hex) });
     defer if (old_hash_hex.len > 0) b.allocator.free(old_hash_hex);
 
-    // compare array to slice and update content hash if necessary
+    // compare array to slice and update content hash if necessary in generate_types.zig
     if (std.mem.eql(u8, current_hash_hex, old_hash_hex)) {
         return;
     }

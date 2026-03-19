@@ -474,7 +474,7 @@ export class GameEngine {
             this.canvas.height,
             currentTime,
             effectiveZoom,
-            this.wireframeOpacity,
+            effectiveZoom < 0.25 ? 0 : this.wireframeOpacity,
             1.0, // chunk opacity
             playerX,
             playerY,

@@ -179,7 +179,7 @@ pub fn main() !void {
 
     const args = try std.process.argsAlloc(allocator);
     if (args.len < 4) {
-        std.log.warn("Missing cache arguments. Skipping cache write.", .{});
+        std.debug.panic("Missing cache arguments. Skipping cache write.", .{});
         return; // Exit function without error
     }
     defer std.process.argsFree(allocator, args);

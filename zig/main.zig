@@ -19,6 +19,7 @@ pub var world_state: ?World = null;
 /// Initializes the game.
 pub fn init() void {
     world_state = World.init(memory.allocator, memory.game.seed);
+    World.push_layer(&world_state.?, 0, 0, world.Sprite.none);
     logger.log(@src(), "Hello from Zig!", .{});
 }
 
@@ -36,51 +37,51 @@ pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f
     // since effective does not influence logic, std.math.pow can be non-deterministic
     const effective_zoom = game.camera_scale * std.math.pow(f64, game.camera_scale_change, dt) * resolution_scale;
 
-    // now do the chunk bound logic
-    // Convert the camera's world position into "Block Units" (this finds the tile where the camera is centered on!)
-    const cam_bx: i32 = @intCast(@divFloor(game.camera_pos[0], SPAN_SQ));
-    const cam_by: i32 = @intCast(@divFloor(game.camera_pos[1], SPAN_SQ));
+    // calculate the screen's half-extents in world sub-pixels (as floats to preserve zoom precision)
+    const subpixels_per_pixel: f64 = @as(f64, @floatFromInt(SPAN_SQ)) / @as(f64, @floatFromInt(SPAN));
+    const subpixels_per_chunk: f64 = @as(f64, @floatFromInt(SUBPIXELS_IN_CHUNK));
+    const half_w_sp = (@as(f64, SCREEN_WIDTH_HALF) / game.camera_scale) * subpixels_per_pixel;
+    const half_h_sp = (@as(f64, SCREEN_HEIGHT_HALF) / game.camera_scale) * subpixels_per_pixel;
 
-    // Now, calculate half the width/height of the screen in world units. This adjusts for camera zoom!
-    const half_w: i32 = @intFromFloat(@divFloor((SCREEN_WIDTH_HALF / SPAN), game.camera_scale));
-    const half_h: i32 = @intFromFloat(@divFloor((SCREEN_HEIGHT_HALF / SPAN), game.camera_scale));
+    // find the world's sub-pixel edges
+    const edge_left = @as(f64, @floatFromInt(game.camera_pos[0])) - half_w_sp;
+    const edge_top = @as(f64, @floatFromInt(game.camera_pos[1])) - half_h_sp;
+    const edge_right = @as(f64, @floatFromInt(game.camera_pos[0])) + half_w_sp;
+    const edge_bottom = @as(f64, @floatFromInt(game.camera_pos[1])) + half_h_sp;
 
-    // Find the chunk indices that end up covering the screen, adding a "buffer" of 1
-    const min_cx: i32 = @divFloor(cam_bx - half_w, SPAN) - 1;
-    const min_cy: i32 = @divFloor(cam_by - half_h, SPAN) - 1;
-    const max_cx: i32 = @divFloor(cam_bx + half_w, SPAN) + 1;
-    const max_cy: i32 = @divFloor(cam_by + half_h, SPAN) + 1;
+    // find the chunk indices that end up covering the screen, with just enough buffer
+    const min_cx: i32 = @intFromFloat(@floor(edge_left / subpixels_per_chunk));
+    const min_cy: i32 = @intFromFloat(@floor(edge_top / subpixels_per_chunk));
+    const max_cx: i32 = @as(i32, @intFromFloat(@floor(edge_right / subpixels_per_chunk))) + 1;
+    const max_cy: i32 = @as(i32, @intFromFloat(@floor(edge_bottom / subpixels_per_chunk))) + 1;
 
-    // Determine the dimensions of the grid to render (cw/ch is how many chunks wide/high the current render-window is)
+    // determine the dimensions of the grid to render (cw/ch is how many chunks wide/high the current render-window is)
     const cw: u32 = @intCast(max_cx - min_cx + 1);
     const ch: u32 = @intCast(max_cy - min_cy + 1);
 
-    // How many render tiles on each side?
+    // how many render tiles on each side?
     const wb = cw * SPAN;
     const hb = ch * SPAN;
 
-    const moved_chunk = game.active_chunk[0] != game.last_active_chunk_x or game.active_chunk[1] != game.last_active_chunk_y;
+    const moved_chunk = game.player_chunk[0] != game.last_player_chunk_x or game.player_chunk[1] != game.last_player_chunk_y;
     if (!game.grid_dirty and !moved_chunk and game.last_grid_min_bx == @as(u32, @bitCast(min_cx))) {
         update_render_properties(game, wb, hb, min_cx, min_cy, dt, effective_zoom);
         return;
     }
 
-    game.last_active_chunk_x = game.active_chunk[0];
-    game.last_active_chunk_y = game.active_chunk[1];
+    game.last_player_chunk_x = game.player_chunk[0];
+    game.last_player_chunk_y = game.player_chunk[1];
 
     memory.scratch_reset();
     const out = memory.scratch_alloc_slice(memory.Block, wb * hb) orelse return;
 
     // TODO look at this and determine if it works properly with higher depths
-    const world_limit: u64 = if (game.current_depth < SPAN)
-        (@as(u64, 1) << @intCast(game.current_depth * memory.SPAN_LOG2))
-    else
-        std.math.maxInt(u64);
+    const world_limit: u64 = world.get_world_limit(game.depth);
 
     for (0..ch) |gy| {
         for (0..cw) |gx| {
-            const suffix_x = @as(i64, @bitCast(game.active_chunk[0]));
-            const suffix_y = @as(i64, @bitCast(game.active_chunk[1]));
+            const suffix_x = @as(i64, @bitCast(game.player_chunk[0]));
+            const suffix_y = @as(i64, @bitCast(game.player_chunk[1]));
 
             const abs_cx = suffix_x + @as(i64, @intCast(min_cx)) + @as(i64, @intCast(gx));
             const abs_cy = suffix_y + @as(i64, @intCast(min_cy)) + @as(i64, @intCast(gy));
@@ -144,34 +145,35 @@ inline fn update_render_properties(game: *memory.GameState, wb: u32, hb: u32, mi
     memory.set_scratch_prop(6, player_render_y);
 
     logger.clear(0);
-    logger.write(0, .{ "{h}Camera actual", game.camera_pos });
-    logger.write(0, .{ "{h}Camera interpolated shader position", @Vector(2, f64){ cam_x_shader, cam_y_shader } });
-    logger.write(0, .{ "{h}Zoom (scaled based on canvas resolution)", effective_zoom });
+    logger.write(0, .{ "{h}Player chunk position", game.player_pos });
+    logger.write(0, .{ "{h}Player position within chunk", game.player_pos });
+    // logger.write(0, .{ "{h}Player interpolated shader position", @Vector(2, f64){ player_render_x, player_render_y } });
 
-    logger.clear(1);
-    logger.write(1, .{ "{h}dt", dt });
-    logger.write(1, .{ "{h}Render tiles for each axis", @Vector(2, u32){ wb, hb } });
+    // logger.clear(1);
+    // logger.write(1, .{ "{h}Keys held down and pressed this frame", game.keys_held_mask, game.keys_pressed_mask });
+    // logger.write(1, .{ "{h}dt (from -1 to 0)", dt });
 
-    logger.clear(2);
-    logger.write(2, .{ "{h}Player actual position", game.player_pos });
-    logger.write(2, .{ "{h}Player interpolated shader position", @Vector(2, f64){ player_render_x, player_render_y } });
+    // logger.clear(2);
+    // logger.write(2, .{ "{h}Camera actual", game.camera_pos });
+    // logger.write(2, .{ "{h}Camera interpolated shader position", @Vector(2, f64){ cam_x_shader, cam_y_shader } });
+    // logger.write(2, .{ "{h}Zoom (scaled based on canvas resolution)", effective_zoom });
 }
 
 pub fn portal_zoom_in(bx: u32, by: u32) void {
     const w = if (world_state) |*ws| ws else return;
     const game = &memory.game;
 
-    const chunk = w.get_chunk(game.active_chunk[0], game.active_chunk[1]);
+    const chunk = w.get_chunk(game.player_chunk[0], game.player_chunk[1]);
     const parent_id = chunk.blocks[(by % SPAN) * SPAN + (bx % SPAN)].id;
 
     // This is the source of truth. push_layer clears caches and invalidates the Quad-Cache.
-    w.push_layer(game.active_chunk[0], game.active_chunk[1], parent_id);
+    w.push_layer(game.player_chunk[0], game.player_chunk[1], parent_id);
 
     // Sync the UI-visible depth
-    game.current_depth = @intCast(w.path.stack.items.len);
+    game.depth = @intCast(w.path.stack.items.len);
 
     // TODO player_pos rearrangement logic
-    game.active_chunk = .{ 0, 0 };
+    game.player_chunk = .{ 0, 0 };
     game.player_pos = .{ 2048, 2048 };
     game.grid_dirty = true;
 }
