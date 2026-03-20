@@ -41,8 +41,6 @@ const STARTING_SCRATCH_BUFFER_SIZE = 256 * MemorySizes.KiB;
 
 /// 64 bytes is ana all-round good alignment size.
 pub const MAIN_ALIGN_BYTES: usize = 64;
-/// 64 bytes for WebGPU alignment.
-pub const GPU_ALIGN_BYTES: usize = 64;
 /// Type-safe alignment for use with `std.mem.Allocator` functions.
 /// Derived from `MAIN_ALIGN_BYTES`.
 pub const MAIN_ALIGN = std.mem.Alignment.fromByteUnits(MAIN_ALIGN_BYTES);
@@ -89,9 +87,9 @@ pub const Chunk = struct {
     }
 };
 
-/// Represents a coordinate, relative to a quad-cache. Stores the "active suffix" (see README for definitions).
-pub const SpatialCoord = packed struct {
-    // Active suffix (stored as a vector).
+/// Represents a "coordinate", relative to a quad-cache. Stores an "active suffix" as well as the quadrant this coordinate belongs to.
+pub const Coordinate = packed struct {
+    // Active suffix (stored as a vector). You can think of the active suffix like 16 u4s packed together for the X and Y coordinate that can be merged with the correct QuadCache quadrant to produce a "complete" path (see README for more details).
     suffix: v2u64,
     /// Quadrant ID (00: NW, 1: NE, 2: SW, 3: SE).
     quadrant: u2,
@@ -153,7 +151,7 @@ pub const GameState = extern struct {
     player_pos: v2i64 align(MAIN_ALIGN_BYTES) = .{ 256, 256 },
     /// Represents the player's position. Importantly, this is not necessarily equal to the player's velocity, as this handles teleports!
     last_player_pos: v2i64 = .{ 256, 256 },
-    /// Represents the player's infinite active chunk coordinate.
+    /// Represents the player's active chunk coordinate.
     player_chunk: v2u64 = .{ 0, 0 },
     /// Represents the player's current movement.
     player_velocity: v2f64 = .{ 0, 0 },
@@ -165,8 +163,15 @@ pub const GameState = extern struct {
     camera_scale: f64 = 1.0,
     /// Represents the camera's zoom scale change rate (multiplier, acts as derivative of camera_scale change).
     camera_scale_change: f64 = 1.0,
+    /// Represents how many layers deep the player is (defaults to 3).
+    depth: u64 = 0,
+
+    /// Represents which quadrant of the QuadCache the player is in (starts at 0 when depth is <= 16)
+    player_quadrant: u32 = 0,
+
     /// Represents where the player should be rendered for WGSL.
     player_screen_offset: @Vector(2, f32) = .{ 0, 0 },
+
     /// Represents if the grid needs to be recalculated/passed to WGSL.
     grid_dirty: bool = true,
     last_grid_min_bx: u32 = 0,
@@ -174,8 +179,6 @@ pub const GameState = extern struct {
     last_player_chunk_x: u64 = 0,
     last_player_chunk_y: u64 = 0,
 
-    /// Represents how many layers deep the player is (defaults to 3).
-    depth: u64 = 0,
     /// Represents the keys that were pressed THIS FRAME. (On the next frame, this will be reset to 0.)
     ///
     /// Example:
@@ -196,6 +199,8 @@ pub const GameState = extern struct {
     /// logger.log(@src(), "{}", .{KeyBits.isSet(KeyBits.up, memory.game.keys_held_mask)}); // Gets if UP key is being held down.
     /// ```
     keys_held_mask: u32 = 0,
+
+    /// The initial or "global" seed from which all generation starts.
     seed: [8]u64 align(16) = std.mem.zeroes([8]u64),
 };
 
@@ -277,7 +282,7 @@ pub fn scratch_alloc(len: usize) ?[*]u8 {
         return @ptrFromInt(updated_aligned);
     }
 
-    // Fast Path: Fits in existing buffer
+    // Fits in existing buffer already, fast!
     mem.scratch_len = @intCast(new_scratch_len);
     return @ptrFromInt(aligned_addr);
 }
@@ -373,9 +378,6 @@ const _ = {
     }
     if (MAIN_ALIGN_BYTES < 16 || (MAIN_ALIGN_BYTES % 16 > 0)) {
         @compileError("MAIN_ALIGN_BYTES should be a positive multiple of 16 for SIMD alignment.");
-    }
-    if (GPU_ALIGN_BYTES < 64 || (GPU_ALIGN_BYTES % 64 > 0)) {
-        @compileError("GPU_ALIGN_BYTES should be a positive multiple of 64 for WebGPU alignment.");
     }
     if (@sizeOf(Block) != 8) {
         @compileError("Memory size for each block should be 8 bytes.");

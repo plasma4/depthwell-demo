@@ -475,7 +475,7 @@ export class GameEngine {
             currentTime,
             effectiveZoom,
             effectiveZoom < 0.25 ? 0 : this.wireframeOpacity,
-            1.0, // chunk opacity
+            1.0, // opacity of all tiles/sprites when rendering
             playerX,
             playerY,
         ]);
@@ -519,6 +519,7 @@ export class GameEngine {
 
         // Draw all tiles as instances. Uses a triangle-strip so 4 vextexCount instead of 6. Also add 1 more instance for the player!
         const instanceCount = this.tileMap.width * this.tileMap.height + 1;
+        renderPass.draw(4, instanceCount);
         renderPass.draw(4, instanceCount);
 
         renderPass.end();

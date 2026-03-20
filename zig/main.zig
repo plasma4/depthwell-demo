@@ -4,7 +4,6 @@ const std = @import("std");
 const logger = @import("logger.zig");
 const seeding = @import("seeding.zig");
 const world = @import("world.zig");
-const World = world.World;
 
 const SPAN = memory.SPAN;
 const SPAN_SQ = memory.SPAN_SQ;
@@ -14,19 +13,19 @@ const SCREEN_WIDTH = 480;
 const SCREEN_HEIGHT = 270;
 const SCREEN_WIDTH_HALF = SCREEN_WIDTH / 2;
 const SCREEN_HEIGHT_HALF = SCREEN_HEIGHT / 2;
-pub var world_state: ?World = null;
+pub var world_state: ?world.World = null;
 
 /// Initializes the game.
 pub fn init() void {
-    world_state = World.init(memory.allocator, memory.game.seed);
-    World.push_layer(&world_state.?, 0, 0, world.Sprite.none);
+    world_state = world.World.init(memory.allocator, memory.game.seed);
+    world.World.push_layer(&world_state.?, world.Sprite.none, .{ .quadrant = 0, .suffix = .{ 0, 0 } });
     logger.log(@src(), "Hello from Zig!", .{});
 }
 
 /// Processes data for renderFrame in TypeScript.
 pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f64) void {
     _ = canvas_h;
-    const w = if (world_state) |*ws| ws else return;
+    const w = world_state.?;
     const game = &memory.game;
 
     // this variable allows for super smooth frame interpolation :)
@@ -76,7 +75,7 @@ pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f
     const out = memory.scratch_alloc_slice(memory.Block, wb * hb) orelse return;
 
     // TODO look at this and determine if it works properly with higher depths
-    const world_limit: u64 = world.get_world_limit(game.depth);
+    const world_limit: u64 = world.get_world_limit();
 
     for (0..ch) |gy| {
         for (0..cw) |gx| {
@@ -93,7 +92,8 @@ pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f
             // BOUNDS CHECK:
             // If abs_cx < 0, u_abs_cx will be massive (wrapping), thus > world_limit.
             if (u_abs_cx < world_limit and u_abs_cy < world_limit) {
-                const chunk = w.get_chunk(@intCast(abs_cx), @intCast(abs_cy));
+                // TODO figure out the funny quadrant business too
+                const chunk = w.get_chunk(.{ .suffix = .{ @intCast(abs_cx), @intCast(abs_cy) }, .quadrant = 0 });
                 for (0..SPAN) |ly| {
                     @memcpy(out[(gy * SPAN + ly) * wb + gx * SPAN ..][0..SPAN], chunk.blocks[ly * SPAN ..][0..SPAN]);
                 }
@@ -145,8 +145,13 @@ inline fn update_render_properties(game: *memory.GameState, wb: u32, hb: u32, mi
     memory.set_scratch_prop(6, player_render_y);
 
     logger.clear(0);
-    logger.write(0, .{ "{h}Player chunk position", game.player_pos });
-    logger.write(0, .{ "{h}Player position within chunk", game.player_pos });
+    const qc = world_state.?.quad_cache;
+    if (game.depth > 16) {
+        logger.write(0, .{ "{h}Chunk X, Y, and active suffix", qc.get_quadrant_path_x(@intCast(game.player_quadrant)), qc.get_quadrant_path_y(@intCast(game.player_quadrant)), game.player_chunk });
+    } else {
+        logger.write(0, .{ "{h}Chunk active suffix", game.player_chunk });
+    }
+    logger.write(0, .{ "{h}Depth and position in chunk", game.depth, game.player_pos });
     // logger.write(0, .{ "{h}Player interpolated shader position", @Vector(2, f64){ player_render_x, player_render_y } });
 
     // logger.clear(1);
@@ -160,17 +165,12 @@ inline fn update_render_properties(game: *memory.GameState, wb: u32, hb: u32, mi
 }
 
 pub fn portal_zoom_in(bx: u32, by: u32) void {
-    const w = if (world_state) |*ws| ws else return;
+    const w = world_state.?;
     const game = &memory.game;
 
     const chunk = w.get_chunk(game.player_chunk[0], game.player_chunk[1]);
     const parent_id = chunk.blocks[(by % SPAN) * SPAN + (bx % SPAN)].id;
-
-    // This is the source of truth. push_layer clears caches and invalidates the Quad-Cache.
     w.push_layer(game.player_chunk[0], game.player_chunk[1], parent_id);
-
-    // Sync the UI-visible depth
-    game.depth = @intCast(w.path.stack.items.len);
 
     // TODO player_pos rearrangement logic
     game.player_chunk = .{ 0, 0 };

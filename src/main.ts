@@ -148,7 +148,7 @@ document.addEventListener(
 );
 
 let engine = await GameEngine.create();
-engine.wireframeOpacity = 0.3;
+engine.wireframeOpacity = 1.0 / 3.0;
 
 let time = performance.now(),
     frame = 0;
