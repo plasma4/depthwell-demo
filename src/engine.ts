@@ -74,6 +74,8 @@ export class GameEngine {
     public readonly resizeObserver!: ResizeObserver;
     /** The input state from keyboard events. */
     public readonly inputState: InputManager.InputState;
+    /** Determines if visible data is new for this frame or not (allowing for `loadOp` in `GPURenderPassDescriptor` to be changed from `"clear"` to `"load"` as necessary). */
+    public isVisibleDataNew: boolean = true;
     /** The sprite tile map. */
     public tileMap!: TileMap;
     /** Provides the bind group for WebGPU. */
@@ -109,6 +111,10 @@ export class GameEngine {
     /** Determines the previous state of the 16:9 aspect ratio. Internal use for updating the canvas styling when calling renderFrame(). */
     private previousForceAspectRatio: boolean | null = null;
 
+    /** Internal encoder to track the current frame's encoding. */
+    private currentEncoder: GPUCommandEncoder | null = null;
+    /** Internal texture view for just the current frame. */
+    private currentTextureView: GPUTextureView | null = null;
     public readonly renderPipeline: GPURenderPipeline;
     public readonly encoder = new TextEncoder();
     public readonly decoder = new TextDecoder();
@@ -191,6 +197,12 @@ export class GameEngine {
             this.canvas.width,
             this.canvas.height,
         );
+    }
+
+    /** Function called from Zig that actually draws these visible chunks. */
+    public handleVisibleChunks() {
+        // Ensure we have an active encoder from renderFrame
+        if (!this.currentEncoder || !this.currentTextureView) return;
 
         const scratchPtr = this.getScratchPtr();
         const scratchLen = this.getScratchLen();
@@ -209,6 +221,7 @@ export class GameEngine {
 
         const neededBytes = u32Count * 4;
         if (!this.tileBuffer || this.tileBuffer.size < neededBytes) {
+            // TODO benchmark destroy/recreation speed
             if (this.tileBuffer) this.tileBuffer.destroy();
             this.tileBuffer = this.device.createBuffer({
                 label: "Tile grid",
@@ -229,12 +242,65 @@ export class GameEngine {
             });
         }
 
+        // Read calculated values directly from Zig.
+        const camX = this.getScratchProperty(2, WasmTypeCode.Float64);
+        const camY = this.getScratchProperty(3, WasmTypeCode.Float64);
+        const effectiveZoom = this.getScratchProperty(4, WasmTypeCode.Float64);
+        const playerX = this.getScratchProperty(5, WasmTypeCode.Float64);
+        const playerY = this.getScratchProperty(6, WasmTypeCode.Float64);
+
+        const uniformData = new Float32Array([
+            camX,
+            camY,
+            this.canvas.width,
+            this.canvas.height,
+            performance.now() - this.startTime, // currentTime
+            effectiveZoom,
+            effectiveZoom < 0.25 ? 0 : this.wireframeOpacity,
+            1.0, // opacity of all tiles/sprites when rendering
+            playerX,
+            playerY,
+        ]);
+
+        this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
         this.device.queue.writeBuffer(this.tileBuffer, 0, wasmView);
         this.device.queue.writeBuffer(
             this.mapSizeBuffer,
             0,
             new Uint32Array([widthBlocks, heightBlocks, 0, 0]),
         );
+
+        // Clear if this is the FIRST time data is being rendered this frame. Otherwise, keep.
+        const loadOp: GPULoadOp = this.isVisibleDataNew ? "clear" : "load";
+
+        const renderPass = this.currentEncoder.beginRenderPass({
+            colorAttachments: [
+                {
+                    view: this.currentTextureView,
+                    loadOp: loadOp,
+                    clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+                    storeOp: "store",
+                },
+            ],
+        });
+
+        renderPass.setPipeline(this.renderPipeline);
+        renderPass.setBindGroup(0, this.bindGroup);
+        renderPass.setViewport(
+            0,
+            0,
+            this.canvas.width,
+            this.canvas.height,
+            0,
+            1,
+        );
+
+        // Draw all tiles as instances. Uses a triangle-strip so 4 vextexCount instead of 6. Also add 1 more instance for the player!
+        const instanceCount = widthBlocks * heightBlocks + 1;
+        renderPass.draw(4, instanceCount);
+        renderPass.end();
+
+        this.isVisibleDataNew = false;
         this.tileMap.width = widthBlocks;
         this.tileMap.height = heightBlocks;
     }
@@ -454,81 +520,29 @@ export class GameEngine {
     };
 
     public renderFrame(timeInterpolated: number, currentTime: number) {
+        this.isVisibleDataNew = true;
         if (this.destroyed) return;
 
         this.updateCanvasStyle();
+
+        // Initialize the encoder and view for this specific frame
+        this.currentEncoder = this.device.createCommandEncoder();
+        this.currentTextureView = this.context.getCurrentTexture().createView();
+
+        // Trigger Zig logic, which will call handleVisibleChunks() (potentially multiple times)
         this.uploadVisibleChunks(timeInterpolated);
 
-        // Read calculated values directly from Zig.
-        const camX = this.getScratchProperty(2, WasmTypeCode.Float64);
-        const camY = this.getScratchProperty(3, WasmTypeCode.Float64);
-        const effectiveZoom = this.getScratchProperty(4, WasmTypeCode.Float64);
-        const playerX = this.getScratchProperty(5, WasmTypeCode.Float64);
-        const playerY = this.getScratchProperty(6, WasmTypeCode.Float64);
+        // Finalize the frame
+        this.device.queue.submit([this.currentEncoder.finish()]);
 
-        // Send data to WebGPU
-        const uniformData = new Float32Array([
-            camX,
-            camY,
-            this.canvas.width,
-            this.canvas.height,
-            currentTime,
-            effectiveZoom,
-            effectiveZoom < 0.25 ? 0 : this.wireframeOpacity,
-            1.0, // opacity of all tiles/sprites when rendering
-            playerX,
-            playerY,
-        ]);
-
-        this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
-
-        // Update tile buffer if dirty
-        if (this.tileBufferDirty) {
-            this.device.queue.writeBuffer(
-                this.tileBuffer,
-                0,
-                this.tileMap.data.buffer,
-            );
-            this.tileBufferDirty = false;
-        }
-
-        const commandEncoder = this.device.createCommandEncoder();
-        const textureView = this.context.getCurrentTexture().createView();
-
-        const renderPass = commandEncoder.beginRenderPass({
-            colorAttachments: [
-                {
-                    view: textureView,
-                    loadOp: "clear",
-                    clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }, // color to use when clearing the background
-                    storeOp: "store",
-                },
-            ],
-        });
-
-        renderPass.setPipeline(this.renderPipeline);
-        renderPass.setBindGroup(0, this.bindGroup);
-        renderPass.setViewport(
-            0,
-            0,
-            this.canvas.width,
-            this.canvas.height,
-            0,
-            1,
-        );
-
-        // Draw all tiles as instances. Uses a triangle-strip so 4 vextexCount instead of 6. Also add 1 more instance for the player!
-        const instanceCount = this.tileMap.width * this.tileMap.height + 1;
-        renderPass.draw(4, instanceCount);
-        renderPass.draw(4, instanceCount);
-
-        renderPass.end();
-        this.device.queue.submit([commandEncoder.finish()]);
+        // Cleanup references for the next frame
+        this.currentEncoder = null;
+        this.currentTextureView = null;
     }
 
     /** Updates the game's logic state. */
     public tick(logicSpeed: number) {
-        // Internally, key pressing data goes keys_pressed_mask, then keys_held_mask.
+        // Internally, key pressing data goes `keys_pressed_mask`, then `keys_held_mask`.
         const inputView = this.getGameView(
             WasmTypeCode.Uint32,
             Zig.game_state_offsets.keys_pressed_mask,

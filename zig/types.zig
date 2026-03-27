@@ -56,6 +56,7 @@ pub const KeyBits = struct {
 };
 
 /// Bitmask flags used to identify the presence of neighboring blocks.
+/// TODO use, and also add logic at the edges of SimBuffer(?)
 pub const EdgeFlags = struct {
     /// Neighboring block is to the top-left (Northwest)
     pub const TOP_LEFT = 0x01;

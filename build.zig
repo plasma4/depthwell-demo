@@ -2,6 +2,7 @@ const std = @import("std");
 
 // Run zig build normally, and zig build -Doptimize=ReleaseFast for the final version. Use zig build --Dgen-enums as well to automatically construct src/enums.ts and zig test "zig/root.zig" to run all tests across the codebase.
 pub fn build(b: *std.Build) void {
+    // TODO add in wasm-opt for faster compilation!
     b.install_path = ".";
     const gen_enums = b.option(bool, "gen-enums", "Regenerate TypeScript enum definitions") orelse false; // -Dgen-enums
     const target = b.standardTargetOptions(.{

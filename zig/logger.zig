@@ -28,7 +28,7 @@ extern "env" fn js_message(ptr: [*]const u8, len: usize, message_type: LogCatego
 /// Logging bridge between JS and WASM for writing to specific text elements.
 extern "env" fn js_write_text(id: u8, ptr: [*]const u8, len: usize) void;
 
-/// Returns the current time (calling performance.now())
+/// Returns the current time (calling `performance.now()` in TS)
 extern "env" fn js_get_time() f64;
 
 /// Gets a time in milliseconds. Time is not guaranteed to start from 0 or standard UNIX timestamp when program execution begins.

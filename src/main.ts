@@ -41,8 +41,8 @@ declare module "./engine" {
         baseSpeed: number;
         /** Main render loop. */
         renderLoop: (time: number) => void;
-        /** Main logic loop. */
-        logicLoop: () => void;
+        /** Main logic loop (called from `renderLoop` to prevent frame drops). */
+        logicLoop: (ticks: number) => void;
         /**
          * Returns the timeout time between logic frames in milliseconds. Note that the actual logic accounts for lag.
          * Customize the frame rate and timeout to test frame interpolation with this:
@@ -82,6 +82,17 @@ declare global {
     )
 */
 
+/** Elements that are used in logging and hidden in production. */
+const loggingElementIds = [
+    "text1",
+    "text2",
+    "text3",
+    "text4",
+    "logicText",
+    "renderText",
+];
+
+// Error-handling logic section!
 if (!CONFIG.noAlertOnError) {
     const handleFatalError = (
         error: any,
@@ -150,28 +161,6 @@ document.addEventListener(
 let engine = await GameEngine.create();
 engine.wireframeOpacity = 1.0 / 3.0;
 
-let time = performance.now(),
-    frame = 0;
-if (CONFIG.exportEngine) (globalThis as any).engine = engine;
-if (CONFIG.verbose) {
-    console.log("Engine initialized successfully:", engine);
-    console.log("Exported functions and memory:", engine.exports);
-}
-
-// Add custom properties into the engine object (not handled by TypeScript)
-engine.isDebug = !!engine.exports.isDebug(); // This function is only true if Doptimize=Debug (default with zig build).
-engine.renderLoop = function (_t: number) {
-    // Difference between frames
-    let timeDifference = performance.now() - time;
-    let timeInterpolated = Math.min(
-        (timeDifference * engine.getFrameRate()) / 1000,
-        1,
-    );
-    engine.renderFrame(timeInterpolated, time);
-    requestAnimationFrame(engine.renderLoop);
-    // setTimeout(engine.renderLoop, 100);
-};
-
 engine.getTimeoutLength = function () {
     return ++frame % 3 == 2 ? 16 : 17;
 };
@@ -182,11 +171,82 @@ engine.getFrameRate = function () {
 
 engine.baseSpeed = 1;
 
-engine.logicLoop = function () {
+let time = performance.now(),
+    renderTime = performance.now(),
+    accumulator = 0,
+    frame = 0;
+if (CONFIG.exportEngine) (globalThis as any).engine = engine;
+if (CONFIG.verbose) {
+    console.log("Engine initialized successfully:", engine);
+    console.log("Exported functions and memory:", engine.exports);
+}
+
+// Add custom properties into the engine object (not handled by TypeScript)
+engine.isDebug = !!engine.exports.isDebug(); // This function is only true if Doptimize=Debug (default with zig build).
+engine.renderLoop = function (_t: number) {
+    // TODO back-off logic when frames get skipped, maybe? (due to WebGPU)
+    let tempTime = performance.now();
+    let delta = tempTime - time;
+    let newTicks = (delta * engine.getFrameRate()) / 1000;
+
+    engine.logicLoop(Math.floor(accumulator + newTicks));
+    accumulator = (accumulator + newTicks) % 1; // calculate new fractional accumulation of ticks
+
+    // mostly arbitrary color thresholds
+    let color = "#4ad14f";
+    if (delta > 55) {
+        color = "#e83769";
+    } else if (delta > 30) {
+        color = "#f39c19";
+    } else if (delta > 20) {
+        color = "#f7ce1a";
+    }
+
+    if (engine.isDebug) {
+        const debugElem: HTMLSpanElement =
+            document.getElementById("renderText")!;
+        debugElem.textContent = `Render diff: ${delta.toFixed(1)}ms`;
+        debugElem.style.fontWeight = (
+            delta > 30 ? (delta > 55 ? 700 : 600) : 500
+        ) as any; // gee thanks TypeScript
+        debugElem.style.color = color;
+    }
+
+    let timeInterpolated = Math.min(accumulator - 1, 0);
+    engine.renderFrame(timeInterpolated, time);
+
+    requestAnimationFrame(engine.renderLoop);
+    // setTimeout(engine.renderLoop, 100);
+};
+
+engine.logicLoop = function (ticks: number) {
+    // Interestingly enough, as ticks becomes large enough, the "imprecision" of the camera (16 possible subpixel positions) results in the player panning being all weird! This only happens past 1000 logical FPS though.
     const startTime = performance.now();
-    engine.tick((60 / engine.getFrameRate()) * engine.baseSpeed);
+    for (let i = 0; i < ticks; i++)
+        engine.tick((60 / engine.getFrameRate()) * engine.baseSpeed);
+
     time = performance.now();
-    setTimeout(engine.logicLoop, engine.getTimeoutLength() - time + startTime);
+    let delta = time - startTime;
+
+    // mostly arbitrary color thresholds
+    let color = "#4ad14f";
+    if (delta > 30) {
+        color = "#e83769";
+    } else if (delta > 15) {
+        color = "#f39c19";
+    } else if (delta > 10) {
+        color = "#f7ce1a";
+    }
+
+    if (engine.isDebug) {
+        const debugElem: HTMLSpanElement =
+            document.getElementById("logicText")!;
+        debugElem.textContent = `Logic diff (${ticks}): ${delta.toFixed(1)}ms`;
+        debugElem.style.fontWeight = (
+            delta > 30 ? (delta > 55 ? 700 : 600) : 500
+        ) as any; // gee thanks TypeScript
+        debugElem.style.color = color;
+    }
 };
 
 import { KeyBits, game_state_offsets } from "./enums";
@@ -195,15 +255,13 @@ if (engine.isDebug) {
     console.log(
         "Zig code is in debug mode. Use engine.exports to see its functions, variables, and memory, such as engine.exports.test_logs.",
     );
+
+    loggingElementIds.forEach((id) => {
+        (document.getElementById(id) as HTMLSpanElement).style.display =
+            "inline";
+    });
 } else {
-    (document.getElementById("text1") as HTMLSpanElement).style.display =
-        "none";
-    (document.getElementById("text2") as HTMLSpanElement).style.display =
-        "none";
-    (document.getElementById("text3") as HTMLSpanElement).style.display =
-        "none";
-    (document.getElementById("text4") as HTMLSpanElement).style.display =
-        "none";
+    // Zig is not in debug mode!
     if (CONFIG.verbose) {
         console.log(
             'Note: engine is in verbose mode, but Zig code is not in -Doptimize=Debug; run just "zig build" to enable additional testing features and safety checks if possible.',
@@ -213,6 +271,5 @@ if (engine.isDebug) {
 
 // Begin the logic
 setTimeout(function () {
-    engine.logicLoop();
     engine.renderLoop(0);
 }, 17);

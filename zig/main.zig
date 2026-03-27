@@ -15,10 +15,29 @@ const SCREEN_WIDTH_HALF = SCREEN_WIDTH / 2;
 const SCREEN_HEIGHT_HALF = SCREEN_HEIGHT / 2;
 pub var world_state: ?world.World = null;
 
+/// External function that makes a call to `engine.handleVisibleChunks()`.
+extern "env" fn js_handle_visible_chunks() void;
+
+/// Makes a call to `engine.handleVisibleChunks()` in JS.
+pub inline fn handle_visible_chunks() void {
+    if (memory.is_wasm) {
+        return js_handle_visible_chunks();
+    } else {
+        return;
+    }
+}
+
 /// Initializes the game.
 pub fn init() void {
-    world_state = world.World.init(memory.allocator, memory.game.seed);
-    world.World.push_layer(&world_state.?, world.Sprite.none, .{ .quadrant = 0, .suffix = .{ 0, 0 } });
+    world_state = world.World.init(memory.allocator);
+    const player_pos = memory.game.player_pos;
+    world.World.push_layer(
+        &world_state.?,
+        world.Sprite.none,
+        .{ .quadrant = 0, .suffix = .{ 0, 0 } },
+        @intCast(@divTrunc(player_pos[0], memory.SPAN_SQ)), // convert a subpixel (0-4095) in a chunk to a block in a chunk (0-15)
+        @intCast(@divTrunc(player_pos[0], memory.SPAN_SQ)),
+    );
     logger.log(@src(), "Hello from Zig!", .{});
 }
 
@@ -29,24 +48,32 @@ pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f
     const game = &memory.game;
 
     // this variable allows for super smooth frame interpolation :)
-    const dt = time_interpolated - 1.0;
+    const dt = time_interpolated;
 
     // calculate effective zoom
     const resolution_scale = canvas_w / @as(f64, SCREEN_WIDTH);
-    // since effective does not influence logic, std.math.pow can be non-deterministic
-    const effective_zoom = game.camera_scale * std.math.pow(f64, game.camera_scale_change, dt) * resolution_scale;
+    // since interpolated doesn't really influence logic, std.math.pow can be non-deterministic
+    const interpolated_zoom = game.camera_scale * std.math.pow(f64, game.camera_scale_change, dt);
+    const effective_zoom = interpolated_zoom * resolution_scale;
 
     // calculate the screen's half-extents in world sub-pixels (as floats to preserve zoom precision)
     const subpixels_per_pixel: f64 = @as(f64, @floatFromInt(SPAN_SQ)) / @as(f64, @floatFromInt(SPAN));
     const subpixels_per_chunk: f64 = @as(f64, @floatFromInt(SUBPIXELS_IN_CHUNK));
-    const half_w_sp = (@as(f64, SCREEN_WIDTH_HALF) / game.camera_scale) * subpixels_per_pixel;
-    const half_h_sp = (@as(f64, SCREEN_HEIGHT_HALF) / game.camera_scale) * subpixels_per_pixel;
+    const half_w_sp = (@as(f64, SCREEN_WIDTH_HALF) / interpolated_zoom) * subpixels_per_pixel;
+    const half_h_sp = (@as(f64, SCREEN_HEIGHT_HALF) / interpolated_zoom) * subpixels_per_pixel;
+
+    // calculate the interpolated camera
+    const cam_vel_x = game.camera_pos[0] - game.last_camera_pos[0];
+    const cam_vel_y = game.camera_pos[1] - game.last_camera_pos[1];
+
+    const interp_cam_x = @as(f64, @floatFromInt(game.camera_pos[0])) + (@as(f64, @floatFromInt(cam_vel_x)) * dt);
+    const interp_cam_y = @as(f64, @floatFromInt(game.camera_pos[1])) + (@as(f64, @floatFromInt(cam_vel_y)) * dt);
 
     // find the world's sub-pixel edges
-    const edge_left = @as(f64, @floatFromInt(game.camera_pos[0])) - half_w_sp;
-    const edge_top = @as(f64, @floatFromInt(game.camera_pos[1])) - half_h_sp;
-    const edge_right = @as(f64, @floatFromInt(game.camera_pos[0])) + half_w_sp;
-    const edge_bottom = @as(f64, @floatFromInt(game.camera_pos[1])) + half_h_sp;
+    const edge_left = interp_cam_x - half_w_sp;
+    const edge_top = interp_cam_y - half_h_sp;
+    const edge_right = interp_cam_x + half_w_sp;
+    const edge_bottom = interp_cam_y + half_h_sp;
 
     // find the chunk indices that end up covering the screen, with just enough buffer
     const min_cx: i32 = @intFromFloat(@floor(edge_left / subpixels_per_chunk));
@@ -62,14 +89,14 @@ pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f
     const wb = cw * SPAN;
     const hb = ch * SPAN;
 
-    const moved_chunk = game.player_chunk[0] != game.last_player_chunk_x or game.player_chunk[1] != game.last_player_chunk_y;
-    if (!game.grid_dirty and !moved_chunk and game.last_grid_min_bx == @as(u32, @bitCast(min_cx))) {
-        update_render_properties(game, wb, hb, min_cx, min_cy, dt, effective_zoom);
-        return;
-    }
+    // const moved_chunk = game.player_chunk[0] != game.last_player_chunk_x or game.player_chunk[1] != game.last_player_chunk_y;
+    // if (!game.grid_dirty and !moved_chunk and game.last_grid_min_bx == @as(u32, @bitCast(min_cx))) {
+    //     update_render_properties(game, wb, hb, min_cx, min_cy, dt, effective_zoom);
+    //     return;
+    // }
 
-    game.last_player_chunk_x = game.player_chunk[0];
-    game.last_player_chunk_y = game.player_chunk[1];
+    // game.last_player_chunk_x = game.player_chunk[0];
+    // game.last_player_chunk_y = game.player_chunk[1];
 
     memory.scratch_reset();
     const out = memory.scratch_alloc_slice(memory.Block, wb * hb) orelse return;
@@ -105,18 +132,12 @@ pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f
             }
         }
     }
-    update_render_properties(game, wb, hb, min_cx, min_cy, dt, effective_zoom);
+    update_render_properties(game, interp_cam_x, interp_cam_y, wb, hb, min_cx, min_cy, dt, effective_zoom);
+    handle_visible_chunks();
 }
 
 /// Sets scratch properties containing information to TypeScript for renderFrame.
-inline fn update_render_properties(game: *memory.GameState, wb: u32, hb: u32, min_cx: i32, min_cy: i32, dt: f64, effective_zoom: f64) void {
-    // Calculate the interpolated camera
-    const cam_vel_x = game.camera_pos[0] - game.last_camera_pos[0];
-    const cam_vel_y = game.camera_pos[1] - game.last_camera_pos[1];
-
-    const interp_cam_x = @as(f64, @floatFromInt(game.camera_pos[0])) + (@as(f64, @floatFromInt(cam_vel_x)) * dt);
-    const interp_cam_y = @as(f64, @floatFromInt(game.camera_pos[1])) + (@as(f64, @floatFromInt(cam_vel_y)) * dt);
-
+inline fn update_render_properties(game: *memory.GameState, interp_cam_x: f64, interp_cam_y: f64, wb: u32, hb: u32, min_cx: i32, min_cy: i32, dt: f64, effective_zoom: f64) void {
     // Calculate the camera position relative to the tile grid origin
     const grid_origin_sub_x = @as(f64, @floatFromInt(min_cx)) * @as(f64, @floatFromInt(memory.SUBPIXELS_IN_CHUNK));
     const grid_origin_sub_y = @as(f64, @floatFromInt(min_cy)) * @as(f64, @floatFromInt(memory.SUBPIXELS_IN_CHUNK));
@@ -135,7 +156,7 @@ inline fn update_render_properties(game: *memory.GameState, wb: u32, hb: u32, mi
     const player_render_x = (player_interpolated_x - grid_origin_sub_x) / SPAN_FLOAT;
     const player_render_y = (player_interpolated_y - grid_origin_sub_y) / SPAN_FLOAT;
 
-    // Update scratch properties that TS reads
+    // Update scratch properties that JS reads
     memory.set_scratch_prop(0, wb);
     memory.set_scratch_prop(1, hb);
     memory.set_scratch_prop(2, cam_x_shader);
@@ -174,8 +195,8 @@ pub fn portal_zoom_in(bx: u32, by: u32) void {
 
     // TODO player_pos rearrangement logic
     game.player_chunk = .{ 0, 0 };
-    game.player_pos = .{ 2048, 2048 };
-    game.grid_dirty = true;
+    game.player_pos = .{ 2048 - 128, 2048 - 128 };
+    // game.grid_dirty = true;
 }
 
 /// Resets the game state.

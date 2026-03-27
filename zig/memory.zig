@@ -3,6 +3,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const logger = @import("logger.zig");
 const ColorRGBA = @import("color_rgba.zig").ColorRGBA;
+const seeding = @import("seeding.zig");
 const world = @import("world.zig");
 pub const is_wasm = builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
 
@@ -62,14 +63,14 @@ pub const MemorySizes = struct {
 
 /// A single block within a chunk.
 pub const Block = packed struct {
-    /// Internal sprite ID
+    /// Internal sprite ID.
     id: world.Sprite,
-    /// The brightness of the tile
+    /// The brightness of the tile.
     light: u8,
-    /// Mining progression for animation
+    /// How "mined" the block is. 0 is least mined, 15 is most mined.
     hp: u4,
 
-    /// Per-block seed for procedural variation in the shader
+    /// Per-block seed for procedural variation in the shader.
     seed: u24,
     /// Edge flags: which neighbors are air (for edge-darkening and culling).
     /// Starts from top left, then middle left, and ending at bottom right (skipping itself).
@@ -89,10 +90,12 @@ pub const Chunk = struct {
 
 /// Represents a "coordinate", relative to a quad-cache. Stores an "active suffix" as well as the quadrant this coordinate belongs to.
 pub const Coordinate = packed struct {
-    // Active suffix (stored as a vector). You can think of the active suffix like 16 u4s packed together for the X and Y coordinate that can be merged with the correct QuadCache quadrant to produce a "complete" path (see README for more details).
+    // Active suffix (stored as a vector). You can think of the active suffix like 16 u4s packed together for the X and Y coordinate that can be merged with the correct QuadCache quadrant to produce a "complete" path (see README.md for more details).
     suffix: v2u64,
     /// Quadrant ID (00: NW, 1: NE, 2: SW, 3: SE).
     quadrant: u2,
+    /// TODO determine if we actually want funny 3D stuff to happen (256 possible subpixel states and 256 possible important states, maybe)
+    influence: u16 = 0,
 };
 
 /// Dense storage for a modified chunk.
@@ -104,7 +107,7 @@ pub const ModifiedChunk = struct {
     blocks: [SPAN_SQ]world.Sprite,
 
     /// Helper to check if a specific local block is modified
-    pub inline fn is_modified(self: *const ModifiedChunk, lx: u4, ly: u4) bool {
+    pub inline fn is_modified(self: *const @This(), lx: u4, ly: u4) bool {
         const index = (@as(u8, ly) << 4) | @as(u8, lx);
         const slot = index >> 6;
         const bit = @as(u6, @truncate(index));
@@ -140,6 +143,7 @@ const Particle = packed struct {
 };
 
 /// A dynamically expandable scratch buffer for fast one-time passing through of data like strings or temporary particle data. Assumes fully single-thread communication. A separate, smaller logging_buffer is used in logger.zig.
+/// Information in the scratch buffer should be assumed to be corrupted as soon as any other function that could modify the scratch buffer is called and thought of as a temporary "handshake" between Zig and TypeScript.
 pub var scratch_buffer: []align(MAIN_ALIGN_BYTES) u8 = &[_]u8{};
 var is_dynamic_scratch: bool = false;
 
@@ -166,18 +170,18 @@ pub const GameState = extern struct {
     /// Represents how many layers deep the player is (defaults to 3).
     depth: u64 = 0,
 
-    /// Represents which quadrant of the QuadCache the player is in (starts at 0 when depth is <= 16)
+    /// Represents which quadrant (0-3) of the QuadCache the player is in (starts at 0 when depth is <= 16).
     player_quadrant: u32 = 0,
 
     /// Represents where the player should be rendered for WGSL.
     player_screen_offset: @Vector(2, f32) = .{ 0, 0 },
 
-    /// Represents if the grid needs to be recalculated/passed to WGSL.
-    grid_dirty: bool = true,
-    last_grid_min_bx: u32 = 0,
-    last_grid_min_by: u32 = 0,
-    last_player_chunk_x: u64 = 0,
-    last_player_chunk_y: u64 = 0,
+    // /// Represents if the grid needs to be recalculated/passed to WGSL.
+    // grid_dirty: bool = true,
+    // last_grid_min_bx: u32 = 0,
+    // last_grid_min_by: u32 = 0,
+    // last_player_chunk_x: u64 = 0,
+    // last_player_chunk_y: u64 = 0,
 
     /// Represents the keys that were pressed THIS FRAME. (On the next frame, this will be reset to 0.)
     ///
@@ -201,7 +205,7 @@ pub const GameState = extern struct {
     keys_held_mask: u32 = 0,
 
     /// The initial or "global" seed from which all generation starts.
-    seed: [8]u64 align(16) = std.mem.zeroes([8]u64),
+    seed: seeding.Seed align(16) = std.mem.zeroes(seeding.Seed),
 };
 
 /// The state of the current game, containing pre-allocated properties.
@@ -217,7 +221,7 @@ pub const MemoryLayout = extern struct {
     scratch_capacity: u64,
     /// Pointer to the GameState. (Can safely be pointer instead of u64 as it is the LAST property.)
     game_ptr: u64,
-    /// Additional properties for configuring the scratch buffer's meaning (with types.zig and commands.zig) if necessary.
+    /// Additional properties for sending additional (pointer or short fixed-length) properties. Information in the scratch properties should be assumed to be corrupted as soon as any other function that could modify the scratch buffer is called and thought of as a temporary "handshake" between Zig and TypeScript.
     scratch_properties: [20]u64,
 };
 
@@ -249,6 +253,7 @@ pub fn wasm_free(ptr: [*]u8, len: usize) void {
 }
 
 /// Determines if scratch_buffer has at least len capacity. If not, expands with the system allocator. Does NOT set the length property; only allocates sufficiently.
+/// TODO scratch_free_and_alloc function(?)
 pub fn scratch_alloc(len: usize) ?[*]u8 {
     const base_addr = @intFromPtr(scratch_buffer.ptr);
     const current_addr = base_addr + @as(usize, @intCast(mem.scratch_len));

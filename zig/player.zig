@@ -28,7 +28,7 @@ const PLAYER_HITBOX_HALF = 96;
 /// Minimum camera zoom/scale allowed. This is strategically calculated to make sure the default render distance is safe.
 const CAMERA_MIN_ZOOM = 1.0 / 100.0; // one third, set to much smaller for testing
 /// Maximum camera zoom/scale allowed. This is strategically calculated to make sure the player always remains in the viewport.
-const CAMERA_MAX_ZOOM = 1;
+const CAMERA_MAX_ZOOM = 10; // temporarily increased from one
 
 /// The zoom in/out keys change the zoom multiplier this fast per frame.
 const CAMERA_CHANGE_SPEED = 1.02;
@@ -51,11 +51,13 @@ pub fn move(logic_speed: f64) void {
 
     const old_camera_scale = game.camera_scale;
     if (KeyBits.isSet(KeyBits.plus, game.keys_held_mask)) {
-        game.camera_scale = @min(game.camera_scale * CAMERA_CHANGE_SPEED, CAMERA_MAX_ZOOM);
+        // since this doesn't really influence logic, std.math.pow can be non-deterministic
+        game.camera_scale = @min(game.camera_scale * std.math.pow(f64, CAMERA_CHANGE_SPEED, logic_speed), CAMERA_MAX_ZOOM);
     }
     if (KeyBits.isSet(KeyBits.minus, game.keys_held_mask)) {
-        game.camera_scale = @max(game.camera_scale / CAMERA_CHANGE_SPEED, CAMERA_MIN_ZOOM);
+        game.camera_scale = @max(game.camera_scale / std.math.pow(f64, CAMERA_CHANGE_SPEED, logic_speed), CAMERA_MIN_ZOOM);
     }
+
     game.camera_scale_change = game.camera_scale / old_camera_scale;
 
     if (KeyBits.isSet(KeyBits.left, game.keys_held_mask)) input_dir[0] -= player_speed;
@@ -91,7 +93,7 @@ pub fn move(logic_speed: f64) void {
             game.camera_pos[i] -= shift_amount;
             game.last_camera_pos[i] -= shift_amount;
 
-            game.grid_dirty = true;
+            // game.grid_dirty = true;
 
             // Hard limit check for depth 3 (TODO verify acacuracy at deeper depths)
             if (game.player_chunk[i] >= SUBPIXELS_IN_CHUNK) {
@@ -105,7 +107,7 @@ pub fn move(logic_speed: f64) void {
                 game.player_velocity[i] = 0;
             } else {
                 game.player_pos[i] = @mod(game.player_pos[i], SUBPIXELS_IN_CHUNK);
-                game.grid_dirty = true;
+                // game.grid_dirty = true;
             }
         }
     }

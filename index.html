@@ -33,8 +33,11 @@
         #text1,
         #text2,
         #text3,
-        #text4 {
+        #text4,
+        #logicText,
+        #renderText {
             position: fixed;
+            display: none;
             font-family: monospace;
             user-select: text;
             font-size: 20px;
@@ -69,16 +72,26 @@
             bottom: 2px;
             right: 2px;
         }
+
+        #logicText {
+            top: -5px;
+            left: -3px;
+            font-size: 8px;
+        }
+
+        #renderText {
+            top: -5px;
+            right: -3px;
+            font-size: 8px;
+        }
     </style>
     <script type="module" src="src/main.ts"></script>
 </head>
 
 <body>
     <canvas></canvas>
-    <span id="text1"></span>
-    <span id="text2"></span>
-    <span id="text3"></span>
-    <span id="text4"></span>
+    <span id="text1"></span><span id="text2"></span><span id="text3"></span><span id="text4"></span>
+    <span id="logicText"></span><span id="renderText"></span>
 </body>
 
 </html>

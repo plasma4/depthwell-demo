@@ -122,6 +122,7 @@ export async function create(
                     el.textContent = str;
                 },
                 js_get_time: () => performance.now(),
+                js_handle_visible_chunks: () => engine?.handleVisibleChunks(),
             },
         },
     );
@@ -235,15 +236,16 @@ export async function create(
     };
     engine.tileMap = tileMap;
 
-    engine.uploadVisibleChunks();
+    // engine.uploadVisibleChunks();
+    // engine.handleVisibleChunks();
 
     // Upload initial tile data
-    device.queue.writeBuffer(engine.tileBuffer, 0, tileMap.data.buffer);
-    device.queue.writeBuffer(
-        mapSizeBuffer,
-        0,
-        new Uint32Array([tileMap.width, tileMap.height]),
-    );
+    // device.queue.writeBuffer(engine.tileBuffer, 0, tileMap.data.buffer);
+    // device.queue.writeBuffer(
+    //     mapSizeBuffer,
+    //     0,
+    //     new Uint32Array([tileMap.width, tileMap.height]),
+    // );
 
     return engine;
 }

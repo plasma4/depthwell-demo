@@ -8,7 +8,7 @@ test "basic usage example" {
     const logger = @import("logger.zig");
 
     // Start with an arbitrary seed (NOTE: seed_from_bytes fails for WASM builds)
-    var world_seed: [8]u64 = undefined;
+    var world_seed: Seed = undefined;
     seed_from_bytes("my-game-seed", &world_seed);
 
     var rng: Xoshiro512 = .{ .state = world_seed };
@@ -17,53 +17,54 @@ test "basic usage example" {
     logger.quick(rng.next());
 }
 
-/// A 512-bit seed state
-pub const LayerSeed = [8]u64;
+/// A 512-bit seed state (also used for hashing).
+pub const Seed = [8]u64;
 
-/// A fast 64-bit to 64-bit generator for avalanching the X/Y offsets.
-inline fn split_mix_64(state: *u64) u64 {
-    state.* +%= 0x9E3779B97F4A7C15;
-    var z = state.*;
-    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
-    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
-    return z ^ (z >> 31);
-}
+// /// A fast 64-bit to 64-bit generator for avalanching the X/Y offsets.
+// inline fn split_mix_64(state: *u64) u64 {
+//     state.* +%= 0x9E3779B97F4A7C15;
+//     var z = state.*;
+//     z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
+//     z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
+//     return z ^ (z >> 31);
+// }
 
-/// BLAKE3 mix, also mixing in the layer seed.
-pub fn mix_coordinate_seed(layer_seed: LayerSeed, x: u64, y: u64) LayerSeed {
-    var hasher = std.crypto.hash.Blake3.init(.{});
-    hasher.update(std.mem.asBytes(&layer_seed));
-    hasher.update(std.mem.asBytes(&x));
-    hasher.update(std.mem.asBytes(&y));
+/// BLAKE3 mix, also mixing in the layer seed. Used when appending on part of a seed to a quadrant.
+pub fn mix_coordinate_seed(layer_seed: Seed, x: u64, y: u64) Seed {
+    const PackedInput = extern struct { // temporary struct for faster mixing :)
+        seed: Seed,
+        x: u64,
+        y: u64,
+    };
+    const input = PackedInput{ .seed = layer_seed, .x = x, .y = y };
 
     var out_bytes: [64]u8 = undefined;
-    hasher.final(&out_bytes);
+    std.crypto.hash.Blake3.hash(std.mem.asBytes(&input), &out_bytes, .{});
     return @bitCast(out_bytes);
 }
 
-/// Bijective mixer for generating Chunk seeds when combining with X/Y values.
-pub inline fn mix_chunk_seed(macro_seed: LayerSeed, coord_vector: memory.v2u64) LayerSeed {
-    // Combine local coordinates into a single 64-bit state.
-    const combined_offset = ((coord_vector[1] << 32) | coord_vector[0]);
+/// Bijective mixer for generating an individual seed for every chunk when combining X/Y active suffix coordinates with the seed of a quadrant.
+pub fn mix_chunk_seed(quadrant_seed: Seed, coord_vector: memory.v2u64) Seed {
+    const PackedInput = extern struct { // do the packing thing again
+        seed: Seed,
+        vector: memory.v2u64,
+    };
+    const input = PackedInput{ .seed = quadrant_seed, .vector = coord_vector };
 
-    // Avalanche the offset into a robust 64-bit state
-    var prng_state = stafford_mix_13(combined_offset) ^ stafford_mix_13(memory.game.depth);
-
-    var out = macro_seed;
-    // Generate 512 bits of avalanched noise and strictly XOR it (maintaining bijectivity)
-    inline for (0..8) |i| {
-        out[i] ^= split_mix_64(&prng_state);
-    }
-
-    return out;
+    var out_bytes: [64]u8 = undefined;
+    std.crypto.hash.Blake3.hash(std.mem.asBytes(&input), &out_bytes, .{});
+    return @bitCast(out_bytes);
 }
+
+pub const ChaCha20 = std.crypto.aead.chacha_poly.ChaCha20Poly1305; // TODO actually use this in procedural generation as a CSPRNG
 
 /// Xoshiro512** (StarStar), public domain randomness function.
 /// A high-performance, all-purpose generator with a period of 2^512 - 1.
 pub const Xoshiro512 = struct {
-    state: [8]u64,
+    state: Seed,
 
-    pub fn init(seed_data: [8]u64) Xoshiro512 {
+    /// Creates a new instance with seed data.
+    pub fn init(seed_data: Seed) Xoshiro512 {
         var state = seed_data;
         var check: u64 = 0;
         for (state) |s| check |= s;
@@ -74,8 +75,9 @@ pub const Xoshiro512 = struct {
         return .{ .state = state };
     }
 
-    pub fn next(self: *Xoshiro512) u64 {
-        const result = std.math.rotl(u64, self.state[1] *% 5, 7) *% 9;
+    /// Returns the next 64 bits of psuedo-random data.
+    pub fn next(self: *@This()) u64 {
+        const result = std.math.rotl(u64, self.state[1] *% 5, 7) *% 9; // the ** part of things
 
         // Xoshiro512 state transition
         const t = self.state[1] << 11;
@@ -89,23 +91,17 @@ pub const Xoshiro512 = struct {
         self.state[6] ^= self.state[7];
         self.state[6] ^= t;
         self.state[7] = std.math.rotl(u64, self.state[7], 21);
-
         return result;
     }
 
-    pub fn float(self: *Xoshiro512, comptime T: type) T {
+    /// Returns a float value (32/64 bits of information)
+    pub fn float(self: *@This(), comptime T: type) T {
         if (T == f64) {
-            // Use 53 bits of entropy (mantissa size for f64)
-            return @as(f64, @floatFromInt(self.next() >> 11)) * (1.0 / 9007199254740992.0);
+            return @as(f64, @floatFromInt(self.next())) * (1.0 / 18446744073709551616.0);
         } else if (T == f32) {
-            // Use 24 bits of entropy (mantissa size for f32)
-            return @as(f32, @floatFromInt(self.next() >> 40)) * (1.0 / 16777216.0);
+            return @as(f32, @floatFromInt(self.next())) * (1.0 / 4294967296.0);
         }
         @compileError("Only f32 and f64 floats are supported.");
-    }
-
-    pub fn checkpoint(self: Xoshiro512) Xoshiro512 {
-        return self;
     }
 };
 
@@ -117,7 +113,7 @@ pub inline fn stafford_mix_13(z_in: u64) u64 {
 }
 
 /// BROKEN WHEN EXPORTING, DO NOT USE. JS LOGIC EXISTS ALREADY. Converts a base-26 [a-z]-only string to 64 bytes. Input should  too no larger than 100 characters.
-pub fn seed_from_base26(noalias input: []const u8, noalias out_seed: *[8]u64) void {
+pub fn seed_from_base26(noalias input: []const u8, noalias out_seed: *Seed) void {
     // Initialize out_seed to 0
     @memset(out_seed, 0);
 
@@ -149,16 +145,16 @@ pub fn seed_from_base26(noalias input: []const u8, noalias out_seed: *[8]u64) vo
 }
 
 /// Bridge to WASM, creates seed data from a string using bijective mapping
-pub fn wasm_seed_from_string(str_ptr: [*]const u8, str_len: u64, output_ptr: *[8]u64) void {
+pub fn wasm_seed_from_string(str_ptr: [*]const u8, str_len: u64, output_ptr: *Seed) void {
     const temp: usize = @intCast(str_len);
     const input = str_ptr[0..temp];
     seed_from_base26(input, output_ptr);
 }
 
 test "bijective seeding uniqueness" {
-    var s1: [8]u64 = undefined;
-    var s2: [8]u64 = undefined;
-    var s3: [8]u64 = undefined;
+    var s1: Seed = undefined;
+    var s2: Seed = undefined;
+    var s3: Seed = undefined;
     seed_from_base26("a", &s1);
     seed_from_base26("b", &s2);
     seed_from_base26("c", &s3);
@@ -167,7 +163,7 @@ test "bijective seeding uniqueness" {
 }
 
 test "Xoshiro512** initialization/consistency" {
-    var seed: [8]u64 = undefined;
+    var seed: Seed = undefined;
     seed_from_bytes("test_seed", &seed);
     var rng1 = Xoshiro512.init(seed);
     var rng2 = Xoshiro512.init(seed);
@@ -179,7 +175,7 @@ test "Xoshiro512** initialization/consistency" {
 }
 
 test "branching check" {
-    var seed: [8]u64 = undefined;
+    var seed: Seed = undefined;
     seed_from_bytes("test", &seed);
     var rng_main = Xoshiro512.init(seed);
 
@@ -200,7 +196,7 @@ test "branching check" {
 
 /// Hashes an arbitrary string into a 512-bit seed directly into the destination (using Sha512).
 /// Used for testing only; actual seeding uses a string with only [a-z] characters and using Sha512 would be too slow for practical use.
-fn seed_from_bytes(noalias input: []const u8, noalias out_seed: *[8]u64) void {
+fn seed_from_bytes(noalias input: []const u8, noalias out_seed: *Seed) void {
     var hash_out: [64]u8 = undefined;
     std.crypto.hash.sha2.Sha512.hash(input, &hash_out, .{});
 
