@@ -62,8 +62,8 @@ export function initInput(): InputState {
     }
 
     window.addEventListener("keydown", (e: KeyboardEvent) => {
-        if (e.ctrlKey || e.metaKey) {
-            reset();
+        if (e.altKey || e.shiftKey || e.ctrlKey || e.metaKey) {
+            reset(); // prevent key-holding shenanigans
         }
         if (e.repeat || e.ctrlKey || e.metaKey) return;
         // console.log(e.code);

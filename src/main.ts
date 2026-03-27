@@ -172,7 +172,6 @@ engine.getFrameRate = function () {
 engine.baseSpeed = 1;
 
 let time = performance.now(),
-    renderTime = performance.now(),
     accumulator = 0,
     frame = 0;
 if (CONFIG.exportEngine) (globalThis as any).engine = engine;
@@ -181,15 +180,23 @@ if (CONFIG.verbose) {
     console.log("Exported functions and memory:", engine.exports);
 }
 
+window.addEventListener("blur", () => (time = Infinity)); // basically, don't let frames when the tab is hidden cause any simulation.
+
 // Add custom properties into the engine object (not handled by TypeScript)
 engine.isDebug = !!engine.exports.isDebug(); // This function is only true if Doptimize=Debug (default with zig build).
 engine.renderLoop = function (_t: number) {
-    // TODO back-off logic when frames get skipped, maybe? (due to WebGPU)
+    // TODO back-off logic when frames get skipped, maybe? (due to WebGPU being the bottleneck)
+
+    // simulate to a second/tick of logical simulation, whichever is higher (in practice, a tick will be less than a second, so 1 second)
     let tempTime = performance.now();
-    let delta = tempTime - time;
-    let newTicks = (delta * engine.getFrameRate()) / 1000;
+    let delta = time === Infinity ? 0 : tempTime - time;
+    let newTicks = Math.min(
+        (delta * engine.getFrameRate()) / 1000,
+        engine.getFrameRate(),
+    );
 
     engine.logicLoop(Math.floor(accumulator + newTicks));
+    console.log(newTicks);
     accumulator = (accumulator + newTicks) % 1; // calculate new fractional accumulation of ticks
 
     // mostly arbitrary color thresholds
