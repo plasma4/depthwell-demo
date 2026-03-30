@@ -1,6 +1,8 @@
 const std = @import("std");
 
 // Run zig build normally, and zig build -Doptimize=ReleaseFast for the final version. Use zig build --Dgen-enums as well to automatically construct src/enums.ts and zig test "zig/root.zig" to run all tests across the codebase.
+// To make a final ReleaseFast build with even more optimization, use wasm-opt like this:
+// { TEMP_WASM=$(mktemp -t wasm_opt_XXXXXX); wasm-opt src/main.wasm -o "$TEMP_WASM" -O4 --strip-debug --strip-dwarf --strip-producers --enable-threads --enable-simd && mv "$TEMP_WASM" src/main.wasm; }
 pub fn build(b: *std.Build) void {
     // TODO add in wasm-opt for ReleaseFast builds for even more optimization!
     b.install_path = ".";
@@ -24,8 +26,6 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Add ReleaseFast flag for release.
-    // Currently, all files are using setFloatMode by default until real32/real64 releases (which will also be better at tracking UB).
     const optimize = b.standardOptimizeOption(.{});
 
     // Main WASM game build
@@ -37,10 +37,14 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    if (optimize == .Debug) {
+        exe.root_module.strip = false;
+        exe.lto = .none;
+        exe.export_table = true;
+    }
     exe.rdynamic = true; // export functions with "export" keyword
     exe.entry = .disabled; // No main()
     exe.stack_size = 4 * 65536; // can increase as necessary
-    exe.initial_memory = 16 * 65536; // 4 MiB
     // exe.global_base = 8; // removed in favor of letting Zig manage pointers
     // if (optimize == .Debug) {
     //     exe.use_llvm = false;
@@ -90,7 +94,7 @@ fn generateEnums(b: *std.Build, paths: []const []const u8) void {
         return;
     }
 
-    // now actually update
+    // now actually update the types if necessary
     const gen_tool = b.addExecutable(.{
         .name = "generate_types",
         .root_module = b.createModule(.{

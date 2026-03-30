@@ -21,7 +21,8 @@ pub export fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canv
 }
 
 pub export fn tick(speed: f64) void {
-    if (in_debug_mode and KeyBits.isSet(KeyBits.zoom, memory.game.keys_pressed_mask)) {
+    if (KeyBits.isSet(KeyBits.zoom, memory.game.keys_pressed_mask)) {
+        // if (in_debug_mode) {
         // increase depth (testing hotkey)
         world.state.push_layer(
             world.Sprite.none,
@@ -29,6 +30,7 @@ pub export fn tick(speed: f64) void {
             memory.game.get_block_x_in_chunk(), // convert a subpixel (0-4095) in a chunk to a block in a chunk (0-15)
             memory.game.get_block_y_in_chunk(),
         );
+        // }
     }
 
     player.move(speed);

@@ -159,7 +159,6 @@ document.addEventListener(
 );
 
 let engine = await GameEngine.create();
-engine.wireframeOpacity = 1.0 / 3.0;
 
 engine.getTimeoutLength = function () {
     return ++frame % 3 == 2 ? 16 : 17;
@@ -262,6 +261,7 @@ if (engine.isDebug) {
         "Zig code is in debug mode. Use engine.exports to see its functions, variables, and memory, such as engine.exports.test_logs.",
     );
 
+    engine.wireframeOpacity = 1.0 / 3.0;
     loggingElementIds.forEach((id) => {
         (document.getElementById(id) as HTMLSpanElement).style.display =
             "inline";

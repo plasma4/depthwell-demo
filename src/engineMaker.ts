@@ -5,7 +5,7 @@ import { GameEngine } from "./engine";
 /** The URL for the WebAssembly code (compiled from zig build). */
 import WASM_URL from "./main.wasm?url";
 /** The URL for the WebGPU shader code. */
-import SHADER_SOURCE from "./shader.wgsl?raw";
+import SHADER_SOURCE from "./shader.wgsl";
 /** The URL for the sprite sheet. */
 import SPRITE_SHEET_URL from "./assets/main.png?url";
 
@@ -170,7 +170,7 @@ export async function create(
         engineModule,
         pipeline,
     );
-    await engine.setSeed(Seeding.makeSeed(12));
+    await engine.setSeed(Seeding.makeSeed(0));
     engine.exports.init();
 
     const resizeObserver = new ResizeObserver(engine.onResize);

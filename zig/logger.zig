@@ -187,12 +187,28 @@ fn write_value(writer: anytype, val: anytype) void {
 
             writer.writeAll(")") catch {};
         },
+        .array => |ptr_info| {
+            writer.writeAll("[") catch {};
+            inline for (0..ptr_info.len) |i| {
+                if (i > 0) writer.writeAll(", ") catch {};
+                write_value(writer, val[i]);
+            }
+            writer.writeAll("]") catch {};
+        },
         .pointer => |ptr_info| {
             if (ptr_info.size == .one) {
                 // De-reference single pointers and try again
                 write_value(writer, val.*);
+            } else if (ptr_info.size == .slice) {
+                // This handles your resultX[0..d] slices!
+                writer.writeAll("[") catch {};
+                for (val, 0..) |item, i| {
+                    if (i > 0) writer.writeAll(", ") catch {};
+                    write_value(writer, item);
+                }
+                writer.writeAll("]") catch {};
             } else {
-                // Opaque pointers or many-item pointers
+                // Opaque pointers or many-item pointers, generic stuff
                 writer.print("{*}", .{val}) catch {};
             }
         },

@@ -148,23 +148,23 @@ pub const MemorySizes = struct {
     pub const wasm_page = 64 * 1024;
 };
 
-/// A single block within a chunk.
-pub const Block = packed struct {
+/// A single block within a chunk. Each block uses 8 bytes.
+pub const Block = packed struct(u64) {
     /// Internal sprite ID.
     id: world.Sprite,
     /// How "mined" the block is. 0 is least mined, 15 is most mined.
     hp: u4,
-    /// The brightness of the tile.
-    light: u8,
-
-    /// Per-block seed for procedural variation in the shader.
-    seed: u24,
     /// Edge flags: which neighbors are air (for edge-darkening and culling).
     /// Starts from top left, then middle left, and ending at bottom right (skipping itself).
-    flags: u8,
+    edge_flags: u8,
+
+    /// The brightness of the tile.
+    light: u8,
+    /// Per-block seed for procedural variation in the shader.
+    seed: u24,
 };
 
-/// 16x16 fixed grid of blocks.
+/// 16x16 fixed grid of blocks. Each chunk is 2KiB in size.
 pub const Chunk = struct {
     blocks: [SPAN_SQ]Block,
     pub inline fn getIndex(x: u4, y: u4) u8 {
@@ -174,7 +174,7 @@ pub const Chunk = struct {
 
 /// Represents a "coordinate", relative to a quad-cache. Stores an "active suffix" as well as the quadrant this coordinate belongs to.
 pub const Coordinate = struct {
-    // Active suffix (stored as a vector). You can think of the active suffix like 16 u4s packed together for the X and Y coordinate that can be merged with the correct QuadCache quadrant to produce a "complete" path (see README.md for more details).
+    // Active suffix (stored as a vector). You can think of the active suffix like 16 u4s packed together for the X and Y coordinate that can be merged with the correct QuadCache quadrant to produce a "complete" path (see `README.md` for more details).
     suffix: v2u64,
     /// Quadrant ID (00: NW, 1: NE, 2: SW, 3: SE).
     quadrant: u2,

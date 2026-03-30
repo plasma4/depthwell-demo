@@ -15,7 +15,7 @@ const SCREEN_WIDTH_HALF = SCREEN_WIDTH / 2;
 const SCREEN_HEIGHT_HALF = SCREEN_HEIGHT / 2;
 
 /// Sets the number of times the push_layer function is called at the start. (If set to 3, the game will start off by being 4096x4096 chunks. If set to 1, it will be 16x16 chunks instead.)
-const STARTING_ZOOM_TIMES = 0;
+const STARTING_ZOOM_TIMES = 3;
 
 /// External function that makes a call to `engine.handleVisibleChunks()`.
 extern "env" fn js_handle_visible_chunks() void;
@@ -33,7 +33,7 @@ pub inline fn handle_visible_chunks() void {
 pub fn init() void {
     world.state = world.World.init(memory.allocator);
     // Some seeding to determine where the player starts off exactly with layer pushing
-    var rng = seeding.Xoshiro512.init(seeding.mix_base_seed(memory.game.seed, 1));
+    var rng = seeding.ChaCha12.init(seeding.mix_base_seed(memory.game.seed, 1));
     for (0..STARTING_ZOOM_TIMES) |_| {
         world.World.push_layer(
             &world.state,
@@ -49,7 +49,7 @@ pub fn init() void {
 /// Processes data for renderFrame in TypeScript.
 pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f64) void {
     _ = canvas_h;
-    const w = world.state;
+    const w = &world.state;
     const game = &memory.game;
 
     // this variable allows for super smooth frame interpolation :)
@@ -122,9 +122,8 @@ pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f
             const u_abs_cy: u64 = @bitCast(abs_cy);
 
             // bounds check with world limits
-            if (u_abs_cx <= world_limit and u_abs_cy <= world_limit) {
-                // TODO figure out the funny quadrant business too
-                const chunk = w.get_chunk(.{ .suffix = .{ @intCast(abs_cx), @intCast(abs_cy) }, .quadrant = 0 });
+            if (abs_cx >= 0 and u_abs_cx <= world_limit and abs_cy >= 0 and u_abs_cy <= world_limit) {
+                const chunk = w.get_chunk(.{ .suffix = .{ @bitCast(abs_cx), @bitCast(abs_cy) }, .quadrant = @intCast(game.player_quadrant) });
                 for (0..SPAN) |ly| {
                     @memcpy(out[(gy * SPAN + ly) * wb + gx * SPAN ..][0..SPAN], chunk.blocks[ly * SPAN ..][0..SPAN]);
                 }
@@ -174,18 +173,25 @@ inline fn update_render_properties(game: *memory.GameState, interp_cam_x: f64, i
     if (game.depth > 16) {
         logger.write(0, .{ "{h}Chunk X, Y, and active suffix", qc.get_quadrant_path_x(@intCast(game.player_quadrant)), qc.get_quadrant_path_y(@intCast(game.player_quadrant)), game.player_chunk });
     } else {
-        logger.write(0, .{ "{h}Chunk active suffix", game.player_chunk });
+        const d = @min(memory.game.depth, 16);
+        var resultX = std.mem.zeroes([16]u4); // or [_]u4{0} ** 16 :)
+        var resultY = std.mem.zeroes([16]u4);
+        for (0..d) |i| {
+            const shift = @as(u6, @intCast(((d - 1) - i) * 4)); // un-backwards the array
+            resultX[i] = @intCast((game.player_chunk[0] >> shift) & 0xF); // mask from 0-15
+            resultY[i] = @intCast((game.player_chunk[1] >> shift) & 0xF);
+        }
+        logger.write(0, .{ "{h}Chunk active suffix X/Y", resultX[0..d], resultY[0..d] });
     }
     logger.write(0, .{ "{h}Depth and position in chunk", game.depth, game.player_pos });
-    // logger.write(0, .{ "{h}Player interpolated shader position", @Vector(2, f64){ player_render_x, player_render_y } });
 
     // logger.clear(1);
-    // logger.write(1, .{ "{h}Keys held down and pressed this frame", game.keys_held_mask, game.keys_pressed_mask });
-    // logger.write(1, .{ "{h}dt (from -1 to 0)", dt });
+    // logger.write(1, .{ "{h}Keys held down", game.keys_held_mask });
 
     // logger.clear(2);
-    // logger.write(2, .{ "{h}Camera actual", game.camera_pos });
+    // logger.write(2, .{ "{h}Player interpolated shader position", @Vector(2, f64){ player_render_x, player_render_y } });
     // logger.write(2, .{ "{h}Camera interpolated shader position", @Vector(2, f64){ cam_x_shader, cam_y_shader } });
+    // logger.write(2, .{ "{h}Camera actual location (relative to player)", game.camera_pos });
     // logger.write(2, .{ "{h}Zoom (scaled based on canvas resolution)", effective_zoom });
 }
 

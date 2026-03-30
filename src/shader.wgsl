@@ -7,7 +7,7 @@ const TILES_PER_ROW: f32 = 15.0;
 const TILES_PER_COLUMN: f32 = 1.0;
 
 const TILE_SIZE: f32 = 16.0;
-const ATLAS_TILE_SIZE: f32 = 16.0;
+const PIXEL_UV_SIZE: f32 = 1.0 / TILE_SIZE;
 const ATLAS_WIDTH: f32 = TILE_SIZE * TILES_PER_ROW;
 const ATLAS_HEIGHT: f32 = TILE_SIZE * TILES_PER_COLUMN;
 
@@ -43,6 +43,7 @@ struct UnpackedTile {
     light: f32,
     hp: u32,
     seed: u32,
+    seed2: u32,
     edge_flags: u32,
 };
 
@@ -52,7 +53,7 @@ struct UnpackedTile {
 @group(0) @binding(3) var pixel_sampler: sampler;
 @group(0) @binding(4) var<uniform> map_size: vec4u;
 
-// Bijective mixer when given 32 bits of data
+// Bijective mixer, given 32 bits of data
 fn murmurmix32(number: u32) -> u32 {
     var h = number;
     h ^= h >> 16;
@@ -63,23 +64,241 @@ fn murmurmix32(number: u32) -> u32 {
     return h;
 }
 
-// Extracts the specific bit ranges defined in the Zig `packed struct(u64)`.
+// Complex logic that returns 0u if a pixel should be TRANSPARENT ("eroded"), NORMAL, or BORDER (darkened).
+fn erosion(local_uv: vec2f, edge_flags: u32, seed2: u32) -> u32 {
+    let px = u32(local_uv.x * TILE_SIZE);
+    let py = u32(local_uv.y * TILE_SIZE);
+
+    let s0 = seed2;
+    let s1 = murmurmix32(s0);
+    let s2 = murmurmix32(s1);
+    let s3 = murmurmix32(s2);
+    let s4 = murmurmix32(s3);
+
+    let has_top    = (edge_flags & EDGE_TOP) != 0u;
+    let has_bottom = (edge_flags & EDGE_BOTTOM) != 0u;
+    let has_left   = (edge_flags & EDGE_LEFT) != 0u;
+    let has_right  = (edge_flags & EDGE_RIGHT) != 0u;
+    let has_tl     = (edge_flags & EDGE_TOP_LEFT) != 0u;
+    let has_tr     = (edge_flags & EDGE_TOP_RIGHT) != 0u;
+    let has_bl     = (edge_flags & EDGE_BOTTOM_LEFT) != 0u;
+    let has_br     = (edge_flags & EDGE_BOTTOM_RIGHT) != 0u;
+
+    // The "center" of the circle is at the corner! Do some pixel-perfect circle edge logic.
+
+    // Top-left outer corner (top AND left both missing)
+    if (!has_top && !has_left) {
+        let r = 2u + extractBits(s4, 0u, 1u); // radius 2/3
+        let r_sq = r * r;
+        let dx = r - px;  // distance from the arc center (r, r)
+        let dy = r - py;
+        if (px < r && py < r) {
+            let dist_sq = dx * dx + dy * dy;
+            if (dist_sq > r_sq) { return 0u; }
+            if (dist_sq > r_sq - r) { return 2u; } // darken ring of 1 pixel
+        }
+    }
+
+    // Top-right outer corner
+    if (!has_top && !has_right) {
+        let r = 4u + extractBits(s4, 2u, 1u);
+        let r_sq = r * r;
+        let fpx = 15u - px; // flip x
+        if (fpx < r && py < r) {
+            let dx = r - fpx;
+            let dy = r - py;
+            let dist_sq = dx * dx + dy * dy;
+            if (dist_sq > r_sq) { return 0u; }
+            if (dist_sq > r_sq - r) { return 2u; }
+        }
+    }
+
+    // Bottom-left outer corner
+    if (!has_bottom && !has_left) {
+        let r = 4u + extractBits(s4, 4u, 1u);
+        let r_sq = r * r;
+        let fpy = 15u - py;
+        if (px < r && fpy < r) {
+            let dx = r - px;
+            let dy = r - fpy;
+            let dist_sq = dx * dx + dy * dy;
+            if (dist_sq > r_sq) { return 0u; }
+            if (dist_sq > r_sq - r) { return 2u; }
+        }
+    }
+
+    // Bottom-right outer corner
+    if (!has_bottom && !has_right) {
+        let r = 4u + extractBits(s4, 6u, 1u);
+        let r_sq = r * r;
+        let fpx = 15u - px;
+        let fpy = 15u - py;
+        if (fpx < r && fpy < r) {
+            let dx = r - fpx;
+            let dy = r - fpy;
+            let dist_sq = dx * dx + dy * dy;
+            if (dist_sq > r_sq) { return 0u; }
+            if (dist_sq > r_sq - r) { return 2u; }
+        }
+    }
+
+    // Straight edges
+
+    // Top edge
+    if (!has_top) {
+        let base_depth = 1u + extractBits(s0, 0u, 1u);
+        let notch_pos = extractBits(s0, 1u, 4u);
+        let notch_dir = extractBits(s0, 5u, 1u);
+        let notch_width = 2u + extractBits(s0, 6u, 2u);
+
+        var depth = base_depth;
+        if (px >= notch_pos && px < notch_pos + notch_width) {
+            if (notch_dir == 0u) { depth = depth + 1u; } else { depth = max(depth, 1u) - 1u; }
+        }
+
+        // Only apply straight edge outside the corner rounding zones
+        let left_safe = select(0u, 4u + extractBits(s4, 0u, 1u), !has_left);
+        let right_safe = select(16u, 16u - 4u - extractBits(s4, 2u, 1u), !has_right);
+
+        if (px >= left_safe && px < right_safe) {
+            if (py < depth) { return 0u; }
+            if (py == depth) { return 2u; }
+        }
+    }
+
+    // Bottom edge
+    if (!has_bottom) {
+        let base_depth = 1u + extractBits(s1, 0u, 1u);
+        let notch_pos = extractBits(s1, 1u, 4u);
+        let notch_dir = extractBits(s1, 5u, 1u);
+        let notch_width = 2u + extractBits(s1, 6u, 2u);
+
+        var depth = base_depth;
+        if (px >= notch_pos && px < notch_pos + notch_width) {
+            if (notch_dir == 0u) { depth = depth + 1u; } else { depth = max(depth, 1u) - 1u; }
+        }
+
+        let left_safe = select(0u, 4u + extractBits(s4, 4u, 1u), !has_left);
+        let right_safe = select(16u, 16u - 4u - extractBits(s4, 6u, 1u), !has_right);
+
+        if (px >= left_safe && px < right_safe) {
+            if (py > 15u - depth) { return 0u; }
+            if (py == 15u - depth) { return 2u; }
+        }
+    }
+
+    // Left edge
+    if (!has_left) {
+        let base_depth = 1u + extractBits(s2, 0u, 1u);
+        let notch_pos = extractBits(s2, 1u, 4u);
+        let notch_dir = extractBits(s2, 5u, 1u);
+        let notch_width = 2u + extractBits(s2, 6u, 2u);
+
+        var depth = base_depth;
+        if (py >= notch_pos && py < notch_pos + notch_width) {
+            if (notch_dir == 0u) { depth = depth + 1u; } else { depth = max(depth, 1u) - 1u; }
+        }
+
+        let top_safe = select(0u, 4u + extractBits(s4, 0u, 1u), !has_top);
+        let bottom_safe = select(16u, 16u - 4u - extractBits(s4, 4u, 1u), !has_bottom);
+
+        if (py >= top_safe && py < bottom_safe) {
+            if (px < depth) { return 0u; }
+            if (px == depth) { return 2u; }
+        }
+    }
+
+    // Right edge
+    if (!has_right) {
+        let base_depth = 1u + extractBits(s3, 0u, 1u);
+        let notch_pos = extractBits(s3, 1u, 4u);
+        let notch_dir = extractBits(s3, 5u, 1u);
+        let notch_width = 2u + extractBits(s3, 6u, 2u);
+
+        var depth = base_depth;
+        if (py >= notch_pos && py < notch_pos + notch_width) {
+            if (notch_dir == 0u) { depth = depth + 1u; } else { depth = max(depth, 1u) - 1u; }
+        }
+
+        let top_safe = select(0u, 4u + extractBits(s4, 2u, 1u), !has_top);
+        let bottom_safe = select(16u, 16u - 4u - extractBits(s4, 6u, 1u), !has_bottom);
+
+        if (py >= top_safe && py < bottom_safe) {
+            if (px > 15u - depth) { return 0u; }
+            if (px == 15u - depth) { return 2u; }
+        }
+    }
+
+    // Inner corners (no diagonal neighbor)
+
+    if (!has_tl && has_top && has_left) {
+        let r = 2u + extractBits(s4, 8u, 1u); // 2 or 3
+        if (px < r && py < r) {
+            let dx = px + 1u; // +1 so the circle center is at (-0.5, -0.5) effectively
+            let dy = py + 1u;
+            let dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= r * r) { return 0u; }
+            if (dist_sq <= (r + 1u) * (r + 1u)) { return 2u; }
+        }
+    }
+
+    if (!has_tr && has_top && has_right) {
+        let r = 2u + extractBits(s4, 10u, 1u);
+        let fpx = 15u - px;
+        if (fpx < r && py < r) {
+            let dx = fpx + 1u;
+            let dy = py + 1u;
+            let dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= r * r) { return 0u; }
+            if (dist_sq <= (r + 1u) * (r + 1u)) { return 2u; }
+        }
+    }
+
+    if (!has_bl && has_bottom && has_left) {
+        let r = 2u + extractBits(s4, 12u, 1u);
+        let fpy = 15u - py;
+        if (px < r && fpy < r) {
+            let dx = px + 1u;
+            let dy = fpy + 1u;
+            let dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= r * r) { return 0u; }
+            if (dist_sq <= (r + 1u) * (r + 1u)) { return 2u; }
+        }
+    }
+
+    if (!has_br && has_bottom && has_right) {
+        let r = 2u + extractBits(s4, 14u, 1u);
+        let fpx = 15u - px;
+        let fpy = 15u - py;
+        if (fpx < r && fpy < r) {
+            let dx = fpx + 1u;
+            let dy = fpy + 1u;
+            let dist_sq = dx * dx + dy * dy;
+            if (dist_sq <= r * r) { return 0u; }
+            if (dist_sq <= (r + 1u) * (r + 1u)) { return 2u; }
+        }
+    }
+
+    return 1u;
+}
+
+// Extracts the specific bit ranges in Block (see zig/memory.zig).
 fn unpack_tile(data: TileData) -> UnpackedTile {
     var out: UnpackedTile;
 
-    // Word 0: [0..19] id, [20..27] light, [28..31] hp
     out.sprite_id = extractBits(data.word0, 0u, 20u);
     out.hp = extractBits(data.word0, 20u, 4u);
+    out.edge_flags = extractBits(data.word0, 24u, 8u);
 
-    let light_u = extractBits(data.word0, 24u, 8u);
-    out.light = sqrt(f32(light_u) / (240.0 * 4.0) + 0.75); // not 255.0 * 4.0, to allow for light > 1, also square-rooted to allow lower light values like 128 to still be fairly visible
+    let light_u = extractBits(data.word1, 0u, 8u);
+    out.light = sqrt(f32(light_u) / (240.0 * 8.0) + 0.875); // not 255.0 * 8.0, to allow for light > 1, also square-rooted to allow lower light values like 128 to still be fairly visible
 
-    // Word 1: [0..23] seed, [24..31] edge_flags
-    out.seed = murmurmix32((extractBits(data.word1, 0u, 24u) << 8u) | light_u);
-    out.edge_flags = extractBits(data.word1, 24u, 8u);
+    // Contains light in the first 8 bytes and seed in the next 24, since all 32 bits are technically random we use murmurmix32 to mix these quite simply with decent results!
+    out.seed = murmurmix32(data.word1);
+    out.seed2 = murmurmix32(out.seed);
 
     if (out.sprite_id == 7 && (extractBits(out.seed, 16u, 2u) == 0)) { // extract bits 16-18 for random modifications
-        out.sprite_id++;
+        out.sprite_id++; // mushroom
     }
 
     return out;
@@ -95,11 +314,12 @@ struct VertexOutput {
     @location(2) @interpolate(flat) edge_flags: u32,
     @location(3) @interpolate(flat) light: f32,
     @location(4) @interpolate(flat) seed: u32, // these bits are used as efficently as possible
+    @location(5) @interpolate(flat) seed2: u32,
 
     // Local UV (0.0 to 1.0) across the surface of the specific tile.
-    @location(5) local_uv: vec2f,
+    @location(6) local_uv: vec2f,
     // Where on the chunk a tile is
-    @location(6) @interpolate(flat) tile_coords: vec2u,
+    @location(7) @interpolate(flat) tile_coords: vec2u,
 };
 
 @vertex
@@ -132,8 +352,8 @@ fn vs_main(
         let safe_local_pos = clamp(local_pos, vec2f(epsilon), vec2f(1.0 - epsilon));
 
         let atlas_uv = vec2f(
-            (1 + safe_local_pos.x) * ATLAS_TILE_SIZE / ATLAS_WIDTH,
-            (0 + safe_local_pos.y) * ATLAS_TILE_SIZE / ATLAS_HEIGHT
+            (1 + safe_local_pos.x) * TILE_SIZE / ATLAS_WIDTH,
+            (0 + safe_local_pos.y) * TILE_SIZE / ATLAS_HEIGHT
         );
 
         out.position = vec4f(ndc, 0.0, 1.0);
@@ -176,8 +396,8 @@ fn vs_main(
     let safe_local_pos = clamp(local_pos, vec2f(epsilon), vec2f(1.0 - epsilon));
 
     let atlas_uv = vec2f(
-        (sprite_col + safe_local_pos.x) * ATLAS_TILE_SIZE / ATLAS_WIDTH,
-        (sprite_row + safe_local_pos.y) * ATLAS_TILE_SIZE / ATLAS_HEIGHT
+        (sprite_col + safe_local_pos.x) * TILE_SIZE / ATLAS_WIDTH,
+        (sprite_row + safe_local_pos.y) * TILE_SIZE / ATLAS_HEIGHT
     );
 
     out.position = vec4f(ndc, 0.0, 1.0);
@@ -187,6 +407,7 @@ fn vs_main(
     out.tile_coords = vec2u(tile_x, tile_y);
     out.light = tile.light;
     out.seed = tile.seed;
+    out.seed2 = tile.seed2;
     out.local_uv = local_pos;
 
     return out;
@@ -198,8 +419,8 @@ fn calculate_atlas_uv(id: u32, local_pos: vec2f) -> vec2f {
     let epsilon = 0.5 / ATLAS_WIDTH;
     let safe_pos = clamp(local_pos, vec2f(epsilon), vec2f(1.0 - epsilon));
     return vec2f(
-        (col + safe_pos.x) * ATLAS_TILE_SIZE / ATLAS_WIDTH,
-        (row + safe_pos.y) * ATLAS_TILE_SIZE / ATLAS_HEIGHT
+        (col + safe_pos.x) * TILE_SIZE / ATLAS_WIDTH,
+        (row + safe_pos.y) * TILE_SIZE / ATLAS_HEIGHT
     );
 }
 
@@ -247,36 +468,49 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     }
 
     // too transparent? return a transparent pixel (which is faster than discarding, probably)
-    if (tex_color.a < 0.01 && !is_wireframe) { return vec4f(0.0, 0.0, 0.0, 0.0); }
+    if (tex_color.a < 0.005 && !is_wireframe) { return vec4f(0.0, 0.0, 0.0, 0.0); }
 
-    var final_rgb = vec3f(0.0);
-    var final_a = 0.0;
 
     // convert to oklab and nudge values with seed
     var lab = linear_srgb_to_oklab(tex_color.rgb);
     var lch = oklab_to_oklch(lab);
 
     // we use 10 out of the 24 seed bits here
-    let l_nudge = f32(extractBits(in.seed, 0u, 4u)) / 15.0;
-    let a_nudge = f32(extractBits(in.seed, 4u, 3u)) / 7.0;
+    let extracted_l = f32(extractBits(in.seed, 0u, 4u));
+    let extracted_a = f32(extractBits(in.seed, 4u, 3u));
+    let l_nudge = extracted_l / 15.0;
+    let a_nudge = extracted_a / 7.0;
     let b_nudge = f32(extractBits(in.seed, 7u, 3u)) / 7.0;
 
     lch.x += (l_nudge - 0.5) * 0.1; // shift lightness (0-1)
     lch.y += a_nudge * 0.01; // shift chroma, which acts similar to saturation (0-1)
     lch.z += (b_nudge - 0.5) * 0.15; // shift hue (in RADIANS)
 
+
+    var final_rgb = vec3f(0.0);
+    var final_a = 0.0;
+
+    let erode_mask = erosion(in.local_uv, in.edge_flags, in.seed2);
+    if (erode_mask == 0u) {
+        final_a = 0.0;
+    } else {
+        // add the edge darkening and base light value, with the function using bits 10-16
+        let darkening = calculate_edge_darkening(in.local_uv, in.edge_flags, in.seed);
+        lch.x = min(1.0, lch.x * (1.0 - darkening) * in.light);
+
+        if (erode_mask == 2u) {
+            lch.x *= 0.8 + extracted_l * 0.01; // lower lightness
+            lch.y *= 1.3 + extracted_a * 0.04; // increase chroma
+        }
+        final_a = tex_color.a * scene.chunk_opacity;
+    }
+
     lab = oklch_to_oklab(lch);
-
-    // add the edge darkening and base light value, with the function using bits 10-16
-    let darkening = calculate_edge_darkening(in.local_uv, in.edge_flags, in.seed);
-    lab.x *= (1.0 - darkening) * in.light;
-
     final_rgb = max(oklab_to_linear_srgb(lab), vec3f(0.0));
-    final_a = tex_color.a * scene.chunk_opacity;
 
     if (is_wireframe) {
         // Correctly mix the wireframe dynamically depending on whether the block exists below it.
-        if (final_a > 0.0) {
+        if (final_a > 0.005) {
             final_rgb = mix(final_rgb, wire_color.rgb, wire_color.a);
             final_a = max(final_a, wire_color.a);
         } else {
@@ -291,37 +525,37 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 // Calculates edge darkening procedurally based on flags calculated in Zig.
 fn calculate_edge_darkening(local_uv: vec2f, edge_flags: u32, seed: u32) -> f32 {
     var darkening = 0.0;
-    let edge_width = 0.125 + (f32(extractBits(seed, 10u, 3u)) / 32.0);
-    let edge_strength = 0.03 + f32(extractBits(seed, 13u, 3u)) / 12.0;
+    let edge_width = 0.20 + f32(extractBits(seed, 10u, 3u)) / 32.0;
+    let edge_strength = 0.1 + f32(extractBits(seed, 13u, 3u)) / 48.0;
     let corner_width = 0.15;
 
     // Curvy shadow gradient
-    if ((edge_flags & EDGE_TOP) != 0u) {
+    if ((edge_flags & EDGE_TOP) == 0u) {
         darkening = max(darkening, (1.0 - smoothstep(0.0, edge_width, local_uv.y)) * edge_strength);
     }
-    if ((edge_flags & EDGE_BOTTOM) != 0u) {
+    if ((edge_flags & EDGE_BOTTOM) == 0u) {
         darkening = max(darkening, (1.0 - smoothstep(0.0, edge_width, 1.0 - local_uv.y)) * edge_strength);
     }
-    if ((edge_flags & EDGE_LEFT) != 0u) {
+    if ((edge_flags & EDGE_LEFT) == 0u) {
         darkening = max(darkening, (1.0 - smoothstep(0.0, edge_width, local_uv.x)) * edge_strength);
     }
-    if ((edge_flags & EDGE_RIGHT) != 0u) {
+    if ((edge_flags & EDGE_RIGHT) == 0u) {
         darkening = max(darkening, (1.0 - smoothstep(0.0, edge_width, 1.0 - local_uv.x)) * edge_strength);
     }
 
-    if ((edge_flags & EDGE_TOP_LEFT) != 0u || ((edge_flags & EDGE_TOP) != 0u && (edge_flags & EDGE_LEFT) != 0u)) {
+    if ((edge_flags & EDGE_TOP_LEFT) == 0u || ((edge_flags & EDGE_TOP) == 0u && (edge_flags & EDGE_LEFT) == 0u)) {
         let corner_dist = length(local_uv);
         darkening = max(darkening, (1.0 - smoothstep(0.0, corner_width * 1.414, corner_dist)) * edge_strength * 1.2);
     }
-    if ((edge_flags & EDGE_TOP_RIGHT) != 0u || ((edge_flags & EDGE_TOP) != 0u && (edge_flags & EDGE_RIGHT) != 0u)) {
+    if ((edge_flags & EDGE_TOP_RIGHT) == 0u || ((edge_flags & EDGE_TOP) == 0u && (edge_flags & EDGE_RIGHT) == 0u)) {
         let corner_dist = length(vec2f(1.0 - local_uv.x, local_uv.y));
         darkening = max(darkening, (1.0 - smoothstep(0.0, corner_width * 1.414, corner_dist)) * edge_strength * 1.2);
     }
-    if ((edge_flags & EDGE_BOTTOM_LEFT) != 0u || ((edge_flags & EDGE_BOTTOM) != 0u && (edge_flags & EDGE_LEFT) != 0u)) {
+    if ((edge_flags & EDGE_BOTTOM_LEFT) == 0u || ((edge_flags & EDGE_BOTTOM) == 0u && (edge_flags & EDGE_LEFT) == 0u)) {
         let corner_dist = length(vec2f(local_uv.x, 1.0 - local_uv.y));
         darkening = max(darkening, (1.0 - smoothstep(0.0, corner_width * 1.414, corner_dist)) * edge_strength * 1.2);
     }
-    if ((edge_flags & EDGE_BOTTOM_RIGHT) != 0u || ((edge_flags & EDGE_BOTTOM) != 0u && (edge_flags & EDGE_RIGHT) != 0u)) {
+    if ((edge_flags & EDGE_BOTTOM_RIGHT) == 0u || ((edge_flags & EDGE_BOTTOM) == 0u && (edge_flags & EDGE_RIGHT) == 0u)) {
         let corner_dist = length(1.0 - local_uv);
         darkening = max(darkening, (1.0 - smoothstep(0.0, corner_width * 1.414, corner_dist)) * edge_strength * 1.2);
     }

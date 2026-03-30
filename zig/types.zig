@@ -60,6 +60,23 @@ pub const KeyBits = struct {
 /// Bitmask flags used to identify the presence of neighboring blocks.
 /// TODO use, and also add logic at the edges of SimBuffer(?)
 pub const EdgeFlags = struct {
+    /// Helper to map dx/dy offsets to these flags
+    pub fn get_flag_bit(dx: i32, dy: i32) u8 {
+        if (dy == -1) {
+            if (dx == -1) return TOP_LEFT;
+            if (dx == 0) return TOP;
+            if (dx == 1) return TOP_RIGHT;
+        } else if (dy == 0) {
+            if (dx == -1) return LEFT;
+            if (dx == 1) return RIGHT;
+        } else if (dy == 1) {
+            if (dx == -1) return BOTTOM_LEFT;
+            if (dx == 0) return BOTTOM;
+            if (dx == 1) return BOTTOM_RIGHT;
+        }
+        return 0;
+    }
+
     /// Neighboring block is to the top-left (Northwest)
     pub const TOP_LEFT = 0x01;
     /// Neighboring block is directly above (North)

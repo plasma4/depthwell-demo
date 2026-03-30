@@ -7,9 +7,9 @@ Depthwell is a procedurally generated fractal mining incremental roguelite. How 
 
 ### Building
 
-Run `zig build` for the main build of Zig code, `zig test "zig/root.zig"` to run (all) tests, and `zig build --Dgen-enums` to simultaneously build and generate `enums.ts` if changes were made.
+Run `zig build` for the main build of Zig code, `zig test "zig/root.zig"` to run (all) tests, and `zig build --Dgen-enums` to simultaneously build and generate `enums.ts` if changes were made. (See `build.zig` for details on compiling a final version.)
 
-When building for production with Vite (`npm run build` instead of `npm run dev`), edit `SHADER_SOURCE` in `engine.ts` to `"./shader.wgsl"` temporarily (without the `?raw` property) to actually compress `shader.wgsl`.
+When building for production with Vite (`npm run build` instead of `npm run dev`), edit `SHADER_SOURCE` in `engineMaker.ts` to `"./shader.wgsl"` temporarily (without the `?raw` property) to actually compress `shader.wgsl`.
 
 With a clear-screen command that uses ANSI-escape codes, you can clear the screen every time after building:
 
@@ -25,7 +25,7 @@ Currently, Depthwell does not utilize web worker technology so custom headers ar
 
 Game is created using Zig and WebGPU, and meant to be web-first. A final product that uses Mach Engine for native building is planned, but _web will always be free and recieve updates_. The internal viewport is 480x270 and scaled up in WebGPU automatically. Functions are exported from `root.zig`.
 
-By using `Xoshiro512**` (TODO migrate to minimal ChaCha8) and a max seeding of 100 `a-z` characters, the game can generate over `10^140` possible maps, with each map containing a very large depth limit that allows for near-infinite exploration.
+By using `ChaCha12` and a seed with 1-100 `a-z` characters, the game can generate over `10^140` possible maps, with each map containing a very large depth limit that allows for near-infinite exploration.
 
 ### Fractal Architecture & Coordinate Systems
 
@@ -121,7 +121,7 @@ There's some details the previous explanation glossed over. You might have wonde
 
 - **Static Bounds:** Again, the QCs are fixed at depth-change. Moving across the $2^{64}$ boundary simply toggles the `u2` quadrant ID.
 - **Mixing:** `ChunkSeed`, to oversimplify details slightly, is `BLAKE3(seed of QC determined by the quadrant ID, SuffixX, SuffixY)`. The seed of the QC itself is determined by the _initial_ seed from the string provided (specific bijective logic is rather complex, but see `src/seeding.ts` for details) and is mixed with the 4 bits of data (a "nibble") that is added to the prefix stack of each quadrant (after depth 16, where the prefix data becomes non-empty).
-- **Block RNG:** Blocks within a chunk are generated sequentially via `Xoshiro512**` (TODO migrate to minimal ChaCha8). Since the order in which the blocks are generated is the same every time (go through X-axis values 0-15, then increment Y, etc.), the PRNG state is shifted multiple times yet produces deterministic outcomes, which makes things simpler.
+- **Block RNG:** Blocks within a chunk are generated sequentially via `ChaCha12`. Since the order in which the blocks are generated is the same every time (go through X-axis values 0-15, then increment Y, etc.), the PRNG state is shifted multiple times yet produces deterministic outcomes, which makes things simpler.
 
 #### Storing modifications
 
@@ -134,20 +134,20 @@ Of course, to have a fractal _mining_ game, you must store if the player has mod
 But wait, what is a block? Here is `zig/memory.zig`:
 
 ```zig
-/// A single block within a chunk.
-pub const Block = packed struct {
-    /// Internal sprite ID
-    id: World.Sprite,
-    /// Mining progression for animation
+/// A single block within a chunk. Each block uses 8 bytes.
+pub const Block = packed struct(u64) {
+    /// Internal sprite ID.
+    id: world.Sprite,
+    /// How "mined" the block is. 0 is least mined, 15 is most mined.
     hp: u4,
-    /// The brightness of the tile
-    light: u8,
-
-    /// Per-block seed for procedural variation in the shader
-    seed: u24,
     /// Edge flags: which neighbors are air (for edge-darkening and culling).
     /// Starts from top left, then middle left, and ending at bottom right (skipping itself).
-    flags: u8,
+    edge_flags: u8,
+
+    /// The brightness of the tile.
+    light: u8,
+    /// Per-block seed for procedural variation in the shader.
+    seed: u24,
 };
 ```
 
@@ -265,7 +265,7 @@ pub const ModKey = extern struct {
 ```
 
 ```zig
-/// A static 2x2 grid of seeds only updated on entering a portal/game startup. See README.md for a more detailed and intuitive explanation for what this does.
+/// A static 2x2 grid of seeds only updated on entering a portal/game startup. See `README.md` for a more detailed and intuitive explanation for what this does.
 pub const QuadCache = struct {
     /// The 256-bit hashes for the 4 active quadrants, used for modifications across 16 depths (sequentially from D to D-15). (0: NW, 1: NE, 2: SW, 3: SE)
     path_hashes: [4][16]seeding.Seed align(memory.MAIN_ALIGN_BYTES),
@@ -278,9 +278,9 @@ pub const QuadCache = struct {
 ```
 
 ```zig
-/// The "fractal lineage sparse set" that stores all modifications. Modifications of "higher" D-values are prioritized, and lower D-values are used for backgrounds/procedural generation; at any depth D, individual blocks are still individual blocks. (See README.md for depth's meaning and more details.)
+/// The "fractal lineage sparse set" that stores all modifications. Modifications of "higher" D-values are prioritized, and lower D-values are used for backgrounds/procedural generation; at any depth D, individual blocks are still individual blocks. (See `README.md` for depth's meaning and more details.)
 ///
-/// Reading performance is an amortized O(1) due only needing to consider block sizes between depth D-15 to D. (See README.md for depth's meaning.)
+/// Reading performance is an amortized O(1) due only needing to consider block sizes between depth D-15 to D.
 ///
 /// Writing performance is an amortized O(1) due to needing to find a `HashMap.
 ///
@@ -318,7 +318,7 @@ Chunk modifications are hashed in the sparse set by XORing the chunk's active co
 
 #### Memory transfer
 
-The interface between the TypeScript engine and the Zig core is managed via a shared **Memory Layout** buffer:
+The interface between the TypeScript engine and the Zig core is managed via a pre-planned memory layout:
 
 - The **scratch buffer** is a gigantic, dynamically expanding shared heap used for high-bandwidth data transfers (mainly, drawing chunks).
 - There's also **scratch properties**, which are an array with 20 properties of 64-bit integers and floats used for metadata (also used for drawing chunks).

@@ -176,7 +176,7 @@ export class GameEngine {
             size: [imageBitmap.width, imageBitmap.height],
             format: device.features.has("canvas-rgba16float-support")
                 ? "rgba16float"
-                : "bgra8unorm", // TODO TODO
+                : "bgra8unorm",
             usage:
                 GPUTextureUsage.TEXTURE_BINDING |
                 GPUTextureUsage.COPY_DST |
@@ -223,8 +223,9 @@ export class GameEngine {
 
         const neededBytes = u32Count * 4;
         if (!this.tileBuffer || this.tileBuffer.size < neededBytes) {
-            // TODO benchmark destroy/recreation speed
-            if (this.tileBuffer) this.tileBuffer.destroy();
+            // console.time();
+            // if (this.tileBuffer) this.tileBuffer.destroy();
+            // console.timeEnd();
             this.tileBuffer = this.device.createBuffer({
                 label: "Tile grid",
                 size: neededBytes,
@@ -310,6 +311,11 @@ export class GameEngine {
     // -----
     // Memory Management
     // -----
+
+    /** Returns the number of MB (fractional) that the memory's buffer is for WASM. */
+    public getWASMMemoryMB() {
+        return this.memory.buffer.byteLength / 1024 / 1024;
+    }
 
     /**
      * Accesses memory relative to the start of the GameState (by adding this.GAME_STATE_PTR to the offset). Obtains a TypedArray view into WASM game data.

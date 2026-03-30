@@ -75,12 +75,269 @@ pub fn mix_chunk_seeds(quadrant_seed: Seed, coord_vector: memory.v2u64) [4]Seed 
         .depth = memory.game.depth,
     };
 
-    var out_bytes: [256]u8 = undefined;
+    var out_bytes: [256]u8 = undefined; // TODO figure out if this is a performance bottleneck slowdown
     std.crypto.hash.Blake3.hash(std.mem.asBytes(&input), &out_bytes, .{});
     return @bitCast(out_bytes);
 }
 
-pub const ChaCha8 = std.crypto.aead.chacha_poly.ChaCha8Poly1305;
+/// ChaCha12 based PRNG. Basically cryptographically secure, can generate 64-byte blocks at a time, and supports skipping. All with 512-bit seeding!
+pub const ChaCha12 = struct {
+    // Internal state stored as vectors for SIMD!
+    row0: @Vector(4, u32),
+    row1: @Vector(4, u32),
+    row2: @Vector(4, u32),
+    row3: @Vector(4, u32),
+
+    /// Pre-generated keystream buffer (64 bytes).
+    keystream: [8]u64,
+    /// Which u64 index in keystream to serve next.
+    position: u32,
+
+    const V4 = @Vector(4, u32);
+
+    pub fn init(seed_data: Seed) ChaCha12 {
+        const s: [16]u32 = @bitCast(seed_data);
+
+        return ChaCha12{
+            .row0 = V4{ s[0], s[1], s[2], s[3] },
+            .row1 = V4{ s[4], s[5], s[6], s[7] },
+            .row2 = V4{ s[8], s[9], s[10], s[11] },
+            .row3 = V4{ s[12], s[13], s[14], s[15] },
+            .keystream = undefined,
+            .position = 8,
+        };
+    }
+
+    pub fn next(self: *@This()) u64 {
+        if (self.position >= 8) {
+            self.generateBlock();
+            self.position = 0;
+        }
+
+        const val = self.keystream[self.position];
+        self.position += 1;
+        return val;
+    }
+
+    /// Skips forward by `count` u64 values in true O(1) time.
+    pub fn skip(self: *@This(), count: u64) void {
+        if (count == 0) return;
+
+        // If we are already at the end of a block, trigger the reset logic early
+        if (self.position >= 8) {
+            self.generateBlock();
+            self.position = 0;
+        }
+
+        const remaining_u64s_in_block = 8 - self.position;
+
+        // If the skip lands within our currently generated block, just move the pointer
+        if (count < remaining_u64s_in_block) {
+            self.position += @as(u32, @truncate(count));
+            return;
+        }
+
+        // Otherwise, figure out how many blocks we need to skip entirely
+        const count_after_block = count - remaining_u64s_in_block;
+        const blocks_to_skip = (count_after_block / 8) + 1;
+        const new_pos = count_after_block % 8;
+
+        // Fast-forward the internal 64-bit counter (row3[0] = low, row3[1] = high)
+        const counter_add = blocks_to_skip - 1;
+        if (counter_add > 0) {
+            const add_low: u32 = @as(u32, @truncate(counter_add));
+            const add_high: u32 = @as(u32, @truncate(counter_add >> 32));
+
+            const low_before = self.row3[0];
+            self.row3[0] +%= add_low;
+            // Catch overflow for the low 32 bits
+            if (self.row3[0] < low_before) {
+                self.row3[1] +%= 1;
+            }
+            self.row3[1] +%= add_high;
+        }
+
+        // Generate only the exact block we landed on
+        self.generateBlock();
+        self.position = @as(u32, @truncate(new_pos));
+    }
+
+    /// Returns a float value (32/64 bits of information)
+    pub fn float(self: *@This(), comptime T: type) T {
+        if (T == f64) {
+            return @as(f64, @floatFromInt(self.next())) * (1.0 / 18446744073709551616.0);
+        } else if (T == f32) {
+            return @as(f32, @floatFromInt(self.next())) * (1.0 / 18446744073709551616.0);
+        }
+        @compileError("Only f32 and f64 floats are supported.");
+    }
+
+    fn generateBlock(self: *@This()) void {
+        var x0 = self.row0;
+        var x1 = self.row1;
+        var x2 = self.row2;
+        var x3 = self.row3;
+
+        // 6 double-rounds
+        inline for (0..6) |_| {
+            // Column rounds: QR on (0,4,8,12), (1,5,9,13), (2,6,10,14), (3,7,11,15)
+            // With row layout, columns are already aligned.
+            quarterRound(&x0, &x1, &x2, &x3);
+
+            // Diagonal rounds: QR on (0,5,10,15), (1,6,11,12), (2,7,8,13), (3,4,9,14)
+            // Rotate rows to align diagonals into columns.
+            x1 = @shuffle(u32, x1, undefined, [4]i32{ 1, 2, 3, 0 });
+            x2 = @shuffle(u32, x2, undefined, [4]i32{ 2, 3, 0, 1 });
+            x3 = @shuffle(u32, x3, undefined, [4]i32{ 3, 0, 1, 2 });
+
+            quarterRound(&x0, &x1, &x2, &x3);
+
+            // Rotate back.
+            x1 = @shuffle(u32, x1, undefined, [4]i32{ 3, 0, 1, 2 });
+            x2 = @shuffle(u32, x2, undefined, [4]i32{ 2, 3, 0, 1 });
+            x3 = @shuffle(u32, x3, undefined, [4]i32{ 1, 2, 3, 0 });
+        }
+
+        // Add original state
+        x0 +%= self.row0;
+        x1 +%= self.row1;
+        x2 +%= self.row2;
+        x3 +%= self.row3;
+
+        // Interleave into u64 pairs and write to keystream.
+        // Row layout: x0 = [s0, s1, s2, s3], x1 = [s4, s5, s6, s7], etc.
+        // We want keystream as u64s: (s0|s1), (s2|s3), (s4|s5), (s6|s7), ...
+        self.keystream[0] = packU64(x0, 0, 1);
+        self.keystream[1] = packU64(x0, 2, 3);
+        self.keystream[2] = packU64(x1, 0, 1);
+        self.keystream[3] = packU64(x1, 2, 3);
+        self.keystream[4] = packU64(x2, 0, 1);
+        self.keystream[5] = packU64(x2, 2, 3);
+        self.keystream[6] = packU64(x3, 0, 1);
+        self.keystream[7] = packU64(x3, 2, 3);
+
+        // Increment counter (row3[0] is low word, row3[1] is high word)
+        self.row3[0] +%= 1;
+        if (self.row3[0] == 0) {
+            self.row3[1] +%= 1;
+        }
+    }
+
+    inline fn packU64(v: V4, lo: comptime_int, hi: comptime_int) u64 {
+        return @as(u64, v[lo]) | (@as(u64, v[hi]) << 32);
+    }
+
+    inline fn rotl(v: V4, comptime n: u8) V4 {
+        const shift_left: @Vector(4, u8) = @splat(n);
+        const shift_right: @Vector(4, u8) = @splat(32 - n);
+        return (v << shift_left) | (v >> shift_right);
+    }
+
+    inline fn quarterRound(a: *V4, b: *V4, c: *V4, d: *V4) void {
+        a.* +%= b.*;
+        d.* ^= a.*;
+        d.* = rotl(d.*, 16);
+
+        c.* +%= d.*;
+        b.* ^= c.*;
+        b.* = rotl(b.*, 12);
+
+        a.* +%= b.*;
+        d.* ^= a.*;
+        d.* = rotl(d.*, 8);
+
+        c.* +%= d.*;
+        b.* ^= c.*;
+        b.* = rotl(b.*, 7);
+    }
+};
+
+test "basic determinism" {
+    var seed = std.mem.zeroes(Seed);
+    seed[0] = 42;
+
+    var rng1 = ChaCha12.init(seed);
+    var rng2 = ChaCha12.init(seed);
+
+    for (0..100) |_| {
+        try std.testing.expectEqual(rng1.next(), rng2.next());
+    }
+}
+
+test "skip produces same values" {
+    var seed = std.mem.zeroes(Seed);
+    seed[0] = 123;
+    seed[5] = 77;
+
+    var rng_sequential = ChaCha12.init(seed);
+
+    // Consume 50 values
+    var values: [50]u64 = undefined;
+    for (0..50) |i| {
+        values[i] = rng_sequential.next();
+    }
+
+    // Skip to position 25 and verify
+    var rng_skipped = ChaCha12.init(seed);
+    rng_skipped.skip(25);
+
+    for (25..50) |i| {
+        try std.testing.expectEqual(values[i], rng_skipped.next());
+    }
+}
+
+test "skip forward matches sequential" {
+    var seed = std.mem.zeroes(Seed);
+    seed[3] = 0xAB;
+
+    var rng1 = ChaCha12.init(seed);
+    var rng2 = ChaCha12.init(seed);
+
+    // Advance rng1 by 37 calls
+    for (0..37) |_| {
+        _ = rng1.next();
+    }
+
+    // Skip rng2 forward by 37
+    rng2.skip(37);
+
+    // They should now agree
+    for (0..20) |_| {
+        try std.testing.expectEqual(rng1.next(), rng2.next());
+    }
+}
+
+test "cross-block boundary skip" {
+    var seed = std.mem.zeroes(Seed);
+    seed[0] = 1;
+
+    var rng = ChaCha12.init(seed);
+
+    // Get value at position 15 (spans two blocks since each block = 8 u64s)
+    var reference = ChaCha12.init(seed);
+    for (0..15) |_| {
+        _ = reference.next();
+    }
+    const expected = reference.next();
+
+    rng.skip(15);
+    try std.testing.expectEqual(expected, rng.next());
+}
+
+test "float range" {
+    var seed = std.mem.zeroes(Seed);
+    seed[0] = 99;
+
+    var rng = ChaCha12.init(seed);
+
+    for (0..1000) |_| {
+        const f64_val = rng.float(f64);
+        try std.testing.expect(f64_val >= 0.0 and f64_val < 1.0);
+
+        const f32_val = rng.float(f32);
+        try std.testing.expect(f32_val >= 0.0 and f32_val < 1.0);
+    }
+}
 
 /// Xoshiro512** (StarStar), public domain randomness function.
 /// A high-performance, all-purpose generator with a period of 2^512 - 1.
@@ -123,7 +380,7 @@ pub const Xoshiro512 = struct {
         if (T == f64) {
             return @as(f64, @floatFromInt(self.next())) * (1.0 / 18446744073709551616.0);
         } else if (T == f32) {
-            return @as(f32, @floatFromInt(self.next())) * (1.0 / 4294967296.0);
+            return @as(f32, @floatFromInt(self.next())) * (1.0 / 18446744073709551616.0);
         }
         @compileError("Only f32 and f64 floats are supported.");
     }

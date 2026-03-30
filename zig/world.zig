@@ -2,6 +2,7 @@
 const std = @import("std");
 const memory = @import("memory.zig");
 const logger = @import("logger.zig");
+const types = @import("types.zig");
 const seeding = @import("seeding.zig");
 
 const Chunk = memory.Chunk;
@@ -27,7 +28,7 @@ pub const Sprite = enum(u20) {
 };
 
 /// Empty block of id Sprite.none
-pub const AIR_BLOCK: Block = .{ .id = Sprite.none, .seed = 0, .light = 255, .hp = 0, .flags = 0 };
+pub const AIR_BLOCK: Block = .{ .id = Sprite.none, .seed = 0, .light = 255, .hp = 0, .edge_flags = 0 };
 
 /// 32-bit packed structure representing a single modified block within a chunk.
 pub const BlockMod = packed struct(u32) {
@@ -75,9 +76,9 @@ pub const ModKeyContext = struct {
     }
 };
 
-/// Constant-size buffer caching the simulation buffer.
+/// Constant-size buffer caching the simulation buffer. 512 KiB in size.
 pub const SimBuffer = struct {
-    chunks: [256]?*memory.Chunk, // hard-capped to 256
+    chunks: [256]*memory.Chunk, // hard-capped to 256, representing a 16x16 area around the player
 
     /// Returns the chunk from the specified x and y.
     pub inline fn get_index(cx: u64, cy: u64) usize {
@@ -91,17 +92,17 @@ pub const SimBuffer = struct {
 };
 
 /// Generates an initial block for seeding.
-pub inline fn generate_initial_block(rng: *seeding.Xoshiro512) Sprite {
+pub inline fn generate_initial_block(rng: *seeding.ChaCha12) Sprite {
     const entropy = rng.next();
 
     var block_id = Sprite.none;
-    if (entropy < odds_num(0.6)) {
+    if (entropy < odds_num(0.3)) {
         block_id = Sprite.none;
-    } else if (entropy < odds_num(0.95)) {
+    } else if (entropy < odds_num(0.9)) {
         block_id = Sprite.stone;
-    } else if (entropy < odds_num(0.97)) {
+    } else if (entropy < odds_num(0.93)) {
         block_id = Sprite.greenstone;
-    } else if (entropy < odds_num(0.99)) {
+    } else if (entropy < odds_num(0.95)) {
         block_id = Sprite.bluestone;
     } else {
         block_id = Sprite.bloodstone;
@@ -138,7 +139,7 @@ const QuadrantEdgeDetails = struct {
     most_right: bool,
 };
 
-/// A static 2x2 grid of seeds only updated on entering a portal/game startup. See README.md for a more detailed and intuitive explanation for what this does.
+/// A static 2x2 grid of seeds only updated on entering a portal/game startup. See `README.md` for a more detailed and intuitive explanation for what this does.
 pub const QuadCache = struct {
     /// The 256-bit hashes for the 4 active quadrants, used for modifications across 16 depths (sequentially from D to D-15). (0: NW, 1: NE, 2: SW, 3: SE)
     path_hashes: [4][16]seeding.Seed align(memory.MAIN_ALIGN_BYTES),
@@ -167,12 +168,12 @@ pub const QuadCache = struct {
 
     /// Returns the Y-coordinate path of a specific quadrant. Unreachable call if path is empty (if depth is not > 16).
     pub inline fn get_quadrant_path_y(self: *const @This(), quadrant: u2) std.ArrayList(u64) {
-        return if (quadrant < 2) self.left_path else carry_path(&self.left_path);
+        return if (quadrant < 2) self.top_path else carry_path(&self.top_path);
     }
 
     /// Deallocates a temporary instance of a QuadCache path.
-    pub inline fn cleanup_path(self: *const @This(), path: std.ArrayList(u64)) std.ArrayList(u64) {
-        // Memory comparison is safe because QuadCache will never be de-initialized, top_left_path is always non-empty (so nothing weird weird), and there's no multicore/async shenanigans here.
+    pub inline fn cleanup_path(self: *const @This(), path: std.ArrayList(u64)) void {
+        // Memory comparison is safe because QuadCache will never be de-initialized, top_left_path is always non-empty (so nothing weird), and there's no multicore/async shenanigans here.
         if (self.left_path.items.ptr != path.items.ptr and self.top_path.items.ptr != path.items.ptr) {
             path.deinit(memory.allocator);
         }
@@ -209,7 +210,7 @@ pub const QuadCache = struct {
     }
 };
 
-/// The "fractal lineage sparse set" that stores all modifications. Modifications of "higher" D-values are prioritized, and lower D-values are used for backgrounds/procedural generation; at any depth D, individual blocks are still individual blocks. (See README.md for depth's meaning and more details.)
+/// The "fractal lineage sparse set" that stores all modifications. Modifications of "higher" D-values are prioritized, and lower D-values are used for backgrounds/procedural generation; at any depth D, individual blocks are still individual blocks. (See `README.md` for depth's meaning and more details.)
 ///
 /// Reading performance is an amortized O(1) due only needing to consider block sizes between depth D-15 to D.
 ///
@@ -222,7 +223,7 @@ pub const FLSS = struct {
     /// Dense, fragmentation-free storage of all chunk modifications.
     history: std.ArrayList(ChunkMod),
     /// Maps a coordinate (u64) to an index in the `history` array.
-    index: std.AutoHashMap(ModKey, u64), // 64-bit to prevent headaches between Memory32/64/native.
+    index: std.AutoHashMap(ModKey, u64), // 64-bit "pointer" to prevent headaches between Memory32/64/native.
 
     pub fn init(alloc: std.mem.Allocator) FLSS {
         return .{
@@ -263,24 +264,33 @@ pub const FLSS = struct {
     }
 };
 
+pub const CachedChunk = struct {
+    x: u64,
+    y: u64,
+    depth: u64,
+    quadrant: u32,
+    chunk_ptr: ?*memory.Chunk = null,
+};
+
 /// Stores the blocks and state of the world of Depthwell.
 pub const World = struct {
     /// Allocator used in the World.
     alloc: std.mem.Allocator,
-    /// A SimBuffer with 256 chunks that is cached to prevent constant recalculations (effectively centered the player).
-    chunk_cache: SimBuffer,
+    /// A SimBuffer with 256 chunks that is cached to prevent constant recalculations (effectively centered around the player and constantly rearranged). TODO actual shifting logic along with chunk_cache, of course
+    sim_buffer: SimBuffer,
+    /// A super simple LRU that stores chunks accessed recently, particularly useful for edge flags and temporary logic like sim_buffer shifting that could potentially exceed the `SimBuffer`'s boundaries. Stores just 64 chunks, and checked after the SimBuffer through linear search. TODO, implement and add search features.
+    chunk_cache: [64]CachedChunk,
+    /// Actual raw chunk data stored in the chunk_cache.
+    chunk_cache_data: [64]*memory.Chunk,
     /// The QuadCache that stores information about the 4 quadrants and their seeds.
     quad_cache: QuadCache,
-    /// Stores modifications of chunks.
-    modification_store: std.HashMap(ModKey, memory.ModifiedChunk, ModKeyContext, 80),
-
     /// Represents the answer to the question "what is the largest possible suffix value"? 15 at depth 1, 255 at depth 2, capped at 2**64-1 at depth 16 and beyond.
     max_possible_suffix: u64 = 0,
 
     pub fn init(alloc: std.mem.Allocator) World {
         return .{
             .alloc = alloc,
-            .chunk_cache = undefined,
+            .sim_buffer = undefined,
             .quad_cache = .{
                 .path_hashes = undefined,
                 .left_path = std.ArrayList(u64){
@@ -293,13 +303,15 @@ pub const World = struct {
                 },
                 .ancestor_materials = .{Sprite.none} ** 4,
             },
-            .modification_store = std.HashMap(ModKey, memory.ModifiedChunk, ModKeyContext, 80).init(alloc),
+            .chunk_cache = undefined,
+            .chunk_cache_data = undefined,
+            // .modification_store = std.HashMap(ModKey, memory.ModifiedChunk, ModKeyContext, 80).init(alloc),
         };
     }
 
     pub fn get_chunk(self: *const @This(), coord: memory.Coordinate) *memory.Chunk {
         // logger.write(3, .{ "{h}Chunk requested", coord });
-        // TODO figure out this whole allocation business
+        // TODO figure out this whole allocation and SimBuffer/chunk_cache usage business
         const chunk = self.alloc.create(memory.Chunk) catch @panic("chunk alloc failed");
         self.generate_chunk(chunk, coord);
         return chunk;
@@ -308,10 +320,10 @@ pub const World = struct {
     /// Generates a whole chunk (considering modifications), given a pointer to where the chunk should be stored and coordinates.
     pub fn generate_chunk(self: *const @This(), chunk: *memory.Chunk, coord: memory.Coordinate) void {
         const chunk_seed = self.quad_cache.get_chunk_seeds(coord);
-        var rng1 = seeding.Xoshiro512.init(chunk_seed[0]);
-        const rng2 = seeding.Xoshiro512.init(chunk_seed[0]);
-        const rng3 = seeding.Xoshiro512.init(chunk_seed[0]);
-        var rng4 = seeding.Xoshiro512.init(chunk_seed[0]);
+        var rng1 = seeding.ChaCha12.init(chunk_seed[0]); // Block generation.
+        const rng2 = seeding.ChaCha12.init(chunk_seed[1]);
+        const rng3 = seeding.ChaCha12.init(chunk_seed[2]);
+        var rng4 = seeding.ChaCha12.init(chunk_seed[3]); // Visual touches only.
 
         _ = rng2;
         _ = rng3;
@@ -328,6 +340,7 @@ pub const World = struct {
                 const is_absolute_edge_y = (cy == 0 and ly == 0 and quadrant_edge_details.most_top) or (cy == state.max_possible_suffix and ly == 15 and quadrant_edge_details.most_bottom);
                 if (is_absolute_edge_x or is_absolute_edge_y) {
                     chunk.blocks[idx] = make_basic_block(.edgestone);
+                    // This does mean there are fewer .next() calls but this doesn't matter here
                     continue;
                 }
 
@@ -335,16 +348,49 @@ pub const World = struct {
                 const entropy = rng4.next();
                 chunk.blocks[idx] = .{
                     .id = block_id,
-                    .seed = @truncate(entropy >> 8),
                     .light = @truncate(entropy),
+                    .seed = @truncate(entropy >> 8),
                     .hp = 15,
-                    .flags = 0,
+                    .edge_flags = 0, // will be updated in second pass
                 };
+            }
+        }
+
+        for (0..SPAN) |ly| {
+            for (0..SPAN) |lx| {
+                const idx = (ly * SPAN) + lx;
+                if (chunk.blocks[idx].id == .none) continue; // air doesn't need edge flags
+                // TODO edge flags across differing chunks!
+
+                var flags: u8 = 0;
+                const sly: i32 = @intCast(ly);
+                const slx: i32 = @intCast(lx);
+
+                // Check the 8 neighbors
+                comptime var dy: i32 = -1;
+                inline while (dy <= 1) : (dy += 1) {
+                    comptime var dx: i32 = -1;
+                    inline while (dx <= 1) : (dx += 1) {
+                        if (dx == 0 and dy == 0) continue;
+
+                        const ny = sly + dy;
+                        const nx = slx + dx;
+
+                        // Bounds check: Stay within this chunk
+                        if (ny >= 0 and ny < SPAN and nx >= 0 and nx < SPAN) {
+                            const neighbor_idx = @as(usize, @intCast(ny * SPAN + nx));
+                            if (chunk.blocks[neighbor_idx].id != .none) {
+                                flags |= types.EdgeFlags.get_flag_bit(dx, dy);
+                            }
+                        }
+                    }
+                }
+                chunk.blocks[idx].edge_flags = flags;
             }
         }
     }
 
-    /// The 16-step Ascendant Projection Read Loop
+    /// The 16-step ascendent projection read loop thingy
     /// Called when the SimBuffer generates a chunk.
     pub fn get_effective_modification(self: *@This(), cx: u64, cy: u64) ?*ChunkMod {
         var search_cx = cx;
@@ -384,6 +430,7 @@ pub const World = struct {
             (memory.game.player_pos[0] << SPAN_LOG2) & player_mask,
             (memory.game.player_pos[1] << SPAN_LOG2) & player_mask,
         };
+        memory.game.player_velocity = .{ 0, 0 };
         memory.game.set_player_pos(new_pos);
         memory.game.set_camera_pos(new_pos);
 
@@ -434,7 +481,7 @@ pub const World = struct {
     }
 };
 
-/// Multiplies a float by 2**64, returning an integer x such that a random next() value generated by Xoshiro512** has its probability to be less than x equal to the chance variable.
+/// Multiplies a float by 2**64, returning an integer x such that a random u64 value has its probability to be less than x equal to the chance variable.
 pub inline fn odds_num(chance: comptime_float) u64 {
     return @intFromFloat(chance * 18446744073709551616.0);
 }
@@ -445,7 +492,7 @@ pub inline fn make_basic_block(sprite_type: Sprite) Block {
         .seed = 0,
         .light = 255,
         .hp = 0,
-        .flags = 0,
+        .edge_flags = 0,
     };
 }
 
