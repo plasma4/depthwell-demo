@@ -80,7 +80,7 @@ pub fn mix_chunk_seeds(quadrant_seed: Seed, coord_vector: memory.v2u64) [4]Seed 
     return @bitCast(out_bytes);
 }
 
-/// ChaCha12 based PRNG. Basically cryptographically secure, can generate 64-byte blocks at a time, and supports skipping. All with 512-bit seeding!
+/// ChaCha12-based PRNG hard-coded to accept 512 bits of seeding and without certain features. Basically cryptographically secure, can generate 64-byte blocks at a time, and supports skipping.
 pub const ChaCha12 = struct {
     // Internal state stored as vectors for SIMD!
     row0: @Vector(4, u32),
@@ -108,6 +108,7 @@ pub const ChaCha12 = struct {
         };
     }
 
+    /// Returns the next 64 bits of psuedo-random data.
     pub fn next(self: *@This()) u64 {
         if (self.position >= 8) {
             self.generateBlock();
@@ -119,7 +120,7 @@ pub const ChaCha12 = struct {
         return val;
     }
 
-    /// Skips forward by `count` u64 values in true O(1) time.
+    /// Skips forward by `count` u64 values. An O(1) operation.
     pub fn skip(self: *@This(), count: u64) void {
         if (count == 0) return;
 
@@ -142,7 +143,7 @@ pub const ChaCha12 = struct {
         const blocks_to_skip = (count_after_block / 8) + 1;
         const new_pos = count_after_block % 8;
 
-        // Fast-forward the internal 64-bit counter (row3[0] = low, row3[1] = high)
+        // Fast-forward the internal 64-bit counter
         const counter_add = blocks_to_skip - 1;
         if (counter_add > 0) {
             const add_low: u32 = @as(u32, @truncate(counter_add));
@@ -162,7 +163,7 @@ pub const ChaCha12 = struct {
         self.position = @as(u32, @truncate(new_pos));
     }
 
-    /// Returns a float value (32/64 bits of information)
+    /// Returns a float value from [0, 1), using 64 bits of seeding data.
     pub fn float(self: *@This(), comptime T: type) T {
         if (T == f64) {
             return @as(f64, @floatFromInt(self.next())) * (1.0 / 18446744073709551616.0);
@@ -172,8 +173,9 @@ pub const ChaCha12 = struct {
         @compileError("Only f32 and f64 floats are supported.");
     }
 
+    /// Generates the next 64 bytes of seeding data.
     fn generateBlock(self: *@This()) void {
-        var x0 = self.row0;
+        var x0 = self.row0; // SIMD-optimized vectors
         var x1 = self.row1;
         var x2 = self.row2;
         var x3 = self.row3;
@@ -206,8 +208,8 @@ pub const ChaCha12 = struct {
 
         // Interleave into u64 pairs and write to keystream.
         // Row layout: x0 = [s0, s1, s2, s3], x1 = [s4, s5, s6, s7], etc.
-        // We want keystream as u64s: (s0|s1), (s2|s3), (s4|s5), (s6|s7), ...
-        self.keystream[0] = packU64(x0, 0, 1);
+        // Make keystream u64 values: (s0|s1), (s2|s3), (s4|s5), (s6|s7), ...
+        self.keystream[0] = packU64(x0, 0, 1); // these functions are optimized with comptime and inline
         self.keystream[1] = packU64(x0, 2, 3);
         self.keystream[2] = packU64(x1, 0, 1);
         self.keystream[3] = packU64(x1, 2, 3);
@@ -309,7 +311,7 @@ test "skip forward matches sequential" {
 
 test "cross-block boundary skip" {
     var seed = std.mem.zeroes(Seed);
-    seed[0] = 1;
+    seed_from_bytes("my-game-seed", &seed);
 
     var rng = ChaCha12.init(seed);
 
@@ -326,7 +328,7 @@ test "cross-block boundary skip" {
 
 test "float range" {
     var seed = std.mem.zeroes(Seed);
-    seed[0] = 99;
+    seed_from_bytes("my-game-seed", &seed);
 
     var rng = ChaCha12.init(seed);
 
@@ -358,7 +360,7 @@ pub const Xoshiro512 = struct {
 
     /// Returns the next 64 bits of psuedo-random data.
     pub fn next(self: *@This()) u64 {
-        const result = std.math.rotl(u64, self.state[1] *% 5, 7) *% 9; // the ** part of things
+        const result = std.math.rotl(u64, self.state[1] *% 5, 7) *% 9; // the "StarStar" part of things
 
         // Xoshiro512 state transition
         const t = self.state[1] << 11;
@@ -375,7 +377,7 @@ pub const Xoshiro512 = struct {
         return result;
     }
 
-    /// Returns a float value (32/64 bits of information)
+    /// Returns a float value from [0, 1), using 64 bits of seeding data.
     pub fn float(self: *@This(), comptime T: type) T {
         if (T == f64) {
             return @as(f64, @floatFromInt(self.next())) * (1.0 / 18446744073709551616.0);
@@ -393,7 +395,7 @@ pub inline fn stafford_mix_13(z_in: u64) u64 {
     return z ^ (z >> 31);
 }
 
-/// BROKEN WHEN EXPORTING, DO NOT USE. JS LOGIC EXISTS ALREADY. Converts a base-26 [a-z]-only string to 64 bytes. Input should  too no larger than 100 characters.
+/// BROKEN WHEN EXPORTING, DO NOT USE FOR WASM, AS JS LOGIC EXISTS ALREADY. Converts a base-26 [a-z]-only string to 64 bytes. Input should  too no larger than 100 characters.
 pub fn seed_from_base26(noalias input: []const u8, noalias out_seed: *Seed) void {
     // Initialize out_seed to 0
     @memset(out_seed, 0);
@@ -488,68 +490,59 @@ fn seed_from_bytes(noalias input: []const u8, noalias out_seed: *Seed) void {
     }
 }
 
-/// Hashes 2D integer coordinates to a float in [0, 1). TODO find better candidate and use
-pub fn hash_2d(seed: u64, x: i32, y: i32) f32 {
-    var h: u64 = seed;
-    h ^= @as(u64, @bitCast(@as(i64, x))) *% 0x517cc1b727220a95;
-    h ^= @as(u64, @bitCast(@as(i64, y))) *% 0x6c62272e07bb0142;
-    h = stafford_mix_13(h);
-    return @as(f32, @floatFromInt(h >> 40)) / 16777216.0;
-}
+// /// 2D value noise with smoothstep interpolation. Returns [0, 1).
+// /// `scale` = feature size in blocks. 4–8 recommended for 16-block chunks.
+// /// Continuous across chunk boundaries (operates in world-space).
+// pub fn value_noise_2d(seed: u64, x: i32, y: i32, scale: i32) f32 {
+//     const s = @max(scale, 2);
+//     const gx = @divFloor(x, s);
+//     const gy = @divFloor(y, s);
+//     const fx: f32 = @as(f32, @floatFromInt(@mod(x, s))) / @as(f32, @floatFromInt(s));
+//     const fy: f32 = @as(f32, @floatFromInt(@mod(y, s))) / @as(f32, @floatFromInt(s));
 
-/// 2D value noise with smoothstep interpolation. Returns [0, 1).
-/// `scale` = feature size in blocks. 4–8 recommended for 16-block chunks.
-/// Continuous across chunk boundaries (operates in world-space).
-pub fn value_noise_2d(seed: u64, x: i32, y: i32, scale: i32) f32 {
-    const s = @max(scale, 2);
-    const gx = @divFloor(x, s);
-    const gy = @divFloor(y, s);
-    const fx: f32 = @as(f32, @floatFromInt(@mod(x, s))) / @as(f32, @floatFromInt(s));
-    const fy: f32 = @as(f32, @floatFromInt(@mod(y, s))) / @as(f32, @floatFromInt(s));
+//     const v00 = hash_2d(seed, gx, gy);
+//     const v10 = hash_2d(seed, gx + 1, gy);
+//     const v01 = hash_2d(seed, gx, gy + 1);
+//     const v11 = hash_2d(seed, gx + 1, gy + 1);
 
-    const v00 = hash_2d(seed, gx, gy);
-    const v10 = hash_2d(seed, gx + 1, gy);
-    const v01 = hash_2d(seed, gx, gy + 1);
-    const v11 = hash_2d(seed, gx + 1, gy + 1);
+//     // Smoothstep (C1 continuous, no visible grid artifacts)
+//     const sx = fx * fx * (3.0 - 2.0 * fx);
+//     const sy = fy * fy * (3.0 - 2.0 * fy);
 
-    // Smoothstep (C1 continuous, no visible grid artifacts)
-    const sx = fx * fx * (3.0 - 2.0 * fx);
-    const sy = fy * fy * (3.0 - 2.0 * fy);
+//     const top = v00 + (v10 - v00) * sx;
+//     const bot = v01 + (v11 - v01) * sx;
+//     return top + (bot - top) * sy;
+// }
 
-    const top = v00 + (v10 - v00) * sx;
-    const bot = v01 + (v11 - v01) * sx;
-    return top + (bot - top) * sy;
-}
+// /// Fractal Brownian Motion: layers multiple octaves of value noise.
+// /// 2 octaves = fast and decent. 3 = nicer caves. 4+ = diminishing returns.
+// /// Returns [0, ~1) (not exactly normalized but close enough).
+// pub fn fbm_2d(seed: u64, x: i32, y: i32, octaves: u32) f32 {
+//     var value: f32 = 0;
+//     var amp: f32 = 0.5;
+//     var s: u64 = seed;
+//     var scale: i32 = 8;
+//     for (0..octaves) |_| {
+//         value += value_noise_2d(s, x, y, @max(scale, 2)) * amp;
+//         amp *= 0.5;
+//         scale = @max(@divFloor(scale, 2), 2);
+//         s +%= 0x9E3779B97F4A7C15;
+//     }
+//     return value;
+// }
 
-/// Fractal Brownian Motion: layers multiple octaves of value noise.
-/// 2 octaves = fast and decent. 3 = nicer caves. 4+ = diminishing returns.
-/// Returns [0, ~1) (not exactly normalized but close enough).
-pub fn fbm_2d(seed: u64, x: i32, y: i32, octaves: u32) f32 {
-    var value: f32 = 0;
-    var amp: f32 = 0.5;
-    var s: u64 = seed;
-    var scale: i32 = 8;
-    for (0..octaves) |_| {
-        value += value_noise_2d(s, x, y, @max(scale, 2)) * amp;
-        amp *= 0.5;
-        scale = @max(@divFloor(scale, 2), 2);
-        s +%= 0x9E3779B97F4A7C15;
-    }
-    return value;
-}
+// test "noise basic sanity" {
+//     // Same input gives same output (crazy testing)
+//     const a = value_noise_2d(42, 10, 20, 6);
+//     const b = value_noise_2d(42, 10, 20, 6);
+//     try testing.expectEqual(a, b);
 
-test "noise basic sanity" {
-    // Same input gives same output (crazy testing)
-    const a = value_noise_2d(42, 10, 20, 6);
-    const b = value_noise_2d(42, 10, 20, 6);
-    try testing.expectEqual(a, b);
+//     const c = value_noise_2d(42, 11, 20, 6);
+//     try testing.expect(a != c);
 
-    const c = value_noise_2d(42, 11, 20, 6);
-    try testing.expect(a != c);
+//     // I would hope it doesn't equal exactly 0.0
+//     try testing.expect(a > 0.0 and a < 1.0);
 
-    // I would hope it doesn't equal exactly 0.0
-    try testing.expect(a > 0.0 and a < 1.0);
-
-    const f = fbm_2d(42, 10, 20, 3);
-    try testing.expect(f > 0.0 and f < 1.0);
-}
+//     const f = fbm_2d(42, 10, 20, 3);
+//     try testing.expect(f > 0.0 and f < 1.0);
+// }

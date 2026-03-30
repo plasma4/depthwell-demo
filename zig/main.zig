@@ -29,21 +29,34 @@ pub inline fn handle_visible_chunks() void {
     }
 }
 
+var firstCall = false;
+
 /// Initializes the game.
 pub fn init() void {
+    memory.game = .{}; // initialize GameState
     world.state = world.World.init(memory.allocator);
-    // Some seeding to determine where the player starts off exactly with layer pushing
+
+    // Start off by determining where the player starts off exactly with layer pushing
     var rng = seeding.ChaCha12.init(seeding.mix_base_seed(memory.game.seed, 1));
     for (0..STARTING_ZOOM_TIMES) |_| {
-        world.World.push_layer(
-            &world.state,
+        // Set the player position to somewhere random in the current chunk
+        memory.game.set_player_pos(.{
+            @intCast(rng.next() & (memory.SUBPIXELS_IN_CHUNK - 1)),
+            @intCast(rng.next() & (memory.SUBPIXELS_IN_CHUNK - 1)),
+        });
+
+        world.state.push_layer(
             world.Sprite.none,
-            .{ .quadrant = 0, .suffix = .{ 0, 0 } },
-            @truncate(rng.next()),
-            @truncate(rng.next()),
+            memory.game.get_player_coord(),
+            memory.game.get_block_x_in_chunk(), // convert a subpixel (0-4095) in a chunk to a block in a chunk (0-15)
+            memory.game.get_block_y_in_chunk(),
         );
     }
-    logger.log(@src(), "Hello from Zig!", .{});
+
+    if (firstCall) {
+        logger.log(@src(), "Hello from Zig!", .{});
+        firstCall = false;
+    }
 }
 
 /// Processes data for renderFrame in TypeScript.

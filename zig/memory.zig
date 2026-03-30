@@ -109,7 +109,7 @@ pub const GameState = extern struct {
 };
 
 /// The state of the current game, containing pre-allocated properties.
-pub var game: GameState = .{};
+pub var game: GameState = undefined;
 
 // Only create an actual GPA instance if building for native.
 var gpa = if (!is_wasm and !builtin.is_test)
