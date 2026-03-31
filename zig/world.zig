@@ -8,6 +8,7 @@ const seeding = @import("seeding.zig");
 const Chunk = memory.Chunk;
 const Block = memory.Block;
 const SPAN = memory.SPAN;
+const SPAN_FLOAT = memory.SPAN_FLOAT;
 const SPAN_LOG2 = memory.SPAN_LOG2;
 
 /// The single instance of a `World`.
@@ -88,25 +89,6 @@ pub const SimBuffer = struct {
         self.chunks[(@as(usize, cy & 0xF) << 4) | @as(usize, cx & 0xF)] = new_chunk;
     }
 };
-
-/// Generates an initial block for seeding.
-pub inline fn generate_initial_block(rng: *seeding.ChaCha12) Sprite {
-    const entropy = rng.next();
-
-    var block_id = Sprite.none;
-    if (entropy < odds_num(0.3)) {
-        block_id = Sprite.none;
-    } else if (entropy < odds_num(0.9)) {
-        block_id = Sprite.stone;
-    } else if (entropy < odds_num(0.93)) {
-        block_id = Sprite.greenstone;
-    } else if (entropy < odds_num(0.95)) {
-        block_id = Sprite.bluestone;
-    } else {
-        block_id = Sprite.bloodstone;
-    }
-    return block_id;
-}
 
 /// Adds 1 to the path as if the ArrayList represented one giant number. Performs allocation; the caller should deinit the path eventually.
 fn carry_path(path: *const std.ArrayList(u64)) std.ArrayList(u64) {
@@ -264,34 +246,35 @@ pub const World = struct {
     /// Generates a whole chunk (considering modifications), given a pointer to where the chunk should be stored and coordinates.
     pub fn generate_chunk(self: *const @This(), chunk: *memory.Chunk, coord: memory.Coordinate) void {
         const chunk_seed = self.quad_cache.get_chunk_seeds(coord);
-        var rng1 = seeding.ChaCha12.init(chunk_seed[0]); // Block generation.
-        const rng2 = seeding.ChaCha12.init(chunk_seed[1]);
+        const rng1 = seeding.ChaCha12.init(chunk_seed[0]); // Block generation.
         const rng3 = seeding.ChaCha12.init(chunk_seed[2]);
         var rng4 = seeding.ChaCha12.init(chunk_seed[3]); // Visual touches only.
 
-        _ = rng2;
+        _ = rng1;
         _ = rng3;
 
         const cx = coord.suffix[0];
         const cy = coord.suffix[1];
         const quadrant_edge_details = self.quad_cache.get_quadrant_edge_details(coord.quadrant);
-        for (0..SPAN) |ly| {
-            for (0..SPAN) |lx| {
-                const idx = (ly * SPAN) + lx;
+
+        for (0..SPAN) |block_y| {
+            for (0..SPAN) |block_x| {
+                const id = (block_y * SPAN) + block_x;
 
                 // TODO make this work with quadcache to still work for edges
-                const is_absolute_edge_x = (cx == 0 and lx == 0 and quadrant_edge_details.most_left) or (cx == state.max_possible_suffix and lx == 15 and quadrant_edge_details.most_right);
-                const is_absolute_edge_y = (cy == 0 and ly == 0 and quadrant_edge_details.most_top) or (cy == state.max_possible_suffix and ly == 15 and quadrant_edge_details.most_bottom);
+                const is_absolute_edge_x = (cx == 0 and block_x == 0 and quadrant_edge_details.most_left) or (cx == self.max_possible_suffix and block_x == 15 and quadrant_edge_details.most_right);
+                const is_absolute_edge_y = (cy == 0 and block_y == 0 and quadrant_edge_details.most_top) or (cy == self.max_possible_suffix and block_y == 15 and quadrant_edge_details.most_bottom);
                 if (is_absolute_edge_x or is_absolute_edge_y) {
-                    chunk.blocks[idx] = make_basic_block(.edgestone);
-                    // This does mean there are fewer .next() calls but this doesn't matter here
+                    chunk.blocks[id] = make_basic_block(.edgestone);
+                    // This does mean there are fewer PRNG .next() calls but this doesn't matter here
                     continue;
                 }
 
-                const block_id = generate_initial_block(&rng1);
+                // Use density to influence block generation
+                const density = get_test_noise(chunk_seed[1], @as(f64, @floatFromInt(block_x)) / SPAN, @as(f64, @floatFromInt(block_y)) / SPAN);
                 const entropy = rng4.next();
-                chunk.blocks[idx] = .{
-                    .id = block_id,
+                chunk.blocks[id] = .{
+                    .id = generate_initial_block(0.0, density, 0.0),
                     .light = @truncate(entropy),
                     .seed = @truncate(entropy >> 8),
                     .hp = 15,
@@ -302,8 +285,8 @@ pub const World = struct {
 
         for (0..SPAN) |ly| {
             for (0..SPAN) |lx| {
-                const idx = (ly * SPAN) + lx;
-                if (chunk.blocks[idx].id == .none) continue; // air doesn't need edge flags
+                const id = (ly * SPAN) + lx;
+                if (chunk.blocks[id].id == .none) continue; // air doesn't need edge flags
                 // TODO edge flags across differing chunks!
 
                 var flags: u8 = 0;
@@ -322,14 +305,14 @@ pub const World = struct {
 
                         // Bounds check: Stay within this chunk
                         if (ny >= 0 and ny < SPAN and nx >= 0 and nx < SPAN) {
-                            const neighbor_idx = @as(usize, @intCast(ny * SPAN + nx));
-                            if (chunk.blocks[neighbor_idx].id != .none) {
+                            const neighbor_id = @as(usize, @intCast(ny * SPAN + nx));
+                            if (chunk.blocks[neighbor_id].id != .none) {
                                 flags |= types.EdgeFlags.get_flag_bit(dx, dy);
                             }
                         }
                     }
                 }
-                chunk.blocks[idx].edge_flags = flags;
+                chunk.blocks[id].edge_flags = flags;
             }
         }
     }
@@ -351,8 +334,8 @@ pub const World = struct {
                 .cy = search_cy,
             };
 
-            if (self.mod_store.index.get(key)) |idx| {
-                return &self.mod_store.history.items[idx];
+            if (self.mod_store.index.get(key)) |id| {
+                return &self.mod_store.history.items[id];
             }
 
             // Move to parent coordinate: shift off the lowest 4 bits (the block coordinates)
@@ -430,6 +413,7 @@ pub inline fn odds_num(chance: comptime_float) u64 {
     return @intFromFloat(chance * 18446744073709551616.0);
 }
 
+/// Makes a simple block of a certain type, with max light and no edge flags/custom properties.
 pub inline fn make_basic_block(sprite_type: Sprite) Block {
     return .{
         .id = sprite_type,
@@ -454,3 +438,72 @@ pub inline fn make_basic_block(sprite_type: Sprite) Block {
 //     // Returns exact block coordinate. @floor() this to get the integer block index.
 //     return .{ world_x / SPAN, world_y / SPAN };
 // }
+
+/// Generates an initial block for seeding.
+pub inline fn generate_initial_block(moisture: f64, density: f64, height: f64) Sprite {
+    _ = moisture;
+    _ = height;
+
+    if (density < 0.4) return .none;
+
+    if (density < 0.8) return .stone;
+    if (density < 0.9) return .greenstone;
+    return .bloodstone;
+}
+
+fn lerp(a: f64, b: f64, t: f64) f64 {
+    return a + t * (b - a);
+}
+
+fn fade(t: f64) f64 {
+    // Smootherstep: 6t^5 - 15t^4 + 10t^3
+    return t * t * t * (t * (t * 6 - 15) + 10);
+}
+
+pub fn get_value_noise(seed: seeding.Seed, world_x: f64, world_y: f64) f64 {
+    var base_seed = seed;
+    base_seed[0] += 0;
+    base_seed[1] += 0;
+    const x0 = @floor(world_x);
+    const y0 = @floor(world_y);
+
+    const fx = world_x - x0;
+    const fy = world_y - y0;
+
+    // Get 4 random values for the corners
+    const v00 = get_random_value(base_seed, @intFromFloat(x0), @intFromFloat(y0));
+    const v10 = get_random_value(base_seed, @intFromFloat(x0 + 1), @intFromFloat(y0));
+    const v01 = get_random_value(base_seed, @intFromFloat(x0), @intFromFloat(y0 + 1));
+    const v11 = get_random_value(base_seed, @intFromFloat(x0 + 1), @intFromFloat(y0 + 1));
+
+    // Smooth the coordinates
+    const u = fade(fx);
+    const v = fade(fy);
+
+    // Bilinear interpolation
+    return lerp(lerp(v00, v10, u), lerp(v01, v11, u), v);
+}
+
+fn get_random_value(seed: seeding.Seed, x: u64, y: u64) f64 {
+    // Just return a float 0.0 to 1.0 based on coords
+    var key = seed;
+    key[0] ^= @bitCast(x);
+    key[1] ^= @bitCast(y);
+    var prng = seeding.ChaCha12.init(key);
+    return @as(f64, @floatFromInt(prng.next() >> 11)) * (1.0 / 9007199254740992.0);
+}
+
+/// Simple noise for testing.
+pub fn get_test_noise(seed: seeding.Seed, x: f64, y: f64) f64 {
+    var key = seed;
+    key[0] += 0; // TODO figure out why this hack is necessary
+    var prng = seeding.ChaCha12.init(key);
+    return @mod((x + y + @as(f64, @floatFromInt(prng.next() & 127)) / 128.0), 1.0);
+}
+
+/// Simple noise for testing.
+pub fn get_test_noise_broken(seed: seeding.Seed, x: f64, y: f64) f64 {
+    const key = seed;
+    var prng = seeding.ChaCha12.init(key);
+    return @mod((x + y + @as(f64, @floatFromInt(prng.next() & 127)) / 128.0), 1.0);
+}

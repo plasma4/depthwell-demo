@@ -89,21 +89,36 @@ pub const ChaCha12 = struct {
     row3: @Vector(4, u32),
 
     /// Pre-generated keystream buffer (64 bytes).
-    keystream: [8]u64,
+    keystream: [8]u64 align(16) = std.mem.zeroes([8]u64),
     /// Which u64 index in keystream to serve next.
     position: u32,
 
-    const V4 = @Vector(4, u32);
+    const v4u32 = @Vector(4, u32);
 
+    /// Creates a new instance of ChaCha12, without a nonce (utilizing all 512 seed bits).
     pub fn init(seed_data: Seed) ChaCha12 {
         const s: [16]u32 = @bitCast(seed_data);
 
         return ChaCha12{
-            .row0 = V4{ s[0], s[1], s[2], s[3] },
-            .row1 = V4{ s[4], s[5], s[6], s[7] },
-            .row2 = V4{ s[8], s[9], s[10], s[11] },
-            .row3 = V4{ s[12], s[13], s[14], s[15] },
-            .keystream = undefined,
+            .row0 = @as(v4u32, @bitCast(s[0..4].*)),
+            .row1 = @as(v4u32, @bitCast(s[4..8].*)),
+            .row2 = @as(v4u32, @bitCast(s[8..12].*)),
+            .row3 = @as(v4u32, @bitCast(s[12..16].*)),
+            .position = 8,
+        };
+    }
+
+    /// Creates a new instance of ChaCha12, with a custom nonce (utilizing the first 384 seed bits).
+    pub fn init_with_nonce(seed_data: [8]u64, nonce: [2]u32) ChaCha12 {
+        const s: [16]u32 = @bitCast(seed_data);
+        return ChaCha12{
+            .row0 = @as(v4u32, @bitCast(s[0..4].*)),
+            .row1 = @as(v4u32, @bitCast(s[4..8].*)),
+            .row2 = @as(v4u32, @bitCast(s[8..12].*)),
+            .row3 = v4u32{
+                0,        0, // Counter always starts at 0 for a new layer
+                nonce[0], nonce[1],
+            },
             .position = 8,
         };
     }
@@ -225,17 +240,17 @@ pub const ChaCha12 = struct {
         }
     }
 
-    inline fn packU64(v: V4, lo: comptime_int, hi: comptime_int) u64 {
+    inline fn packU64(v: v4u32, lo: comptime_int, hi: comptime_int) u64 {
         return @as(u64, v[lo]) | (@as(u64, v[hi]) << 32);
     }
 
-    inline fn rotl(v: V4, comptime n: u8) V4 {
-        const shift_left: @Vector(4, u8) = @splat(n);
-        const shift_right: @Vector(4, u8) = @splat(32 - n);
+    inline fn rotl(v: v4u32, comptime n: u32) v4u32 {
+        const shift_left: v4u32 = @splat(n);
+        const shift_right: v4u32 = @splat(32 - n);
         return (v << shift_left) | (v >> shift_right);
     }
 
-    inline fn quarterRound(a: *V4, b: *V4, c: *V4, d: *V4) void {
+    inline fn quarterRound(a: *v4u32, b: *v4u32, c: *v4u32, d: *v4u32) void {
         a.* +%= b.*;
         d.* ^= a.*;
         d.* = rotl(d.*, 16);
@@ -388,9 +403,9 @@ pub const Xoshiro512 = struct {
     }
 };
 
-/// Stafford Mix 13 for 64-bit entropy avalanching.
-pub inline fn stafford_mix_13(z_in: u64) u64 {
-    var z = (z_in ^ (z_in >> 30)) *% 0xbf58476d1ce4e5b9;
+/// Stafford Mix 13 for 64-bit entropy avalanching. No long used.
+pub inline fn stafford_mix_13(value: u64) u64 {
+    var z = (value ^ (value >> 30)) *% 0xbf58476d1ce4e5b9;
     z = (z ^ (z >> 27)) *% 0x94d049bb133111eb;
     return z ^ (z >> 31);
 }
@@ -489,60 +504,3 @@ fn seed_from_bytes(noalias input: []const u8, noalias out_seed: *Seed) void {
         out_seed[i] = std.mem.readInt(u64, hash_out[start .. start + 8], .little);
     }
 }
-
-// /// 2D value noise with smoothstep interpolation. Returns [0, 1).
-// /// `scale` = feature size in blocks. 4–8 recommended for 16-block chunks.
-// /// Continuous across chunk boundaries (operates in world-space).
-// pub fn value_noise_2d(seed: u64, x: i32, y: i32, scale: i32) f32 {
-//     const s = @max(scale, 2);
-//     const gx = @divFloor(x, s);
-//     const gy = @divFloor(y, s);
-//     const fx: f32 = @as(f32, @floatFromInt(@mod(x, s))) / @as(f32, @floatFromInt(s));
-//     const fy: f32 = @as(f32, @floatFromInt(@mod(y, s))) / @as(f32, @floatFromInt(s));
-
-//     const v00 = hash_2d(seed, gx, gy);
-//     const v10 = hash_2d(seed, gx + 1, gy);
-//     const v01 = hash_2d(seed, gx, gy + 1);
-//     const v11 = hash_2d(seed, gx + 1, gy + 1);
-
-//     // Smoothstep (C1 continuous, no visible grid artifacts)
-//     const sx = fx * fx * (3.0 - 2.0 * fx);
-//     const sy = fy * fy * (3.0 - 2.0 * fy);
-
-//     const top = v00 + (v10 - v00) * sx;
-//     const bot = v01 + (v11 - v01) * sx;
-//     return top + (bot - top) * sy;
-// }
-
-// /// Fractal Brownian Motion: layers multiple octaves of value noise.
-// /// 2 octaves = fast and decent. 3 = nicer caves. 4+ = diminishing returns.
-// /// Returns [0, ~1) (not exactly normalized but close enough).
-// pub fn fbm_2d(seed: u64, x: i32, y: i32, octaves: u32) f32 {
-//     var value: f32 = 0;
-//     var amp: f32 = 0.5;
-//     var s: u64 = seed;
-//     var scale: i32 = 8;
-//     for (0..octaves) |_| {
-//         value += value_noise_2d(s, x, y, @max(scale, 2)) * amp;
-//         amp *= 0.5;
-//         scale = @max(@divFloor(scale, 2), 2);
-//         s +%= 0x9E3779B97F4A7C15;
-//     }
-//     return value;
-// }
-
-// test "noise basic sanity" {
-//     // Same input gives same output (crazy testing)
-//     const a = value_noise_2d(42, 10, 20, 6);
-//     const b = value_noise_2d(42, 10, 20, 6);
-//     try testing.expectEqual(a, b);
-
-//     const c = value_noise_2d(42, 11, 20, 6);
-//     try testing.expect(a != c);
-
-//     // I would hope it doesn't equal exactly 0.0
-//     try testing.expect(a > 0.0 and a < 1.0);
-
-//     const f = fbm_2d(42, 10, 20, 3);
-//     try testing.expect(f > 0.0 and f < 1.0);
-// }
