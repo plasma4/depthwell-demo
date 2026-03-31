@@ -38,13 +38,13 @@ pub fn build(b: *std.Build) void {
         }),
     });
     if (optimize == .Debug) {
-        exe.root_module.strip = false;
-        exe.lto = .none;
-        exe.export_table = true;
+        // exe.root_module.strip = false;
+        // exe.lto = .none;
+        // exe.export_table = true;
     }
     exe.rdynamic = true; // export functions with "export" keyword
     exe.entry = .disabled; // No main()
-    exe.stack_size = 4 * 65536; // can increase as necessary
+    // exe.stack_size = 4 * 65536; // can increase as necessary
     // exe.global_base = 8; // removed in favor of letting Zig manage pointers
     // if (optimize == .Debug) {
     //     exe.use_llvm = false;

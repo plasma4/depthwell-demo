@@ -7,6 +7,7 @@ const seeding = @import("seeding.zig");
 
 const Chunk = memory.Chunk;
 const Block = memory.Block;
+const Coordinate = memory.Coordinate;
 const SPAN = memory.SPAN;
 const SPAN_FLOAT = memory.SPAN_FLOAT;
 const SPAN_LOG2 = memory.SPAN_LOG2;
@@ -166,7 +167,7 @@ pub const QuadCache = struct {
     }
 
     /// Resolves the chunk seeds. If depth > 16, uses the quadrant seeds.
-    pub inline fn get_chunk_seeds(self: *const @This(), coord: memory.Coordinate) [4]seeding.Seed {
+    pub inline fn get_chunk_seeds(self: *const @This(), coord: Coordinate) [4]seeding.Seed {
         return seeding.mix_chunk_seeds(self.get_quadrant_seed(coord.quadrant), coord.suffix);
     }
 
@@ -235,7 +236,7 @@ pub const World = struct {
         };
     }
 
-    pub fn get_chunk(self: *const @This(), coord: memory.Coordinate) *memory.Chunk {
+    pub fn get_chunk(self: *const @This(), coord: Coordinate) *memory.Chunk {
         // logger.write(3, .{ "{h}Chunk requested", coord });
         // TODO figure out this whole allocation and SimBuffer/chunk_cache usage business
         const chunk = self.alloc.create(memory.Chunk) catch @panic("chunk alloc failed");
@@ -244,7 +245,7 @@ pub const World = struct {
     }
 
     /// Generates a whole chunk (considering modifications), given a pointer to where the chunk should be stored and coordinates.
-    pub fn generate_chunk(self: *const @This(), chunk: *memory.Chunk, coord: memory.Coordinate) void {
+    pub fn generate_chunk(self: *const @This(), chunk: *memory.Chunk, coord: Coordinate) void {
         const chunk_seeds = self.quad_cache.get_chunk_seeds(coord);
         const rng1 = seeding.ChaCha12.init(chunk_seeds[0]); // Block generation.
         const rng3 = seeding.ChaCha12.init(chunk_seeds[2]);
@@ -271,7 +272,7 @@ pub const World = struct {
                 }
 
                 // Use density to influence block generation
-                const density = get_test_noise_broken(chunk_seeds[1], @as(f64, @floatFromInt(block_x)) / SPAN, @as(f64, @floatFromInt(block_y)) / SPAN);
+                const density = get_value_noise(chunk_seeds[1], @as(f64, @floatFromInt(block_x)) / SPAN, @as(f64, @floatFromInt(block_y)) / SPAN);
                 const entropy = rng4.next();
                 chunk.blocks[id] = .{
                     .id = generate_initial_block(0.0, density, 0.0),
@@ -347,7 +348,7 @@ pub const World = struct {
 
     /// Handles entering a portal.
     /// `coord` is the chunk the portal is in.
-    pub fn push_layer(self: *@This(), parent_id: Sprite, coord: memory.Coordinate, bx: u4, by: u4) void {
+    pub fn push_layer(self: *@This(), parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
         _ = parent_id;
         memory.game.depth += 1;
 
@@ -450,19 +451,16 @@ pub inline fn generate_initial_block(moisture: f64, density: f64, height: f64) S
     return .bloodstone;
 }
 
-fn lerp(a: f64, b: f64, t: f64) f64 {
+inline fn lerp(a: f64, b: f64, t: f64) f64 {
     return a + t * (b - a);
 }
 
-fn fade(t: f64) f64 {
+inline fn fade(t: f64) f64 {
     // Smootherstep: 6t^5 - 15t^4 + 10t^3
     return t * t * t * (t * (t * 6 - 15) + 10);
 }
 
-pub fn get_value_noise(seed: seeding.Seed, world_x: f64, world_y: f64) f64 {
-    var base_seed = seed;
-    base_seed[0] ^= 0;
-    base_seed[1] += 0;
+pub fn get_value_noise(base_seed: seeding.Seed, world_x: f64, world_y: f64) f64 {
     const x0 = @floor(world_x);
     const y0 = @floor(world_y);
 
@@ -495,9 +493,7 @@ fn get_random_value(seed: seeding.Seed, x: u64, y: u64) f64 {
 /// Simple noise for testing.
 pub fn get_test_noise(seed: seeding.Seed, x: f64, y: f64) f64 {
     _ = .{ x, y };
-    var key = seed;
-    key[0] += 0; // TODO figure out why this hack is necessary
-    var prng = seeding.ChaCha12.init(key);
+    var prng = seeding.ChaCha12.init(seed);
     return @as(f64, @floatFromInt(prng.next() & 127)) / 128;
 }
 

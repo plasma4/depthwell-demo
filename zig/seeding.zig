@@ -1,12 +1,11 @@
 //! Manages seeding calculations for the game.
 // seeding yippeeeeee
 const std = @import("std");
+const logger = @import("logger.zig");
 const memory = @import("memory.zig");
 const testing = std.testing;
 
 test "basic usage example" {
-    const logger = @import("logger.zig");
-
     // Start with an arbitrary seed (NOTE: seed_from_bytes fails for WASM builds)
     var world_seed: Seed = undefined;
     seed_from_bytes("my-game-seed", &world_seed);
@@ -29,55 +28,60 @@ pub const Seed = [8]u64;
 //     return z ^ (z >> 31);
 // }
 
-/// Mixes a base seed with some values. Since BLAKE3 is cryptographic this will yield high-quality results.
+/// Mixes a base seed with some values. Since BLAKE3 is cryptographic this will yield high-quality results. It may be more useful to use a custom nonce with `ChaCha12` instead.
 pub fn mix_base_seed(layer_seed: Seed, number: u64) Seed {
-    const PackedInput = packed struct { // temporary struct for faster mixing :)
-        seed: u512,
+    const PackedInput = extern struct { // temporary struct for faster mixing :)
+        seed: Seed,
         number: u64,
     };
-    const input = PackedInput{ .seed = @bitCast(layer_seed), .number = number };
+    const input = PackedInput{
+        .seed = layer_seed,
+        .number = number,
+    };
 
-    var out_bytes: [64]u8 = undefined;
-    std.crypto.hash.Blake3.hash(std.mem.asBytes(&input), &out_bytes, .{});
-    return @bitCast(out_bytes);
+    var out_seed: Seed = undefined;
+    std.crypto.hash.Blake3.hash(std.mem.asBytes(&input), std.mem.asBytes(&out_seed), .{});
+    return out_seed;
 }
 
 /// Mixes in the layer seed with X/Y values. Used when appending on part of a seed to a quadrant.
 pub fn mix_coordinate_seed(layer_seed: Seed, x: u64, y: u64) Seed {
-    const PackedInput = packed struct { // temporary struct for faster mixing :)
-        seed: u512,
+    const PackedInput = extern struct { // temporary struct for faster mixing :)
+        seed: Seed,
         x: u64,
         y: u64,
         depth: u64,
     };
     const input = PackedInput{
-        .seed = @bitCast(layer_seed),
+        .seed = layer_seed,
         .x = x,
         .y = y,
         .depth = memory.game.depth,
     };
 
-    var out_bytes: [64]u8 = undefined;
-    std.crypto.hash.Blake3.hash(std.mem.asBytes(&input), &out_bytes, .{});
-    return @bitCast(out_bytes);
+    var out_seed: Seed = undefined;
+    std.crypto.hash.Blake3.hash(std.mem.asBytes(&input), std.mem.asBytes(&out_seed), .{});
+    return out_seed;
 }
 
 /// Generates 4 sets of seeds for every chunk when combining X/Y active suffix coordinates with the seed of a quadrant.
 pub fn mix_chunk_seeds(quadrant_seed: Seed, coord_vector: memory.v2u64) [4]Seed {
-    const PackedInput = packed struct { // do the packing thing again
-        seed: u512,
-        vector: memory.v2u64,
+    const PackedInput = extern struct { // do the packing thing again
+        seed: Seed,
+        c1: u64,
+        c2: u64,
         depth: u64,
     };
     const input = PackedInput{
-        .seed = @bitCast(quadrant_seed),
-        .vector = coord_vector,
+        .seed = quadrant_seed,
+        .c1 = coord_vector[0],
+        .c2 = coord_vector[1],
         .depth = memory.game.depth,
     };
 
-    var out_bytes: [256]u8 = undefined; // TODO figure out if this is a performance bottleneck slowdown
-    std.crypto.hash.Blake3.hash(std.mem.asBytes(&input), &out_bytes, .{});
-    return @bitCast(out_bytes);
+    var out_seeds: [4]Seed = undefined;
+    std.crypto.hash.Blake3.hash(std.mem.asBytes(&input), std.mem.asBytes(&out_seeds), .{});
+    return out_seeds;
 }
 
 /// ChaCha12-based PRNG hard-coded to accept 512 bits of seeding and without certain features. Basically cryptographically secure, can generate 64-byte blocks at a time, and supports skipping.
@@ -107,7 +111,6 @@ pub const ChaCha12 = struct {
             .position = 8,
         };
     }
-
     /// Creates a new instance of ChaCha12, with a custom nonce (utilizing the first 384 seed bits).
     pub fn init_with_nonce(seed_data: [8]u64, nonce: [2]u32) ChaCha12 {
         const s: [16]u32 = @bitCast(seed_data);
