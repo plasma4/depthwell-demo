@@ -160,7 +160,7 @@ fn write_value(writer: anytype, val: anytype) void {
             writer.print("{d}", .{val}) catch {};
         },
         .float, .comptime_float => {
-            writer.print("{d:.5}", .{val}) catch {}; // 5 decimal places
+            writer.print("{d:.3}", .{val}) catch {}; // 3 decimal places
         },
         .bool => {
             writer.print("{}", .{val}) catch {};
@@ -264,7 +264,7 @@ fn isString(comptime T: type) bool {
     return false;
 }
 
-/// Internal helper to format arguments. Contains some of the logic to deal with {h} headers.
+/// Internal helper to format arguments. Contains logic for {h} and {mh} headers.
 fn format_args(writer: anytype, args: anytype) !void {
     const ArgsType = @TypeOf(args);
     const type_info = @typeInfo(ArgsType);
@@ -275,27 +275,46 @@ fn format_args(writer: anytype, args: anytype) !void {
     }
 
     var has_header = false;
-    inline for (type_info.@"struct".fields, 0..) |field, i| {
-        const val = @field(args, field.name);
-        var skip_val = false;
+    var multi_line = false;
+    var first_item = true; // Track if we are at the very start of the output
 
-        // Header logic on the first field
-        if (i == 0 and comptime isString(@TypeOf(val))) {
+    inline for (type_info.@"struct".fields, 0..) |field, i| {
+        _ = i;
+        const val = @field(args, field.name);
+        var is_new_header = false;
+
+        // Check if this specific field is a header tag
+        if (comptime isString(@TypeOf(val))) {
             const str: []const u8 = val;
             if (str.len >= 3 and std.mem.startsWith(u8, str, "{h}")) {
                 has_header = true;
-                skip_val = true;
+                multi_line = false; // Override multi-line back to standard
+                is_new_header = true;
+                if (!first_item) try writer.writeAll(" | "); // Separate from previous block
                 try writer.writeAll(str[3..]);
+            } else if (str.len >= 4 and std.mem.startsWith(u8, str, "{mh}")) {
+                has_header = true;
+                multi_line = true;
+                is_new_header = true;
+                if (!first_item) try writer.writeAll("\n"); // Separate from previous block
+                try writer.writeAll(str[4..]);
             }
         }
 
-        if (!skip_val) {
-            if (i > 0) {
-                const sep = if (i == 1 and has_header) ": " else " | ";
+        if (!is_new_header) {
+            if (!first_item) {
+                // If we just had a header, use ": ".
+                // Otherwise, use the current mode's separator.
+                const sep = if (has_header) ": " else (if (multi_line) "\n" else " | ");
                 try writer.writeAll(sep);
             }
             write_value(writer, val);
+
+            // Once a value is written, it's no longer "immediately after a header"
+            has_header = false;
         }
+
+        first_item = false;
     }
 }
 

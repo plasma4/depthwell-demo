@@ -198,7 +198,7 @@ engine.renderLoop = function (_t: number) {
     accumulator = (accumulator + newTicks) % 1; // calculate new fractional accumulation of ticks
 
     // mostly arbitrary color thresholds
-    let color = "#4ad14f";
+    let color = "#dddddd";
     if (delta > 55) {
         color = "#e83769";
     } else if (delta > 30) {
@@ -208,8 +208,9 @@ engine.renderLoop = function (_t: number) {
     }
 
     if (engine.isDebug) {
-        const debugElem: HTMLSpanElement =
-            document.getElementById("renderText")!;
+        const debugElem = document.getElementById(
+            "renderText",
+        ) as HTMLDivElement;
         debugElem.textContent = `Time since last render and Zig compute time: ${delta.toFixed(1)}ms, ${(performance.now() - tempTime).toFixed(1)}ms`;
         debugElem.style.fontWeight = (
             delta > 30 ? (delta > 55 ? 700 : 600) : 500
@@ -234,7 +235,7 @@ engine.logicLoop = function (ticks: number) {
     let delta = time - startTime;
 
     // mostly arbitrary color thresholds
-    let color = "#4ad14f";
+    let color = "#dddddd";
     if (delta > 30) {
         color = "#e83769";
     } else if (delta > 15) {
@@ -244,9 +245,12 @@ engine.logicLoop = function (ticks: number) {
     }
 
     if (engine.isDebug) {
-        const debugElem: HTMLSpanElement =
-            document.getElementById("logicText")!;
-        debugElem.textContent = `Logic diff (${ticks}): ${delta.toFixed(1)}ms`;
+        const debugElem = document.getElementById(
+            "logicText",
+        ) as HTMLDivElement;
+        debugElem.textContent = `Logic diff (${ticks} tick${ticks == 1 ? "" : "s"}): ${delta.toFixed(1)}ms\n`;
+        // new-line in string for copy and paste
+
         debugElem.style.fontWeight = (
             delta > 30 ? (delta > 55 ? 700 : 600) : 500
         ) as any; // gee thanks TypeScript
@@ -263,7 +267,7 @@ if (engine.isDebug) {
 
     engine.wireframeOpacity = 1.0 / 3.0;
     loggingElementIds.forEach((id) => {
-        (document.getElementById(id) as HTMLSpanElement).style.display =
+        (document.getElementById(id) as HTMLDivElement).style.display =
             "inline";
     });
 } else {

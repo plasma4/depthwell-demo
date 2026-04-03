@@ -44,43 +44,71 @@
             padding: 2px;
             margin: 4px;
             line-height: 1.1;
-            background-color: #0006;
+            transition: background-color 250ms;
+            background-color: #0008;
             border-radius: 4px;
             white-space: pre-wrap;
         }
 
+        #text1,
+        #text2,
+        #text3,
+        #text4 {
+            position: relative;
+            display: inline-block;
+            max-width: 45%;
+        }
+
+        #textTop,
+        #textBottom {
+            position: fixed;
+            display: flex;
+            justify-content: space-between;
+            width: calc(100% - 8px);
+            flex-wrap: wrap;
+        }
+
+        #textTop {
+            top: 6px;
+            left: 4px;
+        }
+
+        #textBottom {
+            bottom: 4px;
+            left: 4px;
+        }
+
+        #text1:hover,
+        #text2:hover,
+        #text3:hover,
+        #text4:hover {
+            background-color: #000c;
+        }
+
         #text1 {
-            color: oklch(0.6206 0.2763 3.18);
-            top: 4px;
-            left: 2px;
+            color: oklch(0.6676 0.3059 355);
         }
 
         #text2 {
             color: oklch(80.741% 0.16209 86);
-            top: 4px;
-            right: 2px;
         }
 
         #text3 {
             color: oklch(76.85% 0.22766 145);
-            bottom: 2px;
-            left: 2px;
         }
 
         #text4 {
             color: oklch(0.5971 0.1875 245);
-            bottom: 2px;
-            right: 2px;
         }
 
         #logicText {
-            top: -5px;
+            top: -6px;
             left: -3px;
             font-size: 12px;
         }
 
         #renderText {
-            top: -5px;
+            top: -6px;
             right: -3px;
             font-size: 12px;
         }
@@ -90,8 +118,16 @@
 
 <body>
     <canvas></canvas>
-    <span id="text1"></span><span id="text2"></span><span id="text3"></span><span id="text4"></span>
-    <span id="logicText"></span><span id="renderText"></span>
+    <div id="textTop">
+        <div id="text1"></div>
+        <div id="text2"></div>
+    </div>
+    <div id="textBottom">
+        <div id="text3"></div>
+        <div id="text4"></div>
+    </div>
+    <div id="logicText"></div>
+    <div id="renderText"></div>
 </body>
 
 </html>

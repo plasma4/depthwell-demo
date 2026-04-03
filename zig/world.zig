@@ -1,5 +1,6 @@
 //! Defines the architecture of the fractal world, which is a segmented fractal coordinate system that uses a quad-cache for coordinates and corresponding seeds.
 const std = @import("std");
+const utils = @import("utils.zig");
 const memory = @import("memory.zig");
 const logger = @import("logger.zig");
 const types = @import("types.zig");
@@ -72,7 +73,7 @@ pub const ModKeyContext = struct {
     }
 };
 
-const SIM_BUFFER_WIDTH = 18;
+const SIM_BUFFER_WIDTH = 16;
 const SIM_BUFFER_SIZE = SIM_BUFFER_WIDTH * SIM_BUFFER_WIDTH;
 const CHUNK_CACHE_SIZE = 128;
 const CHUNK_POOL_SIZE = SIM_BUFFER_SIZE + CHUNK_CACHE_SIZE;
@@ -191,11 +192,11 @@ const QuadrantEdgeDetails = struct {
 /// A static 2x2 grid of seeds only updated on entering a portal/game startup. See `README.md` for a more detailed and intuitive explanation for what this does.
 pub const QuadCache = struct {
     /// The 256-bit hashes for the 4 active quadrants, used for modifications across 16 depths (sequentially from D to D-15). (0: NW, 1: NE, 2: SW, 3: SE)
-    path_hashes: [4][16]seeding.Seed align(memory.MAIN_ALIGN_BYTES),
+    path_hashes: [4][SPAN]seeding.Seed align(memory.MAIN_ALIGN_BYTES),
     /// Stores the leftmost QuadCache's X-coordinate.
-    left_path: std.SegmentedList(u64, 1024),
+    left_path: std.SegmentedList(u64, 4096),
     /// Stores the topmost QuadCache's Y-coordinate.
-    top_path: std.SegmentedList(u64, 1024),
+    top_path: std.SegmentedList(u64, 4096),
     /// The block IDs for each of the 4 places the QuadCache represents.
     ancestor_materials: [4]Sprite,
 
@@ -262,8 +263,8 @@ pub const QuadCache = struct {
 /// The QuadCache that stores information about the 4 quadrants and their seeds.
 pub var quad_cache: QuadCache = .{
     .path_hashes = undefined,
-    .left_path = std.SegmentedList(u64, 1024){},
-    .top_path = std.SegmentedList(u64, 1024){},
+    .left_path = std.SegmentedList(u64, 4096){},
+    .top_path = std.SegmentedList(u64, 4096){},
     .ancestor_materials = .{Sprite.none} ** 4,
 };
 
@@ -316,7 +317,7 @@ fn generate_chunk(chunk: *memory.Chunk, coord: Coordinate) void {
         for (0..SPAN) |block_x| {
             const id = (block_y * SPAN) + block_x;
 
-            // TODO make this work with quadcache to still work for edges
+            // simple edge-of-the-world solid block logic
             const is_absolute_edge_x = (cx == 0 and block_x < 2 and quadrant_edge_details.most_left) or (cx == max_possible_suffix and block_x >= (SPAN - 2) and quadrant_edge_details.most_right);
             const is_absolute_edge_y = (cy == 0 and block_y < 2 and quadrant_edge_details.most_top) or (cy == max_possible_suffix and block_y >= (SPAN - 2) and quadrant_edge_details.most_bottom);
             if (is_absolute_edge_x or is_absolute_edge_y) {
@@ -401,7 +402,7 @@ pub fn add_edge_flags(target_chunk: *memory.Chunk, coord: Coordinate) void {
 
                         if (neighbors[idx] == null) {
                             @branchHint(.unlikely); // each neighbor fetched at most once
-                            const neighbor_coord = coord.move(@as(i64, @intCast(grid_x)) - 1, @as(i64, @intCast(grid_y)) - 1);
+                            const neighbor_coord = coord.move(.{ @as(i64, @intCast(grid_x)) - 1, @as(i64, @intCast(grid_y)) - 1 });
                             edge_flags_data[idx] = if (neighbor_coord) |c| get_chunk(c) else std.mem.zeroes(memory.Chunk);
                             neighbors[idx] = &edge_flags_data[idx];
                         }
@@ -416,13 +417,13 @@ pub fn add_edge_flags(target_chunk: *memory.Chunk, coord: Coordinate) void {
     }
 }
 
-fn is_solid(sprite: Sprite) bool {
+/// Determines if a block is considered solid, and should interact with the physics, player, and edge flags.
+pub fn is_solid(sprite: Sprite) bool {
     return switch (sprite) {
         .none,
         .spiral_plant,
         .torch,
         .mushroom,
-        .player,
         => false,
         else => true,
     };
@@ -464,14 +465,18 @@ pub fn push_layer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
     const depth = memory.game.depth;
 
     // Mask the last 12 bits (0-4095)
+    memory.game.player_velocity = .{ 0, 0 };
+
     const player_mask: i64 = SPAN * SPAN * SPAN - 1;
     const new_pos: memory.v2i64 = .{
         (memory.game.player_pos[0] << SPAN_LOG2) & player_mask,
         (memory.game.player_pos[1] << SPAN_LOG2) & player_mask,
     };
-    memory.game.player_velocity = .{ 0, 0 };
     memory.game.set_player_pos(new_pos);
     memory.game.set_camera_pos(new_pos);
+    // TODO migrate to this logic when implementing portals instead
+    // memory.game.set_player_pos(.{ 2048, 2048 });
+    // memory.game.set_camera_pos(.{ 2048, 2048 });
 
     // TODO also clear SimBuffer
     ChunkCache.clear();
@@ -490,66 +495,95 @@ pub fn push_layer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
         return;
     }
 
-    // TODO finish
     // Here, we use a fixed-point rebasing algorithm.
-    // Basically, our goal is to maximize the distance the player has to go before the game crashes (due to none of the 4 quadrants being a valid position for a chunk). We can consider this problem on depth increase as turning the ordinary 2x2 grid of "cells" (4 quadrants) into a 32x32 grid instead (since we are increasing by a depth, this makes logical sense). We're trying to select which cell should be our top left one.
-    // Then, using the coordinate, we determine which cell in the current 32x32 grid the player is. For the first zoom, this grid would be 16x16, but sizing remains the same. Call this cell's coordinates (x, y). In this cell, we find which corner the player is closest to (using coordinate and bx/by as tie-breaker).
-    // If top left:     select (max(x - 1, 0), max(y - 1, 0)) as our new quadrant/grid cell to select (where x/y should be from 0-15).
-    // If top right:    select (x            , max(y - 1, 0)) as ...
-    // If bottom left:  select (max(x - 1, 0), y            )
-    // If bottom right: select (max(x - 1, 0), y            )
-    // The maximum logic is to ensure x can't be negative (top left).
-    // Then, we can use this grid values to determine where from the original quadrants to hash, and append X/Y values to our.
-    // In this way, we have successfully found what quadrant is best. But, there is a potential problem!
-    // Let's say our player has gone from depth 16 to 17. However, the player was closest to (15, 15) with our cell logic. This means we not only could have selected a better value, but we also might create issues for ourselves in the future with coordinate wrapping.
-    // So, this means that the bottom right quadrant is (16, 16). Of course, we can cap both X and Y to 15 for going to depth 17. For greater depths, though, we can use the most_top/bottom/left/right booleans (which is already used in chunk generation for edges, so we basically get this for free, and change in push_layer as necessary). No complicated allocation/carry logic necessary!
-    // The actual implementation makes this work by doing a bunch of management work between the "prefix" (big SegmentedList) and "suffix" (coordinate of the player), and updates the quadrant of where the player is as necessary. We want to select the right prefix, and move the player to the correct quadrant and position.
+    // Basically, our goal is to maximize the distance the player has to go before the game crashes (from being unable to represent a Coordinate using a valid quadrant).
+    // We can consider this problem on depth increase (handled in this function) as turning the ordinary 2x2 grid of "cells" (4 quadrants) into a 32x32 grid instead (since we are increasing by a depth, this makes logical sense).
+    // We're trying to "select" which cell should be our top left one with this algorithm.
 
-    // Identify the bits falling off the top
-    const shift = 60;
-    const ox = coord.suffix[0] >> shift; // top nibble
-    const oy = coord.suffix[1] >> shift;
+    // Using the coordinate, we determine which cell in the current 32x32 grid the player is. Call this cell's coordinates (x, y). In this cell, we find which corner the player is closest to (using coordinate and bx/by as tie-breaker).
+    // If the player is on the left half of a cell, we shift the window left by 1 (subtract 1).
+    // If they are on the right half, we keep the window aligned with the cell (no subtraction).
 
-    // Update the lineage stack for all 4 quadrants
-    for (0..4) |q_idx| {
-        // Shift existing history down to make room for index 0
-        var i: usize = 15;
-        while (i > 0) : (i -= 1) {
-            quad_cache.path_hashes[q_idx][i] = quad_cache.path_hashes[q_idx][i - 1];
-        }
+    // This ensures the player always has at least 1 cell of padding in all directions before hitting the edge of the 2x2 QuadCache.
+    // We also clamp both axes for the new cell's coordinates to be between 0 and 30, so the 2x2 window doesn't exceed the parent's 32x32 bounds.
 
-        // Calculate new root seed for this quadrant.
-        // q_idx % 2 gives us the X-offset of the quadrant (0 or 1)
-        // q_idx / 2 gives us the Y-offset (0 or 1)
-        const q_ox = ox + (q_idx % 2);
-        const q_oy = oy + (q_idx / 2);
+    // The actual implementation applies all this logic by doing a bunch of management work between the "prefix" (big SegmentedList) and "suffix" (coordinate of the player), and updates the quadrant of where the player is as necessary. We want to select the right prefix, and move the player to the correct quadrant and position.
 
-        // Mix the parent seed with the specific spatial nibble for this quadrant
-        quad_cache.path_hashes[q_idx][0] = seeding.mix_coordinate_seed(quad_cache.path_hashes[q_idx][1], q_ox, q_oy); // this logic is deterministic, which is the main thing that matters.
+    // identify the bits falling off the top (the "oldest" part of the suffix that will get merged into the QC path)
+    const shift = 64 - SPAN_LOG2; // 60
+    const top_x = coord.suffix[0] >> shift;
+    const top_y = coord.suffix[1] >> shift;
+
+    // determine if the player is in the left/top half of the new zoomed-in area
+    // do this by masking out the top 4 bits to look at the remaining 60 bits of precision
+    const midpoint: u64 = 1 << (shift - 1);
+    const is_more_left = (coord.suffix[0] & 0x0FFFFFFF_FFFFFFFF) < midpoint;
+    const is_more_top = (coord.suffix[1] & 0x0FFFFFFF_FFFFFFFF) < midpoint;
+
+    const parent_quadrant_x = utils.intFromBool(u64, (memory.game.player_quadrant % 2) != 0); // old quadrant
+    const parent_quadrant_y = utils.intFromBool(u64, (memory.game.player_quadrant / 2) != 0);
+    const naive_cell_x = (parent_quadrant_x << SPAN_LOG2) | top_x; // value from 0-31 that does not consider the midpoint calculation
+    const naive_cell_y = (parent_quadrant_y << SPAN_LOG2) | top_y;
+
+    // determine the origin for the NEW QuadCache window relative to the OLD origin
+    // subtract 1 if the player is in the left or top half to keep them centered.
+    const highest_possible_top_left_cell = (SPAN - 1) * 2; // a mouthful!
+    var left_cell_x: u64 = naive_cell_x -| utils.intFromBool(u64, is_more_left); // saturating subtraction effectively acts as @max(n, 0) without @as casting
+    var top_cell_y: u64 = naive_cell_y -| utils.intFromBool(u64, is_more_top);
+    left_cell_x = @min(left_cell_x, highest_possible_top_left_cell); // clamp (explained above in the big comment section)
+    top_cell_y = @min(top_cell_y, highest_possible_top_left_cell);
+
+    // update edge flags used in generate_chunk()
+    quad_cache.most_left = quad_cache.most_left and left_cell_x == 0;
+    quad_cache.most_right = quad_cache.most_right and left_cell_x == highest_possible_top_left_cell;
+    quad_cache.most_top = quad_cache.most_top and top_cell_y == 0;
+    quad_cache.most_bottom = quad_cache.most_bottom and top_cell_y == highest_possible_top_left_cell;
+
+    var parent_seeds: [4]seeding.Seed = undefined; // save older seeds
+    inline for (0..4) |i| parent_seeds[i] = quad_cache.path_hashes[i][0];
+
+    const SPAN_MASK = SPAN - 1; // 0xF
+
+    // update the lineage stack for all 4 quadrants
+    inline for (0..4) |q_id| {
+        const slice = &quad_cache.path_hashes[q_id];
+        std.mem.copyBackwards(seeding.Seed, slice[1..SPAN], slice[0 .. SPAN - 1]);
+
+        const cell_x = left_cell_x + utils.intFromBool(u64, q_id % 2 == 1);
+        const cell_y = top_cell_y + utils.intFromBool(u64, q_id >= 2);
+
+        // map this cell back to the specific parent quadrant (0-3)
+        const old_q_id = utils.intFromBool(usize, cell_x >= SPAN) + utils.intFromBool(usize, cell_y >= SPAN) * 2;
+
+        slice[0] = seeding.mix_coordinate_seed(
+            parent_seeds[old_q_id],
+            cell_x & SPAN_MASK,
+            cell_y & SPAN_MASK,
+        );
     }
 
-    // Append 4 bits
-    if (memory.game.depth % 16 == 1) {
-        quad_cache.left_path.append(world_arena.allocator(), ox) catch @panic("quad cache append failed"); // new u64 value to store this nibble required!
-        quad_cache.top_path.append(world_arena.allocator(), oy) catch @panic("quad cache append failed");
+    // update the prefix path (which is a SegmentedList)
+    if ((depth - (SPAN + 1)) % SPAN == 0) {
+        quad_cache.left_path.append(world_arena.allocator(), left_cell_x) catch @panic("QC append");
+        quad_cache.top_path.append(world_arena.allocator(), top_cell_y) catch @panic("QC append");
     } else {
-        // quad_cache.left_path.items.len - 1 == depth / 16, since quad_cache is an SegmentedList of u64s
-        const last_item_index: usize = @intCast(depth / 16 - 1);
-        const left_ptr: *u64 = quad_cache.left_path.at(last_item_index);
-        const top_ptr: *u64 = quad_cache.top_path.at(last_item_index);
+        // quad_cache.left_path.len - 1 = (depth - 1) / 16 - 1
+        const last_path_index: usize = @intCast((depth - 1) / 16 - 1);
+        const l_ptr = quad_cache.left_path.at(last_path_index);
+        const t_ptr = quad_cache.top_path.at(last_path_index);
 
-        left_ptr.* = (left_ptr.* << 4) + ox;
-        top_ptr.* = (top_ptr.* << 4) + oy;
+        // Remove the | SPAN_MASK which was forcing bits to 1111
+        l_ptr.* = (l_ptr.* << SPAN_LOG2) + left_cell_x;
+        t_ptr.* = (t_ptr.* << SPAN_LOG2) + top_cell_y;
     }
 
-    // TODO fix this completely wrong logic
-    // const delta_x = ideal_center -% coord.suffix[0];
-    // const delta_y = ideal_center -% coord.suffix[1];
+    // finalize player state
+    memory.game.player_chunk[0] = (coord.suffix[0] << SPAN_LOG2) | bx;
+    memory.game.player_chunk[1] = (coord.suffix[1] << SPAN_LOG2) | by;
 
-    // // Rebase the player
-    // memory.game.player_chunk[0] = delta_x;
-    // memory.game.player_chunk[1] = delta_y;
-    // TODO edge case logic of [15, 15, ...]
+    const quadrant_x = naive_cell_x - left_cell_x;
+    const quadrant_y = naive_cell_y - top_cell_y;
+    memory.game.player_quadrant = @intCast(quadrant_x + (quadrant_y * 2));
 }
 
 // /// Helper to maintain the sliding window of hashes for fast lookups

@@ -1,6 +1,7 @@
 //! Contains initialization and render update functions. See root.zig for exporting these functions (and others) to WASM.
-const memory = @import("memory.zig");
+const builtin = @import("builtin");
 const std = @import("std");
+const memory = @import("memory.zig");
 const logger = @import("logger.zig");
 const seeding = @import("seeding.zig");
 const world = @import("world.zig");
@@ -15,7 +16,7 @@ const SCREEN_WIDTH_HALF = SCREEN_WIDTH / 2;
 const SCREEN_HEIGHT_HALF = SCREEN_HEIGHT / 2;
 
 /// Sets the number of times the push_layer function is called at the start. (If set to 3, the game will start off by being 4096x4096 chunks. If set to 1, it will be 16x16 chunks instead.)
-const STARTING_ZOOM_TIMES = 3;
+const STARTING_ZOOM_TIMES = 0;
 /// Sets the player's spawn randomly (if `STARTING_ZOOM_TIMES` > 0).
 const SET_PLAYER_SPAWN_RANDOMLY = false;
 
@@ -131,8 +132,7 @@ pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f
         for (0..cw) |gx| {
             const offset_x: i64 = @as(i64, @intCast(min_cx)) + @as(i64, @intCast(gx));
 
-            // Let the Coordinate abstraction handle the u64 wrapping and Quadrant logic
-            if (player_coord.move(offset_x, offset_y)) |target_coord| {
+            if (player_coord.move(.{ offset_x, offset_y })) |target_coord| {
                 if (game.depth <= 16) {
                     if (target_coord.suffix[0] > world_limit or target_coord.suffix[1] > world_limit) {
                         for (0..SPAN) |ly| {
@@ -189,37 +189,59 @@ inline fn update_render_properties(game: *memory.GameState, interp_cam_x: f64, i
     memory.set_scratch_prop(5, player_render_x);
     memory.set_scratch_prop(6, player_render_y);
 
-    logger.clear(0);
-    const qc = world.quad_cache;
-    if (game.depth > 16) {
-        logger.write(0, .{
-            "{h}Top left quadrant X, Y, current quadrant, and active suffix",
-            qc.left_path,
-            qc.top_path,
-            ([_][]const u8{ "top left", "top right", "bottom left", "bottom right" })[game.player_quadrant],
-            game.player_chunk,
-        });
-    } else {
+    if (builtin.mode == .Debug) {
+        const qc = world.quad_cache;
         const d = @min(memory.game.depth, 16);
-        var resultX = std.mem.zeroes([16]u4); // or [_]u4{0} ** 16 :)
-        var resultY = std.mem.zeroes([16]u4);
+        var suffix_array_x = std.mem.zeroes([16]u4); // or [_]u4{0} ** 16 :)
+        var suffix_array_y = std.mem.zeroes([16]u4);
         for (0..d) |i| {
             const shift = @as(u6, @intCast(((d - 1) - i) * 4)); // un-backwards the array
-            resultX[i] = @intCast((game.player_chunk[0] >> shift) & 0xF); // mask from 0-15
-            resultY[i] = @intCast((game.player_chunk[1] >> shift) & 0xF);
+            suffix_array_x[i] = @intCast((game.player_chunk[0] >> shift) & 0xF); // mask from 0-15
+            suffix_array_y[i] = @intCast((game.player_chunk[1] >> shift) & 0xF);
         }
-        logger.write(0, .{ "{h}Chunk active suffix X/Y", resultX[0..d], resultY[0..d] });
+
+        if (game.depth > 16) {
+            // logger.write(0, .{
+            //     "{h}Top left quadrant X, Y, current quadrant, and active suffix",
+            //     qc.left_path,
+            //     qc.top_path,
+            //     ([_][]const u8{ "top left", "top right", "bottom left", "bottom right" })[game.player_quadrant],
+            //     suffix_array_x,
+            //     suffix_array_y,
+            // });
+            logger.write_once(2, .{ "{mh}Left quadrant path", qc.left_path, "{mh}X suffix array", suffix_array_x });
+            logger.write_once(3, .{ "{mh}Top quadrant path", qc.top_path, "{mh}Y suffix array", suffix_array_y });
+
+            const quadrant_name = ([_][]const u8{
+                "top left quadrant (0)",
+                "top right quadrant (1)",
+                "bottom left quadrant (2)",
+                "bottom right quadrant (3)",
+            })[game.player_quadrant];
+            logger.write_once(0, .{ "{mh}Quadrant name", quadrant_name, "{mh}Number of digits in the depth", @as(u64, @intFromFloat(@floor(std.math.log10(16.0) * @as(f64, @floatFromInt(game.depth + 1))))) + 1 });
+        } else {
+            logger.write_once(0, .{
+                "{h}Chunk active suffix X/Y",
+                suffix_array_x[0..d],
+                suffix_array_y[0..d],
+            });
+        }
+
+        logger.write_once(1, .{
+            "{h}Depth and position in chunk",
+            game.depth,
+            @as(memory.v2f64, @floatFromInt(game.player_pos)) / memory.v2f64{ SPAN_SQ, SPAN_SQ },
+        });
+
+        // logger.clear(1);
+        // logger.write(1, .{ "{h}Keys held down", game.keys_held_mask });
+
+        // logger.clear(2);
+        // logger.write(2, .{ "{h}Player interpolated shader position", @Vector(2, f64){ player_render_x, player_render_y } });
+        // logger.write(2, .{ "{h}Camera interpolated shader position", @Vector(2, f64){ cam_x_shader, cam_y_shader } });
+        // logger.write(2, .{ "{h}Camera actual location (relative to player)", game.camera_pos });
+        // logger.write(2, .{ "{h}Zoom (scaled based on canvas resolution)", effective_zoom });
     }
-    // logger.write(0, .{ "{h}Depth and position in chunk", game.depth, game.player_pos });
-
-    // logger.clear(1);
-    // logger.write(1, .{ "{h}Keys held down", game.keys_held_mask });
-
-    // logger.clear(2);
-    // logger.write(2, .{ "{h}Player interpolated shader position", @Vector(2, f64){ player_render_x, player_render_y } });
-    // logger.write(2, .{ "{h}Camera interpolated shader position", @Vector(2, f64){ cam_x_shader, cam_y_shader } });
-    // logger.write(2, .{ "{h}Camera actual location (relative to player)", game.camera_pos });
-    // logger.write(2, .{ "{h}Zoom (scaled based on canvas resolution)", effective_zoom });
 }
 
 pub fn portal_zoom_in(bx: u4, by: u4) void {

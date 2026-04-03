@@ -280,6 +280,14 @@ fn erosion(local_uv: vec2f, edge_flags: u32, seed2: u32) -> u32 {
     return 1u;
 }
 
+// Number of 1 bits in a u8 (possibly useful for edge flags, currently unused)
+fn popcount8(v: u32) -> u32 {
+    var n = v;
+    n = n - ((n >> 1u) & 0x55u);
+    n = (n & 0x33u) + ((n >> 2u) & 0x33u);
+    return ((n + (n >> 4u)) & 0x0Fu);
+}
+
 // Extracts the specific bit ranges in Block (see zig/memory.zig).
 fn unpack_tile(data: TileData) -> UnpackedTile {
     var out: UnpackedTile;
@@ -296,7 +304,7 @@ fn unpack_tile(data: TileData) -> UnpackedTile {
     out.seed2 = murmurmix32(out.seed);
 
     if (out.sprite_id == 7 && (extractBits(out.seed, 16u, 2u) == 0)) { // extract bits 16-18 for random modifications
-        out.sprite_id++; // mushroom
+        out.sprite_id++; // 2 mushroom types
     }
 
     return out;

@@ -81,20 +81,20 @@ pub fn move(logic_speed: f64) void {
     inline for (0..2) |i| {
         const carry: i64 = @divFloor(game.player_pos[i], SUBPIXELS_IN_CHUNK);
         if (carry != 0) {
-            // Treat the signed carry as bits and add to the unsigned suffix
-            game.player_chunk[i] +%= @bitCast(carry);
+            const new_coord = (if (i == 0)
+                game.get_player_coord().move_x(carry)
+            else
+                game.get_player_coord().move_y(carry)) orelse @panic("New coordinate for player is out of bounds!");
+            game.player_quadrant = new_coord.quadrant;
+            game.player_chunk = new_coord.suffix;
 
-            // Keep the player position within 0-4095 and rebase the camera
+            // Keep the player position within 0-4095
             game.player_pos[i] = @mod(game.player_pos[i], SUBPIXELS_IN_CHUNK);
 
-            // Shift these variables since they're relative
+            // Shift these variables, since they're relative
             const shift_amount = carry * SUBPIXELS_IN_CHUNK;
             game.last_player_pos[i] -= shift_amount;
-            game.camera_pos[i] -= shift_amount;
-            game.last_camera_pos[i] -= shift_amount;
-
-            // game.grid_dirty = true;
-            game.player_pos[i] = @mod(game.player_pos[i], SUBPIXELS_IN_CHUNK);
+            game.camera_pos[i] -= shift_amount; // rebase the camera
         }
     }
 
@@ -135,7 +135,7 @@ pub fn move(logic_speed: f64) void {
 }
 
 /// AABB check against the world grid
-fn is_colliding(px: i64, py: i64, w: *world) bool {
+fn is_colliding(px: i64, py: i64) bool {
     // Check the 4 corners of the player hitbox
     const corners = [_][2]i64{
         .{ px - PLAYER_HITBOX_HALF, py - PLAYER_HITBOX_HALF },
@@ -152,14 +152,14 @@ fn is_colliding(px: i64, py: i64, w: *world) bool {
         // Get the relative chunk (-1, 0, or 1 relative to player center)
         const cx = @divFloor(bx, SPAN);
         const cy = @divFloor(by, SPAN);
-        const chunk = w.get_chunk(cx, cy);
+        const chunk = world.get_chunk(cx, cy);
 
         // Get the block within that chunk
         const lx: u4 = @intCast(@mod(bx, SPAN));
         const ly: u4 = @intCast(@mod(by, SPAN));
         const block = chunk.blocks[ly * SPAN + lx];
 
-        if (block.id != world.SPRITE_VOID and block.id != world.SPRITE_MUSHROOM) {
+        if (world.is_solid(block.id)) {
             return true;
         }
     }

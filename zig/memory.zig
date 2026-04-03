@@ -9,10 +9,10 @@ pub const is_wasm = builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arc
 
 /// Represents log2(SPAN).
 pub const SPAN_LOG2: comptime_int = 4;
-/// The main number (as an integer) representing the number of blocks in a chunk, number of pixels in a block, and number of subpixels in a pixel.
+/// The main number (as an integer) representing the number of blocks in a chunk, number of pixels in a block, and number of subpixels in a pixel. (Note that changing these values WILL break the code!)
 pub const SPAN: comptime_int = 16;
 /// The main number (as a float) representing the number of blocks in a chunk, number of pixels in a block, and number of subpixels in a pixel.
-pub const SPAN_FLOAT: comptime_float = 16.0;
+pub const SPAN_FLOAT: comptime_float = @floatFromInt(SPAN);
 /// An integer representing the number of subpixels in a block, pixels in a chunk, number of blocks in a chunk, number of pixels in a block, and number of possible subpixel positions within a pixel.
 pub const SPAN_SQ: comptime_int = SPAN * SPAN;
 /// A float representing the number of subpixels in a block, pixels in a chunk, number of blocks in a chunk, number of pixels in a block, and number of possible subpixel positions within a pixel.
@@ -95,7 +95,7 @@ pub const GameState = extern struct {
         return @intCast(@divTrunc(self.player_pos[1], SPAN_SQ));
     }
 
-    /// Sets the player position, teleporting the previous position as well. Do not use for movement.
+    /// Sets the player position, teleporting the previous position as well. Do not use for movement, as this neither does frame interpolation nor takes `Coordinate` input for correct quadrant changes.
     pub inline fn set_player_pos(self: *@This(), new_position: v2i64) void {
         self.player_pos = new_position;
         self.last_player_pos = new_position;
@@ -254,9 +254,9 @@ pub const Coordinate = struct {
     }
 
     /// Adds both an X and Y value, creating a new Coordinate and handling quadrants. Returns `null` if this change would exceed a quadrant's boundaries (or the game's when depth is <= 16).
-    pub fn move(self: @This(), x_shift: i64, y_shift: i64) ?Coordinate {
-        const moved_x = self.move_x(x_shift) orelse return null;
-        return moved_x.move_y(y_shift);
+    pub fn move(self: @This(), suffix_change_vector: v2i64) ?Coordinate {
+        const moved_x = self.move_x(suffix_change_vector[0]) orelse return null;
+        return moved_x.move_y(suffix_change_vector[1]);
     }
 };
 

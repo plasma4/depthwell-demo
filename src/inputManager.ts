@@ -136,7 +136,7 @@ export function updateInput(state: InputState) {
     cleanHeld |= state.verticalPriority;
     cleanHeld |= state.plusMinusPriority;
 
-    state.keysPressed = cleanHeld & ~state.keysHeld;
+    state.keysPressed = cleanHeld & ~state.keysHeld; // a funny side effect of the logic being like this is that in very low-FPS situations you can lift a key early to cancel its pressed status
     state.currentlyHeld = cleanHeld;
     state.keysHeld = cleanHeld;
 }

@@ -47,12 +47,12 @@ Now, bear with me here, because you might be freaking out over the fact a code s
 Basically, all the code below is doing is declaring some constants in Zig, a fancy low-level language. The `SPAN` variable just represents 16; you don't really need to understand the code blocks so feel free to skip these. From `zig/memory.zig`:
 
 ```zig
-/// The main number (as an integer) representing the number of blocks in a chunk, number of pixels in a block, and number of subpixels in a pixel.
+/// The main number (as an integer) representing the number of blocks in a chunk, number of pixels in a block, and number of subpixels in a pixel. (Note that changing these values WILL break the code!)
 pub const SPAN: comptime_int = 16;
 // ...
 /// An integer representing the number of subpixels in a block, pixels in a chunk, number of blocks in a chunk, number of pixels in a block, and number of possible subpixel positions within a pixel.
 pub const SPAN_SQ: comptime_int = SPAN * SPAN;
- // ...
+// ...
 /// An integer representing the number of subpixels within a chunk. The player's X and Y coordinate should wrap around such that it is between 0 and this value (inclusive).
 pub const SUBPIXELS_IN_CHUNK: comptime_int = SPAN * SPAN * SPAN;
 ```
