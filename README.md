@@ -72,11 +72,13 @@ You can imagine the actual location of something as a "smashed together version"
 
 To clarify, `[4]u4` isn't some weird Zig magic, it just represents an array (or collection) of 4 values, between 0-15. So, `[1, 2, 3, 4]` would be an example of the `[4]u4` type.
 
+(Technical note: in the actual game, this data would act like a `[16]u4`, but be stored as `u64`s, and the game would read the depth value to "truncate" the last `u64` appropriately.)
+
 Now, the "raw coordinate" of a player (or anything we want to represent, such as the chunk an NPC is in or what chunk has been modified) might be `([9, 15, 15, 15, 15, 15], [3, 0, 0, 0, 1, 1])`, plus an X/Y from 0-4096 representing where the player is in that chunk.
 
 This would actually internally look like this for the caches (the quad-cache is the same for all players/NPCs/enemies):
 
-- Cached X: `[9, 15]`, `[10, 0]` (9, 15 "carried" to 10, 0. Don't worry about carrying details too much for now, I'll explain more later!)
+- Cached X: `[9, 15]`, `[10, 0]` (9, 15 "carried" to 10, 0. Don't worry about carrying details too much for now, I'll explain more later! Think of these like addition carries, maybe in base 16, that's literally what they act like.)
 - Cached Y: `[2, 15]`, `[3, 0]` (Same carrying here, notice how the carrying is to the left because `[0, 0, 1, 1]` is "below average" while `[15, 15, 15, 15]` is "above average", basically a midpoint split/weight-adjusted quad-partitioning)
 - However, since there are 4 combinations of cached X and Y, there are 4 quad-caches (so combinations $X_1Y_1,X_2Y_1,X_1Y_2,X_2Y_2$ for example), with the seed cached for each combination. Each quad-cache "points" to a combination, so the possible X/Y values aren't stored twice.
 
@@ -187,11 +189,15 @@ Groups of objects such as enemies are stored in a `MultiArrayList` with properti
 
 TODO finish
 
+Procedural generation currently uses...
+
 The primary goal with procedural generation is to create **consistent, high-quality outcomes, independent of the path taken**. This means that the path the user takes should not influence the quality, and quadrant or chunk bounds should not be visually apparent. Performance is also a major concern here, as even with chunk caching, it is possible for 32 chunks to be requested in a single frame.
 
-Utilizing `ChaCha12`, it is possible to...
+Utilizing `ChaCha12` (which has handy nonce/skip logic), it's possible to "skip" the PRNG by a certain amount of steps, and reliably get back to it. This is particularly useful for things like 2D noise!
 
 #### Particles
+
+TODO implement particles in the game
 
 Particles are small squares with rotation and opacity and organized using a circular buffer`ParticleSystem`. There can be a maximum of 1,000 particles at a time (the circular buffer is greedy and "loops around" to always erase the oldest particles). All data is passed to WebGPU and WebGPU automatically culls expired particles (as this part isn't super performance-strict).
 
@@ -309,7 +315,7 @@ Modifications of "higher" $D$-values are prioritized, and lower $D$-values are u
 
 - Reading performance is an amortized O(1) due only needing to consider block sizes between depth D-15 to D.
 - Writing performance is an amortized O(1) due to needing to find a `HashMap.
-- Increasing depth is, surprisingly, an O(1) operation due to a lack of culling (to show a "spectator view" on death), and storing where things are with a 256-bit ModKey and assuming that collisions are impossible.
+- Increasing depth is, surprisingly, an O(1) operation due to a lack of culling (to show a "spectator view" on death), and storing where things are with a 256-bit `ModKey` and assuming that collisions are impossible.
 - Space complexity is O(n) based on the number of modified chunks. Even if all modifications are reversed, each modified chunk still takes up 1KiB in history, plus additional index memory (so slightly more).
 
 #### Memory transfer
@@ -324,11 +330,3 @@ The interface between the TypeScript engine and the Zig core is managed via a pr
 WGSL offers several advantages (despite lower browser support). It lets you explicitly manage browser memory and is more efficient. Also, it's the more "modern" standard compared to things like WebGL, so might as well.
 
 Basically, the goal is to make sure that Zig handles as much of the state as possible, and Zig is the one that generates the data and places it into the scratch buffer. Then, this data is sent to WGSL and processed; Zig pre-processes the data, panning and converting to `f32` (so WebGPU doesn't encounter precision issues).
-
-### Next steps
-
-- Fully implement the architecture outlined above
-- Implement `ModificationStore` and changing chunk cache to ask as well as a basic mousedown-to-change-block-type implementation
-- Fully verify depth stack functionality, making sure it works past 16 values, making sure seeding works with it (goal is to not need to touch again after graphics/water work)
-- Implement basic physics collision and movement, as well as nice features like coyote time
-- Test perlin noise and pixel erosion

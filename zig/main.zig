@@ -218,7 +218,7 @@ inline fn update_render_properties(game: *memory.GameState, interp_cam_x: f64, i
                 "bottom left quadrant (2)",
                 "bottom right quadrant (3)",
             })[game.player_quadrant];
-            logger.write_once(0, .{ "{mh}Quadrant name", quadrant_name, "{mh}Number of digits in the depth", @as(u64, @intFromFloat(@floor(std.math.log10(16.0) * @as(f64, @floatFromInt(game.depth + 1))))) + 1 });
+            logger.write_once(0, .{ "{mh}Quadrant name", quadrant_name, "{mh}Number of digits in the current (hypothetical) width of the game world", @as(u64, @intFromFloat(@floor(std.math.log10(16.0) * @as(f64, @floatFromInt(game.depth + 1))))) + 1 });
         } else {
             logger.write_once(0, .{
                 "{h}Chunk active suffix X/Y",

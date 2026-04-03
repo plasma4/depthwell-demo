@@ -11,6 +11,7 @@ const Chunk = memory.Chunk;
 const Block = memory.Block;
 const Coordinate = memory.Coordinate;
 const SPAN = memory.SPAN;
+const SPAN_SQ = memory.SPAN_SQ;
 const SPAN_FLOAT = memory.SPAN_FLOAT;
 const SPAN_LOG2 = memory.SPAN_LOG2;
 
@@ -43,7 +44,7 @@ pub const BlockMod = packed struct(u32) {
 };
 
 /// A full 256-block (chunk) of modifications.
-pub const ChunkMod = [memory.SPAN_SQ]BlockMod;
+pub const ChunkMod = [SPAN_SQ]BlockMod;
 
 /// Arena for long-lasting data.
 pub var world_arena = memory.make_arena();
@@ -86,7 +87,7 @@ pub const SimBuffer = struct {
 
     /// Returns the chunk from the specified x and y.
     pub inline fn get_index(cx: u64, cy: u64) usize {
-        return (@as(usize, cy & 0xF) << 4) | @as(usize, cx & 0xF);
+        return (cy * SIM_BUFFER_WIDTH) * SIM_BUFFER_WIDTH + cx % SIM_BUFFER_WIDTH;
     }
 
     /// Sets a chunk from the specified x and y to the chunk instance given.
@@ -490,7 +491,7 @@ pub fn push_layer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
         max_possible_suffix = if (depth == 16)
             std.math.maxInt(u64)
         else
-            (@as(u64, 1) << @intCast(depth * memory.SPAN_LOG2)) - 1;
+            (@as(u64, 1) << @intCast(depth * SPAN_LOG2)) - 1;
 
         return;
     }
@@ -544,7 +545,7 @@ pub fn push_layer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
 
     const SPAN_MASK = SPAN - 1; // 0xF
 
-    // update the lineage stack for all 4 quadrants
+    // update the seed lineage for all 4 quadrants
     inline for (0..4) |q_id| {
         const slice = &quad_cache.path_hashes[q_id];
         std.mem.copyBackwards(seeding.Seed, slice[1..SPAN], slice[0 .. SPAN - 1]);
@@ -564,13 +565,13 @@ pub fn push_layer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
 
     // update the prefix path (which is a SegmentedList)
     if ((depth - (SPAN + 1)) % SPAN == 0) {
-        quad_cache.left_path.append(world_arena.allocator(), left_cell_x) catch @panic("QC append");
-        quad_cache.top_path.append(world_arena.allocator(), top_cell_y) catch @panic("QC append");
+        quad_cache.left_path.append(world_arena.allocator(), left_cell_x) catch @panic("quad-cache append failed");
+        quad_cache.top_path.append(world_arena.allocator(), top_cell_y) catch @panic("quad-cache append failed");
     } else {
         // quad_cache.left_path.len - 1 = (depth - 1) / 16 - 1
         const last_path_index: usize = @intCast((depth - 1) / 16 - 1);
-        const l_ptr = quad_cache.left_path.at(last_path_index);
-        const t_ptr = quad_cache.top_path.at(last_path_index);
+        const l_ptr: *u64 = quad_cache.left_path.at(last_path_index);
+        const t_ptr: *u64 = quad_cache.top_path.at(last_path_index);
 
         // Remove the | SPAN_MASK which was forcing bits to 1111
         l_ptr.* = (l_ptr.* << SPAN_LOG2) + left_cell_x;
