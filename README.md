@@ -232,6 +232,8 @@ const Particle = packed struct {
 
 #### The fractal modification buffer
 
+TODO fully implement
+
 Depthwell stores modifications with some fancy lineage inheritance: modifications are stored per-layer, and when generating a chunk at Depth $D$, the engine traverses up depths of the `ModificationStore` (eventually bubbling up to checking the type of a quad-cache if no changes were found). Small detail: portals can only spawn in places where the player is able to enter the new depth, not stuck within a block!
 
 The _goal_ with modifications is to ensure the following:

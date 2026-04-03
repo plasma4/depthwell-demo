@@ -87,7 +87,7 @@ pub const SimBuffer = struct {
 
     /// Returns the chunk from the specified x and y.
     pub inline fn get_index(cx: u64, cy: u64) usize {
-        return (cy * SIM_BUFFER_WIDTH) * SIM_BUFFER_WIDTH + cx % SIM_BUFFER_WIDTH;
+        return (cy / SIM_BUFFER_WIDTH) * SIM_BUFFER_WIDTH + cx % SIM_BUFFER_WIDTH;
     }
 
     /// Sets a chunk from the specified x and y to the chunk instance given.

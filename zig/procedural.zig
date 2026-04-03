@@ -11,7 +11,7 @@ pub inline fn generate_initial_block(moisture: f64, density: f64, height: f64) S
     _ = height;
 
     if (density < 0.2) return .none;
-    if (density < 0.4) return .spiral_plant;
+    if (density < 0.25) return .spiral_plant;
     if (density < 0.8) return .stone;
     return .iron;
 }
