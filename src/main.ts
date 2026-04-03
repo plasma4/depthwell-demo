@@ -198,7 +198,7 @@ engine.renderLoop = function (_t: number) {
     accumulator = (accumulator + newTicks) % 1; // calculate new fractional accumulation of ticks
 
     // mostly arbitrary color thresholds
-    let color = "#dddddd";
+    let color = "#cccccc";
     if (delta > 55) {
         color = "#e83769";
     } else if (delta > 30) {
@@ -235,7 +235,7 @@ engine.logicLoop = function (ticks: number) {
     let delta = time - startTime;
 
     // mostly arbitrary color thresholds
-    let color = "#dddddd";
+    let color = "#cccccc";
     if (delta > 30) {
         color = "#e83769";
     } else if (delta > 15) {

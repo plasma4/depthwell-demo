@@ -303,13 +303,13 @@ See the big chunk of comments in `push_layer` for specific details on zoom logic
 
 Because the coordinate tracking suffix uses a 64-bit integer, and each depth traversal consumes exactly 4 bits (a nibble), a player can natively traverse exactly 16 depths ($2^{64}$ chunks) without exceeding standard integer bounds.
 
-To manage near-infinite zoom, Depthwell utilizes a **16-level sliding lineage window** attached to the 4 instances of the `QuadCache`! The `layer_seed_history` isn't a single global history. Instead it's split into 4 independent arrays of length 16, with each quadrant of the QuadCache containing its own `Seed` history.
+To manage near-infinite zoom, Depthwell utilizes a **16-level sliding active suffix and seed data** attached to the 4 instances of the `QuadCache`! The `layer_seed_history` isn't a single global history. Instead it's split into 4 independent arrays of length 16, with each quadrant of the QuadCache containing its own `Seed` history (4 because the code generates 4 BLAKE3 hashes for various parts of seeding, from cave terrain to WGSL decoration seeding).
 
 When zooming past Depth 16, the engine executes a "rebase." The player is re-centered inside the 64-bit bounds, and the highest 4 bits (the overflow nibble) "fall off" the top of the suffix.
 
 Because a quadrant's spatial area precisely covers $2^{64}$ chunks at the current depth, looking back _exactly_ 16 levels guarantees full coverage of the current addressable space. If a modification occurred at Depth $D-16$, that chunk will be 16x larger than a whole quadrant, so it doesn't matter (and each quadrant stores the value of its original block type, for procedural generation preservation). Therefore, a fixed 16-length lookback is ideal here, and `ancestor_materials` acts as a "collapsed" summary of all modifications beyond $D-15$.
 
-(Modifications are not culled in order to allow for a spectating/history once the player dies, and perhaps even be a main/custom mode where you can re-spawn, although this logic might encounter its own set of difficult struggles!)
+(Modifications are not culled in order to allow for a spectating/history once the player dies, and perhaps even be a main/custom mode where you can re-spawn, although this may might encounter its own set of difficult struggles in the future!)
 
 Chunk modifications are hashed in the sparse set by XORing the chunk's active coordinates directly into its corresponding 512-bit `Seed`. Because the `Seed` is just the BLAKE3 of a quadrant, XOR-ing a coordinate's `cx`/`cy` is fully secure (as this would change between quadrants anyway)!
 
@@ -317,7 +317,7 @@ Modifications of "higher" $D$-values are prioritized, and lower $D$-values are u
 
 - Reading performance is an amortized O(1) due only needing to consider block sizes between depth D-15 to D.
 - Writing performance is an amortized O(1) due to needing to find a `HashMap.
-- Increasing depth is, surprisingly, an O(1) operation due to a lack of culling (to show a "spectator view" on death), and storing where things are with a 256-bit `ModKey` and assuming that collisions are impossible.
+- Increasing depth is, surprisingly, an O(1) operation due to a lack of culling (to allow for a "spectator view" on death), and storing where things are with a 256-bit `ModKey` and assuming that collisions are impossible.
 - Space complexity is O(n) based on the number of modified chunks. Even if all modifications are reversed, each modified chunk still takes up 1KiB in history, plus additional index memory (so slightly more).
 
 #### Memory transfer

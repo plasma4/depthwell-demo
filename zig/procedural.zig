@@ -46,8 +46,8 @@ pub fn get_value_noise(base_seed: seeding.Seed, world_x: f64, world_y: f64) f64 
     return lerp(lerp(v00, v10, u), lerp(v01, v11, u), v);
 }
 
+/// Returns a random deterministic value based on an X and Y value.
 fn get_random_value(seed: seeding.Seed, x: u64, y: u64) f64 {
-    // Just return a float 0.0 to 1.0 based on coords
     var key = seed;
     key[0] ^= @bitCast(x);
     key[1] ^= @bitCast(y);
@@ -55,7 +55,7 @@ fn get_random_value(seed: seeding.Seed, x: u64, y: u64) f64 {
     return @as(f64, @floatFromInt(prng.next())) * (1.0 / 18446744073709551616.0);
 }
 
-/// Simple noise for testing.
+/// Simple noise for testing. Unused.
 pub fn get_test_noise(seed: seeding.Seed, x: f64, y: f64) f64 {
     _ = .{ x, y };
     var prng = seeding.ChaCha12.init(seed);

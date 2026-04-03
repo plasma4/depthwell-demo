@@ -161,7 +161,7 @@ pub const ChunkCache = struct {
     }
 };
 
-/// UNUSED. Adds 1 to the path as if the `SegmentedList` represented one giant number. Performs allocation; the caller should deinit the path eventually using `world_arena`.
+/// UNUSED DUE TO BEING UNNECESSARY. Adds 1 to the path as if the `SegmentedList` represented one giant number. Performs allocation; the caller should deinit the path eventually using `world_arena`.
 fn carry_path(path: *const std.SegmentedList(u64)) std.SegmentedList(u64) {
     const new_path = path.clone(world_arena.allocator()) catch @panic("carry alloc for QuadCache coordinates failed");
     world_arena.reset(.retain_capacity); // TODO decide
