@@ -4,8 +4,8 @@ import { GameEngine } from "./engine";
 
 /** The URL for the WebAssembly code (compiled from zig build). */
 import WASM_URL from "./main.wasm?url";
-/** The URL for the WebGPU shader code. */
-import SHADER_SOURCE from "./shader.wgsl";
+/** The URL for the WebGPU shader code. ADD ?raw FOR DEBUGGING SHADER. */
+import SHADER_SOURCE from "./shader.wgsl?raw"; // TODO remove for prod
 /** The URL for the sprite sheet. */
 import SPRITE_SHEET_URL from "./assets/main.png?url";
 
@@ -137,10 +137,38 @@ export async function create(
     );
     const memory = engineModule.instance.exports.memory as WebAssembly.Memory;
 
+    const bindGroupLayout = device.createBindGroupLayout({
+        label: "Main Bind Group Layout",
+        entries: [
+            {
+                binding: 0,
+                visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+                buffer: { type: "uniform" },
+            }, // SceneUniforms
+            {
+                binding: 1,
+                visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+                buffer: { type: "read-only-storage" },
+            }, // tiles
+            { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: {} }, // atlas
+            { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {} }, // sampler
+            {
+                binding: 4,
+                visibility: GPUShaderStage.VERTEX,
+                buffer: { type: "uniform" },
+            }, // map_size
+        ],
+    });
+
+    const pipelineLayout = device.createPipelineLayout({
+        label: "Shared Pipeline Layout",
+        bindGroupLayouts: [bindGroupLayout],
+    });
+
     // Create pipeline
     const pipeline = device.createRenderPipeline({
         label: "Tilemap pipeline",
-        layout: "auto",
+        layout: pipelineLayout,
         vertex: {
             module: shaderModule,
             entryPoint: "vs_main",
@@ -168,6 +196,33 @@ export async function create(
             topology: "triangle-strip",
             cullMode: "none",
         },
+        depthStencil: {
+            depthWriteEnabled: true,
+            depthCompare: "less",
+            format: "depth24plus",
+        },
+    });
+
+    const bgPipeline = device.createRenderPipeline({
+        label: "Background pipeline",
+        layout: pipelineLayout,
+        vertex: {
+            module: shaderModule,
+            entryPoint: "vs_background",
+        },
+        fragment: {
+            module: shaderModule,
+            entryPoint: "fs_background",
+            targets: [{ format: format }],
+        },
+        primitive: {
+            topology: "triangle-list",
+        },
+        depthStencil: {
+            depthWriteEnabled: false, // Background doesn't need to write to depth
+            depthCompare: "less-equal", // Only draw where Z is 1.0 (empty space)
+            format: "depth24plus",
+        },
     });
 
     engine = new GameEngine(
@@ -177,8 +232,10 @@ export async function create(
         context,
         engineModule,
         pipeline,
+        bgPipeline,
     );
-    await engine.setSeed(Seeding.makeSeed(0));
+    engine.exports.setup();
+    await engine.setSeed(Seeding.makeSeed(100));
     engine.exports.init();
 
     const resizeObserver = new ResizeObserver(engine.onResize);

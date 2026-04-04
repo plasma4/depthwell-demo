@@ -1,8 +1,9 @@
 const alphabet = "abcdefghijklmnopqrstuvwxyz";
 const base = 26n;
 
-/** Creates a seed up from 1 to seedLength characters; won't work properly past length 100. */
+/** Creates a seed up from 1 to `seedLength` characters; won't work properly past length 100. Returns an empty string if `seedLength` is non-positive. */
 export function makeSeed(seedLength = 100) {
+    if (seedLength <= 0) return "";
     // 68 bytes > 2*10^173. The amount of possible seed combinations is around ~3.29*10^141, so this is a sufficient amount of bytes.
     const bytes = new Uint8Array(72);
     crypto.getRandomValues(bytes);
@@ -25,7 +26,7 @@ export function makeSeed(seedLength = 100) {
     return result;
 }
 
-/** Bijective string-to-BigInt (Same as before) */
+/** Bijective string-to-BigInt. */
 function seedToBigInt(seed: string): bigint {
     let total = 0n;
     for (let i = 0; i < seed.length; i++) {

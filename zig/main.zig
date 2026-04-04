@@ -36,9 +36,6 @@ var alreadyStarted = false;
 
 /// Initializes the game.
 pub fn init() void {
-    memory.game = .{}; // initialize GameState
-    // TODO destroy World values as needed
-
     // Start off by determining where the player starts off exactly with layer pushing
     var rng = seeding.ChaCha12.init(seeding.mix_base_seed(memory.game.seed, 1));
     for (0..STARTING_ZOOM_TIMES) |_| {
@@ -49,7 +46,7 @@ pub fn init() void {
         });
 
         world.push_layer(
-            world.Sprite.none,
+            .none,
             memory.game.get_player_coord(),
             memory.game.get_block_x_in_chunk(), // convert a subpixel (0-4095) in a chunk to a block in a chunk (0-15)
             memory.game.get_block_y_in_chunk(),

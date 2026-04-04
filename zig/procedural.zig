@@ -10,10 +10,12 @@ pub inline fn generate_initial_block(moisture: f64, density: f64, height: f64) S
     _ = moisture;
     _ = height;
 
-    if (density < 0.2) return .none;
-    if (density < 0.25) return .spiral_plant;
+    if (density < 0.4) return .none;
+    if (density < 0.55) return .spiral_plant;
     if (density < 0.8) return .stone;
-    return .iron;
+    if (density < 0.85) return .weird_dirt;
+    if (density < 0.95) return .iron;
+    return .silver;
 }
 
 inline fn lerp(a: f64, b: f64, t: f64) f64 {

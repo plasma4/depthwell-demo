@@ -22,16 +22,24 @@ pub const Sprite = enum(u20) {
     edge_stone = 2,
     stone = 3,
     iron = 4,
-    grass = 5,
-    spiral_plant = 6,
-    ceiling_flower = 7,
-    mushroom = 8,
-    torch = 10,
+    silver = 5,
+    weird_dirt = 6,
+    grass = 7,
+    spiral_plant = 8,
+    ceiling_flower = 9,
+    mushroom = 10,
+    torch = 11,
     unchanged = 1048575,
 };
 
 /// Empty block of id `Sprite.none`
-pub const AIR_BLOCK: Block = .{ .id = Sprite.none, .seed = 0, .light = 255, .hp = 0, .edge_flags = 255 };
+pub const AIR_BLOCK: Block = .{
+    .id = .none,
+    .seed = 0,
+    .light = 255,
+    .hp = 0,
+    .edge_flags = 255,
+};
 
 /// 32-bit packed structure representing a single modified block within a chunk.
 pub const BlockMod = packed struct(u32) {

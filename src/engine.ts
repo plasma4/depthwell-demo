@@ -115,7 +115,13 @@ export class GameEngine {
     private currentEncoder: GPUCommandEncoder | null = null;
     /** Internal texture view for just the current frame. */
     private currentTextureView: GPUTextureView | null = null;
+    /** The depth texture for discarding. */
+    public depthTexture!: GPUTexture;
+    /** Internal texture view for just the depth texture. */
+    private depthTextureView: GPUTextureView | null = null;
+
     public readonly renderPipeline: GPURenderPipeline;
+    public readonly bgPipeline: GPURenderPipeline;
     public readonly encoder = new TextEncoder();
     public readonly decoder = new TextDecoder();
 
@@ -130,6 +136,7 @@ export class GameEngine {
         context: GPUCanvasContext,
         engineModule: WebAssembly.WebAssemblyInstantiatedSource,
         renderPipeline: GPURenderPipeline,
+        bgPipeline: GPURenderPipeline,
     ) {
         this.canvas = canvas;
         this.adapter = adapter;
@@ -137,6 +144,7 @@ export class GameEngine {
         this.context = context;
         this.engineModule = engineModule;
         this.renderPipeline = renderPipeline;
+        this.bgPipeline = bgPipeline;
         this.exports = engineModule.instance.exports as Zig.EngineExports;
         this.memory = engineModule.instance.exports
             .memory as WebAssembly.Memory;
@@ -203,7 +211,7 @@ export class GameEngine {
 
     /** Function called from Zig that actually draws these visible chunks. */
     public handleVisibleChunks() {
-        // Ensure we have an active encoder from renderFrame
+        // Ensure we have an active encoder from renderFrame to satisfy TS
         if (!this.currentEncoder || !this.currentTextureView) return;
 
         const scratchPtr = this.getScratchPtr();
@@ -257,7 +265,7 @@ export class GameEngine {
             camY,
             this.canvas.width,
             this.canvas.height,
-            performance.now() - this.startTime, // currentTime
+            (performance.now() - this.startTime) % 16777216, // currentTime, TODO decide wrapping around logic
             effectiveZoom,
             effectiveZoom < 0.25 ? 0 : this.wireframeOpacity,
             1.0, // opacity of all tiles/sprites when rendering
@@ -285,6 +293,12 @@ export class GameEngine {
                     storeOp: "store",
                 },
             ],
+            depthStencilAttachment: {
+                view: this.depthTextureView!,
+                depthClearValue: 1.0,
+                depthLoadOp: "clear",
+                depthStoreOp: "store",
+            },
         });
 
         renderPass.setPipeline(this.renderPipeline);
@@ -301,6 +315,12 @@ export class GameEngine {
         // Draw all tiles as instances. Uses a triangle-strip so 4 vextexCount instead of 6. Also add 1 more instance for the player!
         const instanceCount = widthBlocks * heightBlocks + 1;
         renderPass.draw(4, instanceCount);
+
+        // Draw background (same bind group)
+        renderPass.setPipeline(this.bgPipeline);
+        renderPass.setBindGroup(0, this.bindGroup);
+        renderPass.draw(3); // Draws the large background triangle (not a quad, neat little hack!)
+
         renderPass.end();
 
         this.isVisibleDataNew = false;
@@ -524,6 +544,12 @@ export class GameEngine {
         if (this.canvas.width !== w || this.canvas.height !== h) {
             this.canvas.width = w;
             this.canvas.height = h;
+            if (this.depthTexture) this.depthTexture.destroy();
+            this.depthTexture = this.device.createTexture({
+                size: [w, h],
+                format: "depth24plus",
+                usage: GPUTextureUsage.RENDER_ATTACHMENT,
+            });
         }
     };
 
@@ -536,6 +562,7 @@ export class GameEngine {
         // Initialize the encoder and view for this specific frame
         this.currentEncoder = this.device.createCommandEncoder();
         this.currentTextureView = this.context.getCurrentTexture().createView();
+        this.depthTextureView = this.depthTexture.createView(); // Create view for this frame
 
         // Trigger Zig logic, which will call handleVisibleChunks() (potentially multiple times)
         this.uploadVisibleChunks(timeInterpolated);

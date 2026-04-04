@@ -10,6 +10,10 @@ const world = @import("world.zig");
 const KeyBits = @import("types.zig").KeyBits;
 const builtin = @import("builtin");
 
+pub export fn setup() void {
+    // TODO destroy World/GameState values as needed if !alreadyStarted
+    memory.game = .{}; // initialize GameState
+}
 pub export fn init() void {
     main.init();
 }

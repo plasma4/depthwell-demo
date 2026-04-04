@@ -9,7 +9,7 @@ Depthwell is a procedurally generated fractal mining incremental roguelite. How 
 
 Run `zig build` for the main build of Zig code, `zig test "zig/root.zig"` to run (all) tests, and `zig build --Dgen-enums` to simultaneously build and generate `enums.ts` if changes were made. (See `build.zig` for details on compiling a final version.)
 
-Use `npm run build` instead of `npm run dev` to build for production. The code currently does not require cross-origin isolation, and is meant to be single-core.
+When building for production with Vite (`npm run build` instead of `npm run dev`), edit `SHADER_SOURCE` in `engineMaker.ts` to `"./shader.wgsl"` temporarily (without the `?raw` property) to actually compress `shader.wgsl`.
 
 With a clear-screen command that uses ANSI-escape codes, you can clear the screen every time after building:
 
@@ -21,15 +21,11 @@ cls && zig build --Dgen-enums
 
 Currently, Depthwell does not utilize web worker technology so custom headers are not necessary (and this means it's fairly easily to save as a file/folder, _after building_).
 
-### Architecture goal and details
+### Architecture details
 
 Game is created using Zig and WebGPU, and meant to be web-first. A final product that uses Mach Engine for native building is planned, but _web will always be free and recieve updates_. The internal viewport is 480x270 and scaled up in WebGPU automatically. Functions are exported from `root.zig`.
 
 By using `ChaCha12` and a seed with 1-100 `a-z` characters, the game can generate over `10^140` possible maps, with each map containing a very large depth limit that allows for near-infinite exploration.
-
-### Fractal Architecture & Coordinate Systems
-
-The architecture _implementation goal_ for Depthwell is to use a **Segmented Fractal Coordinate System** to manage near-infinite depth and modification persistence across scales without performance degrading. The philosophy is that the player, of course, shouldn't have to worry about any of this complexity.
 
 #### Coordinates and basics
 
@@ -116,14 +112,6 @@ There's some details the previous explanation glossed over. You might have wonde
     - Coordinate X: `false` (boolean representing which cached value to use), representing the **first** QC.
     - Coordinate Y: `true`, representing the **second** QC.
     - What happens is you encode this into a value between 0-3 (hence the `u2`), so if we consider false = 0 and true = 1, then the result is $C_x+2\times C_y$ (where $C_x$ is coordinate X and $C_y$ is coordinate Y). Then you can "extract" the boolean out from this quadrant ID with bitwise logic, for example.
-
-#### Deterministic seeding
-
-**This part requires an understanding of PRNGs and is not strictly important for understanding.** To support $O(1)$ seeding generation per chunk at arbitrary depths, Zig maintains four `Seed` constants (512-bit), for each quadrant of the QC. This then gets mixed along with the suffixes with Blake3.
-
-- **Static Bounds:** Again, the QCs are fixed at depth-change. Moving across the $2^{64}$ boundary simply toggles the `u2` quadrant ID.
-- **Mixing:** `ChunkSeed`, to oversimplify details slightly, is `BLAKE3(seed of QC determined by the quadrant ID, SuffixX, SuffixY)`. The seed of the QC itself is determined by the _initial_ seed from the string provided (specific bijective logic is rather complex, but see `src/seeding.ts` for details) and is mixed with the 4 bits of data (a "nibble") that is added to the prefix stack of each quadrant (after depth 16, where the prefix data becomes non-empty).
-- **Block RNG:** Blocks within a chunk are generated sequentially via `ChaCha12`. Since the order in which the blocks are generated is the same every time (go through X-axis values 0-15, then increment Y, etc.), the PRNG state is shifted multiple times yet produces deterministic outcomes, which makes things simpler.
 
 #### Storing modifications
 
@@ -252,7 +240,13 @@ A `std.AutoHashMap` stores the path hashes and a dynamically allocated array of 
 
 ```zig
 /// Empty block of id `Sprite.none`
-pub const AIR_BLOCK: Block = .{ .id = Sprite.none, .seed = 0, .light = 255, .hp = 0, .edge_flags = 0 };
+pub const AIR_BLOCK: Block = .{
+    .id = .none,
+    .seed = 0,
+    .light = 255,
+    .hp = 0,
+    .edge_flags = 255,
+};
 
 /// 32-bit packed structure representing a single modified block within a chunk.
 pub const BlockMod = packed struct(u32) {
