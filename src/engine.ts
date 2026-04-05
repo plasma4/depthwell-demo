@@ -244,7 +244,7 @@ export class GameEngine {
 
         const neededBytes = u32Count * 4;
         this.recreateBufferAndBindGroup(neededBytes);
-        this.updateBuffersAndBindGroup(this.renderCallId++);
+        this.updateBuffersAndBindGroup(this.renderCallId);
         this.renderPass.setPipeline(this.renderPipeline);
         this.renderPass.setBindGroup(0, this.bindGroup);
 
@@ -334,12 +334,11 @@ export class GameEngine {
         }
     }
 
-    /** Updates the current `tileBuffer`, `uniformBuffer`, and `bindGroup`, while updating the `renderCallId`. */
-    private updateBuffersAndBindGroup(newRenderCallId: number) {
-        this.renderCallId = newRenderCallId;
-        this.tileBuffer = this.tileBuffers[newRenderCallId];
-        this.uniformBuffer = this.uniformBuffers[newRenderCallId];
-        this.bindGroup = this.bindGroups[newRenderCallId];
+    /** Updates the current `tileBuffer`, `uniformBuffer`, and `bindGroup`. */
+    private updateBuffersAndBindGroup(elementId: number) {
+        this.tileBuffer = this.tileBuffers[elementId];
+        this.uniformBuffer = this.uniformBuffers[elementId];
+        this.bindGroup = this.bindGroups[elementId];
     }
 
     // -----
@@ -604,10 +603,10 @@ export class GameEngine {
         // Trigger Zig logic, which will call handleVisibleChunks() (potentially multiple times)
         this.uploadVisibleChunks(timeInterpolated);
 
-        // don't have background on depth transition, which draws a second batch of tiles
-        if (this.renderCallId == 1) {
+        // Don't have background on depth transition, which draws a second batch of tiles
+        if (this.renderCallId == 0) {
             // Draw background (same bind group as chunk drawing)
-            this.updateBuffersAndBindGroup(0);
+            this.updateBuffersAndBindGroup(this.renderCallId);
             this.renderPass.setPipeline(this.bgPipeline);
             this.renderPass.setBindGroup(0, this.bindGroup);
             this.renderPass.draw(3); // Draws the large background triangle (not a quad, neat little hack!)

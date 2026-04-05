@@ -13,7 +13,7 @@ pub inline fn generate_initial_block(moisture: f64, density: f64, height: f64) S
     if (density < 0.4) return .none;
     if (density < 0.55) return .spiral_plant;
     if (density < 0.8) return .stone;
-    if (density < 0.85) return .weird_dirt;
+    if (density < 0.85) return .gold;
     if (density < 0.95) return .iron;
     return .silver;
 }
