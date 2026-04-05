@@ -21,14 +21,14 @@ const STARTING_ZOOM_TIMES = 0;
 const SET_PLAYER_SPAWN_RANDOMLY = false;
 
 /// External function that makes a call to `engine.handleVisibleChunks()`.
-extern "env" fn js_handle_visible_chunks() void;
+extern "env" fn js_handle_visible_chunks(opacity: f64) void;
 
 /// Makes a call to `engine.handleVisibleChunks()` in JS.
-pub inline fn handle_visible_chunks() void {
+pub inline fn handle_visible_chunks(opacity: f64) void {
     if (memory.is_wasm) {
-        return js_handle_visible_chunks();
+        return js_handle_visible_chunks(opacity);
     } else {
-        return;
+        return; // no native impl yet
     }
 }
 
@@ -107,15 +107,6 @@ pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f
     const wb = cw * SPAN;
     const hb = ch * SPAN;
 
-    // const moved_chunk = game.player_chunk[0] != game.last_player_chunk_x or game.player_chunk[1] != game.last_player_chunk_y;
-    // if (!game.grid_dirty and !moved_chunk and game.last_grid_min_bx == @as(u32, @bitCast(min_cx))) {
-    //     update_render_properties(game, wb, hb, min_cx, min_cy, dt, effective_zoom);
-    //     return;
-    // }
-
-    // game.last_player_chunk_x = game.player_chunk[0];
-    // game.last_player_chunk_y = game.player_chunk[1];
-
     memory.scratch_reset();
     const out = memory.scratch_alloc_slice(memory.Block, wb * hb) orelse return;
 
@@ -153,8 +144,9 @@ pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f
             }
         }
     }
+
     update_render_properties(game, interp_cam_x, interp_cam_y, wb, hb, min_cx, min_cy, dt, effective_zoom);
-    handle_visible_chunks();
+    handle_visible_chunks(1.0);
 }
 
 /// Sets scratch properties containing information to TypeScript for renderFrame.

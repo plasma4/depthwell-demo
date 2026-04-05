@@ -104,7 +104,7 @@ pub fn main() !void {
         \\    highPerformance?: boolean;
         \\}}
         \\
-        \\// Generated from exported functions (should all be in root.zig):
+        \\/** Generated from exported functions (should all be in `zig/root.zig`). */
         \\export interface EngineExports extends WebAssembly.Exports {{
         \\    readonly memory: WebAssembly.Memory;
         \\

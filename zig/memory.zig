@@ -179,6 +179,18 @@ pub const Block = packed struct(u64) {
     light: u8,
     /// Per-block seed for procedural variation in the shader.
     seed: u24,
+
+    /// Makes a simple block of a certain type, with max light and no edge flags and mine level.
+    /// Using the BOTTOM 32 bits from `seed_bits`, 8 bits of `light` and 24 bits of `seed` are extracted.
+    pub inline fn make_basic_block(sprite_type: world.Sprite, seed_bits: u64) Block {
+        return .{
+            .id = sprite_type,
+            .hp = 0,
+            .edge_flags = 0,
+            .light = @truncate(seed_bits >> 24),
+            .seed = @truncate(seed_bits),
+        };
+    }
 };
 
 /// 16x16 fixed grid of blocks. Each chunk is 2KiB in size.
@@ -319,7 +331,7 @@ pub const MemoryLayout = extern struct {
     scratch_capacity: u64,
     /// Pointer to the GameState.
     game_ptr: u64,
-    /// Additional properties for sending additional (pointer or short fixed-length) properties. Information in the scratch properties should be assumed to be corrupted as soon as any other function that could modify the scratch buffer is called and thought of as a temporary "handshake" between Zig and TypeScript.
+    /// Additional properties for sending additional (numeric, pointer, or short fixed-length) properties. Information in the scratch properties should be assumed to be corrupted as soon as any other function that could modify the scratch buffer is called. This array should be thought of as a temporary "handshake" to trade information between Zig and TypeScript. Consider utilizing function arguments instead when sending data to Zig.
     scratch_properties: [20]u64,
 };
 

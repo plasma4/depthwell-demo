@@ -103,7 +103,6 @@ pub inline fn test_logs(skipError: bool) void {
     } else {
         logger.log(@src(), "Skipping error test.", .{});
     }
-    logger.log(@src(), "This log should be multiple lines.\n-----\nTesting logging with a truncated string below:", .{});
     var arena = memory.make_arena();
     const allocator = arena.allocator();
     defer arena.deinit();
@@ -114,9 +113,10 @@ pub inline fn test_logs(skipError: bool) void {
     list.append(allocator, 'l') catch @panic("character append failed");
     list.append(allocator, 'l') catch @panic("character append failed");
     list.append(allocator, 'o') catch @panic("character append failed");
-    list.appendSlice(allocator, " World!") catch @panic("string append failed");
+    list.appendSlice(allocator, " World (using ArrayList, within an unnamed struct)!") catch @panic("string append failed");
+    logger.quick(.{ "{h}Quick log with header and 3 values", 12.34, "string", .{list} });
 
-    logger.quick(.{ "{h}Quick log with header and 3 values", 12.34, "string", list });
+    logger.log(@src(), "This log should be multiple lines.\n-----\nTesting logging with a truncated string below:", .{});
     // Test truncation by taking a test hex string and making it longer than 4,096 bytes
     const long_data = ("0123456789abcdef" ** (5000 / 16 + 1))[0..5000];
     logger.log(@src(), "{s}", .{long_data});

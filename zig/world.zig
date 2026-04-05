@@ -36,7 +36,7 @@ pub const Sprite = enum(u20) {
 pub const AIR_BLOCK: Block = .{
     .id = .none,
     .seed = 0,
-    .light = 255,
+    .light = 0,
     .hp = 0,
     .edge_flags = 255,
 };
@@ -330,21 +330,17 @@ fn generate_chunk(chunk: *memory.Chunk, coord: Coordinate) void {
             const is_absolute_edge_x = (cx == 0 and block_x < 2 and quadrant_edge_details.most_left) or (cx == max_possible_suffix and block_x >= (SPAN - 2) and quadrant_edge_details.most_right);
             const is_absolute_edge_y = (cy == 0 and block_y < 2 and quadrant_edge_details.most_top) or (cy == max_possible_suffix and block_y >= (SPAN - 2) and quadrant_edge_details.most_bottom);
             if (is_absolute_edge_x or is_absolute_edge_y) {
-                chunk.blocks[id] = make_basic_block(.edge_stone);
+                chunk.blocks[id] = Block.make_basic_block(.edge_stone, rng4.next());
                 // This does mean there are fewer PRNG .next() calls but this doesn't matter here
                 continue;
             }
 
             // Use density to influence block generation
             const density = procedural.get_value_noise(chunk_seeds[1], @as(f64, @floatFromInt(block_x)) / SPAN, @as(f64, @floatFromInt(block_y)) / SPAN);
-            const entropy = rng4.next();
-            chunk.blocks[id] = .{
-                .id = procedural.generate_initial_block(0.0, density, 0.0),
-                .light = @truncate(entropy),
-                .seed = @truncate(entropy >> 8),
-                .hp = 15,
-                .edge_flags = 0, // will be updated in second pass
-            };
+            chunk.blocks[id] = Block.make_basic_block(
+                procedural.generate_initial_block(0.0, density, 0.0),
+                rng4.next(),
+            ); // edge flags updated in second pass
         }
     }
 }
@@ -360,7 +356,7 @@ pub fn add_edge_flags(target_chunk: *memory.Chunk, coord: Coordinate) void {
     for (1..SPAN - 1) |ly| {
         for (1..SPAN - 1) |lx| {
             const id = ly * SPAN + lx;
-            if (!is_solid(target_chunk.blocks[id].id)) {
+            if (!should_participate_in_edge_flags(target_chunk.blocks[id].id)) {
                 target_chunk.blocks[id].edge_flags = 0xFF; // prevent erosion/edge darkening
                 continue;
             }
@@ -371,7 +367,7 @@ pub fn add_edge_flags(target_chunk: *memory.Chunk, coord: Coordinate) void {
                     if (dx == 0 and dy == 0) continue;
                     const nx = @as(usize, @intCast(@as(i32, @intCast(lx)) + dx));
                     const ny = @as(usize, @intCast(@as(i32, @intCast(ly)) + dy));
-                    if (is_solid(target_chunk.blocks[ny * 16 + nx].id)) {
+                    if (should_participate_in_edge_flags(target_chunk.blocks[ny * 16 + nx].id)) {
                         flags |= types.EdgeFlags.get_flag_bit(dx, dy);
                     }
                 }
@@ -426,8 +422,21 @@ pub fn add_edge_flags(target_chunk: *memory.Chunk, coord: Coordinate) void {
     }
 }
 
+/// Determines if a block should interact with the edge flags.
+pub inline fn should_participate_in_edge_flags(sprite: Sprite) bool {
+    return switch (sprite) {
+        .none,
+        .spiral_plant,
+        .torch,
+        .edge_stone,
+        .mushroom,
+        => false,
+        else => true,
+    };
+}
+
 /// Determines if a block is considered solid, and should interact with the physics, player, and edge flags.
-pub fn is_solid(sprite: Sprite) bool {
+pub inline fn is_solid(sprite: Sprite) bool {
     return switch (sprite) {
         .none,
         .spiral_plant,
@@ -609,17 +618,6 @@ pub fn push_layer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
 /// Multiplies a float by 2**64, returning an integer x such that a random u64 value has its probability to be less than x equal to the chance variable.
 pub inline fn odds_num(chance: comptime_float) u64 {
     return @intFromFloat(chance * 18446744073709551616.0);
-}
-
-/// Makes a simple block of a certain type, with max light and no edge flags/custom properties.
-pub inline fn make_basic_block(sprite_type: Sprite) Block {
-    return .{
-        .id = sprite_type,
-        .seed = 0,
-        .light = 255,
-        .hp = 0,
-        .edge_flags = 0xFF,
-    };
 }
 
 // /// Convert screen pixels to a world block coordinate

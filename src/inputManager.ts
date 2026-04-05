@@ -40,7 +40,7 @@ const keyMap: Record<string, number> = {
 /** Creates an initial InputState and creates event listeners. Should be updated with with updateInput() in a logic loop. */
 export function initInput(): InputState {
     /** Tracks individual key counts to handle multiple keys mapping to one bit, such as W and KeyUp simulataneously. */
-    const keyCounts: Record<number, number> = {};
+    let keyCounts: Record<number, number> = {};
 
     const state: InputState = {
         heldMask: 0,
@@ -54,6 +54,7 @@ export function initInput(): InputState {
     };
 
     function reset() {
+        keyCounts = {};
         state.horizontalPriority = 0;
         state.verticalPriority = 0;
         state.plusMinusPriority = 0;
@@ -63,10 +64,13 @@ export function initInput(): InputState {
     }
 
     window.addEventListener("keydown", (e: KeyboardEvent) => {
-        if (e.altKey || e.shiftKey || e.ctrlKey || e.metaKey) {
-            reset(); // prevent key-holding shenanigans
-        }
-        if (e.repeat || e.ctrlKey || e.metaKey) return;
+        if (e.repeat) return;
+        // Ramble here. Actually, for some reason, I tested this out, and it turns out that MacOS just bypasses all of this if you three-fingers swipe up. WHY?????? I have no clue, and I also can't deal with it. By disabling these keys it's probably also going to mess with someone's screen reader or something. Ah well.
+        // if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) {
+        //     reset(); // prevent weird shenanigans with lifting a key
+        //     return;
+        // }
+
         // console.log(e.code);
         const bit = keyMap[e.code]; // apparently .code is more robust as it's based on physical keyboard locations, which is what we want here
         if (!bit) return;
@@ -116,6 +120,8 @@ export function initInput(): InputState {
     });
 
     window.addEventListener("blur", reset);
+    document.addEventListener("visibilitychange", reset);
+    window.addEventListener("contextmenu", reset);
 
     return state;
 }

@@ -131,14 +131,15 @@ export async function create(
                     el.textContent = str;
                 },
                 js_get_time: () => performance.now(),
-                js_handle_visible_chunks: () => engine?.handleVisibleChunks(),
+                js_handle_visible_chunks: (opacity: number) =>
+                    engine?.handleVisibleChunks(opacity),
             },
         },
     );
     const memory = engineModule.instance.exports.memory as WebAssembly.Memory;
 
     const bindGroupLayout = device.createBindGroupLayout({
-        label: "Main Bind Group Layout",
+        label: "Main bind group layout",
         entries: [
             {
                 binding: 0,
@@ -152,11 +153,6 @@ export async function create(
             }, // tiles
             { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: {} }, // atlas
             { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {} }, // sampler
-            {
-                binding: 4,
-                visibility: GPUShaderStage.VERTEX,
-                buffer: { type: "uniform" },
-            }, // map_size
         ],
     });
 
@@ -198,7 +194,7 @@ export async function create(
         },
         depthStencil: {
             depthWriteEnabled: true,
-            depthCompare: "less",
+            depthCompare: "less-equal",
             format: "depth24plus",
         },
     });
@@ -278,29 +274,19 @@ export async function create(
     engine.atlasTextureView = atlasTexture.createView();
     engine.pixelSampler = pixelSampler;
 
-    // camera: vec2f (8), viewport_size: vec2f (8), time: f32 (4), zoom: f32 (4), padding: vec2u (8)
-    const uniformBuffer = device.createBuffer({
-        label: "SceneUniforms",
-        size: 48,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    engine.uniformBuffer = uniformBuffer;
-
-    // Create map size buffer
-    const mapSizeBuffer = device.createBuffer({
-        label: "Map size",
-        size: 16, // vec2u, but pad
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    engine.mapSizeBuffer = mapSizeBuffer;
-
-    // Initialize tilemap
-    const tileMap = {
-        width: 0,
-        height: 0,
-        data: new Uint32Array(0),
-    };
-    engine.tileMap = tileMap;
+    const uniformBuffers = [
+        device.createBuffer({
+            label: "SceneUniforms",
+            size: 56, // see setSceneData() in engine.ts/SceneUniforms in shader.wgsl
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        }),
+        device.createBuffer({
+            label: "SceneUniforms",
+            size: 56, // see setSceneData() in engine.ts/SceneUniforms in shader.wgsl
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        }),
+    ];
+    engine.uniformBuffers = uniformBuffers;
 
     // engine.uploadVisibleChunks();
     // engine.handleVisibleChunks();
