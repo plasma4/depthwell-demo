@@ -63,7 +63,8 @@ pub fn build(b: *std.Build) void {
         // exe.use_lld = false; // nope
     }
 
-    // exe.global_base = 8; // removed in favor of letting Zig manage pointers
+    // removed since Zig manages pointers automatically
+    // exe.global_base = 8;
 
     const install_wasm = b.addInstallFileWithDir(
         exe.getEmittedBin(),

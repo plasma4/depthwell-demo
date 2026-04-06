@@ -2,7 +2,7 @@
  * Main shader for Depthwell. IMPORTANT: ADD ?raw FOR DEBUGGING SHADER TO THE END OF engineMaker.ts's SHADER_SOURCE VARIABLE.
  */
 // Sprite sheet constants. Sprites are saved as a .png, and each asset is 16x16. See zig/world.zig's Sprite definitions for what these all are.
-const TILES_PER_ROW: f32 = 14.0;
+const TILES_PER_ROW: f32 = 15.0;
 const TILES_PER_COLUMN: f32 = 1.0;
 
 const TILE_SIZE: f32 = 16.0;
@@ -88,7 +88,7 @@ fn unpack_tile(data: TileData) -> UnpackedTile {
     out.seed = murmurmix32(data.word1);
     out.seed2 = murmurmix32(out.seed);
 
-    if (out.sprite_id == 7 && (extractBits(out.seed, 16u, 2u) == 0)) { // extract bits 16-18 for random modifications
+    if (out.sprite_id == 12 && (extractBits(out.seed, 16u, 2u) == 0)) { // extract bits 16-18 for random modifications
         out.sprite_id++; // 2 mushroom types
     }
 
