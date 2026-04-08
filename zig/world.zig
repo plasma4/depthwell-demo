@@ -345,7 +345,7 @@ fn generate_chunk(chunk: *memory.Chunk, coord: Coordinate) void {
             // BASE CASE: depth = 3.
             const density = procedural.get_fbm_worley_density(memory.game.seed, cx * 16 + block_x, cy * 16 + block_y);
             chunk.blocks[id] = Block.make_basic_block(
-                procedural.generate_initial_block(0.0, density, 0.0),
+                procedural.generate_block_from_values(0.0, density, 0.0),
                 rng4.next(),
             ); // edge flags updated in second pass
         }

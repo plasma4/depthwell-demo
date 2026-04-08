@@ -200,10 +200,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         }
     }
 
+    // put here to prevent control flow breakage error
     var tex_color = textureSample(sprite_atlas, pixel_sampler, in.uv);
-    if (in.sprite_id > 255 && in.sprite_id < 511) {
+
+    // technically I could optimize this part
+    // but it doesn't really matter because its for procedural generation testing anyway
+    if (in.sprite_id >= 256 && in.sprite_id <= 512) {
+        // if (in.sprite_id == 256) { discard; }
         let color = (f32(in.sprite_id) - 256.0) / 256.0;
-        return vec4f(color, color, color, 1.0);
+        var lch = vec3f(0.2 + color * 0.8, 0.2, 1.0); // lightness, chroma, hue
+        let lab = oklch_to_oklab(lch);
+        let final_rgb = max(oklab_to_linear_srgb(lab), vec3f(0.0));
+        return vec4f(final_rgb, 1.0);
     }
 
     var is_wireframe = false;

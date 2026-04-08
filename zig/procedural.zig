@@ -10,12 +10,12 @@ const hash_2d = seeding.ChaCha12.hash_2d;
 const Seed = seeding.Seed;
 const Sprite = world.Sprite;
 
-/// Generates an initial block for seeding.
-pub inline fn generate_initial_block(moisture: f64, density: f64, height: f64) Sprite {
+/// Generates a block for seeding (based on previous procedural generation logic).
+pub inline fn generate_block_from_values(moisture: f64, density: f64, height: f64) Sprite {
     _ = moisture;
     _ = height;
 
-    return @enumFromInt(256 + @as(u20, @intFromFloat(density * 256)));
+    return @enumFromInt(512 - @as(u20, @intFromFloat(density * 256.0))); // sprite IDs from 256-512 create a neat little heatmap
     // if (density < 0.1) return .none;
     // if (density < 0.2) return .spiral_plant;
     // if (density < 0.3) return .edge_stone;
@@ -36,15 +36,14 @@ pub fn get_fbm_worley_density(world_seed: Seed, x: u64, y: u64) f64 {
     const fy = @as(f64, @floatFromInt(y));
 
     const cell_size = 16.0; // Slightly larger for smoother tunnels
-    const h_stretch: f64 = 5.0; // High stretch for horizontal "veins"
-    const fbm_octaves: usize = 2; // Reduced for smoothness
-    const persistence: f64 = 0.4;
-    const warp_intensity: f64 = 4.0; // Lower relative to cell_size
+    const h_stretch: f64 = 2.0;
+    const fbm_octaves: usize = 4;
+    const persistence: f64 = 0.5;
+    var amp: f64 = 4.0; // TODO decide if we should even use FBM in the first place
 
     var warp_x: f64 = 0;
     var warp_y: f64 = 0;
-    var amp: f64 = warp_intensity;
-    var freq: f64 = 1.0 / (cell_size * 2.5);
+    var freq: f64 = 1.0 / cell_size;
 
     for (0..fbm_octaves) |_| {
         const h: memory.v2f64 = hash_2d(f64, world_seed, @as(u64, @intFromFloat(fx * freq + 1e5)), @as(u64, @intFromFloat(fy * freq)));
