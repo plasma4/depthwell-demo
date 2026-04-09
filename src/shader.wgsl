@@ -1,9 +1,9 @@
 /*
- * Main shader for Depthwell. IMPORTANT: ADD ?raw FOR DEBUGGING SHADER TO THE END OF engineMaker.ts's SHADER_SOURCE VARIABLE.
+ * Main shader for Depthwell. ADD ?raw FOR DEBUGGING SHADER TO THE END OF engineMaker.ts's `SHADER_SOURCE` VARIABLE TO NOT COMPRESS.
  */
-// Sprite sheet constants. Sprites are saved as a .png, and each asset is 16x16. See zig/world.zig's Sprite definitions for what these all are.
-const TILES_PER_ROW: f32 = 17.0;
-const TILES_PER_COLUMN: f32 = 1.0;
+// Sprite sheet constants. Sprites are saved as a .png, and each asset is 16x16. See zig/world.zig's Sprite definitions for what these all are. These values are dynamically patched in from TypeScript.
+const TILES_PER_ROW: f32 = /* TILES_PER_ROW */ 1.0 /* TILES_PER_ROW */;
+const TILES_PER_COLUMN: f32 = /* TILES_PER_COLUMN */ 1.0 /* TILES_PER_COLUMN */;
 
 const TILE_SIZE: f32 = 16.0;
 const PIXEL_UV_SIZE: f32 = 1.0 / TILE_SIZE;
@@ -631,10 +631,10 @@ fn fs_background(in: BackgroundOutput) -> @location(0) vec4f {
 
     let f = fbm_4(st + r);
 
-    let mix_blue = mix(0.0, 0.5, in.time);
+    let mix_blue = mix(0.0, 0.4, in.time);
     var color = mix(
         vec3f(0.0, 0.01, mix_blue * mix_blue),
-        vec3f(0.1, 0.4, 0.7),
+        vec3f(0.1, 0.4, 0.2),
         clamp((f * f) * 4.0, 0.0, 1.0)
     );
 

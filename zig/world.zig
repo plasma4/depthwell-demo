@@ -17,24 +17,39 @@ const SPAN_LOG2 = memory.SPAN_LOG2;
 
 /// Sprite IDs, based on src/main.png
 pub const Sprite = enum(u20) {
-    none = 0,
-    player = 1,
-    edge_stone = 2,
-    stone = 3,
-    blue_stone = 4,
-    seagreen_stone = 5,
-    green_stone = 6,
-    iron = 7,
-    silver = 8,
-    gold = 9,
-    darkblue_thing = 10,
-    weird_gem_pile_thing = 11,
-    spiral_plant = 12,
-    ceiling_flower = 13,
-    mushroom = 14,
-    torch = 15,
+    none,
+    player,
+    edge_stone,
+    stone,
+    blue_stone,
+    seagreen_stone,
+    green_stone,
+    iron,
+    silver,
+    gold,
+    darkblue_thing,
+    weird_gem_pile_thing,
+    spiral_plant,
+    ceiling_flower,
+    mushroom = 14, // there is another variant of mushrooms
+    torch = 16,
     unchanged = 1048575,
     _, // non-exhaustive
+};
+
+pub const max_sprite_value = blk: {
+    var max_val: u20 = 0;
+    const fields = @typeInfo(Sprite).@"enum".fields;
+
+    for (fields) |field| {
+        // Skip the "unchanged" field by name
+        if (std.mem.eql(u8, field.name, "unchanged")) continue;
+
+        if (field.value > max_val) {
+            max_val = @intCast(field.value);
+        }
+    }
+    break :blk max_val;
 };
 
 /// Empty block of id `Sprite.none`

@@ -6,7 +6,7 @@ const memory = @import("memory.zig");
 const testing = std.testing;
 
 /// Represents 2^64.
-pub const POW_2_64 = 18446744073709551616.0;
+pub const POW_2_64 = 18446744073709551616;
 
 test "basic usage example" {
     // Start with an arbitrary seed (NOTE: seed_from_bytes fails for WASM builds)
@@ -87,6 +87,45 @@ pub fn mix_chunk_seeds(quadrant_seed: Seed, coord_vector: memory.v2u64) [4]Seed 
     return out_seeds;
 }
 
+/// A high-performance, stateless hash.
+/// Significantly faster than both ChaCha12/Xoshiro512** for procedural generation
+/// Acts like a diffuser for `x`/`y`: assumes `seed` is securely generated from BLAKE3 already.
+pub const FastHash = struct {
+    const M1 = 0x9E3779B97F4A7C15;
+    const M2 = 0xBF58476D1CE4E5B9;
+    const M3 = 0x94D049BB133111EB;
+
+    pub inline fn hash_2d(seed: Seed, x: u64, y: u64) u64 {
+        // bind X/Y to the first 128 bits of high-entropy seed
+        var h: u64 = x ^ seed[0];
+        var k: u64 = y ^ seed[1];
+
+        // mix, swapping h and k here to "cross-pollinate"
+        h = (h ^ (k >> 30)) *% M1;
+        h ^= seed[2];
+
+        k = (k ^ (h >> 27)) *% M2;
+        k ^= seed[3];
+
+        // make a final pass with more seed bits
+        h = (h ^ (k >> 31)) *% M3;
+        h ^= seed[4];
+
+        k = (k ^ (h >> 24)) *% M1;
+        k ^= seed[5];
+
+        // Final convergence
+        var res = h ^ k;
+        res = (res ^ (res >> 30)) *% M2;
+        return res ^ (res >> 31);
+    }
+
+    pub inline fn float_2d(seed: Seed, x: u64, y: u64) f32 {
+        const h = hash_2d(x, y, seed);
+        return @as(f32, @floatFromInt(h >> 40)) * (1.0 / 16777216.0);
+    }
+};
+
 /// ChaCha12-based PRNG hard-coded to accept 512 bits of seeding and without certain features. Basically cryptographically secure, can generate 64-byte blocks at a time, and supports skipping.
 pub const ChaCha12 = struct {
     // Internal state stored as vectors for SIMD!
@@ -114,8 +153,9 @@ pub const ChaCha12 = struct {
             .position = 8,
         };
     }
+
     /// Creates a new instance of ChaCha12, with a custom nonce (utilizing the first 384 seed bits).
-    pub fn init_with_nonce(seed_data: [8]u64, nonce: [2]u32) ChaCha12 {
+    pub fn init_with_nonce(seed_data: Seed, nonce: [2]u32) ChaCha12 {
         const s: [16]u32 = @bitCast(seed_data);
         return ChaCha12{
             .row0 = @as(v4u32, @bitCast(s[0..4].*)),
@@ -195,9 +235,8 @@ pub const ChaCha12 = struct {
     }
 
     /// High-performance stateless 2D hash (using the first 384 seed bits), returning 128 bits of data.
-    /// Treats X and Y as the `ChaCha12` nonce/counter to return
-    /// a random value for a specific global coordinate.
-    pub fn hash_2d(comptime T: type, seed_data: Seed, x: u64, y: u64) @Vector(2, T) {
+    /// Treats X and Y as the `ChaCha12` nonce/counter to return a random value.
+    pub fn hash_2d_128(comptime T: type, seed_data: Seed, x: u64, y: u64) @Vector(2, T) {
         const s: [16]u32 = @bitCast(seed_data);
 
         var x0 = @as(v4u32, @bitCast(s[0..4].*));
@@ -241,6 +280,57 @@ pub const ChaCha12 = struct {
             };
         }
         @compileError("Only u64 and f64 values are supported.");
+    }
+
+    /// High-performance stateless 2D hash (using the first 384 seed bits), returning 512 bits of data.
+    /// Treats X and Y as the `ChaCha12` nonce/counter to return a random value.
+    pub fn hash_2d_512(comptime T: type, seed_data: Seed, x: u64, y: u64) [8]T {
+        const s: [16]u32 = @bitCast(seed_data);
+        var x0 = @as(v4u32, @bitCast(s[0..4].*));
+        var x1 = @as(v4u32, @bitCast(s[4..8].*));
+        var x2 = @as(v4u32, @bitCast(s[8..12].*));
+        var x3 = v4u32{
+            @as(u32, @truncate(x)),
+            @as(u32, @truncate(x >> 32)),
+            @as(u32, @truncate(y)),
+            @as(u32, @truncate(y >> 32)),
+        };
+
+        const orig = [4]v4u32{ x0, x1, x2, x3 };
+
+        // 4 double-rounds = 8 rounds total
+        inline for (0..6) |_| {
+            quarterRound(&x0, &x1, &x2, &x3);
+            x1 = @shuffle(u32, x1, undefined, [4]i32{ 1, 2, 3, 0 });
+            x2 = @shuffle(u32, x2, undefined, [4]i32{ 2, 3, 0, 1 });
+            x3 = @shuffle(u32, x3, undefined, [4]i32{ 3, 0, 1, 2 });
+            quarterRound(&x0, &x1, &x2, &x3);
+            x1 = @shuffle(u32, x1, undefined, [4]i32{ 3, 0, 1, 2 });
+            x2 = @shuffle(u32, x2, undefined, [4]i32{ 2, 3, 0, 1 });
+            x3 = @shuffle(u32, x3, undefined, [4]i32{ 1, 2, 3, 0 });
+        }
+
+        const array = Seed{
+            packU64(x0 +% orig[0], 0, 1), packU64(x0 +% orig[0], 2, 3),
+            packU64(x1 +% orig[1], 0, 1), packU64(x1 +% orig[1], 2, 3),
+            packU64(x2 +% orig[2], 0, 1), packU64(x2 +% orig[2], 2, 3),
+            packU64(x3 +% orig[3], 0, 1), packU64(x3 +% orig[3], 2, 3),
+        };
+        if (T == f64) {
+            return .{
+                @as(f64, @floatFromInt(array[0])) / POW_2_64,
+                @as(f64, @floatFromInt(array[1])) / POW_2_64,
+                @as(f64, @floatFromInt(array[2])) / POW_2_64,
+                @as(f64, @floatFromInt(array[3])) / POW_2_64,
+                @as(f64, @floatFromInt(array[4])) / POW_2_64,
+                @as(f64, @floatFromInt(array[5])) / POW_2_64,
+                @as(f64, @floatFromInt(array[6])) / POW_2_64,
+                @as(f64, @floatFromInt(array[7])) / POW_2_64,
+            };
+        } else if (T == u64) {
+            return array;
+        }
+        @compileError("Only u64 and f64 array values are supported.");
     }
 
     /// Generates the next 64 bytes of seeding data.

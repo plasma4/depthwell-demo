@@ -24,6 +24,13 @@ pub export fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canv
     main.prepare_visible_chunks(time_interpolated, canvas_w, canvas_h);
 }
 
+pub export fn get_tiles_per_row() u32 {
+    return world.max_sprite_value + 1; // the length is the highest value + 1
+}
+pub export fn get_tiles_per_column() u32 {
+    return 1;
+}
+
 pub export fn tick(speed: f64) void {
     if (KeyBits.isSet(KeyBits.zoom, memory.game.keys_pressed_mask)) {
         // if (in_debug_mode) {

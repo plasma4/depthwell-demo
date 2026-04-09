@@ -35,6 +35,8 @@ export interface EngineExports extends WebAssembly.Exports {
     readonly init: () => void;
     readonly reset: () => void;
     readonly prepare_visible_chunks: (arg0: number, arg1: number, arg2: number) => void;
+    readonly get_tiles_per_row: () => number;
+    readonly get_tiles_per_column: () => number;
     readonly tick: (arg0: number) => void;
     readonly wasm_seed_from_string: () => void;
     readonly get_memory_layout_ptr: () => bigint;

@@ -70,6 +70,8 @@ export class GameEngine {
     public readonly resizeObserver!: ResizeObserver;
     /** The input state from keyboard events. */
     public readonly inputState: InputManager.InputState;
+    /** Represents how long it took for `prepare_visible_chunks` to execute, including JS-side `handleVisibleChunks` logic. */
+    public prepare_visible_chunks_time: number = 0;
     /** Determines if visible data is new for this frame or not (allowing for `loadOp` in `GPURenderPassDescriptor` to be changed from `"clear"` to `"load"` as necessary). */
     public isVisibleDataNew: boolean = true;
     /** The width of the sprite tile map. */
@@ -202,11 +204,13 @@ export class GameEngine {
 
     /** Processes all chunks from Zig and uploads them to WGSL. */
     public uploadVisibleChunks(timeInterpolated: number = 1.0): void {
+        const start_time = performance.now();
         this.exports.prepare_visible_chunks(
             timeInterpolated,
             this.canvas.width,
             this.canvas.height,
         );
+        this.prepare_visible_chunks_time = performance.now() - start_time;
     }
 
     /** Function called from Zig (using the `js_handle_visible_chunks` function in `env`) that actually draws the chunks. */

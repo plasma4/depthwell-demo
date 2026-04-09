@@ -182,6 +182,9 @@ if (CONFIG.verbose) {
 
 window.addEventListener("blur", () => (time = Infinity)); // basically, don't let frames when the tab is hidden cause any simulation.
 
+var past60SlowestRenders = Array(60).fill(0);
+var past60SlowestZigRenders = Array(60).fill(0);
+
 // Add custom properties into the engine object (not handled by TypeScript)
 engine.isDebug = !!engine.exports.isDebug(); // This function is only true if Doptimize=Debug (default with zig build).
 engine.renderLoop = function (_t: number) {
@@ -209,10 +212,17 @@ engine.renderLoop = function (_t: number) {
     }
 
     if (engine.isDebug) {
+        past60SlowestRenders.shift();
+        past60SlowestRenders.push(delta);
+        past60SlowestZigRenders.shift();
+        past60SlowestZigRenders.push(engine.prepare_visible_chunks_time);
+
         const debugElem = document.getElementById(
             "renderText",
         ) as HTMLDivElement;
-        debugElem.textContent = `Time since last render and Zig compute time: ${delta.toFixed(1)}ms, ${(performance.now() - tempTime).toFixed(1)}ms`;
+        debugElem.textContent = `Time since last render/prepare_visible_chunks time: ${delta.toFixed(1)}ms, ${engine.prepare_visible_chunks_time.toFixed(1)}ms
+Worst (past 60 frames): ${Math.max.apply(null, past60SlowestRenders).toFixed(1)}ms, ${Math.max.apply(null, past60SlowestZigRenders).toFixed(1)}ms`;
+
         debugElem.style.fontWeight = (
             delta > 30 ? (delta > 55 ? 700 : 600) : 500
         ) as any; // gee thanks TypeScript
@@ -249,7 +259,7 @@ engine.logicLoop = function (ticks: number) {
         const debugElem = document.getElementById(
             "logicText",
         ) as HTMLDivElement;
-        debugElem.textContent = `Logic diff (${ticks} tick${ticks == 1 ? "" : "s"}): ${delta.toFixed(1)}ms\n`;
+        debugElem.textContent = `Logic diff: ${delta.toFixed(1)}ms for ${ticks} tick${ticks == 1 ? "" : "s"}\n`;
         // new-line in string for copy and paste
 
         debugElem.style.fontWeight = (

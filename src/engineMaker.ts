@@ -5,7 +5,7 @@ import { GameEngine } from "./engine";
 /** The URL for the WebAssembly code (compiled from zig build). */
 import WASM_URL from "./main.wasm?url";
 /** The URL for the WebGPU shader code. ADD ?raw FOR DEBUGGING SHADER. */
-import SHADER_SOURCE from "./shader.wgsl?raw"; // TODO remove for prod
+import SHADER_SOURCE from "./shader.wgsl?raw"; // TODO remove ?raw for prod
 /** The URL for the sprite sheet. */
 import SPRITE_SHEET_URL from "./assets/main.png?url";
 
@@ -77,12 +77,6 @@ export async function create(
         alphaMode: "opaque",
     });
 
-    // Get shader
-    const shaderModule = device.createShaderModule({
-        label: "Main shader",
-        code: SHADER_SOURCE,
-    });
-
     // Fetch WASM
     const engineModule = await WebAssembly.instantiateStreaming(
         fetch(WASM_URL),
@@ -136,7 +130,21 @@ export async function create(
             },
         },
     );
-    const memory = engineModule.instance.exports.memory as WebAssembly.Memory;
+    const exports = engineModule.instance.exports as Zig.EngineExports;
+    const memory = exports.memory as WebAssembly.Memory;
+
+    // Make the shader!
+    const shaderModule = device.createShaderModule({
+        label: "Main shader",
+        // constant patching, basically override keyword in WGSL
+        code: SHADER_SOURCE.replace(
+            "/* TILES_PER_ROW */ 1.0 /* TILES_PER_ROW */",
+            "" + exports.get_tiles_per_row(),
+        ).replace(
+            "/* TILES_PER_COLUMN */ 1.0 /* TILES_PER_COLUMN */",
+            "" + exports.get_tiles_per_column(),
+        ),
+    });
 
     const bindGroupLayout = device.createBindGroupLayout({
         label: "Main bind group layout",
