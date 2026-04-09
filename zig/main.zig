@@ -75,10 +75,9 @@ pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f
     const effective_zoom = interpolated_zoom * resolution_scale;
 
     // calculate the screen's half-extents in world sub-pixels (as floats to preserve zoom precision)
-    const subpixels_per_pixel: f64 = @as(f64, SPAN);
-    const subpixels_per_chunk: f64 = @as(f64, @floatFromInt(SUBPIXELS_IN_CHUNK));
-    const half_w_sp = (@as(f64, SCREEN_WIDTH_HALF) / interpolated_zoom) * subpixels_per_pixel;
-    const half_h_sp = (@as(f64, SCREEN_HEIGHT_HALF) / interpolated_zoom) * subpixels_per_pixel;
+    const subpixels_per_chunk: f64 = @floatFromInt(SUBPIXELS_IN_CHUNK);
+    const half_w_sp = (@as(f64, SCREEN_WIDTH_HALF) / interpolated_zoom) * SPAN;
+    const half_h_sp = (@as(f64, SCREEN_HEIGHT_HALF) / interpolated_zoom) * SPAN;
 
     // calculate the interpolated camera
     const cam_vel_x = game.camera_pos[0] - game.last_camera_pos[0];

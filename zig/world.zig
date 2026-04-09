@@ -479,9 +479,10 @@ pub inline fn should_participate_in_edge_flags(sprite: Sprite) bool {
     return switch (sprite) {
         .none,
         .spiral_plant,
+        .ceiling_flower,
         .torch,
-        .edge_stone,
         .mushroom,
+        .edge_stone,
         => false,
         else => true,
     };
@@ -638,7 +639,6 @@ pub fn push_layer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
         const l_ptr: *u64 = quad_cache.left_path.at(last_path_index);
         const t_ptr: *u64 = quad_cache.top_path.at(last_path_index);
 
-        // Remove the | SPAN_MASK which was forcing bits to 1111
         l_ptr.* = (l_ptr.* << SPAN_LOG2) + left_cell_x;
         t_ptr.* = (t_ptr.* << SPAN_LOG2) + top_cell_y;
     }
@@ -651,17 +651,6 @@ pub fn push_layer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
     const quadrant_y = naive_cell_y - top_cell_y;
     memory.game.player_quadrant = @intCast(quadrant_x + (quadrant_y * 2));
 }
-
-// /// Helper to maintain the sliding window of hashes for fast lookups
-// fn push_path_to_stack(self: *@This(), new_hash: seeding.Seed) void {
-//     // Shift everything down 1
-//     var i: usize = 15;
-//     while (i > 0) : (i -= 1) {
-//         path_stack[i] = path_stack[i - 1];
-//     }
-//     // Insert new current path at index 0
-//     path_stack[0] = new_hash;
-// }
 
 // /// Convert screen pixels to a world block coordinate
 // pub fn screen_to_world(screen_x: f64, screen_y: f64, viewport_w: f64, viewport_h: f64, cam_x: f64, cam_y: f64, zoom: f64) @Vector(2, f64) {

@@ -229,9 +229,9 @@ pub const ChaCha12 = struct {
     /// Returns a float value from [0, 1), using 64 bits of seeding data.
     pub fn float(self: *@This(), comptime T: type) T {
         if (T == f64) {
-            return @as(f64, @floatFromInt(self.next())) * (1.0 / POW_2_64);
+            return @as(f64, @floatFromInt(self.next())) / POW_2_64;
         } else if (T == f32) {
-            return @as(f32, @floatFromInt(self.next())) * (1.0 / POW_2_64);
+            return @as(f32, @floatFromInt(self.next())) / POW_2_64;
         }
         @compileError("Only f32 and f64 floats are supported.");
     }
@@ -269,7 +269,7 @@ pub const ChaCha12 = struct {
         x0 +%= orig0;
         x1 +%= orig1;
 
-        // Return 128 bits (as two u64s)
+        // Return 128 bits of data (as two u64s)
         if (T == f64) {
             return .{
                 @as(f64, @floatFromInt(@as(u64, x0[0]) | (@as(u64, x0[1]) << 32))) / POW_2_64,
@@ -319,6 +319,7 @@ pub const ChaCha12 = struct {
             packU64(x3 +% orig[3], 0, 1), packU64(x3 +% orig[3], 2, 3),
         };
         if (T == f64) {
+            // convert to floats
             return .{
                 @as(f64, @floatFromInt(array[0])) / POW_2_64,
                 @as(f64, @floatFromInt(array[1])) / POW_2_64,
@@ -542,9 +543,9 @@ pub const Xoshiro512 = struct {
     /// Returns a float value from [0, 1), using 64 bits of seeding data.
     pub fn float(self: *@This(), comptime T: type) T {
         if (T == f64) {
-            return @as(f64, @floatFromInt(self.next())) * (1.0 / POW_2_64);
+            return @as(f64, @floatFromInt(self.next())) / POW_2_64;
         } else if (T == f32) {
-            return @as(f32, @floatFromInt(self.next())) * (1.0 / POW_2_64);
+            return @as(f32, @floatFromInt(self.next())) / POW_2_64;
         }
         @compileError("Only f32 and f64 floats are supported.");
     }
