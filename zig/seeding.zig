@@ -32,13 +32,13 @@ pub const Seed = [8]u64;
 // }
 
 /// Mixes a base seed with some values. Since BLAKE3 is cryptographic this will yield high-quality results. It may be more useful to use a custom nonce with `ChaCha12` instead.
-pub fn mix_base_seed(layer_seed: Seed, number: u64) Seed {
+pub fn mix_base_seed(layer_seed: *const Seed, number: u64) Seed {
     const PackedInput = extern struct { // temporary struct for faster mixing :)
         seed: Seed,
         number: u64,
     };
     const input = PackedInput{
-        .seed = layer_seed,
+        .seed = layer_seed.*,
         .number = number,
     };
 
@@ -48,7 +48,7 @@ pub fn mix_base_seed(layer_seed: Seed, number: u64) Seed {
 }
 
 /// Mixes in the layer seed with X/Y values. Used when appending on part of a seed to a quadrant.
-pub fn mix_coordinate_seed(layer_seed: Seed, x: u64, y: u64) Seed {
+pub fn mix_coordinate_seed(layer_seed: *const Seed, x: u64, y: u64) Seed {
     const PackedInput = extern struct { // temporary struct for faster mixing :)
         seed: Seed,
         x: u64,
@@ -56,7 +56,7 @@ pub fn mix_coordinate_seed(layer_seed: Seed, x: u64, y: u64) Seed {
         depth: u64,
     };
     const input = PackedInput{
-        .seed = layer_seed,
+        .seed = layer_seed.*,
         .x = x,
         .y = y,
         .depth = memory.game.depth,
@@ -68,7 +68,7 @@ pub fn mix_coordinate_seed(layer_seed: Seed, x: u64, y: u64) Seed {
 }
 
 /// Generates 4 sets of seeds for every chunk when combining X/Y active suffix coordinates with the seed of a quadrant.
-pub fn mix_chunk_seeds(quadrant_seed: Seed, coord_vector: memory.v2u64) [4]Seed {
+pub fn mix_chunk_seeds(quadrant_seed: *const Seed, coord_vector: memory.v2u64) [4]Seed {
     const PackedInput = extern struct { // do the packing thing again
         seed: Seed,
         c1: u64,
@@ -76,7 +76,7 @@ pub fn mix_chunk_seeds(quadrant_seed: Seed, coord_vector: memory.v2u64) [4]Seed 
         depth: u64,
     };
     const input = PackedInput{
-        .seed = quadrant_seed,
+        .seed = quadrant_seed.*,
         .c1 = coord_vector[0],
         .c2 = coord_vector[1],
         .depth = memory.game.depth,
@@ -109,7 +109,7 @@ pub const FastHash = struct {
         return @as(u64, @truncate(res)) ^ @as(u64, @truncate(res >> 64));
     }
 
-    pub inline fn hash_2d(seed: Seed, x: u64, y: u64) u64 {
+    pub inline fn hash_2d(seed: *const Seed, x: u64, y: u64) u64 {
         var h = mix(x ^ seed[0], seed[1] ^ secret[0]); // proces these simultaneously
         var k = mix(y ^ seed[2], seed[3] ^ secret[1]);
 
@@ -122,7 +122,7 @@ pub const FastHash = struct {
         return mix(h ^ secret[2], k ^ secret[3]);
     }
 
-    pub inline fn float_2d(seed: Seed, x: u64, y: u64) f32 {
+    pub inline fn float_2d(seed: *const Seed, x: u64, y: u64) f32 {
         const h = hash_2d(x, y, seed);
         return @as(f32, @floatFromInt(h)) / POW_2_64;
     }
@@ -238,7 +238,7 @@ pub const ChaCha12 = struct {
 
     /// High-performance stateless 2D hash (using the first 384 seed bits), returning 128 bits of data.
     /// Treats X and Y as the `ChaCha12` nonce/counter to return a random value.
-    pub fn hash_2d_128(comptime T: type, seed_data: Seed, x: u64, y: u64) @Vector(2, T) {
+    pub fn hash_2d_128(comptime T: type, seed_data: *const Seed, x: u64, y: u64) @Vector(2, T) {
         const s: [16]u32 = @bitCast(seed_data);
 
         var x0 = @as(v4u32, @bitCast(s[0..4].*));
@@ -286,7 +286,7 @@ pub const ChaCha12 = struct {
 
     /// High-performance stateless 2D hash (using the first 384 seed bits), returning 512 bits of data.
     /// Treats X and Y as the `ChaCha12` nonce/counter to return a random value.
-    pub fn hash_2d_512(comptime T: type, seed_data: Seed, x: u64, y: u64) [8]T {
+    pub fn hash_2d_512(comptime T: type, seed_data: *const Seed, x: u64, y: u64) [8]T {
         const s: [16]u32 = @bitCast(seed_data);
         var x0 = @as(v4u32, @bitCast(s[0..4].*));
         var x1 = @as(v4u32, @bitCast(s[4..8].*));
@@ -510,7 +510,7 @@ pub const Xoshiro512 = struct {
     state: Seed,
 
     /// Creates a new instance with seed data.
-    pub fn init(seed_data: Seed) Xoshiro512 {
+    pub fn init(seed_data: *const Seed) Xoshiro512 {
         var state = seed_data;
         var check: u64 = 0;
         for (state) |s| check |= s;

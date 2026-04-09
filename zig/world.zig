@@ -15,6 +15,8 @@ const SPAN_SQ = memory.SPAN_SQ;
 const SPAN_FLOAT = memory.SPAN_FLOAT;
 const SPAN_LOG2 = memory.SPAN_LOG2;
 
+const odds_num = seeding.odds_num;
+
 /// Sprite IDs, based on src/main.png
 pub const Sprite = enum(u20) {
     none,
@@ -263,7 +265,7 @@ pub const QuadCache = struct {
 
     /// Resolves the chunk seeds. If depth > 16, uses the quadrant seeds.
     pub inline fn get_chunk_seeds(self: *const @This(), coord: Coordinate) [4]seeding.Seed {
-        return seeding.mix_chunk_seeds(self.get_quadrant_seed(coord.quadrant), coord.suffix);
+        return seeding.mix_chunk_seeds(&self.get_quadrant_seed(coord.quadrant), coord.suffix);
     }
 
     /// Returns details on a specific quadrant and what "edges" of the world it touches.
@@ -329,12 +331,8 @@ pub inline fn get_chunk(coord: Coordinate) memory.Chunk {
 /// Internal function to generate a whole chunk (considering modifications), given a pointer to where the chunk should be stored and coordinates. Does not go through the cache.
 fn generate_chunk(chunk: *memory.Chunk, coord: Coordinate) void {
     const chunk_seeds = quad_cache.get_chunk_seeds(coord);
-    const rng1 = seeding.ChaCha12.init(chunk_seeds[0]); // Block generation.
-    const rng3 = seeding.ChaCha12.init(chunk_seeds[2]);
+    var rng1 = seeding.ChaCha12.init(chunk_seeds[0]); // Block generation.
     var rng4 = seeding.ChaCha12.init(chunk_seeds[3]); // Visual touches only.
-
-    _ = rng1;
-    _ = rng3;
 
     const cx = coord.suffix[0];
     const cy = coord.suffix[1];
@@ -359,9 +357,16 @@ fn generate_chunk(chunk: *memory.Chunk, coord: Coordinate) void {
             // TODO finish for higher depths with some cubic bezier-like upscaling method
 
             // BASE CASE: depth = 3.
-            const density = procedural.get_fbm_worley_density(memory.game.seed, cx * 16 + block_x, cy * 16 + block_y);
+            const density = procedural.get_fbm_worley_density(&memory.game.seed, cx * 16 + block_x, cy * 16 + block_y);
+            var sprite_type = procedural.generate_block_from_values(0.0, density, 0.0);
+
+            // TODO better ore logic
+            if (sprite_type == .seagreen_stone and rng1.next() < odds_num(0.01)) {
+                sprite_type = .iron;
+            }
+
             chunk.blocks[id] = Block.make_basic_block(
-                procedural.generate_block_from_values(0.0, density, 0.0),
+                sprite_type,
                 rng4.next(),
             ); // edge flags updated in second pass
         }
@@ -372,8 +377,8 @@ fn generate_chunk(chunk: *memory.Chunk, coord: Coordinate) void {
         for (0..SPAN) |block_x| {
             const id = block_x + block_y * SPAN;
             if (is_solid(chunk.blocks[id + 16].id) and chunk.blocks[id].id == .none) {
-                const val = rng4.next();
-                if (val < seeding.odds_num(0.3)) {
+                const val = rng1.next();
+                if (val < odds_num(0.3)) {
                     chunk.blocks[id].id = .mushroom;
                 }
             }
@@ -383,13 +388,13 @@ fn generate_chunk(chunk: *memory.Chunk, coord: Coordinate) void {
     for (1..SPAN) |block_y| {
         for (0..SPAN) |block_x| {
             const id = block_x + block_y * SPAN;
-            if (chunk.blocks[id - 16].id == .spiral_plant and rng4.next() < seeding.odds_num(0.5)) {
+            if (chunk.blocks[id - 16].id == .spiral_plant and rng1.next() < odds_num(0.5)) {
                 chunk.blocks[id].id = .spiral_plant;
             } else if (is_solid(chunk.blocks[id - 16].id) and chunk.blocks[id].id == .none) {
-                const val = rng4.next();
-                if (val < seeding.odds_num(0.3)) {
+                const val = rng1.next();
+                if (val < odds_num(0.3)) {
                     chunk.blocks[id].id = .ceiling_flower;
-                } else if (val < seeding.odds_num(0.35)) {
+                } else if (val < odds_num(0.35)) {
                     chunk.blocks[id].id = .spiral_plant;
                 }
             }
@@ -623,7 +628,7 @@ pub fn push_layer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
         const old_q_id = utils.intFromBool(usize, cell_x >= SPAN) + utils.intFromBool(usize, cell_y >= SPAN) * 2;
 
         quad_cache.path_hashes[q_id] = seeding.mix_coordinate_seed(
-            old_hashes[old_q_id],
+            &old_hashes[old_q_id],
             cell_x & SPAN_MASK,
             cell_y & SPAN_MASK,
         );

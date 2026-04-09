@@ -55,6 +55,9 @@ pub fn build(b: *std.Build) void {
         exe.lto = .none;
         exe.export_table = true;
     }
+    if (optimize == .ReleaseFast) {
+        exe.lto = .full;
+    }
     exe.rdynamic = true; // export functions with "export" keyword
     exe.entry = .disabled; // No main()
     exe.stack_size = 4 * 65536; // 4 pages, can increase as necessary

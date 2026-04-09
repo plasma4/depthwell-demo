@@ -39,22 +39,22 @@ pub inline fn generate_block_from_values(moisture: f64, density: f64, height: f6
 /// Returns a value between 0-1, used as a terrain starting point for the default depth (D = 3).
 /// Acts as the "parent" from which all blocks at higher depths ("more zoomed in") get generated from.
 /// This function is called 256 times per chunk and is performance-sensitive.
-pub fn get_fbm_worley_density(world_seed: Seed, x: u64, y: u64) f32 {
+pub fn get_fbm_worley_density(world_seed: *const Seed, x: u64, y: u64) f32 {
     const fx = @as(f32, @floatFromInt(x));
     const fy = @as(f32, @floatFromInt(y * 2)); // scaled Y
 
-    const cell_size: f32 = 16.0;
-    const h_stretch: f32 = 3.0;
-    const fbm_octaves: usize = 3;
+    const cell_size = 20.0; // larger = bigger blobs from Worley
+    const h_stretch = 3.0;
 
-    var warp_x: f32 = 0;
+    const fbm_octaves = 3; // amount of octaves to use for FBM
+    var amp: f32 = 24.0; // size of FBM shifts
+    var warp_x: f32 = 0; // 32-bit means possible performance gains from SIMD and stuff
     var warp_y: f32 = 0;
-    var amp: f32 = 20.0;
     var freq: u64 = 1;
 
     // FBM warping
     inline for (0..fbm_octaves) |_| {
-        const noise = get_dual_value_noise(world_seed, x *% freq, y *% freq);
+        const noise = get_dual_value_noise(world_seed, x *% freq, y *% freq); // make shifting smooth!
         warp_x += noise[0] * amp;
         warp_y += noise[1] * amp;
         amp *= 0.5;
@@ -70,8 +70,8 @@ pub fn get_fbm_worley_density(world_seed: Seed, x: u64, y: u64) f32 {
     const cx_i = @as(i64, @intFromFloat(cx_f));
     const cy_i = @as(i64, @intFromFloat(cy_f));
 
-    var d1_sq: f32 = 1e10;
-    var d2_sq: f32 = 1e10;
+    var d1_sq = std.math.inf(f32); // highest possible values
+    var d2_sq = std.math.inf(f32);
 
     // Worley search
     var ox: i32 = -1;
@@ -84,7 +84,7 @@ pub fn get_fbm_worley_density(world_seed: Seed, x: u64, y: u64) f32 {
             // Hash once for both offsets
             const h = FastHash.hash_2d(world_seed, cur_x, cur_y);
             const off_x = @as(f32, @floatFromInt(h % POW_2_32)) / POW_2_32;
-            const off_y = @as(f32, @floatFromInt(h >> 32)) / POW_2_32;
+            const off_y = @as(f32, @floatFromInt(h / POW_2_32)) / POW_2_32;
 
             const px = (@as(f32, @floatFromInt(cx_i + ox)) + off_x) * cell_w;
             const py = (@as(f32, @floatFromInt(cy_i + oy)) + off_y) * cell_size;
@@ -102,13 +102,13 @@ pub fn get_fbm_worley_density(world_seed: Seed, x: u64, y: u64) f32 {
         }
     }
 
-    const normalization = 20.0; // idk anymore
+    const normalization = 30.0; // idk anymore
     const density = (@sqrt(d2_sq) - @sqrt(d1_sq)) / normalization;
     return @min(1.0, density);
 }
 
-/// Returns two independent noise values based on the classic Value Noise algorithm.
-pub fn get_dual_value_noise(seed: Seed, x: u64, y: u64) @Vector(2, f32) {
+/// Returns two independent noise values (32-bit float) based on the classic Value Noise algorithm.
+pub fn get_dual_value_noise(seed: *const Seed, x: u64, y: u64) @Vector(2, f32) {
     const scale: f32 = 16.0;
     const fx_raw = @as(f32, @floatFromInt(x)) / scale;
     const fy_raw = @as(f32, @floatFromInt(y)) / scale;
@@ -177,7 +177,7 @@ inline fn fade(t: f64) f64 {
 }
 
 /// Simple noise for testing. Unused.
-pub fn get_test_noise(seed: Seed, x: f64, y: f64) f64 {
+pub fn get_test_noise(seed: *const Seed, x: f64, y: f64) f64 {
     _ = .{ x, y };
     var prng = seeding.ChaCha12.init(seed);
     return @as(f64, @floatFromInt(prng.next() & 127)) / 128;
