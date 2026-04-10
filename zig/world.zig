@@ -37,6 +37,38 @@ pub const Sprite = enum(u20) {
     torch = 16,
     unchanged = 1048575,
     _, // non-exhaustive
+
+    /// Determines if the sprite's type is one that should interact with the edge flags and procedural generation. This returns false for edge stone, unlike `is_solid`.
+    pub inline fn is_foundation(self: @This()) bool {
+        return switch (self) {
+            .none,
+            .spiral_plant,
+            .ceiling_flower,
+            .torch,
+            .mushroom,
+            .edge_stone,
+            => false,
+            else => true,
+        };
+    }
+
+    /// Determines if the sprite's type is considered solid, and should interact with the physics, player, and edge flags. This returns true for edge stone, unlike `is_solid`.
+    pub inline fn is_solid(self: @This()) bool {
+        return switch (self) {
+            .none,
+            .spiral_plant,
+            .ceiling_flower,
+            .torch,
+            .mushroom,
+            => false,
+            else => true,
+        };
+    }
+
+    /// Determines if the sprite's type is `none` (air/void).
+    pub inline fn is_empty(self: @This()) bool {
+        return self == .none;
+    }
 };
 
 pub const max_sprite_value = blk: {
@@ -54,13 +86,13 @@ pub const max_sprite_value = blk: {
     break :blk max_val;
 };
 
-/// Empty block of id `Sprite.none`
+/// Empty block of id `Sprite.none`.
 pub const AIR_BLOCK: Block = .{
     .id = .none,
     .seed = 0,
     .light = 0,
     .hp = 0,
-    .edge_flags = 255,
+    .edge_flags = 0xFF,
 };
 
 /// 32-bit packed structure representing a single modified block within a chunk.
@@ -110,10 +142,10 @@ const CHUNK_CACHE_SIZE = 128;
 const CHUNK_POOL_SIZE = SIM_BUFFER_SIZE + CHUNK_CACHE_SIZE;
 
 /// A combined pool of SimBuffer and chunk cache data.
-var chunk_pool: [CHUNK_POOL_SIZE]memory.Chunk = undefined;
+var chunk_pool: [CHUNK_POOL_SIZE]Chunk = undefined;
 
 pub const SimBuffer = struct {
-    const sim_buffer_ptr: *[SIM_BUFFER_SIZE]memory.Chunk = chunk_pool[CHUNK_CACHE_SIZE..][0..SIM_BUFFER_SIZE];
+    const sim_buffer_ptr: *[SIM_BUFFER_SIZE]Chunk = chunk_pool[CHUNK_CACHE_SIZE..][0..SIM_BUFFER_SIZE];
 
     /// Returns the chunk from the specified x and y.
     pub inline fn get_index(cx: u64, cy: u64) usize {
@@ -121,21 +153,21 @@ pub const SimBuffer = struct {
     }
 
     /// Sets a chunk from the specified x and y to the chunk instance given.
-    pub inline fn set_index(chunk: *const memory.Chunk, cx: u64, cy: u64) void {
+    pub inline fn set_index(chunk: *const Chunk, cx: u64, cy: u64) void {
         sim_buffer_ptr[get_index(cx, cy)] = chunk;
     }
 };
 
 pub const ChunkCache = struct {
     var cache_keys: [CHUNK_CACHE_SIZE]?Coordinate = [_]?Coordinate{null} ** CHUNK_CACHE_SIZE;
-    var cache_chunk_data: *[CHUNK_CACHE_SIZE]memory.Chunk = chunk_pool[0..CHUNK_CACHE_SIZE];
+    var cache_chunk_data: *[CHUNK_CACHE_SIZE]Chunk = chunk_pool[0..CHUNK_CACHE_SIZE];
 
     // Clock metadata
     var cache_clock_bits: std.StaticBitSet(CHUNK_CACHE_SIZE) = std.StaticBitSet(CHUNK_CACHE_SIZE).initEmpty();
     var cache_hand: usize = 0;
 
     /// Retrieves a chunk if it exists, marking it as "recently used"
-    pub fn get(coord: Coordinate) ?*memory.Chunk {
+    pub fn get(coord: Coordinate) ?*Chunk {
         for (&cache_keys, 0..) |maybe_key, i| {
             if (maybe_key) |k| {
                 if (k.eql(coord)) {
@@ -147,7 +179,7 @@ pub const ChunkCache = struct {
         return null;
     }
 
-    pub fn allocate_slot(coord: Coordinate) *memory.Chunk {
+    pub fn allocate_slot(coord: Coordinate) *Chunk {
         while (true) {
             const idx = cache_hand;
             cache_hand = (cache_hand + 1) % CHUNK_CACHE_SIZE;
@@ -165,7 +197,7 @@ pub const ChunkCache = struct {
     }
 
     /// Inserts a chunk using the clock algorithm to find an eviction candidate.
-    pub fn insert(coord: Coordinate, chunk: memory.Chunk) *memory.Chunk {
+    pub fn insert(coord: Coordinate, chunk: Chunk) *Chunk {
         while (true) {
             const idx = cache_hand;
 
@@ -300,13 +332,13 @@ pub var quad_cache: QuadCache = .{
 /// Represents the answer to the question "what is the largest possible suffix value"? 15 at depth 1, 255 at depth 2, capped at 2**64-1 at depth 16 and beyond.
 pub var max_possible_suffix: u64 = 0;
 
-/// Temporary storage data for calculations. (In order: chunk above, to the left, to the right, below)
-var edge_flags_data: [9]memory.Chunk = undefined;
+// /// Temporary storage data for calculations. (In order: chunk above, to the left, to the right, below)
+// var edge_flags_data: [9]Chunk = undefined;
 /// Allocator used for the world.
 var alloc = std.mem.Allocator;
 
 /// Creates a new instance of a `Chunk` where specified, given a coordinate. Copies over from cache if possible. Does not update edge flags.
-pub fn write_chunk(chunk: *memory.Chunk, coord: Coordinate) void {
+pub fn write_chunk(chunk: *Chunk, coord: Coordinate) void {
     // logger.write(3, .{ "{h}Chunk requested", coord });
     // TODO use SimBuffer
 
@@ -322,14 +354,15 @@ pub fn write_chunk(chunk: *memory.Chunk, coord: Coordinate) void {
 }
 
 /// Creates a new instance of a `Chunk`. Does not update edge flags.
-pub inline fn get_chunk(coord: Coordinate) memory.Chunk {
-    var chunk: memory.Chunk = undefined;
+pub inline fn get_chunk(coord: Coordinate) Chunk {
+    var chunk: Chunk = undefined;
     write_chunk(&chunk, coord);
     return chunk;
 }
 
 /// Internal function to generate a whole chunk (considering modifications), given a pointer to where the chunk should be stored and coordinates. Does not go through the cache.
-fn generate_chunk(chunk: *memory.Chunk, coord: Coordinate) void {
+fn generate_chunk(chunk: *Chunk, coord: Coordinate) void {
+    const seed_vec = memory.game.seed_vec;
     const chunk_seeds = quad_cache.get_chunk_seeds(coord);
     var rng1 = seeding.ChaCha12.init(chunk_seeds[0]); // Block generation.
     var rng4 = seeding.ChaCha12.init(chunk_seeds[3]); // Visual touches only.
@@ -357,19 +390,8 @@ fn generate_chunk(chunk: *memory.Chunk, coord: Coordinate) void {
             // TODO finish for higher depths with some cubic bezier-like upscaling method
 
             // BASE CASE: depth = 3.
-            const density = procedural.get_fbm_worley_density(&memory.game.seed, cx * 16 + block_x, cy * 16 + block_y);
-            var sprite_type = procedural.generate_block_from_values(0.0, density, 0.0);
-
-            // TODO better ore logic
-            if (sprite_type == .seagreen_stone) {
-                if (rng1.next() < odds_num(0.03)) {
-                    sprite_type = .iron;
-                } else if (rng1.next() < odds_num(0.01)) {
-                    sprite_type = .silver;
-                } else if (rng1.next() < odds_num(0.005)) {
-                    sprite_type = .gold;
-                }
-            }
+            var sprite_type = procedural.get_base_sprite_type(seed_vec, cx, cy, block_x, block_y);
+            if (sprite_type.is_foundation()) sprite_type = procedural.add_ores(sprite_type, &rng1, cx * 16 + block_x, cy * 16 + block_y);
 
             chunk.blocks[id] = Block.make_basic_block(
                 sprite_type,
@@ -378,59 +400,31 @@ fn generate_chunk(chunk: *memory.Chunk, coord: Coordinate) void {
         }
     }
 
-    // Extra decor passes (doesn't worry about cross-chunk sadly)
-    for (0..SPAN - 1) |block_y| {
-        for (0..SPAN) |block_x| {
-            const id = block_x + block_y * SPAN;
-            if (is_solid(chunk.blocks[id + 16].id) and chunk.blocks[id].id == .none) {
-                const val = rng1.next();
-                if (val < odds_num(0.3)) {
-                    chunk.blocks[id].id = .mushroom;
-                }
-            }
-        }
-    }
-
-    for (1..SPAN) |block_y| {
-        for (0..SPAN) |block_x| {
-            const id = block_x + block_y * SPAN;
-            if (chunk.blocks[id - 16].id == .spiral_plant and rng1.next() < odds_num(0.5)) {
-                chunk.blocks[id].id = .spiral_plant;
-            } else if (is_solid(chunk.blocks[id - 16].id) and chunk.blocks[id].id == .none) {
-                const val = rng1.next();
-                if (val < odds_num(0.3)) {
-                    chunk.blocks[id].id = .ceiling_flower;
-                } else if (val < odds_num(0.35)) {
-                    chunk.blocks[id].id = .spiral_plant;
-                }
-            }
-        }
-    }
+    add_edge_flags(chunk, coord);
+    procedural.add_decorations(chunk, &rng1);
 }
 
-/// Adds edge flags to an already generated chunk. Requests adjacent chunks in a 3x3.
-pub fn add_edge_flags(target_chunk: *memory.Chunk, coord: Coordinate) void {
-    // Since getting chunks is way more expensive than branch mispredictions,
-    // having lazy-fetch logic is almost certainly faster here :)
-    var neighbors: [9]?*const memory.Chunk = .{null} ** 9;
-    neighbors[4] = target_chunk; // center chunk is always available
+/// Adds edge flags to an already generated chunk. Utilizes `get_base_sprite_type` to prevent a chunk creation dependency loop.
+/// TODO swap out with an actual cache, probably (asking to regen 60 blocks is probably expensive)
+fn add_edge_flags(target_chunk: *Chunk, coord: Coordinate) void {
+    const seed_vec = memory.game.seed_vec;
 
-    // Interior blocks (1..15) never go out of bounds, working with the same chunk!
-    for (1..SPAN - 1) |ly| {
-        for (1..SPAN - 1) |lx| {
-            const id = ly * SPAN + lx;
-            if (!should_participate_in_edge_flags(target_chunk.blocks[id].id)) {
-                target_chunk.blocks[id].edge_flags = 0xFF; // prevent erosion/edge darkening
-                continue;
-            }
+    // Interior blocks (when x and y are between 1-14) only check the current chunk
+    for (1..SPAN - 1) |block_y| {
+        for (1..SPAN - 1) |block_x| {
+            const id = block_y * SPAN + block_x;
+            // if (!target_chunk.blocks[id].is_foundation()) {
+            //     target_chunk.blocks[id].edge_flags = 0xFF;
+            //     continue;
+            // }
 
             var flags: u8 = 0;
             inline for (.{ -1, 0, 1 }) |dy| {
                 inline for (.{ -1, 0, 1 }) |dx| {
                     if (dx == 0 and dy == 0) continue;
-                    const nx = @as(usize, @intCast(@as(i32, @intCast(lx)) + dx));
-                    const ny = @as(usize, @intCast(@as(i32, @intCast(ly)) + dy));
-                    if (should_participate_in_edge_flags(target_chunk.blocks[ny * 16 + nx].id)) {
+                    const nx = block_x +% @as(usize, @bitCast(@as(isize, dx)));
+                    const ny = block_y +% @as(usize, @bitCast(@as(isize, dy)));
+                    if (target_chunk.blocks[ny * SPAN + nx].is_foundation()) {
                         flags |= types.EdgeFlags.get_flag_bit(dx, dy);
                     }
                 }
@@ -439,77 +433,48 @@ pub fn add_edge_flags(target_chunk: *memory.Chunk, coord: Coordinate) void {
         }
     }
 
-    // Edge blocks (row 0, row 15, col 0, col 15), save neighbor chunk logic for here
-    for (0..SPAN) |ly| {
-        for (0..SPAN) |lx| {
-            if (lx >= 1 and lx < SPAN - 1 and ly >= 1 and ly < SPAN - 1) continue;
-
-            const id = ly * SPAN + lx;
-            if (!is_solid(target_chunk.blocks[id].id)) {
-                target_chunk.blocks[id].edge_flags = 0xFF; // prevent erosion/edge darkening
-                continue;
-            }
+    // Perimeter blocks (row 0, row 15, col 0, col 15) require checking neighbors procedurally
+    for (0..SPAN) |block_y| {
+        for (0..SPAN) |block_x| {
+            // Skip interior already processed
+            if (block_x >= 1 and block_x < SPAN - 1 and block_y >= 1 and block_y < SPAN - 1) continue; // TODO better logic
+            const id = block_y * SPAN + block_x;
+            // if (!target_chunk.blocks[id].is_foundation()) {
+            //     target_chunk.blocks[id].edge_flags = 0xFF;
+            //     continue;
+            // }
 
             var flags: u8 = 0;
             inline for (.{ -1, 0, 1 }) |dy| {
                 inline for (.{ -1, 0, 1 }) |dx| {
                     if (dx == 0 and dy == 0) continue;
 
-                    const nx = @as(i32, @intCast(lx)) + dx;
-                    const ny = @as(i32, @intCast(ly)) + dy;
+                    const nx = @as(i32, @intCast(block_x)) + dx;
+                    const ny = @as(i32, @intCast(block_y)) + dy;
 
-                    const block_is_solid = if (nx >= 0 and nx < 16 and ny >= 0 and ny < 16)
-                        is_solid(target_chunk.blocks[@as(usize, @intCast(ny * 16 + nx))].id)
+                    const set_flag_bit = if (nx >= 0 and nx < SPAN and ny >= 0 and ny < SPAN)
+                        target_chunk.blocks[@as(usize, @intCast(ny * SPAN + nx))].is_foundation()
                     else blk: {
-                        const neighbor_x = @as(usize, @intCast(@mod(nx, 16)));
-                        const neighbor_y = @as(usize, @intCast(@mod(ny, 16)));
-                        // Determine which of the 9 chunks in our grid to sample
-                        const grid_x = if (nx < 0) @as(usize, 0) else if (nx >= 16) @as(usize, 2) else 1;
-                        const grid_y = if (ny < 0) @as(usize, 0) else if (ny >= 16) @as(usize, 2) else 1;
-                        const idx = grid_y * 3 + grid_x;
+                        // Resolve the specific neighbor coordinate (handles quadrant/suffix wrapping)
+                        const cx_shift: i64 = if (nx < 0) -1 else if (nx >= SPAN) 1 else 0;
+                        const cy_shift: i64 = if (ny < 0) -1 else if (ny >= SPAN) 1 else 0;
 
-                        if (neighbors[idx] == null) {
-                            @branchHint(.unlikely); // each neighbor fetched at most once
-                            const neighbor_coord = coord.move(.{ @as(i64, @intCast(grid_x)) - 1, @as(i64, @intCast(grid_y)) - 1 });
-                            edge_flags_data[idx] = if (neighbor_coord) |c| get_chunk(c) else std.mem.zeroes(memory.Chunk);
-                            neighbors[idx] = &edge_flags_data[idx];
-                        }
-                        break :blk is_solid(neighbors[idx].?.blocks[neighbor_y * 16 + neighbor_x].id);
+                        const new_coord = coord.move(.{ cx_shift, cy_shift }) orelse break :blk false;
+
+                        const n_bx: u4 = @intCast(@as(u32, @bitCast(nx)) % SPAN);
+                        const n_by: u4 = @intCast(@as(u32, @bitCast(ny)) % SPAN);
+
+                        // Call base procedural logic. Adding ores isn't necessary!
+                        const sprite = procedural.get_base_sprite_type(seed_vec, new_coord.suffix[0], new_coord.suffix[1], n_bx, n_by);
+                        break :blk sprite.is_foundation();
                     };
 
-                    if (block_is_solid) flags |= types.EdgeFlags.get_flag_bit(dx, dy);
+                    if (set_flag_bit) flags |= types.EdgeFlags.get_flag_bit(dx, dy);
                 }
             }
             target_chunk.blocks[id].edge_flags = flags;
         }
     }
-}
-
-/// Determines if a block should interact with the edge flags.
-pub inline fn should_participate_in_edge_flags(sprite: Sprite) bool {
-    return switch (sprite) {
-        .none,
-        .spiral_plant,
-        .ceiling_flower,
-        .torch,
-        .mushroom,
-        .edge_stone,
-        => false,
-        else => true,
-    };
-}
-
-/// Determines if a block is considered solid, and should interact with the physics, player, and edge flags.
-pub inline fn is_solid(sprite: Sprite) bool {
-    return switch (sprite) {
-        .none,
-        .spiral_plant,
-        .ceiling_flower,
-        .torch,
-        .mushroom,
-        => false,
-        else => true,
-    };
 }
 
 // /// The 16-step ascendent projection read loop thingy
@@ -622,8 +587,6 @@ pub fn push_layer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
     quad_cache.most_top = quad_cache.most_top and top_cell_y == 0;
     quad_cache.most_bottom = quad_cache.most_bottom and top_cell_y == highest_possible_top_left_cell;
 
-    const SPAN_MASK = SPAN - 1; // 0xF
-
     const old_hashes = quad_cache.path_hashes;
     // update the seed lineage for all 4 quadrants
     inline for (0..4) |q_id| {
@@ -635,8 +598,8 @@ pub fn push_layer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
 
         quad_cache.path_hashes[q_id] = seeding.mix_coordinate_seed(
             &old_hashes[old_q_id],
-            cell_x & SPAN_MASK,
-            cell_y & SPAN_MASK,
+            cell_x % SPAN,
+            cell_y % SPAN,
         );
     }
 

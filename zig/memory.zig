@@ -1,6 +1,7 @@
 //! Contains main data-types that bridge WASM and Zig, as well as scratch buffer logic. Also contains some structs and commonly used constants.
 const std = @import("std");
 const builtin = @import("builtin");
+const types = @import("types.zig");
 const logger = @import("logger.zig");
 const ColorRGBA = @import("color_rgba.zig").ColorRGBA;
 const seeding = @import("seeding.zig");
@@ -83,6 +84,8 @@ pub const GameState = extern struct {
 
     /// The initial or "global" seed from which all generation starts.
     seed: seeding.Seed align(16) = std.mem.zeroes(seeding.Seed),
+    /// Second seed based on the original `seed` value: derived from `ChaCha12` for use in `FastHash`.
+    seed_vec: v2u64 = .{ 0, 0 },
 
     pub inline fn get_player_coord(self: *const @This()) Coordinate {
         return .{ .quadrant = @intCast(self.player_quadrant), .suffix = self.player_chunk };
@@ -190,6 +193,26 @@ pub const Block = packed struct(u64) {
             .light = @truncate(seed_bits >> 24),
             .seed = @truncate(seed_bits),
         };
+    }
+
+    /// Determines if the block's type is one that should interact with the edge flags and procedural generation. This returns false for edge stone, unlike `is_solid`.
+    pub inline fn is_foundation(self: @This()) bool {
+        return self.id.is_foundation();
+    }
+
+    /// Determines if the block's type is considered solid, and should interact with the physics, player, and edge flags. This returns true for edge stone, unlike `is_solid`.
+    pub inline fn is_solid(self: @This()) bool {
+        return self.id.is_solid();
+    }
+
+    /// Determines if the block's type is `none` (air/void).
+    pub inline fn is_empty(self: @This()) bool {
+        return self.id.is_empty();
+    }
+
+    /// Determines if there is a solid block adjacent based on edge flags.
+    pub inline fn is_adjacent_block_solid(self: @This(), direction: comptime_int) bool {
+        return (self.edge_flags & direction) != 0;
     }
 };
 

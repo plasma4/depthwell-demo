@@ -1,5 +1,6 @@
 //! Handles procedural generation logic for the game.
 const std = @import("std");
+const types = @import("types.zig");
 const logger = @import("logger.zig");
 const memory = @import("memory.zig");
 const seeding = @import("seeding.zig");
@@ -8,20 +9,22 @@ const world = @import("world.zig");
 /// Represents 2^32.
 const POW_2_32 = 4294967296;
 const POW_2_64 = seeding.POW_2_64;
+const SPAN = memory.SPAN;
 
-const hash_2d_512 = seeding.ChaCha12.hash_2d_512;
+const EdgeFlags = types.EdgeFlags;
+const odds_num = seeding.odds_num;
 const FastHash = seeding.FastHash;
 const Seed = seeding.Seed;
 const Sprite = world.Sprite;
 const v2f64 = memory.v2f64;
+const v2u64 = memory.v2u64;
 
 /// Determines whether to use a heatmap or not.
 const USE_HEATMAP = false;
 
 /// Generates a block for seeding (based on previous procedural generation logic).
-pub inline fn generate_block_from_values(moisture: f64, density: f64, height: f64) Sprite {
+pub inline fn generate_block_from_values(moisture: f64, density: f64) Sprite {
     _ = moisture;
-    _ = height;
 
     if (USE_HEATMAP) return @enumFromInt(256 + @as(u20, @intFromFloat(density * 256.0))); // sprite IDs from 256-512 create a neat little heatmap
 
@@ -36,10 +39,24 @@ pub inline fn generate_block_from_values(moisture: f64, density: f64, height: f6
     // return .gold;
 }
 
+/// Returns a base sprite type. Does 3 passes:
+///
+/// 1. Generate initial terrain density value. (moisture TODO or remove)
+/// 2. Generate a block from density value.
+/// 3. Generates structures (TODO)
+pub fn get_base_sprite_type(seed_vector: v2u64, chunk_x: u64, chunk_y: u64, block_x: u64, block_y: u64) Sprite {
+    const density = get_fbm_worley_density(seed_vector, chunk_x * 16 + block_x, chunk_y * 16 + block_y);
+    const sprite_type = generate_block_from_values(0.0, density);
+    return sprite_type;
+}
+
 /// Returns a value between 0-1, used as a terrain starting point for the default depth (D = 3).
 /// Acts as the "parent" from which all blocks at higher depths ("more zoomed in") get generated from.
 /// This function is called 256 times per chunk and is performance-sensitive.
-pub fn get_fbm_worley_density(world_seed: *const Seed, x: u64, y: u64) f32 {
+///
+/// This function uses fractal brownian motion with value noise in an initial pass for domain warping,
+/// then Worley noise to generate terrain.
+fn get_fbm_worley_density(seed_vector: v2u64, x: u64, y: u64) f32 {
     const fx = @as(f32, @floatFromInt(x));
     const fy = @as(f32, @floatFromInt(y * 2)); // scaled Y
 
@@ -48,13 +65,13 @@ pub fn get_fbm_worley_density(world_seed: *const Seed, x: u64, y: u64) f32 {
 
     const fbm_octaves = 3; // amount of octaves to use for FBM
     var amp: f32 = 24.0; // size of FBM shifts
-    var warp_x: f32 = 0; // 32-bit means possible performance gains from SIMD and stuff
+    var warp_x: f32 = 0; // 32-bit means possible performance gains from SIMD and stuff, possibly
     var warp_y: f32 = 0;
     var freq: u64 = 1;
 
     // FBM warping
     inline for (0..fbm_octaves) |_| {
-        const noise = get_dual_value_noise(world_seed, x *% freq, y *% freq); // make shifting smooth!
+        const noise = get_dual_value_noise(seed_vector, x *% freq, y *% freq); // make shifting smooth!
         warp_x += noise[0] * amp;
         warp_y += noise[1] * amp;
         amp *= 0.5;
@@ -80,7 +97,7 @@ pub fn get_fbm_worley_density(world_seed: *const Seed, x: u64, y: u64) f32 {
             const cur_y = @as(u64, @bitCast(cy_i + oy));
 
             // Hash once for both offsets
-            const h = FastHash.hash_2d(world_seed, cur_x, cur_y);
+            const h = FastHash.hash_2d(seed_vector, cur_x, cur_y);
             const off_x = @as(f32, @floatFromInt(h % POW_2_32)) / POW_2_32;
             const off_y = @as(f32, @floatFromInt(h / POW_2_32)) / POW_2_32;
 
@@ -106,7 +123,7 @@ pub fn get_fbm_worley_density(world_seed: *const Seed, x: u64, y: u64) f32 {
 }
 
 /// Returns two independent noise values (32-bit float) based on the classic Value Noise algorithm.
-pub fn get_dual_value_noise(seed: *const Seed, x: u64, y: u64) @Vector(2, f32) {
+fn get_dual_value_noise(seed: v2u64, x: u64, y: u64) @Vector(2, f32) {
     const scale: f32 = 16.0;
     const fx_raw = @as(f32, @floatFromInt(x)) / scale;
     const fy_raw = @as(f32, @floatFromInt(y)) / scale;
@@ -140,29 +157,70 @@ pub fn get_dual_value_noise(seed: *const Seed, x: u64, y: u64) @Vector(2, f32) {
     return res;
 }
 
-// pub fn get_value_noise(base_seed: seeding.Seed, x: u64, y: u64) f64 {
-//     const scale = 16.0;
-//     const world_x = @as(f64, @floatFromInt(x)) / scale;
-//     const world_y = @as(f64, @floatFromInt(y)) / scale;
-//     const x0 = @floor(world_x);
-//     const y0 = @floor(world_y);
+/// Generates ores over certain types of blocks, returning a sprite type (possibly changed to an ore type).
+/// Continues from steps 1-3 in `get_base_sprite_type()`.
+///
+/// 4. Disperses ores using Worley noise. Assumes that `is_foundation()` was checked before calling.
+pub fn add_ores(sprite_type: Sprite, rng1: *seeding.ChaCha12, x: u64, y: u64) Sprite {
+    var new_sprite = sprite_type;
+    _ = .{ x, y };
+    if (sprite_type == .seagreen_stone) {
+        if (rng1.next() < odds_num(0.03)) {
+            new_sprite = .iron;
+        } else if (rng1.next() < odds_num(0.01)) {
+            new_sprite = .silver;
+        } else if (rng1.next() < odds_num(0.005)) {
+            new_sprite = .gold;
+        }
+    }
+    return new_sprite;
+}
 
-//     const fx = world_x - x0;
-//     const fy = world_y - y0;
+/// Generates decorative blocks (such as mushrooms or ceiling plants).
+/// Continues from step 4 in `add_ores()`.
+///
+/// 5. Adds decorative blocks.
+/// 6. Critically, sets `edge_flags` of all blocks that are not `is_foundation()` blocks to `0xFF` to prevent erosion.
+pub fn add_decorations(target_chunk: *memory.Chunk, rng1: *seeding.ChaCha12) void {
+    // Extra decor passes (doesn't worry about cross-chunk sadly)
+    for (0..SPAN) |block_y| {
+        for (0..SPAN) |block_x| {
+            const id = block_x + block_y * SPAN;
+            var block = &target_chunk.blocks[id];
+            if (!block.is_empty()) continue;
+            if (block.is_adjacent_block_solid(EdgeFlags.BOTTOM)) {
+                const val = rng1.next();
+                if (val < odds_num(0.3)) {
+                    block.id = .mushroom;
+                }
+            }
+        }
+    }
 
-//     // Get 4 random values for the corners
-//     const v00: v2f64 = hash_2d_512(f64, base_seed, @intFromFloat(x0), @intFromFloat(y0));
-//     const v10: v2f64 = hash_2d_512(f64, base_seed, @intFromFloat(x0 + 1), @intFromFloat(y0));
-//     const v01: v2f64 = hash_2d_512(f64, base_seed, @intFromFloat(x0), @intFromFloat(y0 + 1));
-//     const v11: v2f64 = hash_2d_512(f64, base_seed, @intFromFloat(x0 + 1), @intFromFloat(y0 + 1));
+    for (1..SPAN) |block_y| { // TODO decide if this failing across chunk boundaries really matters or not
+        for (0..SPAN) |block_x| {
+            const id = block_x + block_y * SPAN;
+            var block = &target_chunk.blocks[id];
+            if (block.is_empty()) continue;
+            if (target_chunk.blocks[id - 16].id == .spiral_plant and rng1.next() < odds_num(0.5)) {
+                block.id = .spiral_plant;
+            } else if (target_chunk.blocks[id - 16].is_foundation() and block.is_empty()) {
+                const val = rng1.next();
+                if (val < odds_num(0.3)) {
+                    block.id = .ceiling_flower;
+                } else if (val < odds_num(0.35)) {
+                    block.id = .spiral_plant;
+                }
+            }
+        }
+    }
 
-//     // Smooth the coordinates
-//     const u = fade(fx);
-//     const v = fade(fy);
-
-//     // Bilinear interpolation
-//     return lerp(lerp(v00[0], v10[0], u), lerp(v01[0], v11[0], u), v);
-// }
+    // final pass to reset edge flags for blocks that should NOT be eroded
+    for (0..memory.SPAN_SQ) |id| {
+        var block = &target_chunk.blocks[id];
+        if (!block.is_foundation()) block.edge_flags = 0xFF;
+    }
+}
 
 /// Linearly interpolates between a and b.
 inline fn lerp(a: f64, b: f64, time: f64) f64 {

@@ -1,7 +1,7 @@
 /*
  * Main shader for Depthwell. ADD ?raw FOR DEBUGGING SHADER TO THE END OF engineMaker.ts's `SHADER_SOURCE` VARIABLE TO NOT COMPRESS.
  */
-// Sprite sheet constants. Sprites are saved as a .png, and each asset is 16x16. See zig/world.zig's Sprite definitions for what these all are. These values are dynamically patched in from TypeScript.
+// Sprite sheet constants. Sprites are saved as a .png, and each asset is 16x16. See zig/world.zig's Sprite definitions for what these all are. These row/column are dynamically patched in from TypeScript, so do not set them here.
 const TILES_PER_ROW: f32 = /* TILES_PER_ROW */ 1.0 /* TILES_PER_ROW */;
 const TILES_PER_COLUMN: f32 = /* TILES_PER_COLUMN */ 1.0 /* TILES_PER_COLUMN */;
 
@@ -138,7 +138,7 @@ fn vs_main(
         out.uv = atlas_uv;
         out.edge_flags = 255u;
         out.sprite_id = 1u;
-        out.light = 255;
+        out.light = 0;
         out.local_uv = local_pos;
         return out;
     }

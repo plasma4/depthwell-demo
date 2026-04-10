@@ -36,8 +36,10 @@ var alreadyStarted = false;
 
 /// Initializes the game.
 pub fn init() void {
+    var temp_seed = seeding.ChaCha12.init(seeding.mix_base_seed(&memory.game.seed, 1));
+    memory.game.seed_vec = .{ temp_seed.next(), temp_seed.next() };
     // Start off by determining where the player starts off exactly with layer pushing
-    var rng = seeding.ChaCha12.init(seeding.mix_base_seed(&memory.game.seed, 1));
+    var rng = seeding.ChaCha12.init(seeding.mix_base_seed(&memory.game.seed, 2));
     for (0..STARTING_ZOOM_TIMES) |_| {
         // Set the player position to somewhere random in the current chunk
         if (SET_PLAYER_SPAWN_RANDOMLY) memory.game.set_player_pos(.{
@@ -131,7 +133,6 @@ pub fn prepare_visible_chunks(time_interpolated: f64, canvas_w: f64, canvas_h: f
                 }
 
                 w.write_chunk(&chunk, target_coord);
-                w.add_edge_flags(&chunk, target_coord);
                 for (0..SPAN) |ly| {
                     @memcpy(out[(gy * SPAN + ly) * wb + gx * SPAN ..][0..SPAN], chunk.blocks[ly * SPAN ..][0..SPAN]);
                 }
@@ -231,11 +232,10 @@ inline fn update_render_properties(game: *memory.GameState, interp_cam_x: f64, i
         // logger.write(2, .{ "{h}Zoom (scaled based on canvas resolution)", effective_zoom });
     }
 }
-
 pub fn portal_zoom_in(bx: u4, by: u4) void {
     _ = bx;
     _ = by;
-    // TODO complete
+    // TODO complete, utilizing `push_layer`
 }
 
 /// Resets the game state.

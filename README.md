@@ -239,13 +239,13 @@ Seeds are even more unlikely to collide than hashes (256 bits of collision resis
 A `std.AutoHashMap` stores the path hashes and a dynamically allocated array of `[memory.SPAN_SQ]BlockMod` (the dense data representing a chunk's entire modifications). See some definitions and more details:
 
 ```zig
-/// Empty block of id `Sprite.none`
+/// Empty block of id `Sprite.none`.
 pub const AIR_BLOCK: Block = .{
     .id = .none,
     .seed = 0,
-    .light = 255,
+    .light = 0,
     .hp = 0,
-    .edge_flags = 255,
+    .edge_flags = 0xFF,
 };
 
 /// 32-bit packed structure representing a single modified block within a chunk.

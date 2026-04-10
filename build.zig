@@ -1,8 +1,11 @@
 const std = @import("std");
 
-// Run zig build normally, and zig build -Doptimize=ReleaseFast for the final version. Use zig build --Dgen-enums as well to automatically construct src/enums.ts and zig test "zig/root.zig" to run all tests across the codebase.
-// To make a final ReleaseFast build with even more optimization, use wasm-opt like this:
-// { TEMP_WASM=$(mktemp -t wasm_opt_XXXXXX); wasm-opt src/main.wasm -o "$TEMP_WASM" -O4 --strip-debug --strip-dwarf --strip-producers --enable-threads --enable-simd && mv "$TEMP_WASM" src/main.wasm; }
+// Run zig build normally, and zig build -Doptimize=ReleaseFast for a production version. Use zig build --Dgen-enums as well to automatically construct src/enums.ts and zig test "zig/root.zig" to run all tests across the codebase.
+
+// To make a final ReleaseFast build with even more optimization, use wasm-opt like this (no fast-math options for determinism):
+// { TEMP_WASM=$(mktemp -t wasm_opt_XXXXXX); wasm-opt src/main.wasm -o "$TEMP_WASM" -O4 --strip-debug --strip-dwarf --strip-producers --enable-simd --enable-sign-ext --enable-tail-call --enable-bulk-memory --enable-multivalue --enable-reference-type --converge --gufa-optimizing --traps-never-happen --ignore-implicit-traps --limit-segments --closed-world --inline-functions-with-loops --inline-max-combined-binary-size=100000 --directize --memory-packing --optimize-added-constants-propagate --flexible-inline-max-function-size=100 --one-caller-inline-max-function-size=1 --roundtrip --low-memory-unused && mv "$TEMP_WASM" src/main.wasm; }
+// (Add --enable-memory64 for 64-bit builds)
+
 pub fn build(b: *std.Build) void {
     // TODO add in wasm-opt for ReleaseFast builds for even more optimization!
     b.install_path = ".";
@@ -54,17 +57,16 @@ pub fn build(b: *std.Build) void {
         exe.root_module.strip = false; // try to reduce any WASM optimization
         exe.lto = .none;
         exe.export_table = true;
-    }
-    if (optimize == .ReleaseFast) {
-        exe.lto = .full;
+        // exe.use_llvm = false; // can't do this for WASM ):
+        // exe.use_lld = false; // nope
+    } else if (optimize == .ReleaseFast) {
+        exe.root_module.single_threaded = true;
+        exe.root_module.stack_check = false;
+        exe.lto = .full; // no work ):
     }
     exe.rdynamic = true; // export functions with "export" keyword
     exe.entry = .disabled; // No main()
     exe.stack_size = 4 * 65536; // 4 pages, can increase as necessary
-    if (optimize == .Debug) {
-        // exe.use_llvm = false; // can't do this for WASM ):
-        // exe.use_lld = false; // nope
-    }
 
     // removed since Zig manages pointers automatically
     // exe.global_base = 8;

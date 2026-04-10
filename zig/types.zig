@@ -7,12 +7,12 @@ const GenerateOffsets = @import("generate_types.zig").GenerateOffsets;
 pub const KeyBits = struct {
     // Note: generate_types.zig will skip all functions in structs, including pub ones (why would you have them here anyway??).
     /// Returns 2^index.
-    fn mask(index: u5) u32 {
+    inline fn mask(comptime index: u5) u32 {
         return @as(u32, 1) << index;
     }
 
     /// Checks if a specific key KeyBit is set within the bitfield.
-    pub fn isSet(bitfield: u32, key_mask: u32) bool {
+    pub inline fn isSet(comptime bitfield: u32, key_mask: u32) bool {
         return (bitfield & key_mask) != 0;
     }
 
@@ -61,7 +61,7 @@ pub const KeyBits = struct {
 /// TODO use, and also add logic at the edges of SimBuffer(?)
 pub const EdgeFlags = struct {
     /// Helper to map dx/dy offsets to these flags
-    pub fn get_flag_bit(dx: i32, dy: i32) u8 {
+    pub inline fn get_flag_bit(dx: i32, dy: i32) u8 {
         if (dy == -1) {
             if (dx == -1) return TOP_LEFT;
             if (dx == 0) return TOP;

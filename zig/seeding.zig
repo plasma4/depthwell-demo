@@ -7,6 +7,7 @@ const testing = std.testing;
 
 /// Represents 2^64.
 pub const POW_2_64 = 18446744073709551616;
+const v2u64 = memory.v2u64;
 
 test "basic usage example" {
     // Start with an arbitrary seed (NOTE: seed_from_bytes fails for WASM builds)
@@ -68,7 +69,7 @@ pub fn mix_coordinate_seed(layer_seed: *const Seed, x: u64, y: u64) Seed {
 }
 
 /// Generates 4 sets of seeds for every chunk when combining X/Y active suffix coordinates with the seed of a quadrant.
-pub fn mix_chunk_seeds(quadrant_seed: *const Seed, coord_vector: memory.v2u64) [4]Seed {
+pub fn mix_chunk_seeds(quadrant_seed: *const Seed, coord_vector: v2u64) [4]Seed {
     const PackedInput = extern struct { // do the packing thing again
         seed: Seed,
         c1: u64,
@@ -96,7 +97,7 @@ pub inline fn odds_num(chance: comptime_float) u64 {
 /// Significantly faster than both ChaCha12/Xoshiro512** for procedural generation
 /// Acts like a diffuser for `x`/`y`: assumes `seed` is securely generated from BLAKE3 already.
 pub const FastHash = struct {
-    const secret = [_]u64{ // Wyhash values within std.hash.Wyhash!
+    const secret = [_]u64{
         0xa0761d6478bd642f,
         0xe7037ed1a0b428db,
         0x8ebc6af09c88c6e3,
@@ -109,21 +110,18 @@ pub const FastHash = struct {
         return @as(u64, @truncate(res)) ^ @as(u64, @truncate(res >> 64));
     }
 
-    pub inline fn hash_2d(seed: *const Seed, x: u64, y: u64) u64 {
-        var h = mix(x ^ seed[0], seed[1] ^ secret[0]); // proces these simultaneously
-        var k = mix(y ^ seed[2], seed[3] ^ secret[1]);
+    /// Returns a 64-bit hash value, assuming `seed_vector` is securely generated from BLAKE3 already.
+    pub inline fn hash_2d(seed_vector: v2u64, x: u64, y: u64) u64 {
+        var v = v2u64{ x, y } ^ seed_vector; // diffuse X and Y using vectors
+        v *%= v2u64{ secret[0], secret[1] }; // wrapping multiply
 
-        // cross-pollinate X/Y together
-        h ^= seed[4];
-        k ^= seed[5];
-
-        // Now, combine and apply a finalizer.
-        // This lets every bit of x and y affect the output.
-        return mix(h ^ secret[2], k ^ secret[3]);
+        v ^= v >> @as(v2u64, @splat(32)); // fold the vector for more variance
+        return mix(v[0] ^ secret[2], v[1] ^ secret[3]); // combine lanes and mix
     }
 
-    pub inline fn float_2d(seed: *const Seed, x: u64, y: u64) f32 {
-        const h = hash_2d(x, y, seed);
+    /// Returns a float value (32-bit), assuming `seed_vector` is securely generated from BLAKE3 already.
+    pub inline fn float_2d(seed_vector: v2u64, x: u64, y: u64) f32 {
+        const h = hash_2d(x, y, seed_vector);
         return @as(f32, @floatFromInt(h)) / POW_2_64;
     }
 };
