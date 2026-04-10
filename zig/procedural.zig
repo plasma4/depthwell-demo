@@ -201,7 +201,7 @@ pub fn add_decorations(target_chunk: *memory.Chunk, rng1: *seeding.ChaCha12) voi
         for (0..SPAN) |block_x| {
             const id = block_x + block_y * SPAN;
             var block = &target_chunk.blocks[id];
-            if (block.is_empty()) continue;
+            if (target_chunk.blocks[id - 16].is_empty()) continue;
             if (target_chunk.blocks[id - 16].id == .spiral_plant and rng1.next() < odds_num(0.5)) {
                 block.id = .spiral_plant;
             } else if (target_chunk.blocks[id - 16].is_foundation() and block.is_empty()) {
