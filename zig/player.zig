@@ -26,9 +26,9 @@ const PLAYER_BASE_SPEED = 5.0;
 const PLAYER_HITBOX_HALF = 96;
 
 /// Minimum camera zoom/scale allowed. This is strategically calculated to make sure the default render distance is safe.
-const CAMERA_MIN_ZOOM = 1.0 / 3.0; // ~33% (too small and sim_buffer nor chunk_cache would no longer be able to reliably cache, remember that simulation is centered around the player!)
+pub const CAMERA_MIN_ZOOM = 1.0 / 3.0; // ~33% (too small and sim_buffer nor chunk_cache would no longer be able to reliably cache, remember that simulation is centered around the player!)
 /// Maximum camera zoom/scale allowed. This is strategically calculated to make sure the player always remains in the viewport.
-const CAMERA_MAX_ZOOM = 1.0; // 100%
+pub const CAMERA_MAX_ZOOM = 1.0; // 100%
 
 /// The zoom in/out keys change the zoom multiplier this fast per frame.
 const CAMERA_CHANGE_SPEED = 1.02;

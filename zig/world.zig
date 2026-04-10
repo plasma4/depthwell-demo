@@ -23,14 +23,14 @@ pub const Sprite = enum(u20) {
     none,
     player,
     edge_stone,
-    stone,
+    strange_stone,
     blue_stone,
     seagreen_stone,
     green_stone,
+    stone,
     iron,
     silver,
     gold,
-    darkblue_stone,
     weird_gem_pile_thing,
     spiral_plant,
     ceiling_flower,
@@ -78,7 +78,7 @@ pub const Sprite = enum(u20) {
             .blue_stone,
             .seagreen_stone,
             .green_stone,
-            .darkblue_stone,
+            .strange_stone,
             => true,
             else => false,
         };
@@ -410,7 +410,7 @@ fn generate_chunk(chunk: *Chunk, coord: Coordinate) void {
             // TODO finish for higher depths with some cubic bezier-like upscaling method
 
             // BASE CASE: depth = 3.
-            var sprite_type = procedural.get_base_sprite_type(
+            const base_data = procedural.get_base_sprite_type(
                 seed_vec1,
                 seed_vec2,
                 @intCast(cx),
@@ -418,8 +418,9 @@ fn generate_chunk(chunk: *Chunk, coord: Coordinate) void {
                 @intCast(block_x),
                 @intCast(block_y),
             );
-            if (sprite_type.is_stone() or sprite_type.is_heatmap()) sprite_type = procedural.add_ores(
-                sprite_type,
+            var sprite = base_data.sprite;
+            if (sprite.is_stone() or sprite.is_heatmap()) sprite = procedural.add_ores(
+                base_data,
                 seed_vec3,
                 &rng1,
                 @intCast(cx * 16 + block_x),
@@ -427,28 +428,32 @@ fn generate_chunk(chunk: *Chunk, coord: Coordinate) void {
             );
 
             chunk.blocks[id] = Block.make_basic_block(
-                sprite_type,
+                sprite,
                 rng4.next(),
             ); // edge flags updated in second pass
         }
     }
 
-    add_edge_flags(chunk, coord);
+    add_edge_flags(chunk, coord, &rng1);
     procedural.add_decorations(chunk, &rng1);
 }
 
 /// Adds edge flags to an already generated chunk. Utilizes `get_base_sprite_type` to prevent a chunk creation dependency loop.
 /// TODO swap out with an actual cache, probably (asking to regen 60 blocks is probably expensive)
-fn add_edge_flags(target_chunk: *Chunk, coord: Coordinate) void {
+fn add_edge_flags(target_chunk: *Chunk, coord: Coordinate, rng1: *seeding.ChaCha12) void {
     const vec1: v2u64 = .{ memory.game.seed2[0], memory.game.seed2[1] };
     const vec2: v2u64 = .{ memory.game.seed2[2], memory.game.seed2[3] };
+    const vec3: v2u64 = .{ memory.game.seed2[4], memory.game.seed2[5] };
+    _ = .{ vec3, rng1 };
 
     // Interior blocks (when x and y are between 1-14) only check the current chunk
     for (1..SPAN - 1) |block_y| {
         for (1..SPAN - 1) |block_x| {
             const id = block_y * SPAN + block_x;
-            // if (!target_chunk.blocks[id].is_foundation()) {
-            //     target_chunk.blocks[id].edge_flags = 0xFF;
+            const current_sprite = target_chunk.blocks[id].id;
+            // commenting this out is necessary for decor generation
+            // if (!current_block.is_foundation()) {
+            //     current_block.edge_flags = 0xFF;
             //     continue;
             // }
 
@@ -458,7 +463,8 @@ fn add_edge_flags(target_chunk: *Chunk, coord: Coordinate) void {
                     if (dx == 0 and dy == 0) continue;
                     const nx = block_x +% @as(usize, @bitCast(@as(isize, dx)));
                     const ny = block_y +% @as(usize, @bitCast(@as(isize, dy)));
-                    if (target_chunk.blocks[ny * SPAN + nx].is_foundation()) {
+                    const sprite = target_chunk.blocks[ny * SPAN + nx].id;
+                    if (should_have_edge_flags(sprite, current_sprite)) {
                         flags |= types.EdgeFlags.get_flag_bit(dx, dy);
                     }
                 }
@@ -473,8 +479,10 @@ fn add_edge_flags(target_chunk: *Chunk, coord: Coordinate) void {
             // Skip interior already processed
             if (block_x >= 1 and block_x < SPAN - 1 and block_y >= 1 and block_y < SPAN - 1) continue; // TODO better logic
             const id = block_y * SPAN + block_x;
-            // if (!target_chunk.blocks[id].is_foundation()) {
-            //     target_chunk.blocks[id].edge_flags = 0xFF;
+            const current_sprite = target_chunk.blocks[id].id;
+            // commenting this out is necessary for decor generation
+            // if (!current_block.is_foundation()) {
+            //     current_block.edge_flags = 0xFF;
             //     continue;
             // }
 
@@ -486,9 +494,10 @@ fn add_edge_flags(target_chunk: *Chunk, coord: Coordinate) void {
                     const nx = @as(i32, @intCast(block_x)) + dx;
                     const ny = @as(i32, @intCast(block_y)) + dy;
 
-                    const set_flag_bit = if (nx >= 0 and nx < SPAN and ny >= 0 and ny < SPAN)
-                        target_chunk.blocks[@as(usize, @intCast(ny * SPAN + nx))].is_foundation()
-                    else blk: {
+                    const set_flag_bit = if (nx >= 0 and nx < SPAN and ny >= 0 and ny < SPAN) blk: {
+                        const sprite = target_chunk.blocks[@as(usize, @intCast(ny * SPAN + nx))].id;
+                        break :blk should_have_edge_flags(sprite, current_sprite);
+                    } else blk: {
                         // Resolve the specific neighbor coordinate (handles quadrant/suffix wrapping)
                         const cx_shift: i64 = if (nx < 0) -1 else if (nx >= SPAN) 1 else 0;
                         const cy_shift: i64 = if (ny < 0) -1 else if (ny >= SPAN) 1 else 0;
@@ -498,7 +507,7 @@ fn add_edge_flags(target_chunk: *Chunk, coord: Coordinate) void {
                         const n_bx: u4 = @intCast(@as(u32, @bitCast(nx)) % SPAN);
                         const n_by: u4 = @intCast(@as(u32, @bitCast(ny)) % SPAN);
 
-                        // Call base procedural logic. Adding ores isn't necessary!
+                        // Call base procedural logic.
                         const sprite = procedural.get_base_sprite_type(
                             vec1,
                             vec2,
@@ -506,8 +515,8 @@ fn add_edge_flags(target_chunk: *Chunk, coord: Coordinate) void {
                             @intCast(new_coord.suffix[1]),
                             @intCast(n_bx),
                             @intCast(n_by),
-                        );
-                        break :blk sprite.is_foundation();
+                        ).sprite;
+                        break :blk should_have_edge_flags(sprite, current_sprite);
                     };
 
                     if (set_flag_bit) flags |= types.EdgeFlags.get_flag_bit(dx, dy);
@@ -516,6 +525,11 @@ fn add_edge_flags(target_chunk: *Chunk, coord: Coordinate) void {
             target_chunk.blocks[id].edge_flags = flags;
         }
     }
+}
+
+inline fn should_have_edge_flags(sprite: Sprite, current_sprite: Sprite) bool {
+    _ = .{current_sprite};
+    return sprite.is_foundation();
 }
 
 // /// The 16-step ascendent projection read loop thingy

@@ -24,15 +24,31 @@ pub const USE_BASE_HEATMAP = false;
 /// Determines whether to use a heatmap or not for ore generation.
 pub const USE_ORE_HEATMAP = false;
 
+/// Options for the FBM+Worley implementation.
+const TerrainOptions = struct {
+    cell_size: comptime_float,
+    fbm_shift_size: comptime_float,
+    horizontally_wide: bool,
+    use_f2_f1: bool = true,
+};
+
+/// Base data for sprites
+const BaseTerrainData = struct {
+    sprite: Sprite,
+    moisture: f32,
+    density: f32,
+};
+
 /// Generates a block for seeding (based on previous procedural generation logic).
-pub inline fn generate_block_from_values(moisture: f64, density: f64) Sprite {
+/// The terms moisture/density are used extremely loosely here.
+pub inline fn generate_sprite_from_values(moisture: f64, density: f64) Sprite {
     if (USE_BASE_HEATMAP) return @enumFromInt(256 + @as(u20, @intFromFloat(density * 256.0))); // sprite IDs from 256-512 create a neat little heatmap
 
-    if (density < 0.45 or density > 0.9) return if (moisture > 0.96) .darkblue_stone else .none;
-    if (moisture < 0.3) return .stone;
-    if (moisture < 0.5) return .green_stone;
-    if (moisture < 0.8) return .seagreen_stone;
-    return .blue_stone;
+    if (density < 0.2 or density > 0.9) return if (moisture > 0.96 and moisture < 0.99) .strange_stone else .none;
+    if (moisture < 0.5) return .stone;
+    if (moisture < 0.52 and density < 0.7) return .green_stone;
+    if (moisture < 0.54 and density > 0.4) return .seagreen_stone;
+    return .stone;
 }
 
 /// Returns a base sprite type. Does 3 passes:
@@ -40,25 +56,33 @@ pub inline fn generate_block_from_values(moisture: f64, density: f64) Sprite {
 /// 1. Generate initial terrain density value. (moisture TODO or remove)
 /// 2. Generate a block from density value.
 /// 3. Generates structures (TODO)
-pub fn get_base_sprite_type(vec1: v2u64, vec2: v2u64, chunk_x: u32, chunk_y: u32, block_x: u32, block_y: u32) Sprite {
+pub fn get_base_sprite_type(vec1: v2u64, vec2: v2u64, chunk_x: u32, chunk_y: u32, block_x: u32, block_y: u32) BaseTerrainData {
     const moisture = get_fbm_worley_value(
         vec2,
         chunk_x * 16 + block_x,
         chunk_y * 16 + block_y,
-        512.0,
-        24.0,
-        false,
+        .{
+            .cell_size = 256.0,
+            .fbm_shift_size = 80.0,
+            .horizontally_wide = false,
+        },
     );
     const density = get_fbm_worley_value(
         vec1,
         chunk_x * 16 + block_x,
         chunk_y * 16 + block_y,
-        60.0,
-        24.0,
-        true,
+        .{
+            .cell_size = 40.0,
+            .fbm_shift_size = 24.0,
+            .horizontally_wide = true,
+        },
     );
 
-    return generate_block_from_values(moisture, density);
+    return .{
+        .sprite = generate_sprite_from_values(moisture, density),
+        .moisture = moisture,
+        .density = density,
+    };
 }
 
 /// Returns a value between 0-1, used as a terrain starting point for the default depth (D = 3).
@@ -67,9 +91,9 @@ pub fn get_base_sprite_type(vec1: v2u64, vec2: v2u64, chunk_x: u32, chunk_y: u32
 ///
 /// This function uses fractal brownian motion with value noise in an initial pass for domain warping,
 /// then Worley noise to generate terrain.
-fn get_fbm_worley_value(seed_vector: v2u64, x: u32, y: u32, cell_size: comptime_float, fbm_shift_size: comptime_float, horizontally_wide: bool) f32 {
+fn get_fbm_worley_value(seed_vector: v2u64, x: u32, y: u32, options: TerrainOptions) f32 {
     const fx = @as(f32, @floatFromInt(x));
-    const fy = @as(f32, @floatFromInt(if (horizontally_wide) y * 2 else y)); // scaled Y
+    const fy = @as(f32, @floatFromInt(if (options.horizontally_wide) y * 2 else y)); // scaled Y
 
     // buncha config options
     const h_stretch = 1.5;
@@ -78,7 +102,7 @@ fn get_fbm_worley_value(seed_vector: v2u64, x: u32, y: u32, cell_size: comptime_
     var warp_y: f32 = 0;
 
     comptime var freq: u64 = 1;
-    comptime var amp = fbm_shift_size;
+    comptime var amp = options.fbm_shift_size;
     // FBM warping
     inline for (0..fbm_octaves) |_| {
         const noise = get_dual_value_noise(seed_vector, x * freq, y * freq); // make shifting smooth!
@@ -90,10 +114,10 @@ fn get_fbm_worley_value(seed_vector: v2u64, x: u32, y: u32, cell_size: comptime_
 
     const wx = fx + warp_x;
     const wy = fy + warp_y;
-    const cell_w = cell_size * h_stretch;
+    const cell_w = options.cell_size * h_stretch;
 
     const cx_f = @floor(wx / cell_w);
-    const cy_f = @floor(wy / cell_size);
+    const cy_f = @floor(wy / options.cell_size);
     const cx_i = @as(i64, @intFromFloat(cx_f));
     const cy_i = @as(i64, @intFromFloat(cy_f));
 
@@ -112,7 +136,7 @@ fn get_fbm_worley_value(seed_vector: v2u64, x: u32, y: u32, cell_size: comptime_
             const off_y = @as(f32, @floatFromInt(h / POW_2_32)) / POW_2_32;
 
             const px = (@as(f32, @floatFromInt(cx_i + ox)) + off_x) * cell_w;
-            const py = (@as(f32, @floatFromInt(cy_i + oy)) + off_y) * cell_size;
+            const py = (@as(f32, @floatFromInt(cy_i + oy)) + off_y) * options.cell_size;
 
             const dx = wx - px;
             const dy = wy - py;
@@ -127,7 +151,8 @@ fn get_fbm_worley_value(seed_vector: v2u64, x: u32, y: u32, cell_size: comptime_
         }
     }
 
-    const density = (@sqrt(d2_sq) - @sqrt(d1_sq)) / cell_size;
+    var density = if (options.use_f2_f1) @sqrt(d2_sq) - @sqrt(d1_sq) else @max(0.0, @sqrt(d1_sq));
+    density /= options.cell_size;
     return @min(1.0, density);
 }
 
@@ -170,31 +195,36 @@ fn get_dual_value_noise(seed: v2u64, x: u64, y: u64) @Vector(2, f32) {
 /// Continues from steps 1-3 in `get_base_sprite_type()`.
 ///
 /// 4. Disperses ores using Worley noise. Assumes that `is_stone()` was checked before calling.
-pub fn add_ores(sprite_type: Sprite, seed_vector: v2u64, rng1: *seeding.ChaCha12, x: u32, y: u32) Sprite {
-    var new_sprite = sprite_type;
+pub fn add_ores(base_data: BaseTerrainData, seed_vector: v2u64, rng1: *seeding.ChaCha12, x: u32, y: u32) Sprite {
+    var new_sprite = base_data.sprite;
     _ = rng1;
     // Generate new density: the seed vector should be different from the `get_fbm_worley_density()` vector.
     const v = get_fbm_worley_value(
         seed_vector,
         x,
         y,
-        24.0,
-        30.0,
-        false,
+        .{
+            .cell_size = 24.0,
+            .fbm_shift_size = 30.0,
+            .horizontally_wide = false,
+            .use_f2_f1 = false,
+        },
     );
 
     if (USE_ORE_HEATMAP) return @enumFromInt(256 + @as(u20, @intFromFloat(v * 256.0))); // sprite IDs from 256-512 create a neat little heatmap
 
-    if (is_within(v, 0.5, 0.6)) {
-        new_sprite = .iron;
-    } else if (is_within(v, 0.88, 0.92)) {
-        new_sprite = .silver;
-    } else if (is_within(v, 0.4, 0.41)) {
-        new_sprite = .gold;
+    if (base_data.density > 0.45 and base_data.density < 0.6) {
+        if (is_within(v, 0.6, 0.68)) {
+            new_sprite = .iron;
+        } else if (is_within(v, 0.82, 0.88)) {
+            new_sprite = .silver;
+        } else if (base_data.density > 0.54 and is_within(v, 0.3, 0.4)) {
+            new_sprite = .gold;
+        }
     }
 
-    if (sprite_type == .stone and is_within(v, 0.6, 0.63)) {
-        new_sprite = .iron; // higher iron odds in plain stone
+    if (base_data.sprite == .strange_stone and is_within(v, 0.6, 0.63)) {
+        new_sprite = .iron; // higher iron odds from strange stone
     }
 
     return new_sprite;

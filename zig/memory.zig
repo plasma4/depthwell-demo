@@ -3,6 +3,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("types.zig");
 const logger = @import("logger.zig");
+const player = @import("player.zig");
 const ColorRGBA = @import("color_rgba.zig").ColorRGBA;
 const seeding = @import("seeding.zig");
 const world = @import("world.zig");
@@ -42,7 +43,7 @@ pub const GameState = extern struct {
     /// Represents the camera's movement in a frame (derivative of `camera_pos`).
     last_camera_pos: v2i64 = .{ 0, 0 },
     /// Represents the camera's zoom scale.
-    camera_scale: f64 = 1.0,
+    camera_scale: f64 = player.CAMERA_MIN_ZOOM,
     /// Represents the camera's zoom scale change rate (multiplier, acts as derivative of camera_scale change).
     camera_scale_change: f64 = 1.0,
     /// Represents how many layers deep the player is (defaults to 3).

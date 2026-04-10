@@ -9,7 +9,7 @@ const TILE_SIZE: f32 = 16.0;
 const PIXEL_UV_SIZE: f32 = 1.0 / TILE_SIZE;
 const ATLAS_WIDTH: f32 = TILE_SIZE * TILES_PER_ROW;
 const ATLAS_HEIGHT: f32 = TILE_SIZE * TILES_PER_COLUMN;
-const TEXTURE_BLEEDING_EPSILON = 0.5 / ATLAS_WIDTH;
+// const TEXTURE_BLEEDING_EPSILON = 0 / TILE_SIZE;
 
 // See EdgeFlags in zig/types.zig.
 const EDGE_TOP: u32         = 0x02u;
@@ -81,10 +81,11 @@ fn unpack_tile(data: TileData) -> UnpackedTile {
     out.sprite_id = extractBits(data.word0, 0u, 20u);
     out.hp = extractBits(data.word0, 20u, 4u);
     out.edge_flags = extractBits(data.word0, 24u, 8u);
+    // out.edge_flags = 0u; // test
 
     let light_u = extractBits(data.word1, 0u, 8u);
-    out.light = f32(light_u) / 5000.0 + 1.0; // allow for (and expect) light > 1, no longer square-rooted
-
+    // out.light = f32(light_u) / 5000.0 + 1.0; // allow for (and expect) light > 1, no longer square-rooted
+    out.light = 1.0; // DISABLED
     // Contains light in the first 8 bytes and seed in the next 24, since all 32 bits are technically random we use murmurmix32 to mix these quite simply with decent results!
     out.seed = murmurmix32(data.word1); // mix, since light is directly visible and technically, the seed is only 24 bits
     out.seed2 = murmurmix32(out.seed);
@@ -127,11 +128,11 @@ fn vs_main(
         );
 
         // Prevent "texture bleeding"
-        let safe_local_pos = clamp(local_pos, vec2f(TEXTURE_BLEEDING_EPSILON), vec2f(1.0 - TEXTURE_BLEEDING_EPSILON));
+        // let local_pos = clamp(local_pos, vec2f(TEXTURE_BLEEDING_EPSILON), vec2f(1.0 - TEXTURE_BLEEDING_EPSILON));
 
         let atlas_uv = vec2f(
-            (1 + safe_local_pos.x) * TILE_SIZE / ATLAS_WIDTH,
-            (0 + safe_local_pos.y) * TILE_SIZE / ATLAS_HEIGHT
+            (1 + local_pos.x) * TILE_SIZE / ATLAS_WIDTH,
+            (0 + local_pos.y) * TILE_SIZE / ATLAS_HEIGHT
         );
 
         out.position = vec4f(ndc, 0.1, 1.0);
@@ -171,11 +172,11 @@ fn vs_main(
     let sprite_row = f32(tile.sprite_id / u32(TILES_PER_ROW));
 
     // Prevent "texture bleeding"
-    let safe_local_pos = clamp(local_pos, vec2f(TEXTURE_BLEEDING_EPSILON), vec2f(1.0 - TEXTURE_BLEEDING_EPSILON));
+    // let local_pos = clamp(local_pos, vec2f(TEXTURE_BLEEDING_EPSILON), vec2f(1.0 - TEXTURE_BLEEDING_EPSILON));
 
     let atlas_uv = vec2f(
-        (sprite_col + safe_local_pos.x) * TILE_SIZE / ATLAS_WIDTH,
-        (sprite_row + safe_local_pos.y) * TILE_SIZE / ATLAS_HEIGHT
+        (sprite_col + local_pos.x) * TILE_SIZE / ATLAS_WIDTH,
+        (sprite_row + local_pos.y) * TILE_SIZE / ATLAS_HEIGHT
     );
 
     out.position = vec4f(ndc, 0.2, 1.0);
@@ -193,7 +194,7 @@ fn vs_main(
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var erode_mask: u32 = 1u;
-    if (in.edge_flags != 0xFF) {
+    if (in.edge_flags != 0xFFu) {
         erode_mask = erosion(in.local_uv, in.edge_flags, in.seed2);
         if (erode_mask == 0u) {
             discard; // discard early
@@ -205,7 +206,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
     // technically I could optimize this part
     // but it doesn't really matter because its for procedural generation testing anyway
-    if (in.sprite_id >= 256 && in.sprite_id <= 512) {
+    if (in.sprite_id >= 256u && in.sprite_id <= 512u) {
         // Heatmap logic!
         // if (in.sprite_id == 256) { discard; }
         let color = (f32(in.sprite_id) - 256.0) / 256.0;
@@ -266,15 +267,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let extracted_a = f32(extractBits(in.seed, 4u, 3u));
     let l_nudge = extracted_l / 15.0;
     let a_nudge = extracted_a / 7.0;
-    let b_nudge = f32(extractBits(in.seed, 7u, 3u)) / 7.0;
+    let b_nudge = f32(extractBits(in.seed, 7u, 3u)) / 4.0;
 
-    lch.x += (l_nudge - 0.5) * 0.1; // shift lightness (0-1)
-    lch.y += a_nudge * 0.01; // shift chroma, which acts similar to saturation (0-1)
-    lch.z += (b_nudge - 0.5) * 0.15; // shift hue (in RADIANS)
-
+    // DISABLED
+    // lch.x += (l_nudge - 0.5) * 0.1; // shift lightness (0-1)
+    // lch.y += a_nudge * 0.01; // shift chroma, which acts similar to saturation (0-1)
+    // lch.z += (b_nudge - 0.5) * 0.15; // shift hue (in RADIANS)
 
     var final_rgb = vec3f(0.0);
-    if (in.edge_flags != 0xFF) {
+    if (in.edge_flags != 0xFFu) {
         // add the edge darkening and base light value, with the function using bits 10-16
         let darkening = calculate_edge_darkening(in.local_uv, in.edge_flags, in.seed);
         lch.x = min(1.0, lch.x * (1.0 - darkening) * in.light);
@@ -531,7 +532,7 @@ fn erosion(local_uv: vec2f, edge_flags: u32, seed2: u32) -> u32 {
     return 1u;
 }
 
-// Number of 1 bits in a u8 (possibly useful for edge flags, currently unused)
+// Number of 1 bits in a u8 (possibly useful for edge flags, currently unused).
 fn popcount8(v: u32) -> u32 {
     var n = v;
     n = n - ((n >> 1u) & 0x55u);
@@ -543,8 +544,8 @@ fn popcount8(v: u32) -> u32 {
 fn calculate_edge_darkening(local_uv: vec2f, edge_flags: u32, seed: u32) -> f32 {
     var darkening = 0.0;
     let edge_width = 0.20 + f32(extractBits(seed, 10u, 3u)) / 32.0;
-    let edge_strength = 0.2 + f32(extractBits(seed, 13u, 3u)) / 48.0;
-    let corner_width = 0.3;
+    let edge_strength = 0.25 + f32(extractBits(seed, 13u, 3u)) / 64.0;
+    let corner_width = 0.5;
 
     // Curvy shadow gradient
     if ((edge_flags & EDGE_TOP) == 0u) {
@@ -560,22 +561,23 @@ fn calculate_edge_darkening(local_uv: vec2f, edge_flags: u32, seed: u32) -> f32 
         darkening = max(darkening, (1.0 - smoothstep(0.0, edge_width, 1.0 - local_uv.x)) * edge_strength);
     }
 
-    if ((edge_flags & EDGE_TOP_LEFT) == 0u || ((edge_flags & EDGE_TOP) == 0u && (edge_flags & EDGE_LEFT) == 0u)) {
-        let corner_dist = length(local_uv);
-        darkening = max(darkening, (1.0 - smoothstep(0.0, corner_width * 1.414, corner_dist)) * edge_strength * 1.2);
-    }
-    if ((edge_flags & EDGE_TOP_RIGHT) == 0u || ((edge_flags & EDGE_TOP) == 0u && (edge_flags & EDGE_RIGHT) == 0u)) {
-        let corner_dist = length(vec2f(1.0 - local_uv.x, local_uv.y));
-        darkening = max(darkening, (1.0 - smoothstep(0.0, corner_width * 1.414, corner_dist)) * edge_strength * 1.2);
-    }
-    if ((edge_flags & EDGE_BOTTOM_LEFT) == 0u || ((edge_flags & EDGE_BOTTOM) == 0u && (edge_flags & EDGE_LEFT) == 0u)) {
-        let corner_dist = length(vec2f(local_uv.x, 1.0 - local_uv.y));
-        darkening = max(darkening, (1.0 - smoothstep(0.0, corner_width * 1.414, corner_dist)) * edge_strength * 1.2);
-    }
-    if ((edge_flags & EDGE_BOTTOM_RIGHT) == 0u || ((edge_flags & EDGE_BOTTOM) == 0u && (edge_flags & EDGE_RIGHT) == 0u)) {
-        let corner_dist = length(1.0 - local_uv);
-        darkening = max(darkening, (1.0 - smoothstep(0.0, corner_width * 1.414, corner_dist)) * edge_strength * 1.2);
-    }
+    // Additional corner darkening
+    // if ((edge_flags & EDGE_TOP_LEFT) == 0u || ((edge_flags & EDGE_TOP) == 0u && (edge_flags & EDGE_LEFT) == 0u)) {
+    //     let corner_dist = length(local_uv);
+    //     darkening = max(darkening, (1.0 - smoothstep(0.0, corner_width * 1.414, corner_dist)) * edge_strength * 1.2);
+    // }
+    // if ((edge_flags & EDGE_TOP_RIGHT) == 0u || ((edge_flags & EDGE_TOP) == 0u && (edge_flags & EDGE_RIGHT) == 0u)) {
+    //     let corner_dist = length(vec2f(1.0 - local_uv.x, local_uv.y));
+    //     darkening = max(darkening, (1.0 - smoothstep(0.0, corner_width * 1.414, corner_dist)) * edge_strength * 1.2);
+    // }
+    // if ((edge_flags & EDGE_BOTTOM_LEFT) == 0u || ((edge_flags & EDGE_BOTTOM) == 0u && (edge_flags & EDGE_LEFT) == 0u)) {
+    //     let corner_dist = length(vec2f(local_uv.x, 1.0 - local_uv.y));
+    //     darkening = max(darkening, (1.0 - smoothstep(0.0, corner_width * 1.414, corner_dist)) * edge_strength * 1.2);
+    // }
+    // if ((edge_flags & EDGE_BOTTOM_RIGHT) == 0u || ((edge_flags & EDGE_BOTTOM) == 0u && (edge_flags & EDGE_RIGHT) == 0u)) {
+    //     let corner_dist = length(1.0 - local_uv);
+    //     darkening = max(darkening, (1.0 - smoothstep(0.0, corner_width * 1.414, corner_dist)) * edge_strength * 1.2);
+    // }
 
     return darkening;
 }

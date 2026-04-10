@@ -66,10 +66,10 @@ export function initInput(): InputState {
     window.addEventListener("keydown", (e: KeyboardEvent) => {
         if (e.repeat) return;
         // Ramble here. Actually, for some reason, I tested this out, and it turns out that MacOS just bypasses all of this if you three-fingers swipe up. WHY?????? I have no clue, and I also can't deal with it. By disabling these keys it's probably also going to mess with someone's screen reader or something. Ah well.
-        // if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) {
-        //     reset(); // prevent weird shenanigans with lifting a key
-        //     return;
-        // }
+        if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) {
+            // reset(); // prevent weird shenanigans with lifting a key
+            return;
+        }
 
         // console.log(e.code);
         const bit = keyMap[e.code]; // apparently .code is more robust as it's based on physical keyboard locations, which is what we want here
