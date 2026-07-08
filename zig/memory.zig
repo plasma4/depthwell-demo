@@ -54,7 +54,10 @@ pub const SeedType = enum {
 
 /// Non-pointer data (short known length) representing part of the game state.
 /// Data is reserved for numbers or positions that are guaranteed to take a constant memory size.
-/// Important data is meant to be placed at the start with less important data later. Data can be rearranged, but requires using the -Dgen-enums for pointer locations to be reflected in TypeScript. See game_state_offsets in types.zig for enum export details.
+///
+/// Important data is meant to be placed at the start with less important data later.
+/// Data can be rearranged or added, as long as -Dgen-enums regenerates TypeScript values.
+/// See `game_state_offsets` in `types.zig` for enum export details.
 pub const GameState = extern struct {
     /// Represents the player's subpixel position within the CURRENT chunk (0 to 4095), from the CENTER of the sprite.
     player_pos: Vec2i align(MAIN_ALIGN_BYTES) = .{ 0, 0 },
@@ -255,7 +258,7 @@ pub const Block = packed struct(u128) {
     id: Sprite,
     /// Edge flags: explains details for neighbors (for both shader and procedural generation).
     /// Starts from top left, then middle left, and ending at bottom right (skipping itself).
-    /// See types/types.zig for more details on correspondence.
+    /// See `types/types.zig` for more details on correspondence.
     ///
     /// - A 1 bit for a solid block ordinarily indicates an edge with an adjacent solid block.
     /// - A 1 bit for a liquid block means that there is either solid or liquid adjacent.
@@ -293,7 +296,7 @@ pub const Block = packed struct(u128) {
     ///   - bits 3-6: left adjacent liquid volume (0-15; 0 means no liquid to the left)
     ///   - bits 7-10: right adjacent liquid volume (0-15; 0 means no liquid to the right)
     waterlogged: u12 = 0,
-    /// Column of this tile within its `Assembly` footprint (0-based, 0..w-1). See zig/types/assembly.zig.
+    /// Column of this tile within its `Assembly` footprint (0-based, 0..w-1). See `zig/types/assembly.zig`.
     /// CPU-render-only: consumed by variation.resolveVariant() for `.group` sprites; never uploaded to the shader.
     group_x: u4 = 0,
     /// Row of this tile within its `Assembly` footprint (0-based, 0..h-1). See `group_x`.
@@ -678,7 +681,7 @@ pub inline fn scratchAsSlice(comptime T: type) []T {
     return std.mem.bytesAsSlice(T, bytes);
 }
 
-/// Runs a set of tests (which should be called from JS) for the scratch allocation. (See root.zig for export logic.)
+/// Runs a set of tests (which should be called from JS) for the scratch allocation. (See `root.zig` for export logic.)
 pub fn runScratchAllocTests() void {
     scratchReset();
 

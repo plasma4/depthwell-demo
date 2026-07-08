@@ -106,15 +106,17 @@ pub fn generate(
     const i_wx = @as(i32, @bitCast(wx));
     const i_wy = @as(i32, @bitCast(wy));
 
-    // bounds already carry the hashed anchor (see getBounds), so no re-rolls of `state` are needed.
+    // bounds already carry the hashed anchor (see getBounds), so no re-rolls of `state` are needed
     const struct_x = i_wx - bounds.x_start;
     const struct_y = i_wy - bounds.y_start;
     if (struct_x < 0 or struct_y < 0 or struct_x >= @as(i32, size_x) or struct_y >= @as(i32, size_y)) return null;
 
-    // resolve this cell's body sprite FIRST (cheap); only body cells pay for the terrain gate.
+    // resolve this cell's body sprite FIRST (cheap); only body cells pay for the terrain gate
     const body: ?Sprite = blk: {
         // Draw the wooden trunk! Simple column below the canopy down to the base.
         if (struct_x == trunk_x and struct_y >= canopy_rows) break :blk .wood;
+        // Don't let any blocks be horizontally adjacent to the trunk, because it looks weird.
+        if ((struct_x == trunk_x - 1 or struct_x == trunk_x + 1) and struct_y >= canopy_rows) break :blk .none;
         // Generate the canopy part; basically a rounded blob of leaves centered over the trunk (the GREEN).
         if (struct_y < canopy_rows) {
             const dx = struct_x - trunk_x;

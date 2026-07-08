@@ -7,7 +7,7 @@
 //! Spawn from elsewhere via `addParticle()` or `spawnBurst()`/`spawnSpriteBurst()`/`maybeSpawnSpriteBurst()`.
 const std = @import("std");
 const dw = @import("../root.zig");
-const palette = @import("particle_colors.zig");
+const palette = @import("sprite_colors.zig");
 
 const Sprite = dw.Sprite;
 const Vec2f32 = dw.utils.Vec2f32;
@@ -87,20 +87,6 @@ pub fn addParticle(particle: Particle) void {
     next_slot = (next_slot + 1) & (MAX_PARTICLES - 1);
 }
 
-/// The unique atlas colors of a sprite's tile as OKLCH+alpha tints (empty for unknown/blank tiles).
-pub fn colorsOf(s: Sprite) []const [4]f32 {
-    const tile = s.asEntity();
-    if (tile >= palette.TILE_COUNT) return &.{};
-    return palette.colors[palette.tile_offsets[tile]..palette.tile_offsets[tile + 1]];
-}
-
-/// The single most common opaque color of a sprite's tile as an OKLCH+alpha tint (opaque white for unknown tiles).
-pub fn dominantColorOf(s: Sprite) Vec4f32 {
-    const tile = s.asEntity();
-    if (tile >= palette.TILE_COUNT) return .{ 1.0, 0.0, 0.0, 1.0 };
-    return palette.dominant[tile];
-}
-
 /// Spawns `config.count` particles radiating from `origin` (viewport pixels) in random directions.
 /// Each picks a uniformly random color from `colors` (white if empty), a random size within the
 /// configured range, and a random starting rotation that keeps spinning until it fades out.
@@ -132,7 +118,7 @@ pub fn spawnBurst(origin: Vec2f32, colors: []const [4]f32, config: BurstConfig) 
 
 /// Spawns a burst colored from the given sprite's atlas tile (see `colorsOf()`).
 pub fn spawnSpriteBurst(s: Sprite, origin: Vec2f32, config: BurstConfig) void {
-    spawnBurst(origin, colorsOf(s), config);
+    spawnBurst(origin, palette.colorsOf(s), config);
 }
 
 /// Rolls `chance` (0-1) and spawns a sprite burst on success.

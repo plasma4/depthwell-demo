@@ -12,8 +12,8 @@ const Vec2f = dw.utils.Vec2f;
 
 /// Contains booleans for all possible menus and whether they are open or not.
 const MenusList = struct {
-    furnace: bool = false,
     corecraft: bool = false,
+    furnace: bool = false,
 
     /// Returns true if any menu is enabled and false otherwise.
     pub fn isAnyEnabled(self: @This()) bool {

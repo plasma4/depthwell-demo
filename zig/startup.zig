@@ -1,4 +1,5 @@
-//! Contains initialization and render update functions. See root.zig for exporting these functions (and others) to WASM.
+//! Contains initialization and render update functions.
+//! See `root.zig` for exporting these functions (and others) to WASM.
 const std = @import("std");
 const dw = @import("root.zig");
 const memory = dw.memory;
@@ -31,36 +32,57 @@ comptime {
     }
 }
 
+/// Whether `init()` has already been called (from `main()` the first time).
 var alreadyStarted = false;
 
-/// Initializes the game, setting up seeding and spawn logic!
-pub fn init() void {
-    if (!alreadyStarted) {
+/// Resets various datatypes and allocators after an instance of the game has already started.
+/// (Restores the seed value though!)
+fn resetAfterStart() void {
+    if (!world.arena.reset(.retain_capacity)) memory.oom();
+    const saved_seed = memory.game.seed;
+    memory.game = .{};
+    memory.game.seed = saved_seed;
+
+    @import("menus/furnace.zig").reset();
+    @import("menus/corecraft.zig").reset();
+    dw.particles.reset();
+    world.SimBuffer.reset();
+    dw.water.reset();
+    // dropped item ring buffer lives in the world arena reset above; detach instead of freeing
+    dw.inventory.dropped_items = .{};
+
+    dw.inventory.reset();
+
+    // Clear paths in quad_cache to prevent depth piling up on reset/reseed
+
+    world.clearCaches(true);
+    world.initArenaAllocatedStructures();
+}
+
+/// Initializes the game, resets datatypes, and sets up seeding and spawn logic!
+/// Use `skip_setup` to only call `resetAfterStart()`.
+pub fn init(skip_setup: bool) void {
+    if (alreadyStarted or skip_setup) {
+        alreadyStarted = true;
+        resetAfterStart();
+        if (skip_setup) return;
+    } else {
         alreadyStarted = true;
         logger.log(@src(), "Hello from Zig!", .{});
-    } else {
-        if (!world.arena.reset(.retain_capacity)) memory.oom();
-
-        @import("menus/furnace.zig").reset();
-        @import("menus/corecraft.zig").reset();
-        dw.particles.reset();
-        world.SimBuffer.reset();
-        world.mod_store.clear();
-        dw.water.reset();
-
-        memory.game = .{};
-        world.clearCaches(true);
+        world.initArenaAllocatedStructures();
     }
 
-    var temp_seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, 1));
+    const seed = memory.game.seed;
+    var temp_seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, 1));
     inline for (&memory.game.seed2) |*s| {
         s.* = temp_seed.next();
     }
 
     // Start off by determining where the player starts off exactly with layer pushing
-    var rng = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, 2));
-    dw.sound.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, 3));
-    dw.particles.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, 4));
+    dw.sound.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, 2));
+    dw.particles.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, 3));
+
+    var rng = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, 100));
     for (0..STARTING_ZOOM_TIMES) |_| {
         // Set the player position to somewhere random in the current chunk
         if (SET_PLAYER_SPAWN_RANDOMLY) memory.game.setPlayerPosDumb(.{

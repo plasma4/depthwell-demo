@@ -1,7 +1,7 @@
 //! Multi-tile "assembly" logic: an assembly is a rectangular group of tiles that is treated as one unit
 //! (but stored as a single generic base `Sprite` in every cell, potentially across `Chunk`s).
 //! Each cell records its position within the footprint in `Block.group_x`/`group_y`,
-//! and the final per-cell atlas frame is resolved at RENDER time by the `.group` variant (see zig/types/variation.zig).
+//! and the final per-cell atlas frame is resolved at RENDER time by the `.group` variant (see `zig/types/variation.zig`).
 //!
 //! No need to register single-tile blocks; can't have assemblies larger than 15x15.
 const std = @import("std");

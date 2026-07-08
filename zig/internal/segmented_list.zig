@@ -89,7 +89,7 @@ const Allocator = std.mem.Allocator;
 // box_index = customer_index + prealloc - 2 ** (log2(prealloc) + 1 + shelf)
 // shelf_size = prealloc * 2 ** (shelf_index + 1)
 
-/// (Modified to use `MAIN_ALIGN` from memory.zig for data alignment.)
+/// (Modified to use `MAIN_ALIGN` from `memory.zig` for data alignment.)
 /// May be broken with frees.
 ///
 /// This is a stack data structure where pointers to indexes have the same lifetime as the data structure

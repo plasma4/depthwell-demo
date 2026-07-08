@@ -292,8 +292,15 @@ pub fn draw() void {
         });
 
         // Draw the actual item now...
+
+        var item = recipe.output.item;
+        if (item == .pickaxe) {
+            // draw the better pickaxe type they are crafting
+            item = @enumFromInt(@intFromEnum(Sprite.pickaxe) + @intFromEnum(dw.mining.pickaxe_type) + 1);
+        }
+
         addEntity(.{
-            .sprite = recipe.output.item,
+            .sprite = item,
             .position = .{ @floatCast(center[0]), @floatCast(center[1]) },
             .size = @as(f32, @floatCast(SLOT - 4.0)),
             .lcha = .{ 1.0, if (craftable) 0.0 else -1.0, 0.0, 1.0 },

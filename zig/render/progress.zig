@@ -9,7 +9,7 @@ const toSize = dw.entity.toSizeUv;
 
 /// Represents 8deg in radians.
 /// The progress bar sprites have been pre-made to be shifted by 8 degrees per 4-pixel bar.
-const HUE_AMOUNT = 8 * (2.0 * std.math.pi / 360.0); // 8deg*2pi/360
+const HUE_AMOUNT = 8 * (std.math.tau / 360.0); // 8deg*2pi/360
 
 /// Draws a progress bar with any width > 8 using entities.
 pub fn drawBar(

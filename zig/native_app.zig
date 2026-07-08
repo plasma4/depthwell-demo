@@ -38,9 +38,9 @@ entity_pipeline: ?*gpu.RenderPipeline = null,
 app_thread: mach.Thread,
 window: mach.ObjectID,
 
-// ------
+// ----
 // IO and Clock State
-// ------
+// ----
 
 pub var io: std.Io = undefined;
 pub var start_timestamp: std.Io.Timestamp = undefined;

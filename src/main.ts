@@ -1,9 +1,11 @@
 /// <reference types="vite/client" />
 "use strict";
+import { GameEngine } from "./engine";
+import * as Seeding from "./seeding";
+import { KeyBits, game_state_offsets } from "./enums";
 
 // const is_dev = import.meta.env.DEV;
 const is_dev = true; // TODO use the other def in production
-
 /**
  * Debug/testing options. Some options are automatically based on the development mode.
  */
@@ -40,9 +42,6 @@ if (!adapter) {
         "WebGPU is supported by the browser, but no compatible GPU was found. Your GPU may be too old to play this game.",
     );
 }
-
-import { GameEngine } from "./engine";
-import { KeyBits, game_state_offsets } from "./enums";
 
 globalThis.Zig = { KeyBits, game_state_offsets };
 if (is_dev) {
@@ -149,6 +148,7 @@ if (!CONFIG.noAlertOnError) {
         }
 
         alert(errorMessage);
+        engine.saveManager?.releaseTabExclusiveLock();
     };
 
     window.onerror = (message, source, lineno, colno, error) => {
@@ -192,6 +192,59 @@ let lastFrameTime = performance.now(),
     accumulator = 0,
     frame = 0;
 if (CONFIG.exportEngine) (globalThis as any).engine = engine;
+
+/** Delay in milliseconds between the *completion* of one autosave and the start of the next. */
+const AUTOSAVE_INTERVAL_MS = 15000;
+void (async () => {
+    // use chained loop to prevent autosave stacking
+    while (true) {
+        await new Promise((resolve) =>
+            setTimeout(resolve, AUTOSAVE_INTERVAL_MS),
+        );
+        await engine.saveManager.autosave();
+    }
+})();
+
+// Emergency save when the tab is backgrounded or closing.
+// On 'hidden' the page is still alive: snapshot to the worker's emergency slot instantly, then run
+// a normal durable autosave too (a committed save clears the slot again).
+document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+        engine.saveManager.emergencySaveSync();
+        void engine.saveManager.autosave();
+    }
+});
+// On pagehide only the synchronous export + zero-copy worker transfer can be relied upon.
+window.addEventListener("pagehide", () =>
+    engine.saveManager.emergencySaveSync(),
+);
+
+/** Serializes the current game and prompts a download of the gzipped save file. */
+async function downloadSaveFile() {
+    const blob = await engine.saveManager.exportToBlob();
+    const url = URL.createObjectURL(new Blob([blob as BlobPart]));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `depthwell.dat`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+/** Prompts the user for a save file and loads it into the running game. */
+function uploadSaveFile() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".dat,application/octet-stream";
+    input.onchange = async () => {
+        const file = input.files?.[0];
+        if (!file) return;
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const ok = await engine.saveManager.importFromBytes(bytes);
+        if (!ok) console.log("Save import failed.");
+    };
+    input.click();
+}
+
 if (CONFIG.verbose) {
     console.log("Engine initialized successfully:", engine);
     console.log("Exported functions and memory:", engine.exports);
@@ -432,6 +485,22 @@ if (is_dev && engine.isDebug) {
         wrapper.appendChild(input);
         container.appendChild(wrapper);
     });
+
+    // Save-system debug controls.
+    const addSaveButton = (name: string, onClick: () => void) => {
+        const btn = document.createElement("button");
+        btn.textContent = name;
+        btn.onclick = onClick;
+        container.appendChild(btn);
+    };
+    addSaveButton("Manual save", () => engine.saveManager.save());
+    addSaveButton("Manual load", async () => await engine.saveManager.load());
+    addSaveButton("Reseed", async () => {
+        await engine.setSeed(Seeding.makeSeed(100));
+        engine.exports.init();
+    });
+    addSaveButton("Export file", () => downloadSaveFile());
+    addSaveButton("Import file", () => uploadSaveFile());
 
     document.body.appendChild(container);
 }

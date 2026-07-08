@@ -6,6 +6,7 @@ const logger = dw.logger;
 const sprite = dw.sprite;
 const Sprite = sprite.Sprite;
 const mouse = dw.mouse;
+const palette = @import("../render/sprite_colors.zig");
 
 const Vec2f32 = dw.utils.Vec2f32;
 const Coordinate = dw.world.Coordinate;
@@ -85,6 +86,22 @@ pub var last_named_sprite: Sprite = .unselected;
 pub var name_wave: f32 = 0.0;
 /// Free-running phase (radians) driving the name banner's traveling wave.
 var name_phase: f32 = 0.0;
+
+/// Resets the selected-item name banner's ripple animation to its idle, page-load state.
+/// Called on load so a restored game doesn't inherit the previous session's banner phase.
+pub fn resetNameBanner() void {
+    last_named_sprite = .unselected;
+    name_wave = 0.0;
+    name_phase = 0.0;
+}
+
+/// Resets all inventory items (unrelated to pickaxes), as well as the name banner animation.
+pub fn reset() void {
+    inventory_counts = @splat(0);
+    selected_sprite = .none;
+    selected_row = 0;
+    resetNameBanner();
+}
 
 /// Logs data on what is inside the inventory.
 pub fn logInventory() void {
@@ -639,27 +656,58 @@ fn drawSelectedName(time_diff: f64) void {
     else
         sprite_to_name;
 
-    const dominant = dw.particles.dominantColorOf(rendered);
-    // Floor lightness so dark sprites' names still read against the UI.
-    const l = @max(dominant[0], 0.6);
+    const primary = palette.primaryColorOf(rendered);
+    const secondary = palette.secondaryColorOf(rendered);
 
     const font_size: f32 = 10.0;
     const amplitude = name_wave * 1.5; // peak ripple displacement in px
     const origin: Vec2f32 = .{ 20.0, 14.0 };
 
-    dw.entity.drawStringWave(name, origin - Vec2f32{ 0.6, 0.6 }, .{
-        .lcha = .{ l * 0.35, dominant[1] * 1.2, dominant[2] - 0.2, 0.7 },
-        .font_size = font_size,
-        .phase = name_phase,
-        .amplitude = amplitude,
-    });
-    dw.entity.drawStringWave(name, origin, .{
-        .lcha = .{ l * 0.9, dominant[1] * 1.1, dominant[2], 1.0 },
-        .font_size = font_size,
-        .phase = name_phase,
-        .amplitude = amplitude,
-        .gradient_l = 0.25,
-    });
+    const prim_hue = @rem(primary[2], std.math.tau);
+    const second_hue = @rem(secondary[2], std.math.tau);
+    var delta = second_hue - prim_hue;
+
+    // Map the difference to the range (-pi, pi) to find the shortest path
+    if (delta > std.math.pi) {
+        delta -= std.math.tau;
+    } else if (delta < -std.math.pi) {
+        delta += std.math.tau;
+    }
+
+    // Unroll the secondary hue so it is continuous relative to prim_hue
+    const target_second_hue = prim_hue + delta;
+
+    // Establish bounds for hue interpolation based on the shortest path
+    const hue1 = @min(prim_hue, target_second_hue);
+    const hue2 = @max(prim_hue, target_second_hue);
+
+    const prim_light = primary[0];
+    const second_light = secondary[0];
+    const light1 = @max(@min(prim_light, second_light), 0.4);
+    const light2 = @max(@max(prim_light, second_light), 0.4);
+
+    dw.entity.drawStringWave(
+        name,
+        origin - Vec2f32{ 0.6, 0.6 },
+        .{
+            .starting_lcha = .{ light1 * 0.35, primary[1] * 1.2, hue1 - 0.2, 0.7 },
+            .ending_lcha = .{ light2 * 0.4, secondary[1] * 1.2, hue2, 0.7 },
+            .font_size = font_size,
+            .phase = name_phase,
+            .amplitude = amplitude,
+        },
+    );
+    dw.entity.drawStringWave(
+        name,
+        origin,
+        .{
+            .starting_lcha = .{ light1 * 1.05, primary[1] * 1.1, hue1, 1.0 },
+            .ending_lcha = .{ light2 * 1.25, secondary[1] * 1.2, hue2 + 0.2, 1.0 },
+            .font_size = font_size,
+            .phase = name_phase,
+            .amplitude = amplitude,
+        },
+    );
 }
 
 /// Back easing function (time-based)

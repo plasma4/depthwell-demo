@@ -3,6 +3,7 @@
 Depthwell is a procedural fractal mining incremental. How deep can you explore? Minimal demo release planned to be late 2026/early 2027.
 
 > [!WARNING]
+> This game is pre-demo so all saves may break at any time due to core logic changes!
 > The current `README` is **incomplete**, as this game is still in the pre-demo stage; more details will be added in the future and details might currently be out of date. Read the code to see specific implementations and TODOs.
 
 ### Images

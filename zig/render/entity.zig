@@ -415,10 +415,12 @@ fn drawStringFast(
 }
 
 /// Configuration for `drawStringWave()`: a horizontally laid-out string whose glyphs ripple
-/// vertically and brighten toward the end.
+/// vertically and transition colors toward the end.
 pub const WaveConfig = struct {
-    /// Base OKLCH+alpha tint of the leftmost glyph (before the gradient adds to L).
-    lcha: dw.utils.Vec4f32 = memory.DEFAULT_ENTITY_LCHA,
+    /// Base OKLCH+alpha tint of the leftmost glyph.
+    starting_lcha: dw.utils.Vec4f32 = memory.DEFAULT_ENTITY_LCHA,
+    /// Target OKLCH+alpha tint reached at the final glyph, ramped linearly from `lcha`.
+    ending_lcha: dw.utils.Vec4f32 = memory.DEFAULT_ENTITY_LCHA,
     /// The font size of the text.
     font_size: f32 = 16.0,
     /// Traveling-wave phase in radians; advance it over time to animate the ripple.
@@ -427,12 +429,10 @@ pub const WaveConfig = struct {
     amplitude: f32 = 0.0,
     /// Radians of phase added per glyph, setting the wavelength of the ripple.
     wave_step: f32 = 0.6,
-    /// L added to the OKLCH tint at the final glyph, ramped linearly from 0 (an OKLCH lightness gradient).
-    gradient_l: f32 = 0.0,
 };
 
-/// Draws a left-to-right monospace string whose glyphs ride a vertical sine ripple and brighten
-/// toward the end. Used for the selected-item name; never rotates.
+/// Draws a left-to-right monospace string whose characters ride a vertical sine ripple with gradient effect.
+/// Used for the selected-item name; never rotates.
 pub fn drawStringWave(
     string: []const u8,
     position: Vec2f32,
@@ -449,8 +449,13 @@ pub fn drawStringWave(
 
         if (char_index != -2) {
             const frac = @as(f32, @floatFromInt(i)) / last;
-            var lcha = config.lcha;
-            lcha[0] += config.gradient_l * frac;
+
+            // Linearly interpolate each channel (L, C, H, A) from config.lcha to config.ending_lcha
+            var lcha: dw.utils.Vec4f32 = undefined;
+            inline for (0..4) |j| {
+                lcha[j] = config.starting_lcha[j] + (config.ending_lcha[j] - config.starting_lcha[j]) * frac;
+            }
+
             const y = position[1] + config.amplitude *
                 @sin(config.phase + config.wave_step * @as(f32, @floatFromInt(i)));
 
@@ -572,7 +577,9 @@ pub fn addEntitySized(entity: memory.SizedEntity) void {
 
 /// Converts a horizontal width of a sprite to a square within UV coordinates.
 pub inline fn toSizeUv(horizontal_width: f32) Vec2f32 {
-    return @as(Vec2f32, @splat(horizontal_width)) * Vec2f32{ 1, @as(comptime_float, dw.SCREEN_WIDTH) / @as(comptime_float, dw.SCREEN_HEIGHT) };
+    return @as(Vec2f32, @splat(horizontal_width)) *
+        Vec2f32{ 1, @as(comptime_float, dw.SCREEN_WIDTH) /
+            @as(comptime_float, dw.SCREEN_HEIGHT) };
 }
 
 /// Converts viewport (logical pixel, 480x270) coordinates to UV (0-1) ones.

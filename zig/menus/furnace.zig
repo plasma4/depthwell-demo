@@ -73,6 +73,35 @@ pub fn reset() void {
     smelting_progress = 0;
 }
 
+/// Furnace state (input/output slots + batch progress) for saving.
+pub const SaveState = struct {
+    loaded_ore: Sprite,
+    loaded_count: u32,
+    output_bar: Sprite,
+    output_count: u32,
+    smelting_progress: u16,
+};
+
+/// Exports furnace state properties.
+pub fn getSaveState() SaveState {
+    return .{
+        .loaded_ore = loaded_ore,
+        .loaded_count = loaded_count,
+        .output_bar = output_bar,
+        .output_count = output_count,
+        .smelting_progress = smelting_progress,
+    };
+}
+
+/// Restores furnace state from a save.
+pub fn setSaveState(s: SaveState) void {
+    loaded_ore = s.loaded_ore;
+    loaded_count = s.loaded_count;
+    output_bar = s.output_bar;
+    output_count = s.output_count;
+    smelting_progress = s.smelting_progress;
+}
+
 /// Advances smelting. Only called while the menu is open (see `state/tick.zig`),
 /// so closing the menu pauses smelting. Holds at 0 whenever nothing is loaded.
 pub fn updateSmelting() void {

@@ -5,7 +5,7 @@ const dw = @import("../root.zig");
 const GameState = @import("../memory.zig").GameState; // Direct relative import
 const GenerateOffsets = @import("../internal/offsets.zig").GenerateOffsets;
 
-// Note: generate_types.zig will skip all all functions in structs, including pub ones .
+// Note: generate_types.zig will skip all all functions in structs, including pub ones.
 
 /// Handles bitmasked data representing keyboard key inputs in the game.
 pub const KeyBits = struct {

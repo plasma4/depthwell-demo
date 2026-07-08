@@ -1,6 +1,6 @@
-// -------
+// ----
 // Main shader for Depthwell. Currently does not support Mach Engine.
-// -------
+// ----
 
 // These are sprite sheet constants.
 // Sprites are saved as a .png in a sprite sheet 128 pixels wide, and each asset is 16x16.
@@ -11,11 +11,11 @@
 // Do NOT edit values between the markers by hand; edit the Sprite enum instead.
 const TILES_PER_ROW: f32 = 8.0;
 const TILES_PER_COLUMN: f32 = 37.0;
-const STONE_START: u32 = 8u;
-const ORE_START: u32 = 32u;
-const GEM_START: u32 = 38u;
-const GEM_MASK_START: u32 = 52u;
-const WATER_START: u32 = 289u;
+const STONE_START: u32 = 12u;
+const ORE_START: u32 = 36u;
+const GEM_START: u32 = 42u;
+const GEM_MASK_START: u32 = 56u;
+const WATER_START: u32 = 293u;
 // #endregion generated-constants
 
 const PI = radians(180.0);
@@ -404,7 +404,7 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
             tex_color.rgb * vec3f(tex_mask.r + 0.3 * u_dist),
             tex_mask.a + u_dist
         );
-        tex_color = vec4f(final_rgb_ore, tex_color.a);
+        tex_color = vec4f(final_rgb_ore, tex_stone.a);
     }
 
     var ore_darkening: f32 = 0.0;
@@ -421,7 +421,7 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
             let base_grid = vec2f(f32(base_id % TILES_PER_ROW_U), f32(base_id / TILES_PER_ROW_U));
             let base_uv = (base_grid + safe_local_uv) * vec2f(SPRITE_W, SPRITE_H);
             let tex_base = textureSampleLevel(sprite_atlas, pixel_sampler, base_uv, 0.0);
-            tex_color = vec4f(srgb_to_linear(tex_base.rgb) * hp_darkness_mult, tex_color.a);
+            tex_color = vec4f(srgb_to_linear(tex_base.rgb) * hp_darkness_mult, tex_base.a);
 
             // Now, calculate proximity to the unconnected tile edges, or the ore boundary
             let width_bonus = -0.22 + f32(extractBits(in.seeds[3], 24u, 3u)) / 128.0;

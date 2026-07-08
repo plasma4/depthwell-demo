@@ -90,7 +90,8 @@ inline fn writeLog(comptime src: std.builtin.SourceLocation, fmt: []const u8, ar
     }
 }
 
-/// A test function for logging, testing all four logging types and truncation. (See root.zig for export logic.)
+/// A test function for logging, testing all four logging types and truncation.
+/// (See `root.zig` for export logic.)
 pub inline fn testLogs(skipError: bool) void {
     const logger = @import("logger.zig");
     logger.log(@src(), "This is a {s}.", .{"normal log"});
@@ -337,7 +338,8 @@ fn formatArgs(writer: anytype, args: anytype) !void {
     }
 }
 
-/// Writes formatted text to one of the four UI text buffers. No-op in release modes. Argument can be a simple literal, complex nested struct, and most other things.
+/// Writes formatted text to one of the four UI text buffers. No-op in release modes.
+/// Argument can be a simple literal, complex nested struct, and most other things.
 pub inline fn write(buffer_id: u2, args: anytype) void {
     if (!is_debug) return;
 

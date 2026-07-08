@@ -4,6 +4,7 @@ import * as Zig from "./enums";
 import * as Seeding from "./seeding";
 import * as InputManager from "./inputManager";
 import * as EngineMaker from "./engineMaker";
+import { SaveManager } from "./saveManager";
 
 /** Typed array types mapped to integers. */
 export enum WasmTypeCode {
@@ -67,6 +68,8 @@ export class GameEngine {
     public LAYOUT_PTR: Zig.PointerLike;
     /** Gives the pointer to the game state. */
     public readonly GAME_STATE_PTR: Zig.PointerLike;
+    /** Save manager instance that handles budgeting logic, OPFS, and tab lock. */
+    public saveManager!: SaveManager;
 
     /** The mouse type that the canvas element is. */
     public mouseType!: number;
@@ -215,9 +218,9 @@ export class GameEngine {
     }
 
     /*
-        ------
+        ----
         GPU Textures/Tilemaps
-        ------
+        ----
     */
 
     /** Loads the image URL to the WGSL device as a texture. */
@@ -495,9 +498,9 @@ export class GameEngine {
     }
 
     /*
-        ------
+        ----
         SFX
-        ------
+        ----
     */
 
     /**
@@ -598,9 +601,9 @@ export class GameEngine {
     }
 
     /*
-        ------
+        ----
         Memory Management
-        ------
+        ----
     */
 
     /** Returns the number of MB (fractional) that the memory's buffer is for WASM. */
@@ -779,12 +782,15 @@ export class GameEngine {
                 8,
             ),
         );
+
+        // use a random seed mixing value here: mixSeed is ONLY dependent on memory.game.seed being valid
+        this.startDelta = Number(this.exports.mixSeed(60n) % 120000n);
     }
 
     /*
-        ------
+        ----
         Resizing/Rendering
-        ------
+        ----
     */
 
     /** Updates the canvas CSS style. */

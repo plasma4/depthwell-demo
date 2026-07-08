@@ -43,6 +43,7 @@ export interface EngineExports extends WebAssembly.Exports {
     readonly jsPlaySound: (arg0: number, arg1: number, arg2: number) => void;
     readonly main: () => void;
     readonly init: () => void;
+    readonly initSkipSetup: () => void;
     readonly prepareVisibleData: (arg0: number, arg1: number, arg2: number, arg3: number) => void;
     readonly getTilesPerRow: () => number;
     readonly getTilesPerColumn: () => number;
@@ -53,6 +54,14 @@ export interface EngineExports extends WebAssembly.Exports {
     readonly getMemoryLayoutPtr: () => bigint;
     readonly scratchAlloc: (arg0: number) => bigint;
     readonly isDebug: () => boolean;
+    readonly saveExportAll: () => bigint;
+    readonly saveGetExportPtr: () => bigint;
+    readonly saveGetExportLen: () => bigint;
+    readonly saveBeginSnapshot: () => bigint;
+    readonly saveWriteBatch: (arg0: bigint) => bigint;
+    readonly savePrepareImport: (arg0: bigint) => bigint;
+    readonly saveImportAll: (arg0: bigint) => boolean;
+    readonly saveFinalizeLoad: () => void;
 }
 
 // Generated enum and struct data from types.zig:

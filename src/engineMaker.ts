@@ -1,4 +1,5 @@
 import * as Zig from "./enums";
+import { SaveManager } from "./saveManager";
 import * as Seeding from "./seeding";
 import { MAX_DRAW_CALLS, GameEngine } from "./engine";
 
@@ -306,14 +307,25 @@ export async function create(
         bgPipeline,
         entityPipeline,
     );
+
+    const saveManager = new SaveManager(engine);
+    engine.saveManager = saveManager;
+    const acquired = await saveManager.tryAcquireTabExclusiveLock();
+    if (!acquired) {
+        alert(
+            "Game is open in another tab! Please use that tab or close it to continue.",
+        );
+        window.onerror = null;
+        throw "Game is open in another tab! Please use that tab or close it to continue.";
+    }
+
     engine.exports.main();
-    await engine.setSeed(Seeding.makeSeed(100));
-    // its a random seed that looks nice
-    // await engine.setSeed(
-    //     "bilkfvrdfprzwieuihruktkdphaarixgsyjhkzljtvysbhmxeihmzatzxfnqmbfylvcbpacmsnbahxccqselcmsgdhggsojwtsjf",
-    // );
-    engine.startDelta = Number(exports.mixSeed(60n) % 120000n); // use a random seed mixing value here
-    engine.exports.init();
+
+    const loaded = await engine.saveManager.load();
+    if (!loaded) {
+        await engine.setSeed(Seeding.makeSeed(100));
+        engine.exports.init();
+    }
 
     const resizeObserver = new ResizeObserver(engine.onResize);
     (engine as any).resizeObserver = resizeObserver;

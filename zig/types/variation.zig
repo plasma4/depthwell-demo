@@ -29,7 +29,7 @@ pub const VariantKind = enum {
     animate,
     /// Liquid surface: offset 1 (top sprite) when no solid/liquid fully covers the block above.
     water_top,
-    /// Multi-tile assembly (see zig/types/assembly.zig): offset `group_y * group_w + group_x`,
+    /// Multi-tile assembly (see `zig/types/assembly.zig`): offset `group_y * group_w + group_x`,
     /// read from the block's stored footprint position. Needs `count == group_w * group_h`.
     group,
 };
@@ -95,7 +95,7 @@ const variant_table: [dw.sprite.MAX_SPRITE_ID]?VariantRule = blk: {
 };
 
 /// Returns the variation rule for a sprite, or null if it has none.
-/// Used by zig/types/assembly.zig to comptime-verify that a `.group` footprint (w x h) matches its frame layout.
+/// Used by `zig/types/assembly.zig` to comptime-verify that a `.group` footprint (w x h) matches its frame layout.
 pub fn ruleFor(sprite: Sprite) ?VariantRule {
     const id = @intFromEnum(sprite);
     if (id >= dw.sprite.MAX_SPRITE_ID) return null;

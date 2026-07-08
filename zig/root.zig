@@ -1,4 +1,4 @@
-//! Root file. Imports startup.zig and handles exporting functions to WASM.
+//! Root file. Imports various other codebase files for easy access and handles exporting functions to WASM.
 //! All functions here (excluding internal ones like panic) should be `pub` to expose functions to `generate_types.zig`,
 //! and `extern` for WASM (with no other exported functions within other Zig files).
 const std = @import("std");
@@ -67,7 +67,7 @@ pub const utils = @import("internal/utils.zig");
 pub const GenerateOffsets = @import("internal/offsets.zig").GenerateOffsets;
 pub const SegmentedList = @import("internal/segmented_list.zig").SegmentedList;
 pub const Fifo = @import("internal/fifo.zig").UnboundedFifo;
-pub const ColorRgba = @import("visual/color_rgba.zig").ColorRgba;
+pub const ColorRgba = @import("internal/color_rgba.zig").ColorRgba;
 
 pub const render = @import("render/render.zig");
 pub const sound = @import("render/sound.zig");
@@ -95,6 +95,7 @@ pub const player = @import("state/player.zig");
 pub const world = @import("state/world.zig");
 pub const ancestor = @import("state/ancestor.zig");
 pub const water = @import("state/water.zig");
+pub const save = @import("state/save.zig");
 pub const handleTick = @import("state/tick.zig").handleTick;
 
 pub const logger = @import("debug/logger.zig");
@@ -127,8 +128,7 @@ pub extern "env" fn jsSetMouseType(mouse_type: mouse.CursorType) void;
 pub extern "env" fn jsPlaySound(soundId: u32, volume: f64, pitch: f64) void;
 
 pub fn main() callconv(.c) void {
-    world.flag_worklist = std.ArrayList(world.UpdateItem).initCapacity(world.alloc, 256) catch unreachable;
-    world.mod_store.init(world.alloc);
+    // nothing happens here for now
 }
 
 comptime {
@@ -141,7 +141,10 @@ comptime {
 }
 
 pub export fn init() void {
-    startup.init();
+    startup.init(false);
+}
+pub export fn initSkipSetup() void {
+    startup.init(true);
 }
 pub export fn prepareVisibleData(time_interpolated: f64, time_diff: f64, canvas_w: f64, canvas_h: f64) void {
     render.prepareVisibleData(time_interpolated, time_diff, canvas_w, canvas_h);
@@ -212,6 +215,33 @@ pub export fn scratchAlloc(len: usize) u64 { // pointer-like [*]u8, Memory64 hac
 /// Returns if code is in debugging mode for JS to see.
 pub export fn isDebug() bool {
     return is_debug;
+}
+
+// Save/load API. The JS host owns the atomic OPFS write and per-frame budgeting;
+// these move data across the boundary and (de)serialize the game state (see state/save.zig).
+pub export fn saveExportAll() u64 {
+    return save.exportAll();
+}
+pub export fn saveGetExportPtr() u64 { // pointer-like [*]u8, Memory64 hack
+    return save.getExportPtr();
+}
+pub export fn saveGetExportLen() u64 {
+    return save.getExportLen();
+}
+pub export fn saveBeginSnapshot() i64 {
+    return save.beginSnapshot();
+}
+pub export fn saveWriteBatch(max_chunks: u64) i64 {
+    return save.writeBatch(@intCast(max_chunks));
+}
+pub export fn savePrepareImport(len: u64) u64 { // pointer-like [*]u8, Memory32/64 consistency hack
+    return save.prepareImport(@intCast(len));
+}
+pub export fn saveImportAll(len: u64) bool {
+    return save.importAll(@intCast(len));
+}
+pub export fn saveFinalizeLoad() void {
+    save.finalizeLoad();
 }
 
 // Import debugging API and functions if optimization level is Debug.
@@ -300,7 +330,7 @@ fn customPanic(msg: []const u8, ret_addr: ?usize) noreturn {
 test "main_tests" {
     const modules = .{
         @import("png/png_to_binary.zig"),
-        @import("visual/color_rgba.zig"),
+        @import("internal/color_rgba.zig"),
         @import("state/seeding.zig"),
         @import("debug/logger.zig"),
         @import("types/assembly.zig"),

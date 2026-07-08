@@ -60,16 +60,6 @@ pub const MiningCapabilities = packed struct(u16) {
     }
 };
 
-pub const ToolProps = struct {
-    /// How much the player increases `mining_progress` every tick.
-    speed: u64,
-    /// How much `hp` the tool takes off the block every time `mining_progress` reaches the block's strength.
-    /// Mining progress accumulates by `mining_speed` every logical.
-    strength: u4,
-    /// Qualitative special properties of this pickaxe
-    capabilities: MiningCapabilities = .{},
-};
-
 /// List of tools.
 pub const Tools = enum {
     stone,
@@ -79,17 +69,23 @@ pub const Tools = enum {
     gold,
 };
 
-pub const pickaxe_table = [@typeInfo(Tools).@"enum".fields.len]ToolProps{
-    // stone
-    .{ .speed = 8, .strength = 1, .capabilities = .t0 },
-    // bronze
-    .{ .speed = 11, .strength = 1, .capabilities = .t1 },
-    // iron
-    .{ .speed = 15, .strength = 1, .capabilities = .t1 },
-    // silver
-    .{ .speed = 12, .strength = 2, .capabilities = .t2 },
-    // gold
-    .{ .speed = 20, .strength = 2, .capabilities = .t3 },
+/// Table for specific tool properties.
+pub const pickaxe_table: std.EnumArray(Tools, ToolProps) = .init(.{
+    .stone = .{ .speed = 8, .strength = 1, .capabilities = .t0 },
+    .bronze = .{ .speed = 11, .strength = 1, .capabilities = .t1 },
+    .iron = .{ .speed = 15, .strength = 1, .capabilities = .t1 },
+    .silver = .{ .speed = 12, .strength = 2, .capabilities = .t2 },
+    .gold = .{ .speed = 20, .strength = 2, .capabilities = .t3 },
+});
+
+pub const ToolProps = struct {
+    /// How much the player increases `mining_progress` every tick.
+    speed: u64,
+    /// How much `hp` the tool takes off the block every time `mining_progress` reaches the block's strength.
+    /// Mining progress accumulates by `mining_speed` every logical.
+    strength: u4,
+    /// Qualitative special properties of this pickaxe
+    capabilities: MiningCapabilities = .{},
 };
 
 /// Promotes the pickaxe to the next tier, updating active speed and strength values.
@@ -103,7 +99,7 @@ pub fn upgradePickaxe() void {
     };
     if (next_type != pickaxe_type) {
         pickaxe_type = next_type;
-        const props = pickaxe_table[@intFromEnum(next_type)];
+        const props = pickaxe_table.get(next_type);
         mining_speed = props.speed;
         mining_strength = props.strength;
     }
@@ -114,7 +110,7 @@ pub fn upgradePickaxe() void {
 
 /// Evaluates whether a given pickaxe is capable of mining a specific block sprite.
 pub fn canMine(tool_type: Tools, target_sprite: Sprite) bool {
-    const pickaxe = pickaxe_table[@intFromEnum(tool_type)];
+    const pickaxe = pickaxe_table.get(tool_type);
     const block_props = sprite.getSpriteProps(target_sprite);
 
     // Check capability compatibility and tier minimum requirements

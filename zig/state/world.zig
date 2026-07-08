@@ -234,6 +234,9 @@ pub const ModificationStore = struct {
     ),
     /// Expandable list that stores modified `Chunk` data (1MiB inline pre-allocation: `256 * @sizeOf(Chunk)`).
     history: SegmentedList(Chunk, 256) = .{},
+    /// Incremented whenever `history` is dropped (`init()`/`clear()`), invalidating any external index
+    /// into it. A budgeted save snapshot compares this to detect a mid-save wipe and abort.
+    generation: u64 = 0,
 
     /// Initializes in-place to avoid stack overflow problems.
     pub fn init(self: *ModificationStore, allocator: std.mem.Allocator) void {
@@ -244,6 +247,7 @@ pub const ModificationStore = struct {
             std.hash_map.default_max_load_percentage,
         ).init(allocator);
         self.history = .{};
+        self.generation +%= 1;
     }
 
     /// Gets an existing modification for reading.
@@ -257,10 +261,12 @@ pub const ModificationStore = struct {
     pub fn clear(self: *@This()) void {
         self.index.clearRetainingCapacity();
         self.history.clearRetainingCapacity();
+        self.generation +%= 1;
     }
 };
 
 /// Stores and handles modifications of chunks across various depths.
+/// Initialized in `main()`.
 pub var mod_store: ModificationStore = undefined;
 
 /// Represents a "coordinate", relative to a quad-cache. Stores an "active suffix" as well as the quadrant this coordinate belongs to.
@@ -392,12 +398,14 @@ pub const DepthCoordinate = struct {
     pub inline fn hash(self: @This()) u64 {
         const secret_0 = 0xa0761d6478bd642f;
         const secret_1 = 0xe7037ed1a0b428db;
+        const secret_2 = 0x517cc1b727220a95;
 
         // Force scalar execution paths
         const x = (self.suffix[0] *% secret_0) ^ (self.suffix[0] >> 32);
         const y = (self.suffix[1] *% secret_1) ^ (self.suffix[1] >> 32);
+        const z = (self.depth *% secret_2) ^ (self.depth >> 32);
 
-        const combined = x ^ y ^ @as(u64, self.quadrant);
+        const combined = x ^ y ^ z ^ @as(u64, self.quadrant);
 
         // MurmurHash3 final mix
         var result = combined;
@@ -777,11 +785,10 @@ pub const SimBuffer = struct {
         };
 
         // Small shift: slide the window by `shift` without rebuilding it.
-        // incrementalRefresh() advances ring_x/ring_y by exactly `shift`, so it is only valid when the
-        // origin also advances by exactly `shift`. At a world edge (depth < HORIZON_DEPTH) the origin move
-        // clamps to fewer chunks, which would desync the ring from the origin and make get() map every
-        // resident chunk to the wrong slot (all lookups then miss) until the next fullRefresh. Fall back
-        // to a full refresh in that case so the two never drift apart.
+        // incrementalRefresh() advances ring_x/ring_y by exactly `shift`, so it is only valid when the origin also advances by exactly `shift`.
+        // At a world edge (depth < HORIZON_DEPTH) the origin move clamps to fewer chunks, which would desync the ring from the origin and make get() map every resident chunk to the wrong slot
+        // (all lookups then miss) until the next fullRefresh(). Fall back to a full refresh in that case so the two never drift apart.
+        // TODO: is there a better way to do things?
         if (@abs(shift[0]) < SIM_BUFFER_WIDTH and @abs(shift[1]) < SIM_BUFFER_WIDTH) {
             if (shift[0] != 0 or shift[1] != 0) {
                 if (og.move(shift) != null) {
@@ -1112,6 +1119,17 @@ pub const QuadCache = struct {
     /// Clock hand per set.
     seed_hand: [SEED_CACHE_SETS]u2 = @splat(0),
 
+    /// Resets the `SimBuffer` completely, clearing tracking, ring buffer offsets, and background scanners.
+    /// Precondition: the world arena MUST be reset to prevent memory leaks!
+    pub fn reset(self: *@This()) void {
+        self.left_path = .{};
+        self.top_path = .{};
+        self.most_top = true;
+        self.most_bottom = true;
+        self.most_left = true;
+        self.most_right = true;
+    }
+
     /// Gets the rebase origin X for a given depth (which is asserted to be > `HORIZON_DEPTH`).
     pub inline fn getOriginX(self: *const @This(), depth: u64) u64 {
         std.debug.assert(depth > dw.HORIZON_DEPTH);
@@ -1215,8 +1233,8 @@ pub const QuadCache = struct {
 /// The QuadCache that stores information about the 4 quadrants and their history.
 pub var quad_cache: QuadCache = .{
     .path_hashes = undefined,
-    .left_path = SegmentedList(u64, QuadCache.PATH_PREALLOC_SIZE){}, // easiest to do prealloc with larger stack size in case
-    .top_path = SegmentedList(u64, QuadCache.PATH_PREALLOC_SIZE){},
+    .left_path = .{}, // easiest to do prealloc with larger stack size in case
+    .top_path = .{},
     .ancestor_materials = undefined,
 };
 
@@ -1589,6 +1607,7 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
 
     const initial_hp: u4 = if (new_sprite == .water) Block.MAX_HP else 0;
 
+    dw.save.shadowChunkForSave(entry_idx);
     const c: *Chunk = mod_store.history.at(entry_idx);
 
     // Derive the overlay's underlay from what was here before, so replacing (say) a blue_stone block
@@ -1666,6 +1685,7 @@ fn internalClearBlock(target_coord: Coordinate, lbx: u4, lby: u4) void {
         mod_store.index.put(key, new_id) catch memory.oom();
         break :blk new_id;
     };
+    dw.save.shadowChunkForSave(mod_id);
     clearBlockFields(&mod_store.history.at(mod_id).blocks[block_id]);
     if (SimBuffer.get(target_coord)) |sc| clearBlockFields(&sc.blocks[block_id]);
     if (chunk_cache.findIndex(target_coord)) |index| clearBlockFields(&chunk_cache.chunks[index].blocks[block_id]);
@@ -1723,7 +1743,10 @@ pub const UpdateItem = struct { coord: Coordinate, bx: u4, by: u4 };
 
 /// Max amount of edge flags to check before exiting. If 0, never exits.
 const CHECK_LIMIT = 0;
-/// Dedicated worklist for local edge flag updating. (Not optimized; expects correct adjacent edge flags for reasonable performance.)
+/// Dedicated worklist for local edge flag updating.
+/// Not optimized (general-purpose); expects correct adjacent edge flags for reasonable performance,
+/// and special anchor types like suspended to not create extremely long chains.
+///
 pub var flag_worklist: std.ArrayList(UpdateItem) = undefined;
 
 /// Recalculates edge flags for a specific block its 8 neighbors.
@@ -1899,6 +1922,7 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                 }
                 const m_key = DepthCoordinate.from(target_coord);
                 if (mod_store.index.get(m_key)) |id_val| {
+                    dw.save.shadowChunkForSave(id_val);
                     mod_store.history.at(id_val).blocks[block_id].edge_flags = flags;
                     mod_store.history.at(id_val).blocks[block_id].id_edge_flags = id_flags;
                     mod_store.history.at(id_val).blocks[block_id].waterlogged = waterlogged;
@@ -1928,6 +1952,7 @@ pub fn modifyBlockHp(coord: Coordinate, bx: u4, by: u4, block: Block, hp_to_add:
         break :blk new_id;
     };
 
+    dw.save.shadowChunkForSave(entry_id);
     const overflow_hp = @addWithOverflow(hp_to_add, block.hp); // overflows past 15, so the block should be deleted
     if (overflow_hp[1] == 1 or hp_to_add == 0 or !block.isSolid()) {
         // The block should be deleted (mined)!
@@ -2053,6 +2078,14 @@ pub fn clearCaches(comptime clear_ancestors: bool) void {
     quad_cache.seed_cache_keys = @splat(@splat(DepthCoordinate.invalid));
 
     if (clear_ancestors) dw.ancestor.ancestor_cache.clear();
+}
+
+/// Re-initializes all structures allocated in the world arena.
+/// Must be called whenever `world.arena` is reset or during init.
+pub fn initArenaAllocatedStructures() void {
+    flag_worklist = std.ArrayList(UpdateItem).initCapacity(alloc, 256) catch memory.oom();
+    mod_store.init(alloc);
+    quad_cache.reset();
 }
 
 /// Increases the game's depth by 1, invalidates caches, moves the player, and handles data modification.

@@ -143,6 +143,11 @@ pub const ColorRgba = extern union {
         return self.channels.a == 255;
     }
 
+    /// Isn't fully opaque or transparent?
+    pub fn isTranslucent(self: ColorRgba) bool {
+        return self.channels.a != 0 and self.channels.a != 255;
+    }
+
     /// Is fully transparent?
     pub fn isTransparent(self: ColorRgba) bool {
         return self.channels.a == 0;

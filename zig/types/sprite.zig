@@ -17,7 +17,7 @@ const DropHandlers = dw.drops.DropHandlers;
 pub const UNMINEABLE_STRENGTH: u64 = std.math.maxInt(u64);
 
 /// Index where stone-like sprites begin.
-pub const STONE_START = 8;
+pub const STONE_START = 12;
 /// Index where stone-like sprites end.
 const STONE_END = STONE_START + 14;
 
@@ -54,13 +54,17 @@ pub const PARTICLE_START = NUMBER_START + 10 + 123;
 pub const Sprite = enum(u16) {
     /// Empty (air) sprite.
     none = 0,
-    /// Sprite of the player.
+    /// Sprite of the player (4 variations).
     player = 1,
+    player_walk1,
+    player_walk2,
+    player_walk3,
+    player_walk4,
 
     /// Edge stone (2 variations).
-    edge_stone = 2,
+    edge_stone = 6,
 
-    wood = 4,
+    wood = 8,
     black_plate,
     white_plate,
     leaves,

@@ -67,9 +67,16 @@ const Sprite = dw.Sprite;
 /// Which way the player is currently facing. Drives the horizontal sprite mirror.
 /// Updated from horizontal velocity in `tickAnimation`; held across idle frames.
 pub var facing_right: bool = true;
-
 /// High-level animation states the player can be in. Pick the clip for each in `clips`.
 pub const AnimState = enum { idle, walk, jump, fall };
+
+/// Per-state clips. Tune `frame_ticks` to extend the animation duration.
+const clips: std.EnumArray(AnimState, Clip) = .init(.{
+    .idle = .{ .frames = &.{.player}, .frame_ticks = 30 },
+    .walk = .{ .frames = &.{ .player_walk1, .player_walk2, .player_walk3, .player_walk4 }, .frame_ticks = 6 },
+    .jump = .{ .frames = &.{.player}, .frame_ticks = 4, .loop = false },
+    .fall = .{ .frames = &.{.player}, .frame_ticks = 4, .loop = false },
+});
 
 /// A single animation clip: an ordered list of sprite frames, each shown for `frame_ticks` logic ticks.
 /// `loop` repeats the clip; otherwise it holds on the final frame.
@@ -80,15 +87,7 @@ pub const Clip = struct {
     loop: bool = true,
 };
 
-/// Per-state clips. Tune `frame_ticks` to extend the animation duration.
-const clips = std.EnumArray(AnimState, Clip).init(.{
-    .idle = .{ .frames = &.{.player}, .frame_ticks = 30 },
-    .walk = .{ .frames = &.{.player}, .frame_ticks = 8 },
-    .jump = .{ .frames = &.{.player}, .frame_ticks = 4, .loop = false },
-    .fall = .{ .frames = &.{.player}, .frame_ticks = 4, .loop = false },
-});
-
-/// Velocity (subpixels/tick) below which the player is considered horizontally still (for idle vs walk).
+/// Velocity (subpixels/tick) below which the player is considered horizontally still (in terms of animations).
 const WALK_VELOCITY_THRESHOLD: f64 = 0.05;
 
 var anim_state: AnimState = .idle;
@@ -107,9 +106,9 @@ fn desiredAnimState() AnimState {
 pub fn tickAnimation() void {
     // Update facing only on meaningful horizontal motion, so it holds when idle.
     const vx = memory.game.player_velocity[0];
-    if (vx > WALK_VELOCITY_THRESHOLD) {
+    if (vx > 0) {
         facing_right = true;
-    } else if (vx < -WALK_VELOCITY_THRESHOLD) {
+    } else if (vx < 0) {
         facing_right = false;
     }
 
