@@ -647,7 +647,7 @@ pub const SimBuffer = struct {
     /// and to lazily re-evaluate the flag for dirtied chunks during `water.tickWater`.
     pub fn chunkHasWater(chunk: *const Chunk) bool {
         for (&chunk.blocks) |b| {
-            if (b.id == .water or water.getVolume(b) > 0) return true;
+            if (b.isLiquid() or water.getVolume(b) > 0) return true;
         }
         return false;
     }
@@ -1584,8 +1584,7 @@ inline fn isBothLiquid(sprite_a: Sprite, sprite_b: Sprite) bool {
     return sprite_a.isLiquid() and sprite_b.isLiquid();
 }
 
-/// Applies a block modification, changing the `Sprite` type and resetting `hp`.
-/// Mutates `mod_store` and caches in-place.
+/// Applies a block modification, changing the `Sprite` type and resetting `hp`. Mutates `mod_store` and caches in-place.
 /// Returns whether `update_local_edge_flags` instantly removed the current block due to being in an invalid position.
 ///
 /// `prev_block` is the block that occupied this cell BEFORE this action began.
@@ -1605,7 +1604,20 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
         break :blk new_idx;
     };
 
-    const initial_hp: u4 = if (new_sprite == .water) Block.MAX_HP else 0;
+    const initial_hp: u4 = if (new_sprite.isLiquid()) 1 else 0;
+    if (new_sprite.isLiquid()) {
+        // also emit some faaancy particles
+        if (dw.mouse.getMouseBlockCenterPx()) |center| {
+            @setFloatMode(.optimized);
+            dw.particles.spawnSpriteBurst(
+                .water,
+                center,
+                .{
+                    .count = @intCast(dw.particles.seed.next() % 8 + 1),
+                },
+            );
+        }
+    }
 
     dw.save.shadowChunkForSave(entry_idx);
     const c: *Chunk = mod_store.history.at(entry_idx);
@@ -1615,7 +1627,7 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
     // underlay, else grow inside the previous solid block, else fall back to plain stone.
     // Non-ore/gem placements carry no underlay.
     const new_base: Sprite = if (new_sprite.isOverlay())
-        (if (prev_block.base_id != .none) prev_block.base_id else if (prev_block.id.isFoundation()) prev_block.id else .stone)
+        (if (prev_block.base_id != .none) prev_block.base_id else if (prev_block.isFoundation()) prev_block.id else .stone)
     else
         .none;
 
@@ -1644,7 +1656,7 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
     }
 
     // Placing water must register the slot so the optimized `tickWater` scan picks it up.
-    if (new_sprite == .water) SimBuffer.markWater(coord);
+    if (new_sprite.isLiquid()) SimBuffer.markWater(coord);
     // Any block change near water can let it flow again, so wake the surrounding chunks (sleep/wake).
     SimBuffer.wake(coord);
 
@@ -1804,9 +1816,8 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                 const block_id = @as(usize, lby) * CHUNK_SIZE + lbx;
                 const current_block = getBlockAt(target_coord, lbx, lby, memory.game.depth);
                 const current_sprite = current_block.id;
-                if (current_sprite == .water) {
-                    // Defer this water block's edge-flag recompute to the next tick which batches in chunks
-                    // Placement runs before tickWater so flags resolve right.
+                if (current_sprite.isLiquid()) {
+                    // Defer this water block's edge-flag recompute to the next tick which batches in chunks.
                     // Also register the slot's water so the optimized active-chunk scan picks it up!
                     if (SimBuffer.origin) |og| {
                         const dcx = target_coord.suffix[0] -% og.suffix[0];
@@ -1848,7 +1859,8 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
 
                 if (broken) {
                     if (item.bx == bx and item.by == by and item.coord.eql(coord)) original_block_broken = true;
-                    dw.inventory.dropItem(current_sprite, target_coord, lbx, lby);
+                    // water already drops in modifyBlockHp()
+                    if (current_sprite != .water) dw.inventory.dropItem(current_sprite, target_coord, lbx, lby);
 
                     // Internal block modification to avoid recursion.
                     internalClearBlock(target_coord, lbx, lby);
@@ -1957,6 +1969,23 @@ pub fn modifyBlockHp(coord: Coordinate, bx: u4, by: u4, block: Block, hp_to_add:
     if (overflow_hp[1] == 1 or hp_to_add == 0 or !block.isSolid()) {
         // The block should be deleted (mined)!
         if (block.isEmpty()) return true;
+        for (0..dw.water.getVolume(block)) |_| {
+            dw.inventory.dropItem(
+                .water,
+                coord,
+                bx,
+                by,
+            );
+        }
+
+        if (block.isFoundation()) memory.game.blocks_mined +%= 1;
+        dw.inventory.dropItem(
+            block.id,
+            coord,
+            bx,
+            by,
+        );
+
         mod_store.history.at(entry_id).blocks[id].id = .none;
         mod_store.history.at(entry_id).blocks[id].waterlogged = 0;
         // Clear the mined cell's assembly footprint position so an emptied cell carries no stale offset.

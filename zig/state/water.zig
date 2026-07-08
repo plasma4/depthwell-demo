@@ -67,7 +67,7 @@ pub fn queueWaterFlags(cx: world.SimIndexType, cy: world.SimIndexType) void {
 /// Helper to get the volume of a block (0 to 15 for water/waterlogged blocks, 0 otherwise).
 /// (Integer casting automatically enforces HP being within `u4` range.)
 pub inline fn getVolume(ptr: Block) u4 {
-    if (ptr.id == .water) {
+    if (ptr.id.isLiquid()) {
         return @intCast(ptr.hp);
     }
     if (ptr.isWaterloggable()) {
@@ -435,8 +435,7 @@ inline fn notifyNeighborEdgeFlags(rx: i32, ry: i32) void {
 
 /// Runs a single frame of the (mass-conserving) water simulation for blocks within the `SimBuffer`.
 pub fn tickWater() void {
-    const frame = memory.game.frame;
-
+    // Phase 1: collect chunks that hold water and have not settled; skip the whole tick if none.
     active_chunks = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
 
     var cy: world.SimIndexType = 0;
@@ -471,27 +470,31 @@ pub fn tickWater() void {
 
     var dirty_chunks = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
 
+    // Phase 2: sweep active chunks bottom-up so falling water moves one cell per tick without
+    // being double-moved (the `water_updated` bitset guards cells that already took their turn).
     var chunk_y: i32 = world.SIM_BUFFER_WIDTH - 1;
     while (chunk_y >= 0) : (chunk_y -= 1) {
-        const left_to_right = (frame % 2 == 0);
         var chunk_x: i32 = 0;
         while (chunk_x < world.SIM_BUFFER_WIDTH) : (chunk_x += 1) {
-            const rcx = if (left_to_right) chunk_x else (world.SIM_BUFFER_WIDTH - 1) - chunk_x;
-            const chunk_idx = (@as(usize, @intCast(chunk_y)) << world.SIM_WIDTH_LOG2) | @as(usize, @intCast(rcx));
+            const chunk_idx = (@as(usize, @intCast(chunk_y)) << world.SIM_WIDTH_LOG2) | @as(usize, @intCast(chunk_x));
 
             if (!active_chunks.isSet(chunk_idx)) continue;
 
-            const curr = getChunkPtr(@intCast(rcx), @intCast(chunk_y)) orelse continue;
-            const left = if (rcx > 0) getChunkPtr(@intCast(rcx - 1), @intCast(chunk_y)) else null;
-            const right = if (rcx < world.SIM_BUFFER_WIDTH - 1) getChunkPtr(@intCast(rcx + 1), @intCast(chunk_y)) else null;
-            const bottom = if (chunk_y < world.SIM_BUFFER_WIDTH - 1) getChunkPtr(@intCast(rcx), @intCast(chunk_y + 1)) else null;
+            const curr = getChunkPtr(@intCast(chunk_x), @intCast(chunk_y)) orelse continue;
+            const left = if (chunk_x > 0) getChunkPtr(@intCast(chunk_x - 1), @intCast(chunk_y)) else null;
+            const right = if (chunk_x < world.SIM_BUFFER_WIDTH - 1) getChunkPtr(@intCast(chunk_x + 1), @intCast(chunk_y)) else null;
+            const top = if (chunk_x < world.SIM_BUFFER_WIDTH - 1) getChunkPtr(@intCast(chunk_x), @intCast(chunk_y - 1)) else null;
+            const bottom = if (chunk_y < world.SIM_BUFFER_WIDTH - 1) getChunkPtr(@intCast(chunk_x), @intCast(chunk_y + 1)) else null;
 
             var by: i32 = CHUNK_SIZE - 1;
             while (by >= 0) : (by -= 1) {
                 var bx: i32 = 0;
                 while (bx < CHUNK_SIZE) : (bx += 1) {
-                    const rbx = if (left_to_right) bx else (CHUNK_SIZE - 1) - bx;
-                    const rx = rcx * CHUNK_SIZE + rbx;
+                    // Horizontal sweep direction alternates by ROW parity, not by frame parity:
+                    // a per-frame flip makes the whole surface visibly slosh left/right every tick,
+                    // while a fixed per-row direction keeps lateral flow fair with no temporal flicker.
+                    const rbx = if ((by & 1) == 0) bx else (CHUNK_SIZE - 1) - bx;
+                    const rx = chunk_x * CHUNK_SIZE + rbx;
                     const ry = chunk_y * CHUNK_SIZE + by;
                     const idx = @as(usize, @intCast(ry)) * world.SIM_GRID_SIZE + @as(usize, @intCast(rx));
 
@@ -510,6 +513,8 @@ pub fn tickWater() void {
                     else
                         null;
 
+                    // Gravity first: pour into the cell below, a full block per tick when falling
+                    // into empty space but only 4 units per tick when topping up existing water.
                     if (down_ptr) |dp| {
                         if (dp.isFlowable()) {
                             const dest_vol = getVolume(dp.*);
@@ -533,6 +538,8 @@ pub fn tickWater() void {
                         }
                     }
 
+                    // Lateral flow only happens once the cell can no longer fall, and never from a
+                    // cell that already received sideways water this tick (stops chain teleports).
                     const down_blocked = if (down_ptr) |dp| (!dp.isFlowable() or getVolume(dp.*) >= MAX_HP) else true;
                     if (!down_blocked) continue;
                     if (lateral_received.isSet(idx)) continue;
@@ -579,59 +586,117 @@ pub fn tickWater() void {
                         }
                     }
 
+                    // Equalize with strictly-lower neighbors, moving up to `diff / 2` (capped at 4)
+                    // units per side per tick. A difference of 1 only flows when the move cascades
+                    // (the cell beyond the destination is lower still), which grinds leftover
+                    // slope-1 staircases into near-flat pools without oscillating.
                     const diff_left = if (left_ok) src_press - left_press else 0;
                     const diff_right = if (right_ok) src_press - right_press else 0;
 
+                    var flow_left: u32 = 0;
+                    var flow_right: u32 = 0;
+
                     if (diff_left > 1 or diff_right > 1) {
-                        var flow_left: u32 = if (diff_left > 1) @min(diff_left / 2, 1) else 0;
-                        var flow_right: u32 = if (diff_right > 1) @min(diff_right / 2, 1) else 0;
+                        flow_left = if (diff_left > 1) @min(diff_left / 2, 4) else 0;
+                        flow_right = if (diff_right > 1) @min(diff_right / 2, 4) else 0;
 
                         const total_flow = flow_left + flow_right;
                         if (total_flow > src_vol - 1) {
                             const scale = @as(f32, @floatFromInt(src_vol - 1)) / @as(f32, @floatFromInt(total_flow));
                             flow_left = @intFromFloat(@as(f32, @floatFromInt(flow_left)) * scale);
                             flow_right = @intFromFloat(@as(f32, @floatFromInt(flow_right)) * scale);
-                        }
-
-                        if (left_ok) {
-                            const dest_avail = MAX_HP - left_vol;
-                            flow_left = @min(flow_left, dest_avail);
-                        }
-                        if (right_ok) {
-                            const dest_avail = MAX_HP - right_vol;
-                            flow_right = @min(flow_right, dest_avail);
-                        }
-
-                        if (flow_left > 0 or flow_right > 0) {
-                            setVolume(block_ptr, src_vol - (flow_left + flow_right));
-                            dirty_chunks.set(chunk_idx);
-
-                            if (flow_left > 0) {
-                                setVolume(left_ptr.?, left_vol + flow_left);
-                                if (rbx > 0) {
-                                    dirty_chunks.set(chunk_idx);
-                                } else if (left != null) {
-                                    dirty_chunks.set(chunk_idx - 1);
-                                }
-                                if (rx > 0) {
-                                    const left_idx = @as(usize, @intCast(ry)) * world.SIM_GRID_SIZE + @as(usize, @intCast(rx - 1));
-                                    lateral_received.set(left_idx);
+                            // Truncation can zero BOTH sides (a 2-unit spike flanked by two lower
+                            // cells would never move); nudge 1 unit toward the deeper drop instead.
+                            if (flow_left == 0 and flow_right == 0 and src_vol >= 2) {
+                                if (diff_left > diff_right or (diff_left == diff_right and (by & 1) != 0)) {
+                                    flow_left = 1;
+                                } else {
+                                    flow_right = 1;
                                 }
                             }
-                            if (flow_right > 0) {
-                                setVolume(right_ptr.?, right_vol + flow_right);
-                                if (rbx < CHUNK_SIZE - 1) {
-                                    dirty_chunks.set(chunk_idx);
-                                } else if (right != null) {
-                                    dirty_chunks.set(chunk_idx + 1);
-                                }
-                                if (rx < world.SIM_GRID_SIZE - 1) {
-                                    const right_idx = @as(usize, @intCast(ry)) * world.SIM_GRID_SIZE + @as(usize, @intCast(rx + 1));
-                                    lateral_received.set(right_idx);
+                        }
+
+                        if (left_ok) flow_left = @min(flow_left, MAX_HP - left_vol);
+                        if (right_ok) flow_right = @min(flow_right, MAX_HP - right_vol);
+                    } else if (diff_left == 1 or diff_right == 1) {
+                        // A full, unconfined source may also top off a neighbor sitting directly under a solid block, so confined cells rest at 15 instead of 14.
+                        // The source must not be confined itself or two capped cells would ping-pong.
+                        const src_confined = if (getLocalBlockPtr(curr, left, right, top, bottom, rbx, by - 1)) |a| !a.isFlowable() else false;
+                        const topup_ok = src_vol == MAX_HP and !src_confined;
+                        var casc_left = false;
+                        var casc_right = false;
+                        if (diff_left == 1 and rx > 0 and
+                            !lateral_received.isSet(@as(usize, @intCast(ry)) * world.SIM_GRID_SIZE + @as(usize, @intCast(rx - 1))))
+                        {
+                            if (getLocalBlockPtr(curr, left, right, top, bottom, rbx - 2, by)) |far| {
+                                if (far.isFlowable() and getVolume(far.*) < left_vol) casc_left = true;
+                            }
+                            if (!casc_left and topup_ok) {
+                                if (getLocalBlockPtr(curr, left, right, top, bottom, rbx - 1, by - 1)) |a| {
+                                    if (!a.isFlowable()) casc_left = true;
                                 }
                             }
-                            src_vol = getVolume(block_ptr.*);
                         }
+                        if (diff_right == 1 and rx < world.SIM_GRID_SIZE - 1 and
+                            !lateral_received.isSet(@as(usize, @intCast(ry)) * world.SIM_GRID_SIZE + @as(usize, @intCast(rx + 1))))
+                        {
+                            if (getLocalBlockPtr(curr, left, right, top, bottom, rbx + 2, by)) |far| {
+                                if (far.isFlowable() and getVolume(far.*) < right_vol) casc_right = true;
+                            }
+                            if (!casc_right and topup_ok) {
+                                if (getLocalBlockPtr(curr, left, right, top, bottom, rbx + 1, by - 1)) |a| {
+                                    if (!a.isFlowable()) casc_right = true;
+                                }
+                            }
+                        }
+                        if (casc_left and casc_right) {
+                            // Prefer the side whose far cell sits lower; ties follow the row sweep.
+                            const far_l = getVolumeLocal(curr, left, right, rbx - 2, by);
+                            const far_r = getVolumeLocal(curr, left, right, rbx + 2, by);
+                            if (far_l < far_r) {
+                                casc_right = false;
+                            } else if (far_r < far_l or (by & 1) == 0) {
+                                casc_left = false;
+                            } else {
+                                casc_right = false;
+                            }
+                        }
+                        if (casc_left) {
+                            flow_left = 1;
+                        } else if (casc_right) {
+                            flow_right = 1;
+                        }
+                    }
+
+                    if (flow_left > 0 or flow_right > 0) {
+                        setVolume(block_ptr, src_vol - (flow_left + flow_right));
+                        dirty_chunks.set(chunk_idx);
+
+                        if (flow_left > 0) {
+                            setVolume(left_ptr.?, left_vol + flow_left);
+                            if (rbx > 0) {
+                                dirty_chunks.set(chunk_idx);
+                            } else if (left != null) {
+                                dirty_chunks.set(chunk_idx - 1);
+                            }
+                            if (rx > 0) {
+                                const left_idx = @as(usize, @intCast(ry)) * world.SIM_GRID_SIZE + @as(usize, @intCast(rx - 1));
+                                lateral_received.set(left_idx);
+                            }
+                        }
+                        if (flow_right > 0) {
+                            setVolume(right_ptr.?, right_vol + flow_right);
+                            if (rbx < CHUNK_SIZE - 1) {
+                                dirty_chunks.set(chunk_idx);
+                            } else if (right != null) {
+                                dirty_chunks.set(chunk_idx + 1);
+                            }
+                            if (rx < world.SIM_GRID_SIZE - 1) {
+                                const right_idx = @as(usize, @intCast(ry)) * world.SIM_GRID_SIZE + @as(usize, @intCast(rx + 1));
+                                lateral_received.set(right_idx);
+                            }
+                        }
+                        src_vol = getVolume(block_ptr.*);
                     }
                 }
             }
@@ -645,6 +710,8 @@ pub fn tickWater() void {
         }
     }
 
+    // Phase 3: active chunks with no movement settle (skipped by future ticks until disturbed);
+    // dirty chunks are copied back to the mod store/cache and unsettle themselves plus neighbors.
     var act_it = active_chunks.iterator(.{});
     while (act_it.next()) |idx| {
         if (!dirty_chunks.isSet(idx)) {
@@ -694,6 +761,7 @@ pub fn tickWater() void {
         if (dy < world.SIM_BUFFER_WIDTH - 1) SimBuffer.water_settled.unset(SimBuffer.getIndex(dx, dy + 1));
     }
 
+    // Phase 4: recompute edge/waterlogged flags for every chunk touched this tick.
     chunk_y = 0;
     while (true) : (chunk_y += 1) {
         var chunk_x: world.SimIndexType = 0;

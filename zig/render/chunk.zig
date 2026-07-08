@@ -32,10 +32,9 @@ pub var player_screen_pos: dw.utils.Vec2f32 = .{ 0.0, 0.0 };
 pub var player_screen_size: f32 = 16.0;
 
 /// Seamless wrap period (in chunks) for the FBM background camera coordinate.
-/// Must match `src/shader.wgsl`; noise lattice repeats every 32 units.
+/// Must match `src/shader.wgsl`; noise "lattice" cycles every 32 units.
 /// With base_scale = 1/64, the farthest layer moves 1/16 unit/chunk (needs factor of 512).
 /// Warp coefficients (9/20, 17/20) require a factor of 20 to clear denominators.
-/// Update if shader coefficients change so it remains a multiple of 32 for all layers.
 pub const BG_WRAP_CHUNKS = 512 * 20;
 comptime {
     // 512 covers the 1/16 unit/chunk base scale; 20 covers warp-coefficient denominators.

@@ -48,10 +48,12 @@ fn resetAfterStart() void {
     dw.particles.reset();
     world.SimBuffer.reset();
     dw.water.reset();
+
     // dropped item ring buffer lives in the world arena reset above; detach instead of freeing
     dw.inventory.dropped_items = .{};
-
     dw.inventory.reset();
+
+    dw.mining.reset();
 
     // Clear paths in quad_cache to prevent depth piling up on reset/reseed
 

@@ -1,4 +1,4 @@
-//! Handles mining and placing blocks.
+//! Handles mining and placing blocks, and tool strength logic.
 const std = @import("std");
 const dw = @import("../root.zig");
 const sprite = dw.sprite;
@@ -30,6 +30,35 @@ pub var not_mining_frame: u64 = 0;
 /// Type of pickaxe equipped.
 pub var pickaxe_type: Tools = .stone;
 
+/// Resets all tool data.
+pub fn reset() void {
+    pickaxe_type = .stone;
+    mining_progress = 0;
+    mining_speed = 8;
+    mining_strength = 1;
+    mining_frame = 0;
+    selected_hp = 0;
+    not_mining_frame = 0;
+}
+
+/// List of tools.
+pub const Tools = enum {
+    stone,
+    bronze,
+    iron,
+    silver,
+    gold,
+};
+
+/// Table for specific tool properties.
+pub const pickaxe_table: std.EnumArray(Tools, ToolProps) = .init(.{
+    .stone = .{ .speed = 8, .strength = 1, .capabilities = .t0 },
+    .bronze = .{ .speed = 11, .strength = 1, .capabilities = .t1 },
+    .iron = .{ .speed = 15, .strength = 1, .capabilities = .t1 },
+    .silver = .{ .speed = 12, .strength = 2, .capabilities = .t2 },
+    .gold = .{ .speed = 20, .strength = 2, .capabilities = .t3 },
+});
+
 /// Struct representing a tool's ability to mine certain types of blocks, or requirements for a block to be mined.
 pub const MiningCapabilities = packed struct(u16) {
     /// Tier 0 (lowest-tier, base pickaxe).
@@ -59,24 +88,6 @@ pub const MiningCapabilities = packed struct(u16) {
         return true;
     }
 };
-
-/// List of tools.
-pub const Tools = enum {
-    stone,
-    bronze,
-    iron,
-    silver,
-    gold,
-};
-
-/// Table for specific tool properties.
-pub const pickaxe_table: std.EnumArray(Tools, ToolProps) = .init(.{
-    .stone = .{ .speed = 8, .strength = 1, .capabilities = .t0 },
-    .bronze = .{ .speed = 11, .strength = 1, .capabilities = .t1 },
-    .iron = .{ .speed = 15, .strength = 1, .capabilities = .t1 },
-    .silver = .{ .speed = 12, .strength = 2, .capabilities = .t2 },
-    .gold = .{ .speed = 20, .strength = 2, .capabilities = .t3 },
-});
 
 pub const ToolProps = struct {
     /// How much the player increases `mining_progress` every tick.
@@ -240,9 +251,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                 }
             }
 
-            if (in_creative or (strength != std.math.maxInt(u64) and mining_progress >= strength) and
-                (!block.isLiquid() or block.hp == memory.Block.MAX_HP))
-            {
+            if (in_creative or (strength != std.math.maxInt(u64) and mining_progress >= strength)) {
                 mining_progress = 0;
                 // sprite type being none check also prevents unneeded memory waste with data update
                 const was_deleted = block.isEmpty() or world.modifyBlockHp(
@@ -277,14 +286,6 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                                 });
                             }
                         }
-
-                        if (block.isFoundation()) memory.game.blocks_mined +%= 1;
-                        inventory.dropItem(
-                            block.id,
-                            mouse.mouse_chunk_coord.?,
-                            mouse.mouse_block_x,
-                            mouse.mouse_block_y,
-                        );
 
                         // Multi-tile assemblies break as a unit: clear the sibling cells the single-cell
                         // modifyBlockHp() above didn't touch (drop already happened once, for this cell).

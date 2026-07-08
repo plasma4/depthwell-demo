@@ -254,7 +254,7 @@ pub fn addDroppedItemsAsEntities(time_diff: f64) void {
                 .position = .{ screen_x, screen_y },
                 .size = item_size * @as(f32, @floatCast(interpolated_zoom)),
                 .rotation = rotation,
-                .lcha = .{ 1.0, 0.0, 0.0, @min(life_fraction * 1.8 - 0.8, 0.6) },
+                .lcha = .{ 1.0, 0.0, 0.0, @min(life_fraction * 1.8 - 0.8, 0.6) * @as(f32, if (item.id == .water) 0.4 else 1.0) },
             });
         }
     };

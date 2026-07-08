@@ -309,7 +309,7 @@ pub const Block = packed struct(u128) {
     pub inline fn makeBasicBlock(sprite_type: Sprite, seed_bits: u64) Block {
         return .{
             .id = sprite_type,
-            .hp = if (sprite_type == .water) MAX_HP else 0,
+            .hp = if (sprite_type.isLiquid()) MAX_HP else 0,
             .edge_flags = 0,
             .light = 255,
             .seed = @truncate(seed_bits),
