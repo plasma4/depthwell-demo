@@ -40,11 +40,17 @@ Useful variables to customize include `CONFIG` in `src/main.ts`, `engine.wirefra
 When building for production with Vite (using `npm run build` instead of `npm run dev`), use `zig build -Dgen-enums -Dwasm-opt` (with WASM optimizations from Binaryen).
 Alternatively, use and modify `.githooks/pre-commit`.
 
-Currently, Depthwell does not utilize web worker technology, so custom headers are not necessary (and this means it's fairly easily to save the entire game as a local asset folder or file, _after building_).
+#### About version control
 
-#### Easy building tips
+It is quite helpful to use the Zig Language Server in VSCode/VSCodium and set it to "watch" mode, which automatically builds the WASM while providing highlighting any errors.
 
-It is quite helpful to use the Zig Language Server in VSCode and set it to "watch" mode, which automatically builds the WASM while providing helpful error feedback to highlight. Clearing the console through shortcuts/ANSI escape codes can be useful if you're not using VSCode utilities.
+Depthwell supports both Git and Jujitsu using `.sh` files. Git VCS is supported by default; to use Jujitsu building for release, simply run `./build.sh` (after `chmod +x ./build.sh`).
+
+You can also easily build for Windows by using a shell script executor, or you can convert the commands to their Windows equivalents very easily.
+
+#### Git building tips
+
+If you're using Git, you'll want to comment out the Jujitsu-intended settings that hide default VSCode/VSCodium behavior.
 
 To auto-build Vite before commit:
 

@@ -1,0 +1,10 @@
+/build
+**/.DS_Store
+/.zig-cache
+/.jj
+/node_modules
+/aseprite/*.aseprite
+!/aseprite/main.aseprite
+
+/zig-out
+/zig-pkg

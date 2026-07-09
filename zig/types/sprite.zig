@@ -48,7 +48,11 @@ pub const INVENTORY_START = GEAR_ID + 35;
 /// Index where numbers (0-9) start.
 pub const NUMBER_START = INVENTORY_START + 4;
 /// ID for `Sprite.particle`, which is after a bunch of character glyphs.
-pub const PARTICLE_START = NUMBER_START + 10 + 123;
+pub const PARTICLE_START = NUMBER_START + 10 + 94;
+
+comptime {
+    if (max_sprite_value != 265) @compileError("Max sprite value unexpected!");
+}
 
 /// Sprite IDs with numbers based on their location in the sprite sheet.
 pub const Sprite = enum(u16) {
@@ -197,11 +201,12 @@ pub const Sprite = enum(u16) {
     _, // non-exhaustive for debugging heatmaps
 
     /// Gets the readable name of the sprite (pre-computed at compile-time).
+    /// Precondition: sprite must be valid with an explicit name in the enum.
     pub inline fn getName(self: @This()) []const u8 {
         const val = @intFromEnum(self);
         if (val < MAX_SPRITE_ID) return dense_names_table[val];
         if (self == .unselected) return unselected_name;
-        return "unknown";
+        unreachable;
     }
 
     /// Retrieves the fully compile-time property data for this sprite.
