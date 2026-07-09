@@ -112,6 +112,28 @@ export class SaveManager {
         });
     }
 
+    /**
+     * Attempts to acquire the lock repeatedly until it succeeds.
+     */
+    public async acquireLockWithRetry(intervalMs: number = 500): Promise<void> {
+        while (true) {
+            console.log("Attempting to acquire exclusive tab lock...");
+            const success = await this.tryAcquireTabExclusiveLock();
+
+            if (success) {
+                console.log("Successfully acquired lock!");
+                return; // exit the loop to continue init
+            }
+
+            console.log(`Lock busy. Retrying in ${intervalMs}ms...`);
+            await this.delay(intervalMs); // wait before trying again
+        }
+    }
+
+    private delay(ms: number): Promise<void> {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
     /** Shuts down the tab lock and let another tab take over. */
     public releaseTabExclusiveLock(): void {
         if (this.lockResolver) {
