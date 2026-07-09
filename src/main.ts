@@ -240,7 +240,6 @@ function uploadSaveFile() {
         if (!file) return;
         const bytes = new Uint8Array(await file.arrayBuffer());
         const ok = await engine.saveManager.importFromBytes(bytes);
-        if (!ok) console.log("Save import failed.");
     };
     input.click();
 }
