@@ -435,7 +435,7 @@ inline fn notifyNeighborEdgeFlags(rx: i32, ry: i32) void {
 
 /// Runs a single frame of the (mass-conserving) water simulation for blocks within the `SimBuffer`.
 pub fn tickWater() void {
-    // Phase 1: collect chunks that hold water and have not settled; skip the whole tick if none.
+    // Phase 1: begin by collecting chunks that hold water and have not settled; skip the whole tick if none.
     active_chunks = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
 
     var cy: world.SimIndexType = 0;
@@ -470,8 +470,8 @@ pub fn tickWater() void {
 
     var dirty_chunks = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
 
-    // Phase 2: sweep active chunks bottom-up so falling water moves one cell per tick without
-    // being double-moved (the `water_updated` bitset guards cells that already took their turn).
+    // Phase 2: sweep active chunks bottom-up so falling water moves one cell per tick without being double-moved
+    // (the `water_updated` bitset guards cells that already took their turn).
     var chunk_y: i32 = world.SIM_BUFFER_WIDTH - 1;
     while (chunk_y >= 0) : (chunk_y -= 1) {
         var chunk_x: i32 = 0;
@@ -483,7 +483,7 @@ pub fn tickWater() void {
             const curr = getChunkPtr(@intCast(chunk_x), @intCast(chunk_y)) orelse continue;
             const left = if (chunk_x > 0) getChunkPtr(@intCast(chunk_x - 1), @intCast(chunk_y)) else null;
             const right = if (chunk_x < world.SIM_BUFFER_WIDTH - 1) getChunkPtr(@intCast(chunk_x + 1), @intCast(chunk_y)) else null;
-            const top = if (chunk_x < world.SIM_BUFFER_WIDTH - 1) getChunkPtr(@intCast(chunk_x), @intCast(chunk_y - 1)) else null;
+            const top = if (chunk_y > 0) getChunkPtr(@intCast(chunk_x), @intCast(chunk_y - 1)) else null;
             const bottom = if (chunk_y < world.SIM_BUFFER_WIDTH - 1) getChunkPtr(@intCast(chunk_x), @intCast(chunk_y + 1)) else null;
 
             var by: i32 = CHUNK_SIZE - 1;
@@ -513,8 +513,8 @@ pub fn tickWater() void {
                     else
                         null;
 
-                    // Gravity first: pour into the cell below, a full block per tick when falling
-                    // into empty space but only 4 units per tick when topping up existing water.
+                    // Gravity first: pour into the cell below
+                    // (a full block per tick when falling into empty space but only 4 units per tick when topping up existing water)
                     if (down_ptr) |dp| {
                         if (dp.isFlowable()) {
                             const dest_vol = getVolume(dp.*);
@@ -586,10 +586,9 @@ pub fn tickWater() void {
                         }
                     }
 
-                    // Equalize with strictly-lower neighbors, moving up to `diff / 2` (capped at 4)
-                    // units per side per tick. A difference of 1 only flows when the move cascades
-                    // (the cell beyond the destination is lower still), which grinds leftover
-                    // slope-1 staircases into near-flat pools without oscillating.
+                    // Equalize with strictly-lower neighbors, moving up to `diff / 2` (capped at 4) units per side per tick.
+                    // A difference of 1 only flows when the move cascades (the cell beyond the destination is lower still),
+                    // which grinds leftover slope-1 staircases into near-flat pools without oscillating.
                     const diff_left = if (left_ok) src_press - left_press else 0;
                     const diff_right = if (right_ok) src_press - right_press else 0;
 

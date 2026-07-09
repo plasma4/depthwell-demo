@@ -1604,7 +1604,7 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
         break :blk new_idx;
     };
 
-    const initial_hp: u4 = if (new_sprite.isLiquid()) 1 else 0;
+    const initial_hp: u4 = if (new_sprite.isLiquid()) Block.MAX_HP else 0;
     if (new_sprite.isLiquid()) {
         // also emit some faaancy particles
         if (dw.mouse.getMouseBlockCenterPx()) |center| {
