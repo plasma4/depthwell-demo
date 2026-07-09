@@ -358,11 +358,12 @@ pub fn getSpritesInInventory(buffer: *SlotBuffer) []Sprite {
     // foundation_sprites is already sorted by enum ID because of how it's generated in types/sprite.zig
     inline for (sprite.possible_item_sprites) |s| {
         if (s.isEmpty()) continue;
-        if ((shouldShowAllItems() and s.isInWorld()) or (!shouldShowAllItems() and inventory_counts[@intFromEnum(s)] > 0)) {
-            if (s != .water or inventory_counts[@intFromEnum(s)] >= memory.Block.MAX_HP) {
-                buffer[count] = s;
-                count += 1;
-            }
+        if ((shouldShowAllItems() and s.isInWorld()) or // if we're showing all items, is this item actually placeable?
+            (!shouldShowAllItems() and inventory_counts[@intFromEnum(s)] > 0 and // we're not showing all items, does the player have at least one of these
+                (s != .water or inventory_counts[@intFromEnum(s)] >= memory.Block.MAX_HP))) // if it's water, does the player have at least 15 (since the actual amount is x15 internally?)
+        {
+            buffer[count] = s;
+            count += 1;
             // logger.quick(.{ s, buffer.len, sprite.max_sprite_value });
         }
     }
@@ -376,11 +377,12 @@ pub fn getSelectedIndex() u16 {
     var count: usize = 1;
     inline for (sprite.possible_item_sprites) |s| {
         if (s.isEmpty()) continue;
-        if ((shouldShowAllItems() and s.isInWorld()) or (!shouldShowAllItems() and inventory_counts[@intFromEnum(s)] > 0)) {
-            if (s != .water or inventory_counts[@intFromEnum(s)] >= memory.Block.MAX_HP) {
-                if (s == selected_sprite) return @intCast(count);
-                count += 1;
-            }
+        if ((shouldShowAllItems() and s.isInWorld()) or // if we're showing all items, is this item actually placeable?
+            (!shouldShowAllItems() and inventory_counts[@intFromEnum(s)] > 0 and // we're not showing all items, does the player have at least one of these
+                (s != .water or inventory_counts[@intFromEnum(s)] >= memory.Block.MAX_HP))) // if it's water, does the player have at least 15 (since the actual amount is x15 internally?)
+        {
+            if (s == selected_sprite) return @intCast(count);
+            count += 1;
         }
     }
 

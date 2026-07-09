@@ -311,7 +311,7 @@ pub fn addOresAndGems(
 
         s = selectSprite(
             .{ s, .gold },
-            base_data.density >= 0.63 or (base_data.density >= 0.59 and base_data.sprite == .lava_stone),
+            base_data.density >= 0.60 or (base_data.density >= 0.52 and base_data.sprite == .lava_stone),
             .{ v2, 0.3, 0.36 },
         );
         if (s == .gold) return s;
@@ -401,7 +401,7 @@ pub fn addOresAndGems(
                     v3 >= 0.84 and v3 <= 0.85,
                     null,
                 );
-                if (s == .ruby) return s;
+                if (s == .electrit) return s;
             }
         }
     }
