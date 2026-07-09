@@ -211,6 +211,11 @@ export class GameEngine {
         return await EngineMaker.create(canvas, options);
     }
 
+    public async start() {
+        await this.setSeed(Seeding.makeSeed(100));
+        this.exports.init();
+    }
+
     public destroy(reason = "unknown reason", error: any = null) {
         this.resizeObserver.disconnect();
         this.destroyed = reason;

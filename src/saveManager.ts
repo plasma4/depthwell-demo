@@ -144,7 +144,7 @@ export class SaveManager {
 
     /*
         ----
-        WASM boundary
+        WASM Boundary
         ----
     */
 
@@ -438,12 +438,16 @@ export class SaveManager {
             this.engine.exports.savePrepareImport(BigInt(bytes.length)),
         );
         if (ptr === 0) {
+            alert("Import failed; resetting.");
+            this.engine.start();
             return false;
         }
         new Uint8Array(this.engine.memory.buffer, ptr, bytes.length).set(bytes);
 
         const success = this.engine.exports.saveImportAll(BigInt(bytes.length));
         if (!success) {
+            alert("Import failed; resetting.");
+            this.engine.start();
             return false;
         }
 

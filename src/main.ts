@@ -1,7 +1,6 @@
 /// <reference types="vite/client" />
 "use strict";
 import { GameEngine } from "./engine";
-import * as Seeding from "./seeding";
 import { KeyBits, game_state_offsets } from "./enums";
 
 // const is_dev = import.meta.env.DEV;
@@ -494,9 +493,8 @@ if (is_dev && engine.isDebug) {
     };
     addSaveButton("Manual save", () => engine.saveManager.save());
     addSaveButton("Manual load", async () => await engine.saveManager.load());
-    addSaveButton("Reseed", async () => {
-        await engine.setSeed(Seeding.makeSeed(100));
-        engine.exports.init();
+    addSaveButton("Reset", async () => {
+        engine.start();
     });
     addSaveButton("Export file", () => downloadSaveFile());
     addSaveButton("Import file", () => uploadSaveFile());
