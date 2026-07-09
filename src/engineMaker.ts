@@ -316,7 +316,7 @@ export async function create(
             "Game is open in another tab! Please use that tab or close it to continue.",
         );
         window.onerror = null;
-        throw "Game is open in another tab! Please use that tab or close it to continue.";
+        await saveManager.acquireLockWithRetry();
     }
 
     engine.exports.main();
