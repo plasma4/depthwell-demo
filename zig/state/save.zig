@@ -279,7 +279,7 @@ fn readHeaderCore(r: *Reader, section_len: usize) !void {
     const copy_len = @min(section_len, dest_slice.len);
     try r.readInto(dest_slice[0..copy_len]);
 
-    if (section_len != copy_len) {
+    if (section_len != copy_len or memory.game.depth < dw.startup.STARTING_ZOOM_TIMES) {
         return SaveError.BadData;
     }
 

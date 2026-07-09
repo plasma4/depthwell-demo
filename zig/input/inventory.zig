@@ -336,13 +336,14 @@ pub fn removeFromInventory(id: Sprite) bool {
         const to_remove = if (id == .water) memory.Block.MAX_HP else 1;
         if (idx >= inventory_counts.len or inventory_counts[idx] < to_remove) return false;
         inventory_counts[idx] -= to_remove;
+
+        // if we used the last one, remove it immediately!
+        // the amount of water that the player has is rendered by dividing by 15, so this checks out
+        if (inventory_counts[idx] < to_remove and selected_sprite == id) {
+            selected_sprite = .unselected;
+        }
     }
     if (inventory_wobble_progress[idx] == 0.0) inventory_wobble_progress[idx] = -1.0;
-
-    // If we used the last one, unselect it immediately
-    if (!isInCreative() and inventory_counts[idx] == 0 and selected_sprite == id) {
-        selected_sprite = .unselected;
-    }
 
     return true;
 }
@@ -358,8 +359,10 @@ pub fn getSpritesInInventory(buffer: *SlotBuffer) []Sprite {
     inline for (sprite.possible_item_sprites) |s| {
         if (s.isEmpty()) continue;
         if ((shouldShowAllItems() and s.isInWorld()) or (!shouldShowAllItems() and inventory_counts[@intFromEnum(s)] > 0)) {
-            buffer[count] = s;
-            count += 1;
+            if (s != .water or inventory_counts[@intFromEnum(s)] >= memory.Block.MAX_HP) {
+                buffer[count] = s;
+                count += 1;
+            }
             // logger.quick(.{ s, buffer.len, sprite.max_sprite_value });
         }
     }
@@ -374,8 +377,10 @@ pub fn getSelectedIndex() u16 {
     inline for (sprite.possible_item_sprites) |s| {
         if (s.isEmpty()) continue;
         if ((shouldShowAllItems() and s.isInWorld()) or (!shouldShowAllItems() and inventory_counts[@intFromEnum(s)] > 0)) {
-            if (s == selected_sprite) return @intCast(count);
-            count += 1;
+            if (s != .water or inventory_counts[@intFromEnum(s)] >= memory.Block.MAX_HP) {
+                if (s == selected_sprite) return @intCast(count);
+                count += 1;
+            }
         }
     }
 
@@ -439,7 +444,7 @@ pub fn drawInventory(time_diff: f64) void {
     var hovered_inventory_sprite: ?Sprite = null;
     for (active_slots, 0..) |active_sprite, i| {
         // For each slot, find the sprite ID, handle animations, and draw sprite and its shadow
-        const is_empty = active_sprite.isEmpty();
+        const acts_as_pickaxe = active_sprite.isEmpty();
         const id = @intFromEnum(active_sprite);
         const is_selected = active_sprite == selected_sprite;
 
@@ -463,11 +468,11 @@ pub fn drawInventory(time_diff: f64) void {
         const inventory_pos: Vec2f32 = .{ 32 + col * spacing, 32 + row * spacing };
 
         // Background sizing (using is_selected directly for instant feedback on bg)
-        const bg_size: f32 = if (is_selected) base_size * 1.125 else if (is_empty) base_size * 0.9 else base_size;
+        const bg_size: f32 = if (is_selected) base_size * 1.125 else if (acts_as_pickaxe) base_size * 0.9 else base_size;
         const bg_pos = inventory_pos - Vec2f32{ bg_size / 4.0, bg_size / 4.0 };
 
         // replace with pickaxe for UI
-        const rendered_sprite: Sprite = if (is_empty)
+        const rendered_sprite: Sprite = if (acts_as_pickaxe)
             @enumFromInt(@intFromEnum(Sprite.pickaxe) + @intFromEnum(dw.mining.pickaxe_type))
         else
             active_sprite;
@@ -566,7 +571,8 @@ pub fn drawInventory(time_diff: f64) void {
         const pos = inventory_pos - size_vec / Vec2f32{ base_size / 4.0, base_size / 4.0 } - Vec2f32{ base_size / 16.0, base_size / 16.0 };
 
         // number automatically resizes to be smaller for large values!
-        const count = inventory_counts[@intFromEnum(active_sprite)];
+        var count = inventory_counts[@intFromEnum(active_sprite)];
+        if (active_sprite == .water) count /= 15;
         const digit_count_minus_one: f32 = if (count == 0) 1 else std.math.log10_int(count);
         const number_size = base_size * (1.0 + 0.3 * wobble_progress) / (@max(3.0, digit_count_minus_one + 0.5));
 
