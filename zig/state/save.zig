@@ -542,7 +542,10 @@ pub fn getExportPtr() usize {
 /// Reserves `len` bytes in the load staging buffer and returns a pointer for JS to write into.
 pub fn prepareImport(len: usize) usize {
     load_buf.clearRetainingCapacity();
-    load_buf.resize(save_alloc, len) catch return 0;
+    load_buf.resize(save_alloc, len) catch {
+        logger.err(@src(), "Allocation failed while preparing for import!", .{});
+        return 0;
+    };
     return @intFromPtr(load_buf.items.ptr);
 }
 
@@ -553,11 +556,13 @@ pub fn importAll(len: usize) bool {
     const buf = load_buf.items[0..len];
     validate(buf) catch |err| {
         logger.err(@src(), "Save validation failed: {s}", .{@errorName(err)});
+        dw.startup.init(true);
         return false;
     };
-    dw.startup.init(true);
+    dw.startup.init(false);
     deserialize(buf) catch |err| {
         logger.err(@src(), "Save import failed: {s}", .{@errorName(err)});
+        dw.startup.init(true);
         return false;
     };
     return true;
@@ -613,7 +618,7 @@ fn validate(buf: []const u8) !void {
 
 /// Applies a save blob: walks the sections and dispatches each to its reader.
 /// The framing length is trusted so a reader consuming the wrong amount can't desync the stream.
-/// Precondition: `validate()` passed on `buf`, and the game has been reset via `startup.init(true)`.
+/// Precondition: `validate()` passed on `buf`, and the game has been reset via `startup.init(false)`.
 fn deserialize(buf: []const u8) !void {
     // Clean up our temporary remapping table after import finishes.
     defer {

@@ -264,7 +264,7 @@ fn addAsepriteStep(
         "--sheet-type",
         "rows",
         "--sheet-columns",
-        "8",
+        "16",
     });
     run_cmd.addArg("--sheet");
     const output = run_cmd.addOutputFileArg(out_filename);

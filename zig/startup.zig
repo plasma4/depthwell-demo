@@ -55,19 +55,19 @@ fn resetAfterStart() void {
 
     dw.mining.reset();
 
-    // Clear paths in quad_cache to prevent depth piling up on reset/reseed
-
     world.clearCaches(true);
     world.initArenaAllocatedStructures();
 }
 
 /// Initializes the game, resets datatypes, and sets up seeding and spawn logic!
-/// Use `skip_setup` to only call `resetAfterStart()`.
-pub fn init(skip_setup: bool) void {
-    if (alreadyStarted or skip_setup) {
+///
+/// Set `new_game` to false to only call `resetAfterStart()`, without setting up the world and seeding.
+/// (This is used when importing a save.)
+pub fn init(new_game: bool) void {
+    if (alreadyStarted or !new_game) {
         alreadyStarted = true;
         resetAfterStart();
-        if (skip_setup) return;
+        if (!new_game) return;
     } else {
         alreadyStarted = true;
         logger.log(@src(), "Hello from Zig!", .{});

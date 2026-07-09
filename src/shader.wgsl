@@ -9,8 +9,8 @@
 // #region generated-constants
 // Auto-generated from zig/types/sprite.zig by zig/generate_shader.zig (runs during `zig build`).
 // Do NOT edit values between the markers by hand; edit the Sprite enum instead.
-const TILES_PER_ROW: f32 = 8.0;
-const TILES_PER_COLUMN: f32 = 34.0;
+const TILES_PER_ROW: f32 = 16.0;
+const TILES_PER_COLUMN: f32 = 17.0;
 const STONE_START: u32 = 12u;
 const ORE_START: u32 = 36u;
 const GEM_START: u32 = 42u;
@@ -1202,9 +1202,9 @@ fn fs_entity(in: EntityOutput) -> @location(0) vec4f {
     let tex_rgb = srgb_to_linear(raw_tex.rgb * raw_mask.rgb);
     let tex_a = raw_tex.a * raw_mask.a;
     // Early discard if the pixel is fully transparent (maybe)
-    // if tex_color.a <= 0.0 {
-    //     discard;
-    // }
+    if tex_a <= 0.002 {
+        discard;
+    }
     var lab = linear_srgb_to_oklab(tex_rgb);
     var lch = oklab_to_oklch(lab);
 

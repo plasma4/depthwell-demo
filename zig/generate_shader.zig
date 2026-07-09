@@ -49,8 +49,8 @@ pub fn main(init: std.process.Init) !void {
         \\const WATER_START: u32 = {d}u;
         \\
     , .{
-        8,
-        sprite.max_sprite_value / 8 + 1,
+        dw.getTilesPerRow(),
+        dw.getTilesPerColumn(),
         sprite.STONE_START,
         sprite.ORE_START,
         sprite.GEM_START,
