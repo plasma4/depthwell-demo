@@ -556,13 +556,11 @@ pub fn importAll(len: usize) bool {
     const buf = load_buf.items[0..len];
     validate(buf) catch |err| {
         logger.err(@src(), "Save validation failed: {s}", .{@errorName(err)});
-        dw.startup.init(true);
         return false;
     };
     dw.startup.init(false);
     deserialize(buf) catch |err| {
         logger.err(@src(), "Save import failed: {s}", .{@errorName(err)});
-        dw.startup.init(true);
         return false;
     };
     return true;

@@ -323,8 +323,7 @@ export async function create(
 
     const loaded = await engine.saveManager.load();
     if (!loaded) {
-        await engine.setSeed(Seeding.makeSeed(100));
-        engine.exports.init();
+        engine.start();
     }
 
     const resizeObserver = new ResizeObserver(engine.onResize);
