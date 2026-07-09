@@ -333,8 +333,9 @@ pub fn removeFromInventory(id: Sprite) bool {
 
     const idx = @intFromEnum(id);
     if (!isInCreative()) {
-        if (idx >= inventory_counts.len or inventory_counts[idx] == 0) return false;
-        inventory_counts[idx] -= 1;
+        const to_remove = if (id == .water) memory.Block.MAX_HP else 1;
+        if (idx >= inventory_counts.len or inventory_counts[idx] < to_remove) return false;
+        inventory_counts[idx] -= to_remove;
     }
     if (inventory_wobble_progress[idx] == 0.0) inventory_wobble_progress[idx] = -1.0;
 
