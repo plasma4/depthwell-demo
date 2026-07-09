@@ -73,9 +73,9 @@ Here are the basic terms (note that there are, for example, 16 possible subpixel
 - 1 Pixel = 16 Subpixels
 - 1 Block = 16 Pixels
 - 1 Chunk = 16 Blocks = 256 Pixels = 4,096 Subpixels
-- **Depth**: How "deep" the player is. Depth starts at $4$ (see `STARTING_ZOOM_TIMES`). Each time you enter a portal, the world zooms in by $4\text{x}$, making everything look 4 times larger, and the depth increases by 1.
+- **Depth**: How "deep" the player is. Depth starts at $6$ (see `STARTING_ZOOM_TIMES` in `zig/startup.zig`). Each time you enter a portal, the world zooms in by $4\text{x}$, making everything look 4 times larger, and the depth increases by 1.
 - **$D$**: Shorthand for the current depth. You can think of depth $D-1$ as the coordinate space you occupied right _before_ entering a portal.
-- **The Event Horizon ($H$)**: Shorthand for $D-32$. When you are deep in the fractal ($D \ge 32 + 4$), the game stops tracking individual blocks shallower than 32 levels above you, replacing them with a simplified 4x4 background grid. (This is not necessarily related to game mechanics but instead internal.)
+- **The Event Horizon ($H$)**: Shorthand for $D-32$. When you are deep in the fractal ($D \ge 32 + 6$), the game stops tracking individual blocks shallower than 32 levels above you, replacing them with a simplified 4x4 background grid. (This is not necessarily related to game mechanics but instead internal.)
 
 The player starts off at `STARTING_ZOOM_TIMES`, which defaults to 4. So, $D$ starts off as 4 and $D-1$ doesn't exist until $D$ increases further.
 
@@ -210,7 +210,7 @@ Well, now you know what a block contains.
 
 The most complex part of Depthwell's architecture, though, is ensuring that a hole mined at Depth 0 results in an empty 4-by-4 region at Depth 1, 16-by-16 at Depth 2, and so on. This is handled through a neat little **lineage check** during chunk generation.
 
-When the generator builds a chunk at Depth $D$, it iteratively traverses backward through the prefix stack from $D-1$ down to $D-32$. ($D$ is larger the "more zoomed in" the game is, and starts at $4$. It represents how many `u2`s need to represent where a chunk is, to put it another way.)
+When the generator builds a chunk at Depth $D$, it iteratively traverses backward through the prefix stack from $D-1$ down to $D-32$. (Recall that $D$ is larger the "more zoomed in" the game is, and starts at `STARTING_ZOOM_TIMES`. It represents how many `u2`s need to represent where a chunk is, to put it another way.)
 
 For each ancestor level, it traces upward and queries `ModificationStore` or evaluates `AncestorCache`: _"Was the parent block at this specific path modified?"_ At $D-32$ (the event horizon limit), chunk-level details are replaced by checking the global `QuadCache` 4x4 material grid. Any properties inherited directly from parents influence chunk structures appropriately.
 

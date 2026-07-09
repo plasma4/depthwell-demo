@@ -34,7 +34,7 @@ pub const CAMPFIRE_LIGHT: u16 = 240;
 pub const FURNACE_LIGHT: u16 = 80;
 // ---
 pub const PLATE_LIGHT: u16 = 160;
-pub const LAVA_LIGHT: u16 = 40;
+pub const LAVA_LIGHT: u16 = 60;
 
 // Orthogonal decay rates per block type. Air should always be the lowest (decays slowest)!
 // Logic is optimized and dependent around air falloff being 10 and solid falloff being 26.
