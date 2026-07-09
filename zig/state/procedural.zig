@@ -293,14 +293,14 @@ pub fn addOresAndGems(
         s = selectSprite(
             .{ s, .iron },
             base_data.sprite != .blue_strange_stone,
-            .{ v1, 0.55, 0.565 },
+            .{ v1, 0.55, 0.595 },
         );
         if (s == .iron) return s;
 
         s = selectSprite(
             .{ s, .silver },
             base_data.density <= 0.48,
-            .{ v1, 0.2, 0.23 },
+            .{ v1, 0.2, 0.25 },
         );
         s = selectSprite(
             .{ s, .silver },
@@ -319,7 +319,7 @@ pub fn addOresAndGems(
         s = selectSprite(
             .{ s, .nickel },
             true,
-            .{ v2, 0.58, 0.605 },
+            .{ v2, 0.58, 0.595 },
         );
         if (s == .nickel) return s;
 

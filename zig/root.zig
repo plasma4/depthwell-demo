@@ -177,7 +177,7 @@ pub export fn tick(logic_speed: f64, iterations: u32) void {
     //     "{mh}Mouse status",
     //     mouse.cursor_type,
     // });
-    logger.writeOnce(3, .{if (mouse.mouse_chunk_coord) |coord| world.getChunk(coord).getBlock(mouse.mouse_block_x, mouse.mouse_block_y) else null});
+    // logger.writeOnce(3, .{if (mouse.mouse_chunk_coord) |coord| world.getChunk(coord).getBlock(mouse.mouse_block_x, mouse.mouse_block_y) else null});
 }
 
 pub export fn mixSeed(number: u64) i64 {
