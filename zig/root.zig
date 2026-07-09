@@ -154,10 +154,12 @@ pub export fn prepareVisibleData(time_interpolated: f64, time_diff: f64, canvas_
 // (STONE_START, ORE_START, …) are no longer exported: they are baked into shader.wgsl at build time
 // by zig/generate_shader.zig, sourced directly from the Sprite enum.
 pub export fn getTilesPerRow() u32 {
-    return 8; // Sprites are saved as a .png in a sprite sheet 128 pixels wide, and each individual sprite is 16x16.
+    // Sprites are saved as a .png in a sprite sheet 256 pixels wide from build.zig
+    // each individual sprite is 16x16, so there's 16 tiles/row (or 16 columns)
+    return 16;
 }
 pub export fn getTilesPerColumn() u32 {
-    return sprite.max_sprite_value / 8 + 1; // works out from 0-indexing
+    return sprite.max_sprite_value / getTilesPerRow() + 1; // works out from 0-indexing
 }
 
 pub export fn handleMouse(mouse_x: f64, mouse_y: f64, action: u32) void {
