@@ -5,7 +5,7 @@
 //! tint over a white sprite such as `.particle`.
 const dw = @import("../root.zig");
 
-/// Number of 16x16 tiles in the sprite atlas (row-major, 8 per row).
+/// Number of 16x16 tiles in the sprite atlas (row-major, 16 per row).
 pub const TILE_COUNT: usize = 272;
 
 /// CSR offsets into `colors`: tile `i` owns `colors[tile_offsets[i]..tile_offsets[i + 1]]`.

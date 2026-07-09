@@ -1622,9 +1622,8 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
     dw.save.shadowChunkForSave(entry_idx);
     const c: *Chunk = mod_store.history.at(entry_idx);
 
-    // Derive the overlay's underlay from what was here before, so replacing (say) a blue_stone block
-    // with gold keeps showing blue_stone behind the ore mask. Priority: inherit a previous overlay's
-    // underlay, else grow inside the previous solid block, else fall back to plain stone.
+    // Derive the overlay's underlay from what was here before, so replacing (say) a blue_stone block with gold keeps showing blue_stone behind the ore mask
+    // Priority: inherit a previous overlay's underlay, else grow inside the previous solid block, else fall back to plain stone.
     // Non-ore/gem placements carry no underlay.
     const new_base: Sprite = if (new_sprite.isOverlay())
         (if (prev_block.base_id != .none) prev_block.base_id else if (prev_block.isFoundation()) prev_block.id else .stone)
@@ -1757,8 +1756,7 @@ pub const UpdateItem = struct { coord: Coordinate, bx: u4, by: u4 };
 const CHECK_LIMIT = 0;
 /// Dedicated worklist for local edge flag updating.
 /// Not optimized (general-purpose); expects correct adjacent edge flags for reasonable performance,
-/// and special anchor types like suspended to not create extremely long chains.
-///
+/// and special anchor types like `suspended` to not create extremely long chains.
 pub var flag_worklist: std.ArrayList(UpdateItem) = undefined;
 
 /// Recalculates edge flags for a specific block its 8 neighbors.
