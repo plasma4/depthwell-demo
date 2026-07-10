@@ -45,6 +45,7 @@ fn resetAfterStart() void {
 
     @import("menus/furnace.zig").reset();
     @import("menus/corecraft.zig").reset();
+    @import("menus/loot.zig").reset();
     dw.particles.reset();
     world.SimBuffer.reset();
     dw.water.reset();
@@ -64,6 +65,7 @@ fn resetAfterStart() void {
 /// Set `new_game` to false to only call `resetAfterStart()`, without setting up the world and seeding.
 /// (This is used when importing a save.)
 pub fn init(new_game: bool) void {
+    dw.save.in_tick = false; // a rebuilt world is coherent again after a mid-tick trap
     if (alreadyStarted or !new_game) {
         alreadyStarted = true;
         resetAfterStart();

@@ -60,6 +60,7 @@ pub fn updateEntities(time_diff: f64) void {
     dw.indicators.drawIndicators();
     @import("../menus/furnace.zig").draw();
     @import("../menus/corecraft.zig").draw();
+    @import("../menus/loot.zig").draw();
 
     // draw the inventory items/all items if in creative
     inventory.drawInventory(time_diff);

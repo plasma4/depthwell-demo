@@ -7,6 +7,7 @@
 //! Dragging an ore from the inventory onto the input slot loads ALL of that ore at once!
 const std = @import("std");
 const dw = @import("../root.zig");
+const util = @import("util.zig");
 
 const Sprite = dw.Sprite;
 const Vec2f = dw.utils.Vec2f;
@@ -30,21 +31,9 @@ const TOTAL_PROGRESS = SMELTING_STEPS * FRAMES_PER_STEP;
 const MENU_POS: Vec2f32 = .{ 0.02, 0.75 };
 const MENU_SIZE: Vec2f32 = toSize(0.3) * Vec2f32{ 1.0, 0.5 };
 
-/// Round-rect hitbox covering the whole menu panel, in viewport pixels.
-fn menuHitbox() dw.geometry.Shape {
-    const px_scale: Vec2f = .{ dw.SCREEN_WIDTH, dw.SCREEN_HEIGHT };
-    return dw.geometry.Shape.roundSquare(
-        .{ @as(f64, MENU_POS[0]) * px_scale[0], @as(f64, MENU_POS[1]) * px_scale[1] },
-        @as(f64, MENU_SIZE[0]) * px_scale[0],
-        0.05,
-    );
-}
-
-/// Whether the cursor is over a menu panel (such as furnace smelting). Always false while the menu is closed.
-/// Used by `mouse.processDownCaptures()` to keep pointerdown from falling through to the world.
+/// Whether the cursor is over the furnace panel. Always false while the menu is closed.
 pub fn isHoveringOnMenu() bool {
-    if (!dw.indicators.menus.furnace) return false;
-    return menuHitbox().contains(mouse.uv_position * Vec2f{ dw.SCREEN_WIDTH, dw.SCREEN_HEIGHT });
+    return util.isHovering(dw.indicators.menus.furnace, MENU_POS, MENU_SIZE);
 }
 
 /// Ore currently loaded in the input slot (`.none` if empty).
@@ -179,11 +168,6 @@ fn collectOutput() void {
     output_count = 0;
 }
 
-/// Builds a centered round-square hitbox in viewport pixels.
-fn slotHitbox(center_px: Vec2f, size: f64) dw.geometry.Shape {
-    return .roundSquare(center_px - @as(Vec2f, @splat(size / 2.0)), size, 0.2);
-}
-
 /// Draws the ore currently being dragged from the inventory toward the input slot with lag and wiggle effects.
 fn drawDragIcon(mouse_px: Vec2f) void {
     const dragged = inventory.selected_sprite;
@@ -242,8 +226,6 @@ pub fn draw() void {
     // The menu is only visible/interactive while opened via a furnace indicator.
     if (!dw.indicators.menus.furnace) return;
 
-    const px_scale: Vec2f = .{ dw.SCREEN_WIDTH, dw.SCREEN_HEIGHT };
-
     const menu_pos = MENU_POS;
     const menu_size = MENU_SIZE;
     const menu_center: Vec2f32 = menu_pos + menu_size / Vec2f32{ 2.0, 2.0 };
@@ -251,15 +233,15 @@ pub fn draw() void {
     // Slot centers, in UV and in viewport pixels.
     const input_uv: Vec2f32 = menu_center - Vec2f32{ 0.1, 0.0 };
     const output_uv: Vec2f32 = menu_center + Vec2f32{ 0.1, 0.0 };
-    const input_px: Vec2f = .{ @as(f64, input_uv[0]) * px_scale[0], @as(f64, input_uv[1]) * px_scale[1] };
-    const output_px: Vec2f = .{ @as(f64, output_uv[0]) * px_scale[0], @as(f64, output_uv[1]) * px_scale[1] };
+    const input_px = util.uvToPx(input_uv);
+    const output_px = util.uvToPx(output_uv);
 
     const SLOT_SIZE: f64 = 20.0;
     const ITEM_SIZE: f32 = 16.0;
 
-    const mouse_px: Vec2f = mouse.uv_position * px_scale;
-    const input_hitbox = slotHitbox(input_px, SLOT_SIZE);
-    const output_hitbox = slotHitbox(output_px, SLOT_SIZE);
+    const mouse_px = util.mousePx();
+    const input_hitbox = util.slotHitbox(input_px, SLOT_SIZE);
+    const output_hitbox = util.slotHitbox(output_px, SLOT_SIZE);
 
     // .smelting down-capture is claimed centrally in mouse.processDownCaptures() (via isHoveringMenu),
     // so by here click_focus already reflects whether this click started on the menu panel.
@@ -306,21 +288,7 @@ pub fn draw() void {
             .size = ITEM_SIZE,
         });
 
-        // draw amount and shadow
-        drawNumber(loaded_count, .{
-            @floatCast(input_px[0] + 2.4),
-            @floatCast(input_px[1] + 4.4),
-        }, .{
-            .font_size = 6.0,
-            .lcha = .{ 0.30, 0.22, 1.0, 0.8 },
-        });
-        drawNumber(loaded_count, .{
-            @floatCast(input_px[0] + 3.0),
-            @floatCast(input_px[1] + 5.0),
-        }, .{
-            .font_size = 6.0,
-            .lcha = .{ 0.85, 0.30, 1.2, 1.0 },
-        });
+        util.drawCount(loaded_count, .{ input_px[0] + 3.0, input_px[1] + 5.0 }, .{ 0.85, 0.30, 1.2, 1.0 }, 1.0);
     }
 
     // Finished bars+count goes in the output slot
@@ -330,14 +298,7 @@ pub fn draw() void {
             .position = .{ @floatCast(output_px[0]), @floatCast(output_px[1]) },
             .size = ITEM_SIZE,
         });
-        drawNumber(output_count, .{ @floatCast(output_px[0] + 2.4), @floatCast(output_px[1] + 4.4) }, .{
-            .font_size = 6.0,
-            .lcha = .{ 0.30, 0.22, 1.6, 0.8 },
-        });
-        drawNumber(output_count, .{ @floatCast(output_px[0] + 3.0), @floatCast(output_px[1] + 5.0) }, .{
-            .font_size = 6.0,
-            .lcha = .{ 0.85, 0.30, 1.8, 1.0 },
-        });
+        util.drawCount(output_count, .{ output_px[0] + 3.0, output_px[1] + 5.0 }, .{ 0.85, 0.30, 1.8, 1.0 }, 1.0);
     }
 
     // Progress bar between the slots.

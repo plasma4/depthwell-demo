@@ -495,6 +495,11 @@ fn readModStore(r: *Reader) !void {
     }
 }
 
+/// True while `handleTick()` is executing; set/cleared by `tick()` in `root.zig` and cleared again by `startup.init()`.
+/// A panic/trap mid-tick leaves it set, so `exportAll()` and `beginSnapshot()` refuse to serialize the half-applied tick forever
+/// (an older intact save beats a torn one; page-close saves hit the same guard).
+pub var in_tick: bool = false;
+
 /// Accumulates the finished save blob; handed to JS (which copies it out to OPFS).
 var save_buf: std.ArrayList(u8) = .empty;
 /// Staging buffer JS writes a save into before `importAll()`.
@@ -523,7 +528,12 @@ fn serialize(w: *Writer) !void {
 }
 
 /// Serializes the entire game state into `save_buf`. Returns the byte length, or 0 on failure.
+/// Refuses while `in_tick` is set: the state is then not at a tick boundary and must never be persisted.
 pub fn exportAll() usize {
+    if (in_tick) {
+        logger.err(@src(), "Refusing to export: a logical tick never finished (state is torn)!", .{});
+        return 0;
+    }
     snapshot_active = false; // reuses save_buf, so an in-flight budgeted snapshot must abort
     save_buf.clearRetainingCapacity();
     var w: Writer = .{ .list = &save_buf };
@@ -581,6 +591,19 @@ pub fn finalizeLoad() void {
 
     // repopulate the SimBuffer around the player using the newly loaded state
     world.SimBuffer.sync(g.getPlayerCoord(), .{ 0, 0 });
+
+    // A save can land between a water-adjacent block change and the next tick's batched flag recompute
+    // (see queueWaterFlags()), baking stale/sentinel edge flags into the stored blocks.
+    // Re-queue every water chunk so those flags heal on the first tick after a load.
+    var cy: usize = 0;
+    while (cy < world.SIM_BUFFER_WIDTH) : (cy += 1) {
+        var cx: usize = 0;
+        while (cx < world.SIM_BUFFER_WIDTH) : (cx += 1) {
+            if (world.SimBuffer.has_water.isSet(world.SimBuffer.getIndex(@intCast(cx), @intCast(cy)))) {
+                dw.water.queueWaterFlags(@intCast(cx), @intCast(cy));
+            }
+        }
+    }
 }
 
 /// Structurally validates a save blob without touching any game state: magic, BLAKE3 hash, format version, and section framing (known tags, in-bounds lengths, end marker reached).
@@ -696,7 +719,12 @@ var shadow: std.AutoHashMapUnmanaged(usize, Chunk) = .empty;
 
 /// Starts a budgeted snapshot: resets `save_buf`, writes the header and small sections, opens MOD_STORE and freezes the modified-chunk plan.
 /// Returns the number of chunks to write (feed to `writeBatch()`), or -1 on failure.
+/// Refuses while `in_tick` is set (see `exportAll()`).
 pub fn beginSnapshot() i64 {
+    if (in_tick) {
+        logger.err(@src(), "Refusing to snapshot: a logical tick never finished (state is torn)!", .{});
+        return -1;
+    }
     plan.clearRetainingCapacity();
     shadow.clearRetainingCapacity();
     plan_cursor = 0;

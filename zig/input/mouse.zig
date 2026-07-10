@@ -30,6 +30,8 @@ pub const ClickFocus = enum(u32) {
     smelting,
     /// Click started specifically on a crafting menu panel.
     crafting,
+    /// Click started specifically on the chest loot menu panel.
+    loot,
 
     /// Returns the numerical priority of the focus state, where lower is more prioritized.
     pub fn priority(self: ClickFocus) u32 {
@@ -148,6 +150,7 @@ pub fn processDownCaptures() void {
             .inventory => _ = tryCaptureDown(.inventory, inventory.getHoveredInventorySprite() != null),
             .smelting => _ = tryCaptureDown(.smelting, @import("../menus/furnace.zig").isHoveringOnMenu()),
             .crafting => _ = tryCaptureDown(.crafting, @import("../menus/corecraft.zig").isHoveringOnMenu()),
+            .loot => _ = tryCaptureDown(.loot, @import("../menus/loot.zig").isHoveringOnMenu()),
             // intentionally non-exhaustive to catch errors
         }
     }
