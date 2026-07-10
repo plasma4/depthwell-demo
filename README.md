@@ -47,7 +47,8 @@ It is quite helpful to use the Zig Language Server in VSCode/VSCodium and set it
 You can also easily build for Windows by using a shell script executor, or you can convert the commands to their Windows equivalents very easily.
 
 Depthwell supports both Git and Jujitsu using `.sh` files. Git VCS is supported by default; to use Jujitsu building for release, simply run `./build.sh` (after `chmod +x ./build.sh`).
-To commit to main, for example, you would run `./build.sh && jj bookmark set main -r @ && jj git push --branch main` or create an alias in your config. You can also customize whether diffs are shown through `.vscode/settings.json`!
+
+To commit to the main branch, you can use `./push.sh` or create an alias in your config. (You can also customize whether diffs are shown through `.vscode/settings.json`, to re-enable if you're using Git.)
 
 #### Git building tips
 

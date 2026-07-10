@@ -1,0 +1,1 @@
+./build.sh && jj b m main && jj git push
