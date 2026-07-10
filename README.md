@@ -42,12 +42,15 @@ Alternatively, use and modify `.githooks/pre-commit`.
 
 #### About version control
 
+NOTE: you can re-enable whether diffs are visually shown through `.vscode/settings.json` (ideal with Git-only version control).
+
 It is quite helpful to use the Zig Language Server in VSCode/VSCodium and set it to "watch" mode, which automatically builds the WASM while providing highlighting any errors.
 
 You can also easily build for Windows by using a shell script executor, or you can convert the commands to their Windows equivalents very easily.
 
-Depthwell supports both Git and Jujitsu using `.sh` files. Git VCS is supported by default; to use Jujitsu building for release, simply run `./build.sh` (after `chmod +x ./build.sh`).
-To commit to main, for example, you would run `./build.sh && jj bookmark set main -r @ && jj git push --branch main` or create an alias in your config. You can also customize whether diffs are shown through `.vscode/settings.json`!
+Depthwell supports both Git and Jujitsu using `.sh` files. Git VCS is supported by default; to use Jujitsu building for release, simply run `./build.sh` (after running `chmod +x ./build.sh`).
+
+To commit to the main branch, you can use `./push.sh` (after running `chmod +x ./push.sh`) or create an alias in your config.
 
 #### Git building tips
 
@@ -62,7 +65,7 @@ chmod +x .githooks/pre-commit
 
 Game is created using Zig and WebGPU, and meant to be web-first. A final product that uses Mach Engine for native building is planned, but _web will always be free and receive updates_. The internal viewport is 480x270 (but it automatically scales with the DPI/base resolution). Functions are exported from `root.zig`.
 
-By using `ChaCha12` and `Blake3` and a seed with 1-100 `a-z` characters, the game can generate over `10^140` possible maps, with each map containing a very large depth limit that allows for near-infinite exploration. Performance-sensitive areas are generated using `FastHash`, which uses 128-bit seed vectors at a time.
+By using `ChaCha12` and `Blake3` and a seed with 1-100 `a-z` characters, the game can generate over `10^140` possible maps, with depth and chunk sizes only practically bound by storage/RAM limits! Performance-sensitive areas are generated using `FastHash`, which uses 128-bit seed vectors at a time.
 
 #### Coordinates and basics
 
