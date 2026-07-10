@@ -40,12 +40,12 @@ pub fn slotHitbox(center_px: Vec2f, size: f64) dw.geometry.Shape {
     return .roundSquare(center_px - @as(Vec2f, @splat(size / 2.0)), size, 0.2);
 }
 
-/// Draws a count with a drop shadow: same digits, darker, nudged down-right, then the colored copy on top.
+/// Draws a number (with a darker drop-shadow).
 pub fn drawCount(count: u64, center_px: Vec2f, color: Vec4f32, alpha: f32) void {
     const pos: Vec2f32 = .{ @floatCast(center_px[0]), @floatCast(center_px[1]) };
-    dw.entity.drawNumber(count, pos + Vec2f32{ 0.6, 0.6 }, .{
+    dw.entity.drawNumber(count, pos - Vec2f32{ 0.5, 0.5 }, .{
         .font_size = 6.0,
-        .lcha = .{ 0.16, 0.1, color[2], 0.75 * alpha },
+        .lcha = .{ color[0] * 0.4, color[1] * 0.8, color[2] - 0.25, 0.75 * alpha },
     });
     dw.entity.drawNumber(count, pos, .{
         .font_size = 6.0,
@@ -53,7 +53,7 @@ pub fn drawCount(count: u64, center_px: Vec2f, color: Vec4f32, alpha: f32) void 
     });
 }
 
-/// Layout options for `Grid()`. All lengths are viewport pixels.
+/// Layout options for `Grid()`. All lengths are in viewport pixels.
 pub const GridOptions = struct {
     /// Number of slots the grid holds; the panel sizes itself from this.
     len: usize,
