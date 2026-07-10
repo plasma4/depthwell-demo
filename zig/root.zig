@@ -167,7 +167,10 @@ pub export fn handleMouse(mouse_x: f64, mouse_y: f64, action: u32) void {
 }
 
 pub export fn tick(logic_speed: f64, iterations: u32) void {
+    // A trap inside handleTick() leaves this set, so the torn state can never be saved (see `save.in_tick`).
+    save.in_tick = true;
     handleTick(logic_speed, iterations);
+    save.in_tick = false;
 
     // give some helpful info!
     // this gets cleared every frame since writeOnce() is used
