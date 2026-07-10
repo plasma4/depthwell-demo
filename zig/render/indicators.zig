@@ -14,6 +14,7 @@ const Vec2f = dw.utils.Vec2f;
 const MenusList = struct {
     corecraft: bool = false,
     furnace: bool = false,
+    loot: bool = false,
 
     /// Returns true if any menu is enabled and false otherwise.
     pub fn isAnyEnabled(self: @This()) bool {
@@ -57,6 +58,7 @@ pub var nearby_cores: NearbyCores = .{};
 const IndicatorKind = enum {
     furnace,
     corecraft,
+    loot,
 
     /// Classifies a stored block id into the indicator it displays, or null for non-indicator blocks.
     /// Block ids are stored as the base sprite (variation is render-only), so exact matching is valid here.
@@ -64,6 +66,7 @@ const IndicatorKind = enum {
         return switch (id) {
             .forest_furnace, .lava_furnace => .furnace,
             .basic_core, .core1, .core2, .core3, .core4 => .corecraft,
+            .chest => .loot,
             // .moss_shrub1, .moss_shrub2 => .tree,
             else => null,
         };
@@ -74,6 +77,7 @@ const IndicatorKind = enum {
         return switch (self) {
             .furnace => .gold_bar,
             .corecraft => .craft,
+            .loot => .chest,
         };
     }
 
@@ -86,6 +90,10 @@ const IndicatorKind = enum {
         };
     }
 };
+
+/// A specific block cell in the world: its chunk plus the block position within it.
+/// Handed to indicator visitors (and menus like loot) so a menu can act on the exact block that opened it.
+pub const BlockRef = struct { coord: dw.world.Coordinate, bx: u4, by: u4 };
 
 /// Per-frame camera interpolation shared by every indicator, matching the world's position/zoom curves.
 const CameraView = struct {
@@ -127,8 +135,8 @@ fn cameraView() CameraView {
 }
 
 /// Computes an indicator's on-screen geometry for a block at the given chunk-relative cell.
-/// `off_sub_x`/`off_sub_y` shift the icon within the block (subpixels; 256 per tile) so a multi-tile
-/// assembly's single icon can sit over its footprint center rather than its origin cell.
+/// `off_sub_x`/`off_sub_y` shift the icon within the block (subpixels; 256 per tile)
+/// so a multi-tile assembly's single icon can sit over its footprint center rather than its origin cell.
 /// Returns null when the block is too far away (>= 5 blocks) to display an icon.
 fn indicatorGeom(
     view: CameraView,
@@ -179,7 +187,7 @@ fn indicatorGeom(
 }
 
 /// Scans a local 33x33 block window centered on the player and visits every in-range indicator.
-/// `visitor.visit(id, kind, geom)` runs once per displayed indicator; returning true stops the scan early.
+/// `visitor.visit(id, kind, geom, ref)` runs once per displayed indicator; returning true stops the scan early.
 fn scanIndicators(view: CameraView, visitor: anytype) void {
     const game = &memory.game;
     const player_coord = game.getPlayerCoord();
@@ -218,7 +226,8 @@ fn scanIndicators(view: CameraView, visitor: anytype) void {
                 off_sub_x,
                 off_sub_y,
             ) orelse continue;
-            if (visitor.visit(block.id, kind, geom)) return;
+            const ref: BlockRef = .{ .coord = target_coord, .bx = local_bx, .by = local_by };
+            if (visitor.visit(block.id, kind, geom, ref)) return;
         }
     }
 }
@@ -242,7 +251,7 @@ const DrawVisitor = struct {
     /// Guards against a single click toggling two overlapping indicators at once.
     click_used: bool = false,
 
-    fn visit(self: *DrawVisitor, id: Sprite, kind: IndicatorKind, geom: IndicatorGeom) bool {
+    fn visit(self: *DrawVisitor, id: Sprite, kind: IndicatorKind, geom: IndicatorGeom, ref: BlockRef) bool {
         self.seen.insert(kind);
         if (kind == .corecraft) markNearbyCore(id);
 
@@ -263,6 +272,11 @@ const DrawVisitor = struct {
             if (!self.click_used and mouse.isClicked(.indicator, true)) {
                 flag.?.* = !flag.?.*;
                 self.click_used = true;
+                // The loot menu is per-chest: tell it which block backs it (or that it lost one).
+                if (kind == .loot) {
+                    const loot = @import("../menus/loot.zig");
+                    if (flag.?.*) loot.open(ref) else loot.close();
+                }
             }
         }
 
@@ -311,17 +325,37 @@ pub fn drawIndicators() void {
     inline for (@typeInfo(IndicatorKind).@"enum".fields) |field| {
         const kind: IndicatorKind = @enumFromInt(field.value);
         if (kind.menuFlag()) |flag| {
-            if (flag.* and !drawer.seen.contains(kind)) flag.* = false;
+            if (flag.* and !drawer.seen.contains(kind)) {
+                flag.* = false;
+                if (kind == .loot) @import("../menus/loot.zig").close();
+            }
         }
     }
+}
+
+/// Screen-space center of a block, in viewport pixels, using this frame's interpolated camera
+/// (same position math as `indicatorGeom()`, without the icon's upward offset).
+pub fn blockScreenPx(coord: dw.world.Coordinate, bx: u4, by: u4) dw.utils.Vec2f32 {
+    const view = cameraView();
+    const player_coord = memory.game.getPlayerCoord();
+    const chunk_dx: i64 = @bitCast(coord.suffix[0] -% player_coord.suffix[0]);
+    const chunk_dy: i64 = @bitCast(coord.suffix[1] -% player_coord.suffix[1]);
+    const block_sub_x = chunk_dx * dw.SUBPIXELS_IN_CHUNK + @as(i64, bx) * 256 + 128;
+    const block_sub_y = chunk_dy * dw.SUBPIXELS_IN_CHUNK + @as(i64, by) * 256 + 128;
+    const zoom_px = view.zoom / 16.0;
+    return .{
+        @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + (@as(f64, @floatFromInt(block_sub_x)) - view.cam_x) * zoom_px),
+        @floatCast(@as(f64, dw.SCREEN_HEIGHT_HALF) + (@as(f64, @floatFromInt(block_sub_y)) - view.cam_y) * zoom_px),
+    };
 }
 
 /// Accumulates whether the cursor is over any active indicator icon.
 const HoverVisitor = struct {
     found: bool = false,
 
-    fn visit(self: *HoverVisitor, id: Sprite, kind: IndicatorKind, geom: IndicatorGeom) bool {
+    fn visit(self: *HoverVisitor, id: Sprite, kind: IndicatorKind, geom: IndicatorGeom, ref: BlockRef) bool {
         _ = id;
+        _ = ref;
         // Display-only indicators (no menu) are not clickable, so they never claim indicator focus.
         if (kind.menuFlag() == null) return false;
         if (geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
@@ -333,7 +367,7 @@ const HoverVisitor = struct {
 };
 
 /// Checks if the mouse is currently hovering over any active in-world indicator (furnace, core, etc.).
-/// Used by mouse.processDownCaptures() to claim the .indicator click focus.
+/// Used by `mouse.processDownCaptures()` to claim the `.indicator` click focus.
 pub fn isHoveringIndicator() bool {
     @setFloatMode(.optimized);
     var hover: HoverVisitor = .{};
