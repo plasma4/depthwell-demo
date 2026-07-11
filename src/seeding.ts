@@ -1,7 +1,10 @@
 const alphabet = "abcdefghijklmnopqrstuvwxyz";
 const base = 26n;
 
-/** Creates a seed up from 1 to `seedLength` characters; won't work properly past length 100. Returns an empty string if `seedLength` is non-positive. */
+/**
+ * Creates a seed up from 1 to `seedLength` characters; won't work properly past length 100.
+ * Returns an empty string if `seedLength` is non-positive.
+ */
 export function makeSeed(seedLength = 100) {
     if (seedLength <= 0) return "";
     // 72 bytes > 2.47*10^173.
@@ -40,7 +43,8 @@ function seedToBigInt(seed: string): bigint {
 
 /**
  * Bijective 512-bit mixer using HMAC-SHA256 in a Feistel Network.
- * This isn't your typical string-to-binary algorithm as it preserves true bijectivity while being cryptographically secure...why not.
+ * This isn't your typical string-to-binary algorithm as it preserves true bijectivity,
+ * while being cryptographically secure...why not.
  */
 export async function seedToMemory(
     seed: string,
@@ -49,7 +53,7 @@ export async function seedToMemory(
     const total = seedToBigInt(seed);
     const view = new DataView(new ArrayBuffer(64));
 
-    // Efficiently pack the BigInt
+    // efficiently pack the BigInt
     for (let i = 0; i < 8; i++) {
         view.setBigUint64(
             i * 8,
@@ -87,7 +91,7 @@ export async function seedToMemory(
         R = nextR;
     }
 
-    // Direct copy-to-output
+    // direct copy-to-output
     const finalBuffer = new Uint8Array(64);
     finalBuffer.set(L, 0);
     finalBuffer.set(R, 32);

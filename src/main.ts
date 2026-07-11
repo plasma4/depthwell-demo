@@ -205,7 +205,7 @@ void (async () => {
 })();
 
 // Emergency save when the tab is backgrounded or closing.
-// On 'hidden' the page is still alive: snapshot to the worker's emergency slot instantly, then run
+// On `hidden` the page is still alive: snapshot to the worker's emergency slot instantly, then run
 // a normal durable autosave too (a committed save clears the slot again).
 document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {

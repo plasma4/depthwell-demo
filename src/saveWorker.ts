@@ -1,17 +1,18 @@
 "use strict";
 /**
- * Dedicated save worker: owns a permanently open synchronous OPFS handle to the emergency slot.
+ * TL;DR: this worker attempts to force a synchronous save on tab close/hide with verification.
+ * Dedicated worker that owns a permanently open synchronous OPFS handle to the emergency export slot, run on `pagehide`/`visibilitychange`.
  *
- * FileSystemSyncAccessHandle is worker-only, but it is the one storage API whose writes need no further event-loop turns:
- * once a message arrives, truncate+write+flush complete synchronously,
- * so a save transferred during pagehide survives even though the page (and this worker) are torn down moments later.
- * The handle is acquired once at startup and held for the whole session;
- * its exclusive lock means the main thread must read the slot through this worker as well.
+ * `FileSystemSyncAccessHandle` is worker-only, but it is the one storage API whose writes need no further event-loop turns:
+ * - once a message arrives, truncate+write+flush complete synchronously
+ * - a save transferred during `pagehide` survives even though the page and worker are forced to shut down in a short time window
  *
- * The slot is cleared after every committed normal save, so a non-empty slot is always newer than the committed MAIN save.
- * A torn write fails Zig-side BLAKE3 validation and the loader falls back to MAIN/BAK, so no atomic swap is needed here.
+ * The handle is acquired once at startup and held for the whole session and the lock forces the main thread to read the slot through this worker as well.
+ * The slot is cleared after every committed normal save, so a non-empty slot is always newer than the committed `MAIN` save.
+ *
+ * A torn write fails BLAKE3 validation and the loader falls back to `MAIN`/`BAK`
+ * (this way we can easily verify validity if a device crash occurs or similar)!
  */
-
 interface FileSystemSyncAccessHandle {
     getSize(): number;
     read(buffer: ArrayBufferView, options?: { at?: number }): number;

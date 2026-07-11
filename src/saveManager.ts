@@ -1,6 +1,7 @@
 "use strict";
 import type { GameEngine } from "./engine";
 
+// (OPFS file loc config)
 const SAVE_DIR = "saves";
 const MAIN = "world.dw";
 const BAK = "world.bak";
