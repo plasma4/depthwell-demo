@@ -1,0 +1,5 @@
+{
+    // we're using Jujutsu, so don't show these
+    "git.decorations.enabled": false,
+    "scm.diffDecorations": "none"
+}
