@@ -18,7 +18,7 @@ const MenusList = struct {
 
     /// Returns true if any menu is enabled and false otherwise.
     pub fn isAnyEnabled(self: @This()) bool {
-        // inline for loops are unrolled at compile time
+        // inline for loops are unrolled at compile-time
         inline for (@typeInfo(@This()).@"struct".fields) |field_info| {
             // Ensure we are only checking boolean fields
             if (field_info.type == bool) {

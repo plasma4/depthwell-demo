@@ -1,4 +1,4 @@
-//! Defines the architecture of the fractal world with various datatypes  and edge flag logic.
+//! Defines the architecture of the fractal world with various datatypes and edge flag logic.
 const std = @import("std");
 const dw = @import("../root.zig");
 const SegmentedList = dw.SegmentedList;
@@ -27,17 +27,57 @@ const CHUNK_SIZE_LOG2 = dw.CHUNK_SIZE_LOG2;
 const ZOOM_FACTOR = dw.ZOOM_FACTOR;
 
 /// Final foundation sprite at an absolute base-depth block, plus the plain-stone base it grew from
-/// (`base` is only meaningful when `id` is an ore/gem overlay).
-const BaseFoundation = struct { id: Sprite, base: Sprite };
+/// (`base` is only meaningful when `id` is an ore/gem overlay) and the water a structure submerged it in
+/// (only meaningful when `id` is waterloggable; see `StructureResult.water_volume`).
+const BaseFoundation = struct { id: Sprite, base: Sprite, water_volume: u4 = 0 };
 
-/// Resolves the base-depth sprite at absolute chunk (`cx`, `cy`) + local block (`bx`, `by`).
+/// One memoized `resolveBaseFoundation()` result, keyed by absolute world block.
+const FoundationCacheEntry = struct {
+    wx: u32 = 0,
+    wy: u32 = 0,
+    data: BaseFoundation = undefined,
+    occupied: bool = false,
+};
+
+/// Direct-mapped cache of `resolveBaseFoundation()` (must be a power of two).
+const FOUNDATION_CACHE_SLOTS = 8192;
+var foundation_cache: [FOUNDATION_CACHE_SLOTS]FoundationCacheEntry = @splat(.{});
+/// Terrain identity the cache holds; a mismatch (reseed, or a dragged debug slider) drops every entry.
+var foundation_cache_key: u64 = 0;
+
+/// Direct-mapped slot for a world block; mixes the coords so adjacent blocks do not collide.
+inline fn foundationCacheIndex(wx: u32, wy: u32) usize {
+    const h = (@as(u64, wx) *% 0x9E3779B97F4A7C15) ^ (@as(u64, wy) *% 0x85EBCA77C2B2AE63);
+    return @intCast((h >> 32) & (FOUNDATION_CACHE_SLOTS - 1));
+}
+
+/// Resolves the base-depth sprite at absolute chunk (`cx`, `cy`) + local block (`bx`, `by`), memoized.
 /// Same as `generateBaseChunk()`: finds world-edge stone, base terrain, ore dispersal (stone only), then structures.
 /// Decorations, however, are excluded.
 ///
 /// Both the generator and its base-depth edge-flag halo call this,
 /// so a neighbor recomputed for the halo carries the same ore id as the real chunk;
 /// `id_edge_flags` then connects a vein to its continuation across the chunk border instead of cutting it off.
-inline fn resolveBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
+fn resolveBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
+    const wx: u32 = @intCast(cx * CHUNK_SIZE + bx);
+    const wy: u32 = @intCast(cy * CHUNK_SIZE + by);
+
+    const key = procedural.terrainGeneration();
+    if (key != foundation_cache_key) {
+        foundation_cache = @splat(.{});
+        foundation_cache_key = key;
+    }
+
+    const entry = &foundation_cache[foundationCacheIndex(wx, wy)];
+    if (entry.occupied and entry.wx == wx and entry.wy == wy) return entry.data;
+
+    const data = computeBaseFoundation(cx, cy, bx, by);
+    entry.* = .{ .wx = wx, .wy = wy, .data = data, .occupied = true };
+    return data;
+}
+
+/// Uncached foundation evaluation. Call `resolveBaseFoundation()` instead outside of the cache itself.
+inline fn computeBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
     const max_suffix = getMaxSuffixAtDepth(STARTING_ZOOM_TIMES);
     const on_edge_x = (cx == 0 and bx < 2) or (cx == max_suffix and bx >= (CHUNK_SIZE - 2));
     const on_edge_y = (cy == 0 and by < 2) or (cy == max_suffix and by >= (CHUNK_SIZE - 2));
@@ -60,6 +100,7 @@ inline fn resolveBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation
     return .{
         .id = structured.id,
         .base = if (structured.base != .none) structured.base else base_data.sprite,
+        .water_volume = structured.water_volume,
     };
 }
 
@@ -127,6 +168,7 @@ pub fn generateBaseChunk(chunk: *Chunk, coord: Coordinate) void {
                 // Overlay sprites remember the stone they replaced so the shader can composite them over it.
                 .base_id = if (bf.id.isOverlay()) bf.base else .none,
                 .seed = rng_seed.next(),
+                .water_volume = bf.water_volume,
             };
             chunk.blocks[idx] = spec.compile();
         }
@@ -223,51 +265,263 @@ fn computeColumnSeeds(comptime f: procedural.ColumnFeature, coord: Coordinate, d
     return seeds;
 }
 
+/// One authored cell: the only `Block` fields that cannot be recovered by regenerating the chunk.
+/// Everything else in a `Block` is derived and is rebuilt by `materializeChunk()`:
+/// - `seed` is `CHUNK_SIZE_SQ` deterministic draws in block-index order (`generateBaseChunk()`, `generateChunk()`).
+/// - `light` and `lighting_color` are written only into the per-frame render scratch buffer (`applyLighting()`).
+/// - `edge_flags`, `id_edge_flags`, and `waterlogged` are recomputed from neighbor `id`+`hp` by the flag passes.
+/// - `group_x` and `group_y` are stamped during generation and cleared by any edit.
+pub const ModCell = extern struct {
+    id: Sprite,
+    /// The underlay behind an overlay sprite. Authoritative, NOT derivable: `modifyBlockType()` picks it
+    /// from the block that occupied the cell BEFORE the edit, so it depends on the order of past edits.
+    base_id: Sprite,
+    /// Mining progress for solids, water volume for liquids and waterloggable cells. Range 0-15 (`Block.MAX_HP`).
+    hp: u8,
+
+    /// Overwrites the authoritative fields of `block`, leaving every derived field for the flag passes.
+    pub inline fn applyTo(self: @This(), block: *Block) void {
+        block.id = self.id;
+        block.base_id = self.base_id;
+        block.hp = @intCast(self.hp);
+        block.group_x = 0;
+        block.group_y = 0;
+    }
+
+    /// Captures the authoritative fields of a materialized `Block`.
+    pub inline fn from(block: Block) @This() {
+        return .{ .id = block.id, .base_id = block.base_id, .hp = block.hp };
+    }
+};
+
+/// Words in a `ModEntry.authored` bitmap (one bit per block in a chunk).
+const AUTHORED_WORDS = CHUNK_SIZE_SQ / 64;
+/// Capacity of a `ModEntry.cells` allocation on first write; doubles from there up to `CHUNK_SIZE_SQ`.
+const MIN_MOD_CELLS = 8;
+
+/// The modifications to a single chunk, as a sparse set of authored cells rather than a full `Chunk`.
+/// A chunk the player mined 30 blocks out of costs ~210 bytes here instead of 4 KiB.
+///
+/// Mutate ONLY through `ModificationStore.beginWrite()`: it shadows the entry for an in-flight save first,
+/// and `setCellRaw()` is file-private so no other module can bypass that.
+pub const ModEntry = struct {
+    /// Cells whose value came from a player edit or the water sim rather than from procedural generation.
+    /// Bit `i` (block index `by * CHUNK_SIZE + bx`) set means `cells[rank(i)]` holds that cell's value.
+    authored: [AUTHORED_WORDS]u64 = @splat(0),
+    /// Authored cells in ascending block-index order. The first `count` are live; the rest is spare capacity.
+    cells: []ModCell = &.{},
+    /// Live entries in `cells`. Always equals the population count of `authored`.
+    count: u16 = 0,
+
+    /// Number of authored cells below block index `i`, which is `i`'s position within `cells`.
+    inline fn rank(self: *const @This(), i: u8) u16 {
+        const word: usize = i >> 6;
+        const bit: u6 = @truncate(i);
+        var total: u16 = 0;
+        for (self.authored[0..word]) |w| total += @popCount(w);
+        const below: u64 = (@as(u64, 1) << bit) -% 1;
+        return total + @popCount(self.authored[word] & below);
+    }
+
+    /// Whether block index `i` carries an authored value (as opposed to its procedural one).
+    pub inline fn isAuthored(self: *const @This(), i: u8) bool {
+        return (self.authored[i >> 6] >> @as(u6, @truncate(i))) & 1 != 0;
+    }
+
+    /// The authored value at block index `i`, or null if that cell is still procedural.
+    pub inline fn get(self: *const @This(), i: u8) ?ModCell {
+        if (!self.isAuthored(i)) return null;
+        return self.cells[self.rank(i)];
+    }
+
+    /// Replays every authored cell over a freshly generated chunk.
+    /// The caller MUST then rerun the flag pass: replaying ids invalidates the generated edge/waterlogged flags.
+    pub fn applyTo(self: *const @This(), chunk: *Chunk) void {
+        var i: usize = 0;
+        for (0..AUTHORED_WORDS) |w| {
+            var bits = self.authored[w];
+            while (bits != 0) : (i += 1) {
+                const bit = @ctz(bits);
+                bits &= bits - 1;
+                self.cells[i].applyTo(&chunk.blocks[(w << 6) | bit]);
+            }
+        }
+    }
+
+    /// Writes `cell` at block index `i`, marking it authored. File-private: reach it via `ModWriter.setCell()`.
+    fn setCellRaw(self: *@This(), i: u8, cell: ModCell) void {
+        const at = self.rank(i);
+        if (self.isAuthored(i)) {
+            self.cells[at] = cell;
+            return;
+        }
+
+        if (self.count == self.cells.len) {
+            const new_cap = if (self.cells.len == 0) MIN_MOD_CELLS else self.cells.len * 2;
+            std.debug.assert(new_cap <= CHUNK_SIZE_SQ); // a chunk cannot author more cells than it has
+            self.cells = mod_store.allocator.realloc(self.cells, new_cap) catch memory.oom();
+        }
+
+        // Keep `cells` in ascending block-index order so `rank()` indexes it directly.
+        std.mem.copyBackwards(
+            ModCell,
+            self.cells[at + 1 .. self.count + 1],
+            self.cells[at..self.count],
+        );
+        self.cells[at] = cell;
+        self.authored[i >> 6] |= @as(u64, 1) << @truncate(i);
+        self.count += 1;
+    }
+};
+
 /// Stores and handles modifications of chunks. Functions across depths.
+///
+/// Lives on `memory.main_allocator`, NOT the world arena: entries are freed and their cell blocks
+/// recycled, which an arena cannot do.
 pub const ModificationStore = struct {
-    /// `HashMap`-based system to store indexes to `history`.
-    index: std.HashMap(
+    /// Maps a chunk to its index in `entries`. Indices are stable for the life of the store
+    /// (see `entries`), which the budgeted save snapshot relies on.
+    index: std.HashMapUnmanaged(
         DepthCoordinate,
         usize,
         DepthCoordinateContext,
         std.hash_map.default_max_load_percentage,
-    ),
-    /// Expandable list that stores modified `Chunk` data (1MiB inline pre-allocation: `256 * @sizeOf(Chunk)`).
-    history: SegmentedList(Chunk, 256) = .{},
-    /// Incremented whenever `history` is dropped (`init()`/`clear()`), invalidating any external index
+    ) = .empty,
+    /// Every modification entry. `SegmentedList` only ever appends, so an index (and a pointer) into it
+    /// stays valid across later insertions: `save.zig` freezes a plan of `entries` indices and resolves
+    /// them frames later, and an entry can be mutated while another is created.
+    entries: SegmentedList(ModEntry, 256) = .{},
+    /// Indices in `entries` whose chunk was removed, ready to be handed out again.
+    /// `entries` itself must never shrink (the save plan holds indices into it), so freed slots are recycled instead.
+    free_entries: std.ArrayList(usize) = .empty,
+    /// Incremented whenever `entries` is dropped (`init()`/`clear()`), invalidating any external index
     /// into it. A budgeted save snapshot compares this to detect a mid-save wipe and abort.
     generation: u64 = 0,
+    allocator: std.mem.Allocator = undefined,
+    /// Whether the containers below hold real allocations. Guards `deinit()` before the first `init()`.
+    live: bool = false,
 
-    /// Initializes in-place to avoid stack overflow problems.
+    /// Initializes in-place to avoid stack overflow problems. Frees anything a previous world left behind.
     pub fn init(self: *ModificationStore, allocator: std.mem.Allocator) void {
-        self.index = std.HashMap(
-            DepthCoordinate,
-            usize,
-            DepthCoordinateContext,
-            std.hash_map.default_max_load_percentage,
-        ).init(allocator);
-        self.history = .{};
-        self.generation +%= 1;
+        self.deinit();
+        self.* = .{ .allocator = allocator, .live = true, .generation = self.generation +% 1 };
     }
 
-    /// Gets an existing modification for reading.
-    /// Returns null if there is no modification for that depth+location.
-    pub fn get(self: *const @This(), key: DepthCoordinate) ?*const Chunk {
+    /// Releases every allocation. Safe to call on a store that was never initialized.
+    pub fn deinit(self: *ModificationStore) void {
+        if (!self.live) return;
+        var it = self.entries.iterator(0);
+        while (it.next()) |e| self.allocator.free(e.cells);
+        self.entries.deinit(self.allocator);
+        self.index.deinit(self.allocator);
+        self.free_entries.deinit(self.allocator);
+        self.live = false;
+    }
+
+    /// Gets an existing modification entry for reading, or null if the chunk is unmodified.
+    pub fn get(self: *const @This(), key: DepthCoordinate) ?*const ModEntry {
         const id = self.index.get(key) orelse return null;
-        return self.history.at(id);
+        return self.entries.at(id);
+    }
+
+    /// The authored value at one block of one chunk, or null if that cell is still procedural.
+    /// O(1): the fast path that lets ancestor lookups resolve a single block without materializing a chunk.
+    pub fn getCell(self: *const @This(), key: DepthCoordinate, block_idx: u8) ?ModCell {
+        const entry = self.get(key) orelse return null;
+        return entry.get(block_idx);
+    }
+
+    /// Whether a chunk carries any modifications at all.
+    pub fn contains(self: *const @This(), key: DepthCoordinate) bool {
+        return self.index.contains(key);
+    }
+
+    /// Drops a chunk's modifications entirely, recycling its entry slot and cell block.
+    /// The chunk reverts to pure procedural generation on its next materialization.
+    pub fn remove(self: *@This(), key: DepthCoordinate) void {
+        const kv = self.index.fetchRemove(key) orelse return;
+        const entry = self.entries.at(kv.value);
+        self.allocator.free(entry.cells);
+        entry.* = .{};
+        self.free_entries.append(self.allocator, kv.value) catch memory.oom();
     }
 
     /// Completely wipes all user modifications. Should be followed by `world.clearCaches(true)`.
     pub fn clear(self: *@This()) void {
+        var it = self.entries.iterator(0);
+        while (it.next()) |e| {
+            self.allocator.free(e.cells);
+            e.* = .{};
+        }
         self.index.clearRetainingCapacity();
-        self.history.clearRetainingCapacity();
+        self.entries.clearRetainingCapacity();
+        self.free_entries.clearRetainingCapacity();
         self.generation +%= 1;
+    }
+
+    /// Reserves an entry slot, reusing a freed one when possible.
+    fn allocEntry(self: *@This()) usize {
+        if (self.free_entries.pop()) |idx| return idx;
+        const idx = self.entries.len;
+        const slot = self.entries.addOne(self.allocator) catch memory.oom();
+        slot.* = .{};
+        return idx;
+    }
+
+    /// Opens `key`'s entry for mutation, creating it if the chunk has never been modified.
+    ///
+    /// This is the ONLY way to mutate the store: it preserves the entry's pre-edit contents for an in-flight budgeted save before handing back a writer,
+    /// so no call site can forget to.
+    pub fn beginWrite(self: *@This(), key: DepthCoordinate) ModWriter {
+        const idx = self.index.get(key) orelse blk: {
+            const new_idx = self.allocEntry();
+            self.index.put(self.allocator, key, new_idx) catch memory.oom();
+            break :blk new_idx;
+        };
+        dw.save.shadowEntryForSave(idx);
+        return .{ .entry = self.entries.at(idx) };
+    }
+
+    /// Rebuilds an entry straight from a save, bypassing the copy-on-write shadow (nothing can be mid-save during a load).
+    /// `cells` must be in ascending block-index order and match `authored`.
+    pub fn loadEntry(self: *@This(), key: DepthCoordinate, authored: [AUTHORED_WORDS]u64, cells: []const ModCell) !void {
+        const idx = self.allocEntry();
+        const entry = self.entries.at(idx);
+        entry.authored = authored;
+        entry.count = @intCast(cells.len);
+        entry.cells = try self.allocator.alloc(ModCell, @max(cells.len, MIN_MOD_CELLS));
+        @memcpy(entry.cells[0..cells.len], cells);
+        try self.index.put(self.allocator, key, idx);
+    }
+
+    /// Total bytes of live `ModCell` payload, for the debug HUD.
+    pub fn cellBytes(self: *const @This()) usize {
+        var total: usize = 0;
+        var it = self.entries.constIterator(0);
+        while (it.next()) |e| total += e.cells.len * @sizeOf(ModCell);
+        return total;
+    }
+};
+
+/// A permit to mutate one `ModEntry`, obtained from `ModificationStore.beginWrite()`.
+/// Its existence proves the entry was already shadowed for any in-flight save.
+pub const ModWriter = struct {
+    entry: *ModEntry,
+
+    /// Marks block `i` as authored and stores its value.
+    pub inline fn setCell(self: ModWriter, i: u8, cell: ModCell) void {
+        self.entry.setCellRaw(i, cell);
+    }
+
+    /// Captures a materialized block's authoritative fields as block `i`'s authored value.
+    pub inline fn setBlock(self: ModWriter, i: u8, block: Block) void {
+        self.entry.setCellRaw(i, .from(block));
     }
 };
 
 /// Stores and handles modifications of chunks across various depths.
 /// Initialized in `main()`.
-pub var mod_store: ModificationStore = undefined;
+pub var mod_store: ModificationStore = .{};
 
 /// Represents a "coordinate", relative to a quad-cache. Stores an "active suffix" as well as the quadrant this coordinate belongs to.
 pub const Coordinate = struct {
@@ -1259,23 +1513,7 @@ pub fn writeChunk(chunk: *Chunk, coord: Coordinate) void {
         chunk.* = cached_ptr.*;
         return;
     }
-
-    if (chunk_cache.findIndex(coord)) |i| {
-        chunk.* = chunk_cache.chunks[i];
-        return;
-    }
-
-    const slot_index = chunk_cache.allocateIndex(coord);
-    const key = DepthCoordinate.from(coord);
-
-    if (mod_store.get(key)) |modified_chunk| {
-        // Modified state!
-        chunk_cache.chunks[slot_index].blocks = modified_chunk.*.blocks;
-    } else { // generate procedurally
-        generateChunk(&chunk_cache.chunks[slot_index], coord.asDepthCoordinate(memory.game.depth));
-    }
-
-    chunk.* = chunk_cache.chunks[slot_index];
+    writeChunkSimless(chunk, coord);
 }
 
 /// Same as `writeChunk()`, but avoids checking `SimBuffer` first.
@@ -1286,33 +1524,7 @@ pub fn writeChunkSimless(chunk: *Chunk, coord: Coordinate) void {
     }
 
     const slot_index = chunk_cache.allocateIndex(coord);
-    const key = DepthCoordinate.from(coord);
-
-    if (mod_store.get(key)) |modified_chunk| {
-        // Modified state!
-        chunk_cache.chunks[slot_index].blocks = modified_chunk.*.blocks;
-    } else { // generate procedurally
-        generateChunk(&chunk_cache.chunks[slot_index], coord.asDepthCoordinate(memory.game.depth));
-    }
-
-    chunk.* = chunk_cache.chunks[slot_index];
-}
-
-/// Same as `writeChunk()`, but avoids checking `mod_store`.
-pub fn writeChunkModless(chunk: *Chunk, coord: Coordinate) void {
-    if (SimBuffer.get(coord)) |cached_ptr| {
-        chunk.* = cached_ptr.*;
-        return;
-    }
-
-    if (chunk_cache.findIndex(coord)) |i| {
-        chunk.* = chunk_cache.chunks[i];
-        return;
-    }
-
-    const slot_index = chunk_cache.allocateIndex(coord);
-    const key = DepthCoordinate.from(coord);
-    generateChunk(&chunk_cache.chunks[slot_index], key);
+    materializeChunk(&chunk_cache.chunks[slot_index], coord.asDepthCoordinate(memory.game.depth));
     chunk.* = chunk_cache.chunks[slot_index];
 }
 
@@ -1323,10 +1535,45 @@ pub inline fn getChunk(coord: Coordinate) Chunk {
     return chunk;
 }
 
+/// Builds the chunk the player actually sees: procedural generation, then every authored cell replayed on top,
+/// then a flag recompute (replaying ids invalidates the flags the generator derived).
+///
+/// This is the ONLY way a `mod_store` entry becomes a `Chunk`; the store holds no block data of its own.
+/// Unmodified chunks cost exactly what they did before (a plain `generateChunk()` with no second flag pass).
+pub fn materializeChunk(chunk: *Chunk, key: DepthCoordinate) void {
+    generateChunk(chunk, key);
+    const entry = mod_store.get(key) orelse return;
+    entry.applyTo(chunk);
+    refreshDerivedFlags(chunk, key);
+}
+
+/// Recomputes `edge_flags`/`id_edge_flags`/`waterlogged` across a whole chunk after its ids changed.
+/// Reuses the generator's own flag passes, so a materialized chunk carries exactly the flags a chunk
+/// generated with those ids would have had.
+///
+/// The halo both passes read comes from procedural generation (`resolveBaseFoundation()`) or from single-block ancestor lookups,
+/// never from a neighbor's `mod_store` entry, so this cannot recurse back into `materializeChunk()`.
+fn refreshDerivedFlags(chunk: *Chunk, key: DepthCoordinate) void {
+    if (key.depth != STARTING_ZOOM_TIMES) {
+        addEdgeFlagsFractal(chunk, key);
+        return;
+    }
+
+    addEdgeFlags(chunk, key.asCoord(), key.depth);
+    // Matches the reset `generateBaseChunk()` performs after decorating: an empty cell carries no edges.
+    for (0..CHUNK_SIZE_SQ) |idx| {
+        const block = &chunk.blocks[idx];
+        if (block.isEmpty()) {
+            block.edge_flags = 0xFF;
+            block.id_edge_flags = 0xFF;
+        }
+    }
+}
+
 /// Does not go through the cache, as its goal is to generate chunks from scratch;
 /// branches into base procedural generation or fractal scaling depending on depth.
 ///
-/// This function generates a whole chunk (considering modifications) given a pointer to where the chunk should be stored and coordinates.
+/// Purely procedural: modifications are NOT applied here. Use `materializeChunk()` for the chunk the player actually sees.
 pub fn generateChunk(chunk: *Chunk, key: DepthCoordinate) void {
     if (key.depth == STARTING_ZOOM_TIMES) {
         generateBaseChunk(chunk, key.asCoord());
@@ -1370,10 +1617,11 @@ pub fn generateChunk(chunk: *Chunk, key: DepthCoordinate) void {
         }
     }
 
-    addEdgeFlagsFractal(chunk, key, parent_neighborhood);
+    addEdgeFlagsFractal(chunk, key);
 }
 
-/// Gets an already loaded or cached chunk without triggering any generation.
+/// Gets an already materialized chunk without triggering any generation.
+/// Every cache it consults holds post-modification blocks, so a hit already carries the player's edits.
 pub fn getCachedChunk(key: DepthCoordinate) ?*const Chunk {
     if (key.depth == memory.game.depth) {
         if (SimBuffer.get(key.asCoord())) |cached_ptr| {
@@ -1382,16 +1630,9 @@ pub fn getCachedChunk(key: DepthCoordinate) ?*const Chunk {
         if (chunk_cache.findIndex(key.asCoord())) |i| {
             return &chunk_cache.chunks[i];
         }
+        return null;
     }
-    if (mod_store.get(key)) |modified_chunk| {
-        return modified_chunk;
-    }
-    if (key.depth != memory.game.depth) {
-        if (dw.ancestor.ancestor_cache.get(key)) |cached| {
-            return cached;
-        }
-    }
-    return null;
+    return dw.ancestor.ancestor_cache.get(key);
 }
 
 /// Adds edge flags to an already generated chunk using a stack-safe halo buffer.
@@ -1488,9 +1729,7 @@ fn addEdgeFlags(target_chunk: *Chunk, coord: Coordinate, depth: u64) void {
 }
 
 /// Adds edge flags for deeper depths by applying seeding logic.
-fn addEdgeFlagsFractal(target_chunk: *Chunk, key: DepthCoordinate, parent_neighborhood: [6][6]Block) void {
-    _ = parent_neighborhood; // No longer used for halo calculation to prevent indexing overflows
-
+fn addEdgeFlagsFractal(target_chunk: *Chunk, key: DepthCoordinate) void {
     var halo: [18][18]Block = undefined;
 
     // Fast memory copy for the center 16x16 blocks
@@ -1591,18 +1830,7 @@ inline fn isBothLiquid(sprite_a: Sprite, sprite_b: Sprite) bool {
 /// The caller must pass the original block (for example, mining reads it before deleting).
 pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, prev_block: Block) bool {
     const key = DepthCoordinate.from(coord);
-    const idx = @as(usize, by) * CHUNK_SIZE + bx;
-
-    const entry_idx = mod_store.index.get(key) orelse blk: {
-        const new_idx = mod_store.history.len;
-        _ = mod_store.history.addOne(alloc) catch memory.oom();
-
-        // Use a temporary buffer to avoid holding mod_store pointers during generation
-        writeChunkModless(mod_store.history.at(new_idx), coord);
-
-        mod_store.index.put(key, new_idx) catch memory.oom();
-        break :blk new_idx;
-    };
+    const idx: u8 = @intCast(@as(usize, by) * CHUNK_SIZE + bx);
 
     const initial_hp: u4 = if (new_sprite.isLiquid()) Block.MAX_HP else 0;
     if (new_sprite.isLiquid()) {
@@ -1619,10 +1847,8 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
         }
     }
 
-    dw.save.shadowChunkForSave(entry_idx);
-    const c: *Chunk = mod_store.history.at(entry_idx);
-
-    // Derive the overlay's underlay from what was here before, so replacing (say) a blue_stone block with gold keeps showing blue_stone behind the ore mask
+    // Determine the overlay's underlay from what was here before,
+    // so replacing (say) a blue_stone block with gold keeps showing blue_stone behind the ore mask
     // Priority: inherit a previous overlay's underlay, else grow inside the previous solid block, else fall back to plain stone.
     // Non-ore/gem placements carry no underlay.
     const new_base: Sprite = if (new_sprite.isOverlay())
@@ -1633,14 +1859,7 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
     // Single-cell placement: assembly offset is always the origin (0, 0).
     // A future multi-tile placeable will stamp the whole footprint here (see dw.assembly.stampChunk).
     // (TODO)
-    c.blocks[idx].id = new_sprite;
-    c.blocks[idx].base_id = new_base;
-    c.blocks[idx].hp = initial_hp;
-    c.blocks[idx].edge_flags = 0xFF;
-    c.blocks[idx].id_edge_flags = 0xFF;
-    c.blocks[idx].waterlogged = 0;
-    c.blocks[idx].group_x = 0;
-    c.blocks[idx].group_y = 0;
+    mod_store.beginWrite(key).setCell(idx, .{ .id = new_sprite, .base_id = new_base, .hp = initial_hp });
 
     if (SimBuffer.get(coord)) |sim_chunk| {
         const block: *Block = &sim_chunk.blocks[idx];
@@ -1674,9 +1893,15 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
     return updateLocalEdgeFlags(coord, bx, by);
 }
 
-/// Resets one block's fields to the "empty cell" sentinels (id + edge/waterlog + assembly offset).
+/// Resets one block's fields to the "empty cell" sentinels (id + underlay + hp + edge/waterlog + assembly offset).
+/// Leaves `seed` alone: it is a property of the cell, not of what occupies it.
+///
+/// Must agree field-for-field with the `ModCell` `internalClearBlock()` stores, so a cleared cell reads
+/// the same whether it comes from a live cache or from `materializeChunk()`.
 inline fn clearBlockFields(b: *Block) void {
     b.id = .none;
+    b.base_id = .none;
+    b.hp = 0;
     b.edge_flags = 0xFF;
     b.id_edge_flags = 0xFF;
     b.waterlogged = 0;
@@ -1687,17 +1912,9 @@ inline fn clearBlockFields(b: *Block) void {
 /// Clears a single cell to empty across `mod_store`, `SimBuffer`, and `chunk_cache` (no drop, no worklist).
 /// Used by the anchor cascade and multi-tile group breaking; safe to call outside the worklist loop.
 fn internalClearBlock(target_coord: Coordinate, lbx: u4, lby: u4) void {
-    const block_id = @as(usize, lby) * CHUNK_SIZE + lbx;
+    const block_id: u8 = @intCast(@as(usize, lby) * CHUNK_SIZE + lbx);
     const key = DepthCoordinate.from(target_coord);
-    const mod_id = mod_store.index.get(key) orelse blk: {
-        const new_id = mod_store.history.len;
-        _ = mod_store.history.addOne(alloc) catch memory.oom();
-        writeChunkModless(mod_store.history.at(new_id), target_coord);
-        mod_store.index.put(key, new_id) catch memory.oom();
-        break :blk new_id;
-    };
-    dw.save.shadowChunkForSave(mod_id);
-    clearBlockFields(&mod_store.history.at(mod_id).blocks[block_id]);
+    mod_store.beginWrite(key).setCell(block_id, .{ .id = .none, .base_id = .none, .hp = 0 });
     if (SimBuffer.get(target_coord)) |sc| clearBlockFields(&sc.blocks[block_id]);
     if (chunk_cache.findIndex(target_coord)) |index| clearBlockFields(&chunk_cache.chunks[index].blocks[block_id]);
 }
@@ -1759,6 +1976,62 @@ const CHECK_LIMIT = 0;
 /// and special anchor types like `suspended` to not create extremely long chains.
 pub var flag_worklist: std.ArrayList(UpdateItem) = undefined;
 
+/// Memoized 5x5 block window around one worklist cell, in cell coordinates relative to `coord`
+/// (so an entry may live in a neighboring chunk; `get()` resolves that).
+/// NOTE: The drain mutates blocks as it goes, so every write MUST be mirrored here!
+/// This means calling `drop()` after writing a cell's flags, and `reset()` after any block is cleared.
+const BlockWindow = struct {
+    const SPAN = 5;
+    const HALF: i32 = SPAN / 2;
+
+    coord: Coordinate,
+    /// Center cell, in `coord`-local block coordinates.
+    bx: i32,
+    by: i32,
+    cells: [SPAN * SPAN]?Block = @splat(null),
+
+    fn init(coord: Coordinate, bx: u4, by: u4) BlockWindow {
+        return .{ .coord = coord, .bx = bx, .by = by };
+    }
+
+    /// Index of (`cx`, `cy`) within the window, or null when it falls outside the 5x5.
+    inline fn indexOf(self: *const BlockWindow, cx: i32, cy: i32) ?usize {
+        const wx = cx - self.bx + HALF;
+        const wy = cy - self.by + HALF;
+        if (wx < 0 or wx >= SPAN or wy < 0 or wy >= SPAN) return null;
+        return @intCast(wy * SPAN + wx);
+    }
+
+    /// Reads the block at (`cx`, `cy`), which may sit outside `coord` and is then resolved into the
+    /// neighboring chunk (clamped to `coord` at the world edge, as the cascade has always done).
+    fn get(self: *BlockWindow, cx: i32, cy: i32) Block {
+        const slot = self.indexOf(cx, cy);
+        if (slot) |i| {
+            if (self.cells[i]) |cached| return cached;
+        }
+
+        const in_chunk = cx >= 0 and cx < CHUNK_SIZE and cy >= 0 and cy < CHUNK_SIZE;
+        const target = if (in_chunk)
+            self.coord
+        else
+            self.coord.move(.{ @divFloor(cx, CHUNK_SIZE), @divFloor(cy, CHUNK_SIZE) }) orelse self.coord;
+        const block = getBlockAt(target, @intCast(@mod(cx, CHUNK_SIZE)), @intCast(@mod(cy, CHUNK_SIZE)), memory.game.depth);
+
+        if (slot) |i| self.cells[i] = block;
+        return block;
+    }
+
+    /// Forgets one cell, after its flags were rewritten.
+    inline fn drop(self: *BlockWindow, cx: i32, cy: i32) void {
+        if (self.indexOf(cx, cy)) |i| self.cells[i] = null;
+    }
+
+    /// Forgets everything, after a clear that may have touched cells beyond this window (an assembly).
+    inline fn reset(self: *BlockWindow) void {
+        self.cells = @splat(null);
+    }
+};
+
 /// Recalculates edge flags for a specific block its 8 neighbors.
 /// Returns whether the current block was removed due to being in an invalid position.
 ///
@@ -1777,25 +2050,13 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
     in_edge_flag_update = true;
     defer in_edge_flag_update = was_updating;
 
-    const getBlockLocalOrNeighbor = struct {
-        inline fn func(c: Coordinate, bx_i: i32, by_i: i32, depth: u64) Block {
-            if (bx_i >= 0 and bx_i < CHUNK_SIZE and by_i >= 0 and by_i < CHUNK_SIZE) {
-                return getBlockAt(c, @intCast(bx_i), @intCast(by_i), depth);
-            }
-            const ndx = @divFloor(bx_i, CHUNK_SIZE);
-            const ndy = @divFloor(by_i, CHUNK_SIZE);
-            const lx: u4 = @intCast(@mod(bx_i, CHUNK_SIZE));
-            const ly: u4 = @intCast(@mod(by_i, CHUNK_SIZE));
-            const nc = c.move(.{ ndx, ndy }) orelse c;
-            return getBlockAt(nc, lx, ly, depth);
-        }
-    }.func;
-
     var original_block_broken = false;
     var checks_done: usize = 0; // prevent running out of memory
     while (flag_worklist.pop()) |item| {
         if (CHECK_LIMIT != 0 and checks_done >= CHECK_LIMIT) break;
         checks_done += 1;
+
+        var window: BlockWindow = .init(item.coord, item.bx, item.by);
 
         var dy: i32 = -1;
         while (dy <= 1) : (dy += 1) {
@@ -1812,7 +2073,7 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                 const lbx: u4 = @intCast(@mod(nx, CHUNK_SIZE));
                 const lby: u4 = @intCast(@mod(ny, CHUNK_SIZE));
                 const block_id = @as(usize, lby) * CHUNK_SIZE + lbx;
-                const current_block = getBlockAt(target_coord, lbx, lby, memory.game.depth);
+                const current_block = window.get(nx, ny);
                 const current_sprite = current_block.id;
                 if (current_sprite.isLiquid()) {
                     // Defer this water block's edge-flag recompute to the next tick which batches in chunks.
@@ -1827,32 +2088,20 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                     }
                 }
 
-                // Do cascade logic using edge flags (if a block is resting in an impossible state)
+                // Cascade: a block whose declared neighbors (`Sprite.supports()`, built from the rule table in types/sprite.zig)
+                // are no longer there cannot rest here, so it breaks.
                 var broken = false;
-                switch (current_sprite.anchor()) {
-                    .none => {},
-                    .floor => {
-                        const below = if (lby < CHUNK_SIZE - 1)
-                            getBlockAt(target_coord, lbx, lby + 1, memory.game.depth).id
-                        else
-                            getBlockAt(target_coord.moveY(1) orelse target_coord, lbx, 0, memory.game.depth).id;
-                        if (!below.isSolid()) broken = true;
-                    },
-                    .ceiling => {
-                        const above = if (lby > 0)
-                            getBlockAt(target_coord, lbx, lby - 1, memory.game.depth).id
-                        else
-                            getBlockAt(target_coord.moveY(-1) orelse target_coord, lbx, CHUNK_SIZE - 1, memory.game.depth).id;
-                        if (!above.isSolid()) broken = true;
-                    },
-                    .suspended => {
-                        const above = if (lby > 0)
-                            getBlockAt(target_coord, lbx, lby - 1, memory.game.depth).id
-                        else
-                            getBlockAt(target_coord.moveY(-1) orelse target_coord, lbx, CHUNK_SIZE - 1, memory.game.depth).id;
-                        if (!above.isSolid() and above != current_sprite) broken = true;
-                    },
-                    // TODO: add needs_pair_left and needs_pair_right for larger plants
+                for (current_sprite.supports()) |req| {
+                    const neighbor = window.get(nx + req.dx, ny + req.dy).id;
+                    const satisfied = switch (req.kind) {
+                        .solid => neighbor.isSolid(),
+                        .solid_or_self => neighbor.isSolid() or neighbor == current_sprite,
+                        .exact => neighbor == req.sprite,
+                    };
+                    if (!satisfied) {
+                        broken = true;
+                        break;
+                    }
                 }
 
                 if (broken) {
@@ -1864,6 +2113,7 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                     internalClearBlock(target_coord, lbx, lby);
                     // Multi-tile assemblies break as a unit so an unsupported group never leaves halves.
                     clearAssemblyRest(target_coord, lbx, lby, current_block);
+                    window.reset();
 
                     flag_worklist.append(alloc, .{ // use append() instead of at() to prevent panics
                         .coord = target_coord,
@@ -1880,12 +2130,12 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                 var id_flags: u8 = 0;
                 var waterlogged: water.WaterloggedFlags = 0;
 
-                const left_nb = getBlockLocalOrNeighbor(target_coord, @as(i32, lbx) - 1, @as(i32, lby), memory.game.depth);
-                const right_nb = getBlockLocalOrNeighbor(target_coord, @as(i32, lbx) + 1, @as(i32, lby), memory.game.depth);
-                const top_nb = getBlockLocalOrNeighbor(target_coord, @as(i32, lbx), @as(i32, lby) - 1, memory.game.depth);
-                const bottom_nb = getBlockLocalOrNeighbor(target_coord, @as(i32, lbx), @as(i32, lby) + 1, memory.game.depth);
-                const above_left_nb = getBlockLocalOrNeighbor(target_coord, @as(i32, lbx) - 1, @as(i32, lby) - 1, memory.game.depth);
-                const above_right_nb = getBlockLocalOrNeighbor(target_coord, @as(i32, lbx) + 1, @as(i32, lby) - 1, memory.game.depth);
+                const left_nb = window.get(nx - 1, ny);
+                const right_nb = window.get(nx + 1, ny);
+                const top_nb = window.get(nx, ny - 1);
+                const bottom_nb = window.get(nx, ny + 1);
+                const above_left_nb = window.get(nx - 1, ny - 1);
+                const above_right_nb = window.get(nx + 1, ny - 1);
 
                 const state = water.getWaterFlags(top_nb, bottom_nb, left_nb, right_nb, above_left_nb, above_right_nb);
 
@@ -1902,12 +2152,7 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                     inline for (.{ -1, 0, 1 }) |ndy| {
                         inline for (.{ -1, 0, 1 }) |ndx| {
                             if (ndx == 0 and ndy == 0) continue;
-                            const neighbor_block = getBlockLocalOrNeighbor(
-                                target_coord,
-                                @as(i32, lbx) + ndx,
-                                @as(i32, lby) + ndy,
-                                memory.game.depth,
-                            );
+                            const neighbor_block = window.get(nx + ndx, ny + ndy);
 
                             const is_solid_or_liquid = neighbor_block.isSolid() or neighbor_block.isLiquid();
                             if ((!current_sprite.isLiquid() and shouldHaveEdgeFlags(neighbor_block.id)) or (current_sprite.isLiquid() and is_solid_or_liquid)) {
@@ -1920,6 +2165,14 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                     }
                 }
 
+                // Most cells the cascade sweeps are unaffected; skipping the identical rewrite avoids two store lookups.
+                if (current_block.edge_flags == flags and
+                    current_block.id_edge_flags == id_flags and
+                    current_block.waterlogged == waterlogged) continue;
+                window.drop(nx, ny);
+
+                // Only the materialized caches are patched: flags are derived state, so `mod_store` does not store them,
+                // and `refreshDerivedFlags()` rebuilds them from the replayed ids on the next materialization.
                 if (SimBuffer.get(target_coord)) |c| {
                     c.blocks[block_id].edge_flags = flags;
                     c.blocks[block_id].id_edge_flags = id_flags;
@@ -1929,13 +2182,6 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                     chunk_cache.chunks[index].blocks[block_id].edge_flags = flags;
                     chunk_cache.chunks[index].blocks[block_id].id_edge_flags = id_flags;
                     chunk_cache.chunks[index].blocks[block_id].waterlogged = waterlogged;
-                }
-                const m_key = DepthCoordinate.from(target_coord);
-                if (mod_store.index.get(m_key)) |id_val| {
-                    dw.save.shadowChunkForSave(id_val);
-                    mod_store.history.at(id_val).blocks[block_id].edge_flags = flags;
-                    mod_store.history.at(id_val).blocks[block_id].id_edge_flags = id_flags;
-                    mod_store.history.at(id_val).blocks[block_id].waterlogged = waterlogged;
                 }
             }
         }
@@ -1949,20 +2195,8 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
 /// If `hp_to_add` is 0, the sprite is instantly mined. Returns if the block became/was type `none`.
 pub fn modifyBlockHp(coord: Coordinate, bx: u4, by: u4, block: Block, hp_to_add: u4) bool {
     const key = DepthCoordinate.from(coord);
-    const id: usize = @as(usize, by) * CHUNK_SIZE + bx;
+    const id: u8 = @intCast(@as(usize, by) * CHUNK_SIZE + bx);
 
-    // Ensure entry exists in history
-    const entry_id = mod_store.index.get(key) orelse blk: {
-        const new_id = mod_store.history.len;
-        _ = mod_store.history.addOne(alloc) catch memory.oom();
-
-        // Write directly to the newly slot in-place
-        writeChunkModless(mod_store.history.at(new_id), coord);
-        mod_store.index.put(key, new_id) catch memory.oom();
-        break :blk new_id;
-    };
-
-    dw.save.shadowChunkForSave(entry_id);
     const overflow_hp = @addWithOverflow(hp_to_add, block.hp); // overflows past 15, so the block should be deleted
     if (overflow_hp[1] == 1 or hp_to_add == 0 or !block.isSolid()) {
         // The block should be deleted (mined)!
@@ -1984,25 +2218,11 @@ pub fn modifyBlockHp(coord: Coordinate, bx: u4, by: u4, block: Block, hp_to_add:
             by,
         );
 
-        mod_store.history.at(entry_id).blocks[id].id = .none;
-        mod_store.history.at(entry_id).blocks[id].waterlogged = 0;
-        // Clear the mined cell's assembly footprint position so an emptied cell carries no stale offset.
-        mod_store.history.at(entry_id).blocks[id].group_x = 0;
-        mod_store.history.at(entry_id).blocks[id].group_y = 0;
+        mod_store.beginWrite(key).setCell(id, .{ .id = .none, .base_id = .none, .hp = 0 });
 
         // Update caches so changes appear immediately
-        if (SimBuffer.get(coord)) |sim_chunk| {
-            sim_chunk.blocks[id].id = .none;
-            sim_chunk.blocks[id].waterlogged = 0;
-            sim_chunk.blocks[id].group_x = 0;
-            sim_chunk.blocks[id].group_y = 0;
-        }
-        if (chunk_cache.findIndex(coord)) |index| {
-            chunk_cache.chunks[index].blocks[id].id = .none;
-            chunk_cache.chunks[index].blocks[id].waterlogged = 0;
-            chunk_cache.chunks[index].blocks[id].group_x = 0;
-            chunk_cache.chunks[index].blocks[id].group_y = 0;
-        }
+        if (SimBuffer.get(coord)) |sim_chunk| clearBlockFields(&sim_chunk.blocks[id]);
+        if (chunk_cache.findIndex(coord)) |index| clearBlockFields(&chunk_cache.chunks[index].blocks[id]);
 
         _ = updateLocalEdgeFlags(coord, bx, by);
         // Removing a block opens space that sleeping (settled) water may now flow into, so wake the surrounding chunks.
@@ -2011,7 +2231,7 @@ pub fn modifyBlockHp(coord: Coordinate, bx: u4, by: u4, block: Block, hp_to_add:
         return true;
     } else {
         const new_hp: u4 = overflow_hp[0];
-        mod_store.history.at(entry_id).blocks[id].hp = new_hp;
+        mod_store.beginWrite(key).setCell(id, .{ .id = block.id, .base_id = block.base_id, .hp = new_hp });
 
         if (SimBuffer.get(coord)) |sim_chunk| {
             sim_chunk.blocks[id].hp = new_hp;
@@ -2034,14 +2254,7 @@ pub fn getBlockAt(coord: Coordinate, lx: u4, ly: u4, depth: u64) Block {
         }
 
         const slot_index = chunk_cache.allocateIndex(coord);
-        const key = DepthCoordinate.from(coord);
-
-        if (mod_store.get(key)) |modified_chunk| {
-            // Modified state!
-            chunk_cache.chunks[slot_index].blocks = modified_chunk.*.blocks;
-        } else { // generate procedurally
-            generateChunk(&chunk_cache.chunks[slot_index], key);
-        }
+        materializeChunk(&chunk_cache.chunks[slot_index], DepthCoordinate.from(coord));
         return chunk_cache.chunks[slot_index].blocks[(@as(usize, ly) << CHUNK_SIZE_LOG2) | lx];
     }
 
@@ -2109,9 +2322,13 @@ pub fn clearCaches(comptime clear_ancestors: bool) void {
 
 /// Re-initializes all structures allocated in the world arena.
 /// Must be called whenever `world.arena` is reset or during init.
+///
+/// `mod_store` is rebuilt here too, but on `memory.main_allocator` rather than the arena:
+/// it frees entries and recycles cell blocks as the player edits, which an arena cannot do.
+/// Its `init()` releases the previous world's allocations itself.
 pub fn initArenaAllocatedStructures() void {
     flag_worklist = std.ArrayList(UpdateItem).initCapacity(alloc, 256) catch memory.oom();
-    mod_store.init(alloc);
+    mod_store.init(memory.main_allocator);
     quad_cache.reset();
 }
 
@@ -2288,9 +2505,7 @@ pub fn pushLayer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
 
                 if (trace_coord.asCoord().moveAtDepth(.{ chunk_dx, chunk_dy }, target_horizon_depth)) |nc| {
                     const child_key = nc.asDepthCoordinate(target_horizon_depth);
-                    if (mod_store.get(child_key)) |mod| {
-                        next_materials[y_idx][x_idx] = mod.blocks[(@as(usize, local_by) << 4) | local_bx];
-                    } else if (target_horizon_depth == STARTING_ZOOM_TIMES) {
+                    if (target_horizon_depth == STARTING_ZOOM_TIMES) {
                         next_materials[y_idx][x_idx] = dw.ancestor.getInheritedMaterial(child_key, local_bx, local_by);
                     } else {
                         const p = dw.ancestor.getParentInfo(child_key, local_bx, local_by);
@@ -2343,10 +2558,129 @@ pub fn pushLayer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
                             local_by,
                         ).compile();
                     }
+
+                    // The traces above are purely procedural, so the player's edit at this exact cell (if any) wins.
+                    const block_idx: u8 = @intCast((@as(usize, local_by) << 4) | local_bx);
+                    if (mod_store.getCell(child_key, block_idx)) |cell| {
+                        cell.applyTo(&next_materials[y_idx][x_idx]);
+                    }
                 } else next_materials[y_idx][x_idx] = .empty;
             }
         }
 
         quad_cache.ancestor_materials = next_materials;
     }
+}
+
+const testing = std.testing;
+
+/// A distinct `ModCell` per block index, so a misplaced cell is always detectable.
+fn testCell(i: u8) ModCell {
+    return .{ .id = @enumFromInt(@as(u16, i) + 1), .base_id = @enumFromInt(@as(u16, i) + 300), .hp = i % 16 };
+}
+
+test "ModEntry: cells stay indexable by block index regardless of insertion order" {
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+
+    const key: DepthCoordinate = .{ .suffix = .{ 1, 2 }, .depth = 7, .quadrant = 0 };
+
+    // Insert scrambled (a stride coprime with 256 hits every index exactly once)
+    // so every insert lands in the middle of the packed array and exercises the shift.
+    var n: u32 = 0;
+    while (n < CHUNK_SIZE_SQ) : (n += 1) {
+        const i: u8 = @intCast((n *% 97) % CHUNK_SIZE_SQ);
+        mod_store.beginWrite(key).setCell(i, testCell(i));
+
+        const entry = mod_store.get(key).?;
+        try testing.expectEqual(@as(u16, @intCast(n + 1)), entry.count);
+        // `cells` must remain sorted by block index, which is what makes rank() a valid lookup.
+        var prev: i32 = -1;
+        var seen: u16 = 0;
+        for (0..CHUNK_SIZE_SQ) |b| {
+            if (!entry.isAuthored(@intCast(b))) continue;
+            try testing.expect(@as(i32, @intCast(b)) > prev);
+            try testing.expectEqual(entry.cells[seen], entry.get(@intCast(b)).?);
+            prev = @intCast(b);
+            seen += 1;
+        }
+        try testing.expectEqual(entry.count, seen);
+    }
+
+    const entry = mod_store.get(key).?;
+    for (0..CHUNK_SIZE_SQ) |i| {
+        try testing.expectEqual(testCell(@intCast(i)), entry.get(@intCast(i)).?);
+    }
+}
+
+test "ModEntry: unauthored cells read as null and rewrites do not grow the entry" {
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+
+    const key: DepthCoordinate = .{ .suffix = .{ 0, 0 }, .depth = 6, .quadrant = 3 };
+    const authored = [_]u8{ 0, 1, 63, 64, 65, 127, 128, 200, 255 };
+
+    for (authored) |i| mod_store.beginWrite(key).setCell(i, testCell(i));
+
+    const entry = mod_store.get(key).?;
+    try testing.expectEqual(@as(u16, authored.len), entry.count);
+    for (0..CHUNK_SIZE_SQ) |i| {
+        const idx: u8 = @intCast(i);
+        const expected = std.mem.indexOfScalar(u8, &authored, idx) != null;
+        try testing.expectEqual(expected, entry.get(idx) != null);
+    }
+
+    // Overwriting an already-authored cell must replace it, not insert a duplicate.
+    mod_store.beginWrite(key).setCell(64, .{ .id = .stone, .base_id = .none, .hp = 3 });
+    try testing.expectEqual(@as(u16, authored.len), entry.count);
+    try testing.expectEqual(Sprite.stone, entry.get(64).?.id);
+}
+
+test "ModEntry: applyTo overwrites exactly the authored cells" {
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+
+    const key: DepthCoordinate = .{ .suffix = .{ 9, 9 }, .depth = 8, .quadrant = 1 };
+    mod_store.beginWrite(key).setCell(5, .{ .id = .none, .base_id = .none, .hp = 0 });
+    mod_store.beginWrite(key).setCell(200, .{ .id = .water, .base_id = .none, .hp = 9 });
+
+    var chunk: Chunk = undefined;
+    for (&chunk.blocks) |*b| b.* = .makeBasicBlock(.stone, 0xABCD);
+
+    mod_store.get(key).?.applyTo(&chunk);
+
+    for (chunk.blocks, 0..) |b, i| {
+        // `seed` is regenerated by the procedural pass, never stored, so replay must leave it untouched.
+        try testing.expectEqual(@as(u28, 0xABCD), b.seed);
+        switch (i) {
+            5 => try testing.expectEqual(Sprite.none, b.id),
+            200 => {
+                try testing.expectEqual(Sprite.water, b.id);
+                try testing.expectEqual(@as(u4, 9), b.hp);
+            },
+            else => try testing.expectEqual(Sprite.stone, b.id),
+        }
+    }
+}
+
+test "ModificationStore: remove drops the chunk and recycles its slot" {
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+
+    const a: DepthCoordinate = .{ .suffix = .{ 1, 1 }, .depth = 6, .quadrant = 0 };
+    const b: DepthCoordinate = .{ .suffix = .{ 2, 2 }, .depth = 6, .quadrant = 0 };
+
+    mod_store.beginWrite(a).setCell(10, testCell(10));
+    try testing.expect(mod_store.contains(a));
+    try testing.expectEqual(@as(usize, 1), mod_store.entries.len);
+
+    mod_store.remove(a);
+    try testing.expect(!mod_store.contains(a));
+    try testing.expectEqual(@as(?ModCell, null), mod_store.getCell(a, 10));
+
+    // The freed slot is handed out again instead of appending, so `entries` does not grow.
+    mod_store.beginWrite(b).setCell(20, testCell(20));
+    try testing.expectEqual(@as(usize, 1), mod_store.entries.len);
+    try testing.expectEqual(testCell(20), mod_store.getCell(b, 20).?);
+    try testing.expectEqual(@as(?ModCell, null), mod_store.getCell(b, 10));
 }

@@ -4,17 +4,13 @@
 const std = @import("std");
 const dw = @import("../root.zig");
 
+const uvToViewport = dw.entity.uvToViewport;
 const Vec2f = dw.utils.Vec2f;
 const Vec2f32 = dw.utils.Vec2f32;
 const Vec4f32 = dw.utils.Vec4f32;
 
 /// Viewport pixel scale for converting UV positions.
 pub const px_scale: Vec2f = .{ dw.SCREEN_WIDTH, dw.SCREEN_HEIGHT };
-
-/// Converts a UV-space vector (position or size) into viewport pixels.
-pub inline fn uvToPx(uv: Vec2f32) Vec2f {
-    return .{ @as(f64, uv[0]) * px_scale[0], @as(f64, uv[1]) * px_scale[1] };
-}
 
 /// Mouse position in viewport pixels.
 pub inline fn mousePx() Vec2f {
@@ -23,8 +19,8 @@ pub inline fn mousePx() Vec2f {
 
 /// Round-rect hitbox covering a whole menu panel (UV pos/size in, viewport-px shape out).
 pub fn panelHitbox(pos: Vec2f32, size: Vec2f32) dw.geometry.Shape {
-    const p = uvToPx(pos);
-    const s = uvToPx(size);
+    const p = uvToViewport(pos);
+    const s = uvToViewport(size);
     return .{ .start = p, .w = s[0], .h = s[1], .r = 0.05 };
 }
 
@@ -94,7 +90,7 @@ pub fn Grid(comptime opts: GridOptions) type {
 
         /// The pixel center of slot `i` for a panel whose top-left sits at `pos` (UV).
         pub fn slotCenterPx(pos: Vec2f32, i: usize) Vec2f {
-            const panel = uvToPx(pos);
+            const panel = uvToViewport(pos);
             const col: f64 = @floatFromInt(i % opts.cols);
             const row: f64 = @floatFromInt(i / opts.cols);
             return .{
@@ -105,7 +101,7 @@ pub fn Grid(comptime opts: GridOptions) type {
 
         /// The pixel center of the title-icon strip above the slots.
         pub fn titleCenterPx(pos: Vec2f32) Vec2f {
-            const panel = uvToPx(pos);
+            const panel = uvToViewport(pos);
             return .{ panel[0] + SIZE_PX[0] / 2.0, panel[1] + opts.top_pad / 2.0 };
         }
     };
