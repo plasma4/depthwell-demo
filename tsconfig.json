@@ -1,0 +1,24 @@
+{
+    "compilerOptions": {
+        "target": "ESNext",
+        "module": "ESNext",
+        "lib": ["ESNext", "DOM"],
+        "types": ["@webgpu/types"],
+        "moduleResolution": "bundler",
+        "allowImportingTsExtensions": true,
+        "noEmit": true,
+
+        "strict": true,
+        "sourceMap": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true,
+        "outDir": "dist",
+        "rootDir": "src",
+
+        "paths": {
+            "@generated/*": ["./src/generated/*"]
+        }
+    },
+    "include": ["src/**/*"]
+}
