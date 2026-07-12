@@ -193,6 +193,14 @@ pub const page_allocator = if (builtin.is_test) std.testing.allocator else std.h
 /// Use `makeArena()` to create an `ArenaAllocator` around this (WASM has no SMP allocator support).
 const main_allocator = if (builtin.is_test) std.testing.allocator else if (builtin.single_threaded) std.heap.brk_allocator else std.heap.smp_allocator; // use .allocator() for instance
 
+/// The general-purpose allocator, for long-lived structures that must genuinely free and reuse
+/// memory rather than accumulate (`world.mod_store`). Both `brk_allocator` and `smp_allocator`
+/// recycle freed blocks through internal size classes, so churn here does not grow the heap.
+///
+/// Prefer `world.arena` for anything whose lifetime ends at a world reset; prefer the scratch
+/// buffer for anything that dies at the end of the frame.
+pub const general_allocator: std.mem.Allocator = main_allocator;
+
 /// Creates an `ArenaAllocator` around the `page_allocator`.
 /// It is usually preferable when possible to utilize the scratch buffer for temporary calculations through a callee,
 /// store `len` from the caller, and re-access `scratch_ptr`.
@@ -411,11 +419,18 @@ pub const BlockSpec = struct {
     base_id: Sprite = .none,
     /// Uses the BOTTOM 32 bits when compiled into `Block.seed`.
     seed: u64 = 0,
+    /// Starting water volume (0-15) for a waterloggable cell generated inside a pool.
+    /// Ignored for liquids (`makeBasicBlock()` already fills them to `MAX_HP`) and meaningless for solids,
+    /// whose `hp` is mining progress and always generates at 0.
+    /// A waterloggable cell generated dry inside full water is NOT at equilibrium: the sim floods it on the
+    /// first tick, which dirties the chunk and creates a modification entry with no player involvement.
+    water_volume: u4 = 0,
 
     /// Compiles the spec into a packed `Block` (max light, no edge flags or mine level, matching `makeBasicBlock()`).
     pub inline fn compile(self: @This()) Block {
         var block: Block = .makeBasicBlock(self.id, self.seed);
         block.base_id = self.base_id;
+        if (!self.id.isLiquid() and self.id.isWaterloggable()) block.hp = self.water_volume;
         return block;
     }
 };

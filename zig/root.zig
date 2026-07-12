@@ -339,7 +339,8 @@ test "main_tests" {
         @import("internal/color_rgba.zig"),
         @import("state/seeding.zig"),
         @import("debug/logger.zig"),
-        @import("types/assembly.zig"),
+        @import("state/world.zig"),
+        @import("state/save.zig"),
     };
 
     inline for (modules) |mod| {

@@ -122,13 +122,13 @@ pub const Sprite = enum(u16) {
 
     // Decor (THIS IS COUPLED TO WGSL CODE)
     small_tree = DECOR_START,
-    /// Left/base tile of the 2x1 big-tree assembly; stored in BOTH cells,
-    /// and resolved to `moss_shrub1` (left) / `moss_shrub1_right` (right) at render time via the `.group` variant.
+    /// Left half of the 2x1 big tree; each half is stored as its own block id and requires the other
+    /// directly beside it (see the `requires` rules below), so the pair always breaks as a unit.
     moss_shrub1,
-    /// Render-only right frame of `moss_shrub1` (never stored as a block id).
+    /// Right half of `moss_shrub1`; only ever valid directly right of it.
     moss_shrub1_right,
     moss_shrub2,
-    /// Render-only right frame of `moss_shrub2` (never stored as a block id).
+    /// Right half of `moss_shrub2`; only ever valid directly right of it.
     moss_shrub2_right,
     blemon_fruit = GEAR_ID - FRUIT_COUNT,
     teal_lemon_fruit,
@@ -285,6 +285,15 @@ pub const Sprite = enum(u16) {
     /// Returns the cascade anchoring rules for this sprite.
     pub inline fn anchor(self: @This()) AnchorKind {
         return self.props().anchor;
+    }
+
+    /// Returns every neighbor cell this sprite requires to stay in the world: its `anchor` constraint
+    /// followed by any extra `SpriteProps.requires` entries, flattened into one list at compile time.
+    /// The cascade in `state/world.zig` clears the block as soon as one entry fails.
+    pub inline fn supports(self: @This()) []const Support {
+        const val = @intFromEnum(self);
+        if (val < MAX_SPRITE_ID) return dense_supports_table[val];
+        return &.{};
     }
 
     /// Returns the broad `Category` classification for this sprite.
@@ -533,14 +542,12 @@ const rules = [_]SpriteRule{
         .{ .evolves_to = .lava_stone },
     },
 
-    // 2x1 big-tree assemblies drop one 1x1 small_tree. Only the base tile is ever stored
-    // (the `_right` frame is render-only), so the rule targets the base ids alone.
+    // 2x1 big trees. Each half pins the other through `requires`, so the cascade breaks the pair as a unit
+    // whichever half goes first; only the base half drops, keeping one `small_tree` per tree.
     .{
         .{ .list = &[_]Sprite{
             .moss_shrub1,
             .moss_shrub2,
-            .moss_shrub1_right,
-            .moss_shrub2_right,
         } },
         .{
             .in_world = true,
@@ -549,6 +556,32 @@ const rules = [_]SpriteRule{
                 .static_items = &[_]Sprite{.small_tree},
             },
         },
+    },
+    .{
+        .{ .list = &[_]Sprite{
+            .moss_shrub1_right,
+            .moss_shrub2_right,
+        } },
+        .{
+            .in_world = true,
+            .drops = .{ .strategy = .none },
+        },
+    },
+    .{
+        .{ .single = .moss_shrub1 },
+        .{ .requires = &.{.{ .dx = 1, .kind = .exact, .sprite = .moss_shrub1_right }} },
+    },
+    .{
+        .{ .single = .moss_shrub1_right },
+        .{ .requires = &.{.{ .dx = -1, .kind = .exact, .sprite = .moss_shrub1 }} },
+    },
+    .{
+        .{ .single = .moss_shrub2 },
+        .{ .requires = &.{.{ .dx = 1, .kind = .exact, .sprite = .moss_shrub2_right }} },
+    },
+    .{
+        .{ .single = .moss_shrub2_right },
+        .{ .requires = &.{.{ .dx = -1, .kind = .exact, .sprite = .moss_shrub2 }} },
     },
 
     // Anchor rules!
@@ -621,8 +654,7 @@ const rules = [_]SpriteRule{
             .category = .decor,
         },
     },
-    // Non-item decor (corresponds to small_tree). Only base tiles are stored; the `_right`
-    // frames stay propertyless render-only ids (like the extra grid_2x2 stone frames).
+    // Non-item decor: a tree is picked up as the `small_tree` it drops, never as its own halves.
     .{
         .{ .list = &[_]Sprite{
             .moss_shrub1,
@@ -670,6 +702,37 @@ pub const AnchorKind = enum(u2) {
     /// This sprite type must be directly below a solid block or itself.
     suspended = 3,
 };
+
+/// What a `Support` entry demands of the neighbor cell it points at.
+pub const SupportKind = enum(u2) {
+    /// The neighbor must be solid.
+    solid,
+    /// The neighbor must be solid, or another copy of the sprite being checked (self-stacking chains, like vines).
+    solid_or_self,
+    /// The neighbor must hold exactly `Support.sprite`.
+    exact,
+};
+
+/// One neighbor cell a sprite needs in order to stay in the world.
+/// - `dx`/`dy` are tile offsets from the block itself: +x is right, +y is DOWN (screen order, like `Coordinate.move()`).
+/// - `sprite` is only read for `SupportKind.exact`.
+pub const Support = struct {
+    dx: i2 = 0,
+    dy: i2 = 0,
+    kind: SupportKind,
+    sprite: Sprite = .none,
+};
+
+/// The `Support` list implied by an `AnchorKind`, so that `anchor` and `SpriteProps.requires`
+/// collapse into the single list the cascade walks (see `Sprite.supports()`).
+fn anchorSupports(a: AnchorKind) []const Support {
+    return switch (a) {
+        .none => &.{},
+        .floor => &.{.{ .dy = 1, .kind = .solid }},
+        .ceiling => &.{.{ .dy = -1, .kind = .solid }},
+        .suspended => &.{.{ .dy = -1, .kind = .solid_or_self }},
+    };
+}
 
 /// Broad classification of a sprite, replacing scattered ID-range arithmetic.
 /// Add new variants freely; `Category` is `u3`, so up to 8 fit in `SpriteFlags`.
@@ -720,6 +783,9 @@ pub const SpriteProps = struct {
     hitbox: HitboxKind = .full,
     /// Backs `Sprite.anchor()`: where this sprite can appear; see `AnchorKind`.
     anchor: AnchorKind = .none,
+    /// Neighbor requirements beyond `anchor` (such as the two halves of a 2x1 shrub pinning each other).
+    /// Merged with the `anchor` constraint by `Sprite.supports()`; see `Support`.
+    requires: []const Support = &.{},
     /// What item(s) this sprite drops when mined; see `DropConfig`.
     drops: DropConfig = .{ .strategy = .self },
     /// If set, the sprite this evolves into at increased depth. See `Sprite.evolvesTo()`.
@@ -792,6 +858,7 @@ fn mergeProps(dest: *SpriteProps, src: SpriteProps) void {
     if (src.instant_mine) dest.instant_mine = src.instant_mine;
     if (src.hitbox != .full) dest.hitbox = src.hitbox;
     if (src.anchor != .none) dest.anchor = src.anchor;
+    if (src.requires.len != 0) dest.requires = src.requires;
     if (src.drops.strategy != .self or src.drops.static_items.len != 0 or src.drops.dynamic_fn != null) {
         dest.drops = src.drops;
     }
@@ -889,6 +956,23 @@ const dense_flags_table: [MAX_SPRITE_ID]SpriteFlags = blk: {
             .anchor = p.anchor,
             .category = p.category,
         };
+    }
+    break :blk table;
+};
+
+/// Precomputed `anchor` + `requires` support lists, one flat list per sprite (see `Sprite.supports()`).
+const dense_supports_table: [MAX_SPRITE_ID][]const Support = blk: {
+    @setEvalBranchQuota(20000);
+    var table: [MAX_SPRITE_ID][]const Support = @splat(&.{});
+
+    for (0..MAX_SPRITE_ID) |i| {
+        const p = dense_props_table[i];
+        const from_anchor = anchorSupports(p.anchor);
+        if (p.requires.len == 0) {
+            table[i] = from_anchor;
+        } else {
+            table[i] = from_anchor ++ p.requires;
+        }
     }
     break :blk table;
 };
@@ -995,6 +1079,18 @@ comptime {
     // length, so the mapping is a constant offset. Enforce that here.
     if (ORE_START - BAR_START != GEM_START - ORE_START)
         @compileError("Bar range is not parallel to the ore range; oreToBar() would be wrong.");
+
+    // Equal-length ranges are not enough: the two must also line up name-for-name, or a reordered ore
+    // would smelt into someone else's bar. Cheap to check, and it catches an insertion into either range.
+    for (ORE_START..GEM_START) |ore_id| {
+        const ore: Sprite = @enumFromInt(ore_id);
+        if (!std.mem.eql(u8, @tagName(ore.oreToBar()), @tagName(ore) ++ "_bar"))
+            @compileError("Ore `" ++ @tagName(ore) ++ "` smelts into `" ++ @tagName(ore.oreToBar()) ++ "`; the bar range drifted out of order.");
+    }
+
+    // GEM_COUNT positions MASK_START (and bounds `isOverlay()`), so it must match the actual gem span.
+    if (@intFromEnum(Sprite.electrit) - GEM_START + 1 != GEM_COUNT)
+        @compileError("GEM_COUNT does not match the quartz..electrit range.");
 
     // isOverlay() bounds-tests one contiguous ore+gem range; verify it matches the props table exactly.
     var o: u16 = 0;

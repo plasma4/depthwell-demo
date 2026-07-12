@@ -31,6 +31,22 @@ pub const density_min = TuningFloat(0.36);
 pub const density_max = TuningFloat(0.94);
 pub const hybrid_weight = TuningFloat(0.6);
 
+/// Every `TuningFloat` that feeds base-terrain generation; a change to any of them invalidates the
+/// base-terrain cache (see `tuningVersion()`). Keep in sync when adding a slider that `computeBaseSpriteType()` reads.
+const terrain_tuning = .{ dual_value_scale, procedural_cell_size, fbm_scale, density_min, density_max, hybrid_weight };
+
+/// Hash of the live debug controls that change base-terrain output: the sliders above plus the heatmap
+/// toggles (which `generateBaseProceduralSprite()` reads). Used as part of the base-terrain cache key.
+/// Folds to a constant in release (the sliders are `const` there), so the check costs nothing outside debug.
+inline fn tuningVersion() u64 {
+    if (!dw.is_debug) return 0;
+    var h: u64 = @intFromBool(USE_BASE_HEATMAP) | (@as(u64, @intFromBool(USE_ORE_HEATMAP)) << 1);
+    inline for (terrain_tuning) |t| {
+        h = (h ^ @as(u64, @bitCast(t.value))) *% 0x100000001B3;
+    }
+    return h;
+}
+
 /// Generates a block for seeding (based on previous procedural generation logic).
 /// The terms moisture/density are used extremely loosely here.
 /// Moisture is over a larger area, acting as the "biome" for structure logic.
@@ -155,10 +171,9 @@ const BaseTerrainCacheEntry = struct {
 
 /// Direct-mapped cache of `computeBaseSpriteType()` results (must be a power of two).
 /// The same cell is recomputed many times per chunk gen (pass 1, the edge-flag halo, the vine scan, and structure terrain gates all resample it, plus overlap across neighbors), so memoizing removes that FBM redundancy: the dominant generation cost.
-/// Release-only: in debug the `TuningFloat` sliders mutate FBM output live, so debug always recomputes.
-const BASE_CACHE_SLOTS = 8192;
+const BASE_CACHE_SLOTS = 32768;
 var base_terrain_cache: [BASE_CACHE_SLOTS]BaseTerrainCacheEntry = @splat(.{});
-/// Current seed the cache holds; a mismatch (reseed) invalidates every entry at once.
+/// Seed + slider state the cache holds; a mismatch (reseed, or a dragged debug slider) invalidates every entry at once.
 var base_cache_key: u64 = 0;
 
 /// Direct-mapped slot for a world block; mixes the coords so adjacent cells do not collide.
@@ -178,14 +193,13 @@ pub fn getBaseSpriteType(
     block_x: u4,
     block_y: u4,
 ) BaseTerrainData {
-    // Debug drags terrain sliders live, so caching would serve stale samples; always recompute there.
-    if (dw.is_debug) return computeBaseSpriteType(chunk_x, chunk_y, block_x, block_y);
-
     const wx = chunk_x * 16 + block_x;
     const wy = chunk_y * 16 + block_y;
 
+    // Debug drags the terrain sliders live, so the slider state joins the seed in the cache key: dragging one
+    // drops the whole cache (as it must) instead of forcing every sample to recompute its FBM forever.
     const seed = memory.game.getHashSeed(.moisture);
-    const key = seed[0] ^ seed[1];
+    const key = seed[0] ^ seed[1] ^ tuningVersion();
     if (key != base_cache_key) {
         base_terrain_cache = @splat(.{});
         base_cache_key = key;
@@ -480,7 +494,7 @@ pub const ColumnFeature = struct {
     salt: u64 = 0,
 };
 
-/// Compile-time invariant check for a `ColumnFeature`. Call from a comptime block per instance/use.
+/// Verifies `ColumnFeature` validity.
 pub fn assertColumnFeature(comptime f: ColumnFeature) void {
     if (f.max_length >= 2 * CHUNK_SIZE)
         @compileError("ColumnFeature.max_length must stay < 2 * CHUNK_SIZE so the cross-border scan reaches at most the two neighbor chunks.");
@@ -562,39 +576,17 @@ pub fn addDecorations(
     vine_seeds: *const [CHUNK_SIZE]VineState,
 ) void {
     // First, we handle blocks with a floor anchor kind.
+    // Multi-block decorations (the 2x1 moss shrub, the 1x3 plant) are NOT placed here: this pass only sees
+    // one chunk, so a footprint reaching past a border would be truncated. They live in `state/structures/`.
     for (0..CHUNK_SIZE) |block_y| {
-        var forced_next_sprite_type: Sprite = .none; // .none means nothing is forced
         for (0..CHUNK_SIZE) |block_x| {
             const idx = block_x + block_y * CHUNK_SIZE;
             var block = &target_chunk.blocks[idx];
-            if (forced_next_sprite_type != .none) {
-                // semantically, .none makes sense, simply an alternative to optional type
-                block.id = forced_next_sprite_type;
-                forced_next_sprite_type = .none;
-                continue;
-            }
 
             if (!block.isEmpty()) continue;
             // Check calculated bitmask directly to avoid isAdjacentBlockSolid logic discrepancies
             if ((block.edge_flags & types.EdgeFlags.BOTTOM) != 0) {
                 const val = rng_decor.next();
-
-                // Only initiate 2x1 tree placement on even columns to prevent asymmetric overwrites
-                if (block_x % 2 == 0 and block_x != CHUNK_SIZE - 1) {
-                    const other_block_x = block_x + 1;
-                    const other_block = &target_chunk.blocks[other_block_x + block_y * CHUNK_SIZE];
-                    if (other_block.isEmpty() and ((other_block.edge_flags & types.EdgeFlags.BOTTOM) != 0)) {
-                        if (val >= oddsNum(0.98)) {
-                            block.id = .moss_shrub1;
-                            forced_next_sprite_type = .moss_shrub1_right;
-                            continue;
-                        } else if (val >= oddsNum(0.97)) {
-                            block.id = .moss_shrub2;
-                            forced_next_sprite_type = .moss_shrub2_right;
-                            continue;
-                        }
-                    }
-                }
 
                 if (val <= oddsNum(0.030)) {
                     block.id = .bush;

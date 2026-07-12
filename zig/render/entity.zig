@@ -36,6 +36,8 @@ const NUMBER_WIDTHS: [10]f32 = .{
 
 /// List of monospace characters starting from
 const MONOSPACE_CHARS = "!\"%$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz(|)~";
+/// Width of each character relative to the font size (6/16).
+const CHARACTER_WIDTH_FRACTION: f32 = 6.0 / 16.0;
 
 /// Current number of entities (reset every frame).
 pub var entity_count: u64 = 0;
@@ -103,6 +105,21 @@ pub fn updateEntities(time_diff: f64) void {
         .font_size = 7.5,
         .lcha = .{ 0.85, 0.24, 1.8, 1.0 },
     });
+
+    if (false) {
+        // draws info on # of chunks and data usage
+        const store = &dw.world.mod_store;
+        var mod_buf: [64]u8 = undefined;
+        const mod_msg = std.fmt.bufPrint(
+            &mod_buf,
+            "mods: {d} chunks / {d}B",
+            .{ store.index.count(), store.cellBytes() },
+        ) catch unreachable;
+        dw.entity.drawString(mod_msg, .{ 20.0, 4.0 }, .{
+            .font_size = 6.0,
+            .lcha = .{ 0.85, 0.0, 0.0, 0.8 },
+        });
+    }
 
     memory.setScratchProp(0, entity_count);
     // entity rendering is dispatched to JS right after this function completes
@@ -259,7 +276,7 @@ fn drawNumberFast(number: u64, position: Vec2f32, options: TextConfig) void {
     }
 }
 
-/// A compile-time lookup table mapping ASCII characters to their index in MONOSPACE_CHARS.
+/// A compile-time lookup table mapping ASCII characters to their index in `MONOSPACE_CHARS`.
 /// `-1` represents an invalid character.
 /// `-2` represents a space character (valid but skipped during rendering).
 const CHAR_MAP: [256]i16 = blk: {
@@ -271,9 +288,6 @@ const CHAR_MAP: [256]i16 = blk: {
     }
     break :blk map;
 };
-
-/// Width of each character relative to the font size (6/16).
-const CHARACTER_WIDTH_FRACTION: f32 = 6.0 / 16.0;
 
 /// Draws a single monospace character.
 pub fn drawCharacter(
