@@ -3,8 +3,8 @@
 //! Values are written as plain WGSL `const`s so they are part of the one shader source
 //! (which survives minification as a nice bonus).
 //!
-//! Run automatically by `zig build` (see `generateShaderConstants` in build.zig), guarded by a content
-//! hash of the files these values derive from so the host tool is not rebuilt on unrelated changes.
+//! Run automatically by `zig build` (see `generateShaderConstants` in build.zig),
+//! guarded by a content hash of the files these values derive from so the host tool is not rebuilt on unrelated changes.
 const std = @import("std");
 
 /// Points to definitions from zig/root.zig.

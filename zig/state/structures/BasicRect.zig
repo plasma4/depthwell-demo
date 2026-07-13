@@ -12,28 +12,15 @@ const structures = @import("../structures.zig");
 const Rect = structures.Rect;
 
 pub const spawn_area: u32 = 32;
-pub const max_w: u32 = 8;
-pub const max_h: u32 = 5;
+pub const max_w: u32 = size_x;
+pub const max_h: u32 = size_y;
 pub const target_chance: f64 = 0.03;
 
-pub fn getBounds(state: *HashState, cx: i32, cy: i32) Rect {
-    const i_area = @as(i32, @intCast(spawn_area));
-    const size_x = 8;
-    const size_y = 5;
-    const max_pos_x = @as(u32, @intCast(i_area - size_x));
-    const max_pos_y = @as(u32, @intCast(i_area - size_y));
+const size_x: i32 = 8;
+const size_y: i32 = 5;
 
-    const pos_x = @as(i32, @intCast(state.getLimit(u32, max_pos_x)));
-    const pos_y = @as(i32, @intCast(state.getLimit(u32, max_pos_y)));
-
-    const x_start = cx * i_area + pos_x;
-    const y_start = cy * i_area + pos_y;
-    return .{
-        .x_start = x_start,
-        .y_start = y_start,
-        .x_end = x_start + size_x,
-        .y_end = y_start + size_y,
-    };
+pub fn getBounds(state: *HashState, cx: i32, cy: i32) ?Rect {
+    return structures.jitter(state, cx, cy, spawn_area, size_x, size_y);
 }
 
 pub fn generate(
@@ -46,23 +33,16 @@ pub fn generate(
     state: *HashState,
     struct_seed: Vec2u,
 ) ?structures.StructureResult {
-    _ = bounds;
+    _ = cx;
+    _ = cy;
     _ = struct_seed;
-    const i_area = @as(i32, @intCast(spawn_area));
     const i_wx = @as(i32, @bitCast(wx));
     const i_wy = @as(i32, @bitCast(wy));
 
-    const size_x = 8;
-    const size_y = 5;
-    const max_pos_x = @as(u32, @intCast(i_area - size_x));
-    const max_pos_y = @as(u32, @intCast(i_area - size_y));
-
-    const pos_x = @as(i32, @intCast(state.getLimit(u32, max_pos_x)));
-    const pos_y = @as(i32, @intCast(state.getLimit(u32, max_pos_y)));
     const chest_x = 1 + @as(i32, @intCast(state.getLimit(u32, size_x - 2)));
 
-    const struct_x = i_wx - (cx * i_area + pos_x);
-    const struct_y = i_wy - (cy * i_area + pos_y);
+    const struct_x = i_wx - bounds.x_start;
+    const struct_y = i_wy - bounds.y_start;
 
     if (struct_x >= 0 and struct_y >= 0 and struct_x < size_x and struct_y < size_y) {
         // Rect outer boundary
