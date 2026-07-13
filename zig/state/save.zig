@@ -447,12 +447,12 @@ fn readMisc(r: *Reader) !void {
 // MOD_STORE record (section version 2), per modified chunk:
 //   key      : suffix[0] u64 | suffix[1] u64 | depth u64 | quadrant u32   (28 bytes)
 //   authored : [CHUNK_SIZE_SQ / 64]u64                                    (32 bytes; which cells the player owns)
-//   cells    : id u16 | base_id u16 | hp u8, once per set bit, ascending  (5 bytes each)
+//   cells    : PackedCell (u32), once per set bit, ascending              (4 bytes each)
 // The cell count is the population count of `authored`, so it is never stored twice.
 // Sprite ids go out as ids (remapped through SPRITE_TABLE on load), never as build-local table indices.
 
 /// Bytes one authored cell occupies on disk.
-const MOD_CELL_BYTES: u64 = 2 + 2 + 1;
+const MOD_CELL_BYTES: u64 = @sizeOf(PackedCell);
 /// Bytes of a record's fixed key prefix.
 const MOD_KEY_BYTES: u64 = 8 + 8 + 8 + 4;
 /// Bytes of a record's `authored` bitmap.
@@ -474,9 +474,12 @@ fn writeEntryKey(w: *Writer, key: DepthCoordinate) !void {
 fn writeEntryPayload(w: *Writer, entry: *const world.ModEntry) !void {
     for (entry.authored) |word| try w.int(u64, word);
     for (entry.cells[0..entry.count]) |cell| {
-        try w.int(u16, @intFromEnum(cell.id));
-        try w.int(u16, @intFromEnum(cell.base_id));
-        try w.int(u8, cell.hp);
+        const packed_cell: PackedCell = .{
+            .id = @intCast(@intFromEnum(cell.id)),
+            .base_id = @intCast(@intFromEnum(cell.base_id)),
+            .hp = @intCast(cell.hp),
+        };
+        try w.int(u32, @bitCast(packed_cell));
     }
 }
 
@@ -516,15 +519,22 @@ fn readModStore(r: *Reader) !void {
 
         var cells: [dw.CHUNK_SIZE_SQ]world.ModCell = undefined;
         for (cells[0..count]) |*cell| {
-            cell.id = remapSpriteId(try r.int(u16));
-            cell.base_id = remapSpriteId(try r.int(u16));
-            cell.hp = try r.int(u8);
+            const packed_cell: PackedCell = @bitCast(try r.int(u32));
+            cell.id = remapSpriteId(@intCast(packed_cell.id));
+            cell.base_id = remapSpriteId(@intCast(packed_cell.base_id));
+            cell.hp = @intCast(packed_cell.hp);
             if (cell.hp > Block.MAX_HP) return SaveError.BadData;
         }
 
         try world.mod_store.loadEntry(key, authored, cells[0..count]);
     }
 }
+
+const PackedCell = packed struct(u32) {
+    id: u14,
+    base_id: u14,
+    hp: u4,
+};
 
 /// True while `handleTick()` is executing; set/cleared by `tick()` in `root.zig` and cleared again by `startup.init()`.
 /// A panic/trap mid-tick leaves it set, so `exportAll()` and `beginSnapshot()` refuse to serialize the half-applied tick forever
@@ -953,9 +963,10 @@ test "MOD_STORE: an entry round-trips through its record encoding" {
 
     var decoded: [dw.CHUNK_SIZE_SQ]world.ModCell = undefined;
     for (decoded[0..count]) |*cell| {
-        cell.id = remapSpriteId(try r.int(u16));
-        cell.base_id = remapSpriteId(try r.int(u16));
-        cell.hp = try r.int(u8);
+        const packed_cell: PackedCell = @bitCast(try r.int(u32));
+        cell.id = remapSpriteId(@intCast(packed_cell.id));
+        cell.base_id = remapSpriteId(@intCast(packed_cell.base_id));
+        cell.hp = @intCast(packed_cell.hp);
     }
     try world.mod_store.loadEntry(key, authored, decoded[0..count]);
 

@@ -174,20 +174,17 @@ pub fn generateBaseChunk(chunk: *Chunk, coord: Coordinate) void {
         }
     }
 
-    addEdgeFlags(chunk, coord, depth);
+    // Mod-blind on purpose: `addDecorations()` below reads these flags and gates `rng_decor` on them, so an
+    // edit reaching them here would make one chunk's decorations depend on whether a NEIGHBOR was mined.
+    // `materializeChunk()` re-derives them with the edits overlaid once decoration is done.
+    addEdgeFlags(chunk, coord, depth, null);
+
     // Decorate the base chunk here so that child depths inherit the results.
     // Hanging vines need the vine state entering each column from the chunk(s) above so they cross the border.
     const vine_seeds = computeVineSeeds(coord, depth);
     procedural.addDecorations(chunk, &rng_decor, cx, cy, &vine_seeds);
 
-    // Reset edge flags to 0xFF for empty blocks after decorations are completed!
-    for (0..CHUNK_SIZE_SQ) |idx| {
-        const block = &chunk.blocks[idx];
-        if (block.isEmpty()) {
-            block.edge_flags = 0xFF;
-            block.id_edge_flags = 0xFF;
-        }
-    }
+    resetEmptyEdgeFlags(chunk);
 }
 
 /// Computes the hanging-vine (spiral plant) state entering the top of each of this chunk's columns,
@@ -1542,25 +1539,29 @@ pub inline fn getChunk(coord: Coordinate) Chunk {
 /// Unmodified chunks cost exactly what they did before (a plain `generateChunk()` with no second flag pass).
 pub fn materializeChunk(chunk: *Chunk, key: DepthCoordinate) void {
     generateChunk(chunk, key);
-    const entry = mod_store.get(key) orelse return;
-    entry.applyTo(chunk);
-    refreshDerivedFlags(chunk, key);
-}
 
-/// Recomputes `edge_flags`/`id_edge_flags`/`waterlogged` across a whole chunk after its ids changed.
-/// Reuses the generator's own flag passes, so a materialized chunk carries exactly the flags a chunk
-/// generated with those ids would have had.
-///
-/// The halo both passes read comes from procedural generation (`resolveBaseFoundation()`) or from single-block ancestor lookups,
-/// never from a neighbor's `mod_store` entry, so this cannot recurse back into `materializeChunk()`.
-fn refreshDerivedFlags(chunk: *Chunk, key: DepthCoordinate) void {
+    const entry = mod_store.get(key);
+    if (entry) |e| e.applyTo(chunk);
+
     if (key.depth != STARTING_ZOOM_TIMES) {
-        addEdgeFlagsFractal(chunk, key);
+        // The fractal halo resolves its neighbors through `getInheritedMaterial()`, which already overlays a
+        // neighbor's edits, so generation left the border flags correct. Only OUR replayed ids need a redo.
+        if (entry != null) addEdgeFlagsFractal(chunk, key);
         return;
     }
 
-    addEdgeFlags(chunk, key.asCoord(), key.depth);
-    // Matches the reset `generateBaseChunk()` performs after decorating: an empty cell carries no edges.
+    // Base generation deliberately computes flags WITHOUT looking at any edit (see `addEdgeFlags()`), so the
+    // border flags are still mod-blind here. Re-derive them whenever this chunk or any neighbor carries one:
+    // an unmodified chunk next to a mined one still has to open up its own border.
+    const hood: ModNeighborhood = .collect(key);
+    if (!hood.any) return;
+
+    addEdgeFlags(chunk, key.asCoord(), key.depth, &hood);
+    resetEmptyEdgeFlags(chunk);
+}
+
+/// An empty cell carries no edges. Run after any pass that may have emptied one.
+fn resetEmptyEdgeFlags(chunk: *Chunk) void {
     for (0..CHUNK_SIZE_SQ) |idx| {
         const block = &chunk.blocks[idx];
         if (block.isEmpty()) {
@@ -1635,9 +1636,49 @@ pub fn getCachedChunk(key: DepthCoordinate) ?*const Chunk {
     return dw.ancestor.ancestor_cache.get(key);
 }
 
+/// The `mod_store` entries of a chunk and its 8 neighbors, indexed by chunk offset (`[dx + 1][dy + 1]`, so
+/// the chunk itself sits at `[1][1]`).
+///
+/// Collected once per chunk rather than once per halo cell: the border touches the same neighbor chunk up to
+/// 16 times in a row, and a per-cell lookup would repeat that hash for every one of them.
+///
+/// Holding `*const ModEntry` across the flag pass is safe: `entries` is a `SegmentedList` (pointer-stable),
+/// and nothing the pass reaches mutates the store.
+const ModNeighborhood = struct {
+    entries: [3][3]?*const ModEntry = @splat(@splat(null)),
+    /// Whether ANY of the nine chunks carries an edit. False lets the caller skip the re-derive outright,
+    /// which is the common case and the reason an unmodified world pays nothing for this.
+    any: bool = false,
+
+    fn collect(key: DepthCoordinate) ModNeighborhood {
+        var result: ModNeighborhood = .{};
+        if (mod_store.index.count() == 0) return result;
+
+        const coord = key.asCoord();
+        var dy: i32 = -1;
+        while (dy <= 1) : (dy += 1) {
+            var dx: i32 = -1;
+            while (dx <= 1) : (dx += 1) {
+                const nc = coord.moveAtDepth(.{ dx, dy }, key.depth) orelse continue;
+                const entry = mod_store.get(nc.asDepthCoordinate(key.depth)) orelse continue;
+                result.entries[@intCast(dx + 1)][@intCast(dy + 1)] = entry;
+                result.any = true;
+            }
+        }
+        return result;
+    }
+
+    inline fn at(self: *const @This(), dx: i32, dy: i32) ?*const ModEntry {
+        return self.entries[@intCast(dx + 1)][@intCast(dy + 1)];
+    }
+};
+
 /// Adds edge flags to an already generated chunk using a stack-safe halo buffer.
 /// Intentionally does NOT skip non-foundation blocks so `addDecorations()` functions for procedural logic.
-fn addEdgeFlags(target_chunk: *Chunk, coord: Coordinate, depth: u64) void {
+///
+/// `mods` overlays the player's edits onto the neighbor blocks in the halo. It MUST be null while generating
+/// (see the note at the base-depth border below) and non-null once the chunk is materialized.
+fn addEdgeFlags(target_chunk: *Chunk, coord: Coordinate, depth: u64, mods: ?*const ModNeighborhood) void {
     var halo: [18][18]Sprite = undefined;
 
     // Fill the center 16x16 from our already generated blocks
@@ -1661,16 +1702,29 @@ fn addEdgeFlags(target_chunk: *Chunk, coord: Coordinate, depth: u64) void {
             const lx: u4 = @intCast(@mod(hx, @as(i32, CHUNK_SIZE)));
             const ly: u4 = @intCast(@mod(hy, @as(i32, CHUNK_SIZE)));
 
-            // At base depth we MUST recompute the neighbor deterministically (rather than read cached
-            // neighbor chunks) so edge flags stay independent of neighboring decoration states, keeping
-            // RNG consumption during addDecorations() perfectly deterministic. resolveBaseFoundation()
-            // includes the ore pass, so id_edge_flags matches the adjacent chunk's ore across the border.
+            // At base depth we MUST recompute the neighbor deterministically (rather than read cached neighbor chunks)
+            // so edge flags stay independent of neighboring decoration states, keeping RNG consumption during addDecorations() deterministic.
+            // resolveBaseFoundation() includes the ore pass, so id_edge_flags matches the adjacent chunk's ore across the border.
             if (is_base) {
                 const target_nc = coord.moveAtDepth(.{ ndx, ndy }, depth) orelse {
                     halo[@intCast(hy + 1)][@intCast(hx + 1)] = .none;
                     continue;
                 };
-                halo[@intCast(hy + 1)][@intCast(hx + 1)] = resolveBaseFoundation(target_nc.suffix[0], target_nc.suffix[1], lx, ly).id;
+                var id = resolveBaseFoundation(target_nc.suffix[0], target_nc.suffix[1], lx, ly).id;
+
+                // The neighbor resolved above is procedural, so it is blind to the player: a block mined in
+                // the chunk next door would never open up THIS chunk's border. Overlay the edit -- but only
+                // once generation is over (`mods` is null during it). `addDecorations()` reads these very
+                // flags to place decorations AND to gate `rng_decor`, so an edit reaching them mid-generation
+                // would shift a chunk's decorations whenever a NEIGHBOR was mined.
+                if (mods) |m| {
+                    if (m.at(ndx, ndy)) |entry| {
+                        const block_idx: u8 = @intCast(@as(usize, ly) * CHUNK_SIZE + lx);
+                        if (entry.get(block_idx)) |cell| id = cell.id;
+                    }
+                }
+
+                halo[@intCast(hy + 1)][@intCast(hx + 1)] = id;
                 continue;
             }
 

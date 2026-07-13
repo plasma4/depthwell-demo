@@ -905,6 +905,8 @@ pub const MAX_SPRITE_ID = blk: {
         if (field.value > max_val) {
             if (field.value >= 60000)
                 @compileError("Sprite enum values must not be between the reserved range of 60000-65534.");
+            if (field.value >= 16384)
+                @compileError("Sprite enum values cannot be greater than 2**14 (save.zig restriction).");
             max_val = @intCast(field.value);
         }
     }
