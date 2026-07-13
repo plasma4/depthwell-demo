@@ -187,11 +187,13 @@ pub var game: GameState = .{};
 /// System-level allocator for pages (or testing allocator when running tests).
 /// On WASM, this grows the linear heap. On native, this requests pages from the OS.
 /// Use as a backing for other allocators.
-pub const page_allocator = if (builtin.is_test) std.testing.allocator else std.heap.page_allocator;
+pub const page_allocator: std.mem.Allocator =
+    if (builtin.is_test) std.testing.allocator else std.heap.page_allocator;
 
 /// An instance of the general-purpose allocator (or testing allocator when running tests).
 /// Use `makeArena()` to create an `ArenaAllocator` around this (WASM has no SMP allocator support).
-const main_allocator = if (builtin.is_test) std.testing.allocator else if (builtin.single_threaded) std.heap.brk_allocator else std.heap.smp_allocator; // use .allocator() for instance
+pub const main_allocator: std.mem.Allocator =
+    if (builtin.is_test) std.testing.allocator else if (builtin.single_threaded) std.heap.brk_allocator else std.heap.smp_allocator;
 
 /// Creates an `ArenaAllocator` around the `page_allocator`.
 /// It is usually preferable when possible to utilize the scratch buffer for temporary calculations through a callee,
@@ -372,7 +374,7 @@ pub const Block = packed struct(u128) {
         return self.id.isHeatmap();
     }
 
-    /// Extracts the evolved form of this block at compile time.
+    /// Extracts the evolved form of this block at compile-time.
     /// If it doesn't evolve, returns the original sprite type!
     pub inline fn evolvesTo(self: @This()) Sprite {
         return self.id.evolvesTo();
@@ -411,11 +413,18 @@ pub const BlockSpec = struct {
     base_id: Sprite = .none,
     /// Uses the BOTTOM 32 bits when compiled into `Block.seed`.
     seed: u64 = 0,
+    /// Starting water volume (0-15) for a waterloggable cell generated inside a pool.
+    /// Ignored for liquids (`makeBasicBlock()` already fills them to `MAX_HP`) and meaningless for solids,
+    /// whose `hp` is mining progress and always generates at 0.
+    /// A waterloggable cell generated dry inside full water is NOT at equilibrium: the sim floods it on the
+    /// first tick, which dirties the chunk and creates a modification entry with no player involvement.
+    water_volume: u4 = 0,
 
     /// Compiles the spec into a packed `Block` (max light, no edge flags or mine level, matching `makeBasicBlock()`).
     pub inline fn compile(self: @This()) Block {
         var block: Block = .makeBasicBlock(self.id, self.seed);
         block.base_id = self.base_id;
+        if (!self.id.isLiquid() and self.id.isWaterloggable()) block.hp = self.water_volume;
         return block;
     }
 };

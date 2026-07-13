@@ -23,13 +23,37 @@ const Vec2u = dw.utils.Vec2u;
 const Vec4u = dw.utils.Vec4u;
 
 // Lots of values controllable by debug sliders here!
-pub const dual_value_scale = TuningFloat(16.0);
+
+/// Lattice size of the value noise that domain-warps the density field.
+///
+/// NOTE: 16 is exactly `CHUNK_SIZE`, and value noise is pinned at its lattice points (the fade curve zeroes
+/// the derivative there), so the warp stamps a 16-block phase onto the terrain. It is measurable: a flat
+/// 8-column run is ~2x more likely at `x % 16 >= 10` than below it (`debug/audit.zig` shows the knock-on
+/// effect on where structures land). A non-power-of-two here (13, 23) would decorrelate it from the chunk
+/// grid, at the cost of a different world.
+pub const dual_value_scale = TuningFloat(21.0);
 pub const base_gem_odds = TuningFloat(0.25);
 pub const procedural_cell_size = TuningFloat(1.0);
 pub const fbm_scale = TuningFloat(1.0);
 pub const density_min = TuningFloat(0.36);
 pub const density_max = TuningFloat(0.94);
 pub const hybrid_weight = TuningFloat(0.6);
+
+/// Every `TuningFloat` that feeds base-terrain generation; a change to any of them invalidates the
+/// base-terrain cache (see `tuningVersion()`). Keep in sync when adding a slider that `computeBaseSpriteType()` reads.
+const terrain_tuning = .{ dual_value_scale, procedural_cell_size, fbm_scale, density_min, density_max, hybrid_weight };
+
+/// Hash of the live debug controls that change base-terrain output: the sliders above plus the heatmap
+/// toggles (which `generateBaseProceduralSprite()` reads). Used as part of the base-terrain cache key.
+/// Folds to a constant in release (the sliders are `const` there), so the check costs nothing outside debug.
+inline fn tuningVersion() u64 {
+    if (!dw.is_debug) return 0;
+    var h: u64 = @intFromBool(USE_BASE_HEATMAP) | (@as(u64, @intFromBool(USE_ORE_HEATMAP)) << 1);
+    inline for (terrain_tuning) |t| {
+        h = (h ^ @as(u64, @bitCast(t.value))) *% 0x100000001B3;
+    }
+    return h;
+}
 
 /// Generates a block for seeding (based on previous procedural generation logic).
 /// The terms moisture/density are used extremely loosely here.
@@ -155,11 +179,18 @@ const BaseTerrainCacheEntry = struct {
 
 /// Direct-mapped cache of `computeBaseSpriteType()` results (must be a power of two).
 /// The same cell is recomputed many times per chunk gen (pass 1, the edge-flag halo, the vine scan, and structure terrain gates all resample it, plus overlap across neighbors), so memoizing removes that FBM redundancy: the dominant generation cost.
-/// Release-only: in debug the `TuningFloat` sliders mutate FBM output live, so debug always recomputes.
-const BASE_CACHE_SLOTS = 8192;
+const BASE_CACHE_SLOTS = 32768;
 var base_terrain_cache: [BASE_CACHE_SLOTS]BaseTerrainCacheEntry = @splat(.{});
-/// Current seed the cache holds; a mismatch (reseed) invalidates every entry at once.
+/// Seed + slider state the cache holds; a mismatch (reseed, or a dragged debug slider) invalidates every entry at once.
 var base_cache_key: u64 = 0;
+
+/// Identity of the terrain every cache downstream of it holds: the world seed, plus (in debug) the live
+/// tuning sliders. Anything memoizing derived terrain must key on this, so a reseed or a dragged slider drops
+/// the cache rather than leaving it serving stale blocks forever.
+pub inline fn terrainGeneration() u64 {
+    const seed = memory.game.getHashSeed(.moisture);
+    return seed[0] ^ seed[1] ^ tuningVersion();
+}
 
 /// Direct-mapped slot for a world block; mixes the coords so adjacent cells do not collide.
 inline fn baseCacheIndex(wx: u32, wy: u32) usize {
@@ -167,25 +198,30 @@ inline fn baseCacheIndex(wx: u32, wy: u32) usize {
     return @intCast((h >> 32) & (BASE_CACHE_SLOTS - 1));
 }
 
+/// Highest valid base-depth chunk coordinate on either axis. Enforced below: the noise scales coordinates
+/// (`y * 2`, `y * freq`) without wrapping, so a coordinate past the world traps on integer overflow rather
+/// than returning garbage. Callers that can reach off-world (`structures.baseSolid()`) must clamp first.
+const MAX_BASE_CHUNK: u32 = @intCast(dw.world.getMaxSuffixAtDepth(dw.startup.STARTING_ZOOM_TIMES));
+
 /// Returns a base sprite type, memoized in release (see `BASE_CACHE_SLOTS`). Does 3 passes:
 ///
 /// 1. Generate an initial terrain density+moisture value using the seed vectors.
 /// 2. Generate a block from those values.
 /// 3. Generates larger structures with FBM Worley and valid placement checks.
+///
+/// Precondition: the coordinate is inside the base world (see `MAX_BASE_CHUNK`).
 pub fn getBaseSpriteType(
     chunk_x: u32,
     chunk_y: u32,
     block_x: u4,
     block_y: u4,
 ) BaseTerrainData {
-    // Debug drags terrain sliders live, so caching would serve stale samples; always recompute there.
-    if (dw.is_debug) return computeBaseSpriteType(chunk_x, chunk_y, block_x, block_y);
+    std.debug.assert(chunk_x <= MAX_BASE_CHUNK and chunk_y <= MAX_BASE_CHUNK);
 
     const wx = chunk_x * 16 + block_x;
     const wy = chunk_y * 16 + block_y;
 
-    const seed = memory.game.getHashSeed(.moisture);
-    const key = seed[0] ^ seed[1];
+    const key = terrainGeneration();
     if (key != base_cache_key) {
         base_terrain_cache = @splat(.{});
         base_cache_key = key;
@@ -206,24 +242,27 @@ fn computeBaseSpriteType(
     block_x: u4,
     block_y: u4,
 ) BaseTerrainData {
+    const wx = chunk_x * 16 + block_x;
+    const wy = chunk_y * 16 + block_y;
+
+    // NOTE: `use_f2_f1` is false here, so this takes fbm+getPerlinNoise.
     const moisture = getFbmValue( // acts as a biome selector
         memory.game.getHashSeed(.moisture),
-        chunk_x * 16 + block_x,
-        chunk_y * 16 + block_y,
+        wx,
+        wy,
         .{
             .cell_size = 425.0, // very LARGE cells for biome generation
-            .fbm_shift_size = 20.0, // minimize shift potential
-            .horizontally_wide = false,
+            .fbm_shift_size = 0.0,
+            .use_f2_f1 = false,
         },
     );
     const density = getFbmValue( // more granular density
         memory.game.getHashSeed(.density),
-        chunk_x * 16 + block_x,
-        chunk_y * 16 + block_y,
+        wx,
+        wy,
         .{
             .cell_size = 80.0, // smaller cells for cave terrain
             .fbm_shift_size = 24.0,
-            .horizontally_wide = true,
             .use_f2_f1 = true,
         },
     );
@@ -257,7 +296,6 @@ pub fn addOresAndGems(
         .{
             .cell_size = 21.0,
             .fbm_shift_size = 8.0,
-            .horizontally_wide = false,
             .use_f2_f1 = true,
         },
     );
@@ -268,7 +306,6 @@ pub fn addOresAndGems(
         .{
             .cell_size = 36.0,
             .fbm_shift_size = 60.0,
-            .horizontally_wide = false,
             .use_f2_f1 = true,
         },
     );
@@ -343,7 +380,6 @@ pub fn addOresAndGems(
                     .{
                         .cell_size = 35.0,
                         .fbm_shift_size = 0.0,
-                        .horizontally_wide = false,
                         .use_f2_f1 = false,
                     },
                 );
@@ -353,8 +389,7 @@ pub fn addOresAndGems(
                     x,
                     .{
                         .cell_size = 45.0,
-                        .fbm_shift_size = 18.0,
-                        .horizontally_wide = false,
+                        .fbm_shift_size = 0.0,
                         .use_f2_f1 = false,
                     },
                 );
@@ -480,7 +515,7 @@ pub const ColumnFeature = struct {
     salt: u64 = 0,
 };
 
-/// Compile-time invariant check for a `ColumnFeature`. Call from a comptime block per instance/use.
+/// Verifies `ColumnFeature` validity.
 pub fn assertColumnFeature(comptime f: ColumnFeature) void {
     if (f.max_length >= 2 * CHUNK_SIZE)
         @compileError("ColumnFeature.max_length must stay < 2 * CHUNK_SIZE so the cross-border scan reaches at most the two neighbor chunks.");
@@ -562,39 +597,17 @@ pub fn addDecorations(
     vine_seeds: *const [CHUNK_SIZE]VineState,
 ) void {
     // First, we handle blocks with a floor anchor kind.
+    // Multi-block decorations (the 2x1 moss shrub, the 1x3 plant) are NOT placed here: this pass only sees
+    // one chunk, so a footprint reaching past a border would be truncated. They live in `state/structures/`.
     for (0..CHUNK_SIZE) |block_y| {
-        var forced_next_sprite_type: Sprite = .none; // .none means nothing is forced
         for (0..CHUNK_SIZE) |block_x| {
             const idx = block_x + block_y * CHUNK_SIZE;
             var block = &target_chunk.blocks[idx];
-            if (forced_next_sprite_type != .none) {
-                // semantically, .none makes sense, simply an alternative to optional type
-                block.id = forced_next_sprite_type;
-                forced_next_sprite_type = .none;
-                continue;
-            }
 
             if (!block.isEmpty()) continue;
             // Check calculated bitmask directly to avoid isAdjacentBlockSolid logic discrepancies
             if ((block.edge_flags & types.EdgeFlags.BOTTOM) != 0) {
                 const val = rng_decor.next();
-
-                // Only initiate 2x1 tree placement on even columns to prevent asymmetric overwrites
-                if (block_x % 2 == 0 and block_x != CHUNK_SIZE - 1) {
-                    const other_block_x = block_x + 1;
-                    const other_block = &target_chunk.blocks[other_block_x + block_y * CHUNK_SIZE];
-                    if (other_block.isEmpty() and ((other_block.edge_flags & types.EdgeFlags.BOTTOM) != 0)) {
-                        if (val >= oddsNum(0.98)) {
-                            block.id = .moss_shrub1;
-                            forced_next_sprite_type = .moss_shrub1_right;
-                            continue;
-                        } else if (val >= oddsNum(0.97)) {
-                            block.id = .moss_shrub2;
-                            forced_next_sprite_type = .moss_shrub2_right;
-                            continue;
-                        }
-                    }
-                }
 
                 if (val <= oddsNum(0.030)) {
                     block.id = .bush;
@@ -735,6 +748,7 @@ fn getBilinearValueNoise(seed_vector: Vec2u, x: u32, y: u32, cell_size: f32) f32
 /// If F2-F1 calculations are requested, then Worley noise is used instead.
 ///
 /// Use for: terraced blocks, cellular clusters, and erosion basins.
+/// TODO: Make options less confusing, esp. with f2_f1 toggle
 fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, comptime options: TerrainOptions) f32 {
     if (!options.use_f2_f1) {
         // Excellent for sharp branching networks and rich ore veins
