@@ -91,6 +91,7 @@ pub const drops = @import("state/drops.zig");
 pub const seeding = @import("state/seeding.zig");
 pub const procedural = @import("state/procedural.zig");
 pub const structures = @import("state/structures.zig");
+pub const decorations = @import("state/decorations.zig");
 pub const player = @import("state/player.zig");
 pub const world = @import("state/world.zig");
 pub const ancestor = @import("state/ancestor.zig");
@@ -100,6 +101,7 @@ pub const handleTick = @import("state/tick.zig").handleTick;
 
 pub const logger = @import("debug/logger.zig");
 pub const chunk_preview = @import("debug/chunk_preview.zig");
+pub const audit = @import("debug/audit.zig");
 
 pub const inventory = @import("input/inventory.zig");
 pub const mining = @import("input/mining.zig");
@@ -339,7 +341,8 @@ test "main_tests" {
         @import("internal/color_rgba.zig"),
         @import("state/seeding.zig"),
         @import("debug/logger.zig"),
-        @import("types/assembly.zig"),
+        @import("state/world.zig"),
+        @import("state/save.zig"),
     };
 
     inline for (modules) |mod| {

@@ -14,30 +14,22 @@ const Rect = structures.Rect;
 pub const spawn_area: u32 = 64;
 pub const max_w: u32 = 30;
 pub const max_h: u32 = 20;
-pub const target_chance: f64 = 0.32;
+pub const target_chance: f64 = 0.36;
 
-pub fn getBounds(state: *HashState, cx: i32, cy: i32) Rect {
-    const i_area = @as(i32, @intCast(spawn_area));
+/// Ring of empty blocks the ellipse is inset by, so the shell never touches the bounding box.
+const padding = 3;
+
+pub fn getBounds(state: *HashState, cx: i32, cy: i32) ?Rect {
     const base_radius_x = state.getRange(i32, 6, 12);
     const base_radius_y = state.getRange(i32, 4, 7);
-    const padding = 3;
-    const size_x = (base_radius_x + padding) * 2;
-    const size_y = (base_radius_y + padding) * 2;
-
-    const max_pos_x = @max(1, i_area - size_x);
-    const max_pos_y = @max(1, i_area - size_y);
-
-    const pos_x = state.getLimit(i32, max_pos_x);
-    const pos_y = state.getLimit(i32, max_pos_y);
-
-    const x_start = cx * i_area + pos_x;
-    const y_start = cy * i_area + pos_y;
-    return .{
-        .x_start = x_start,
-        .y_start = y_start,
-        .x_end = x_start + size_x,
-        .y_end = y_start + size_y,
-    };
+    return structures.jitter(
+        state,
+        cx,
+        cy,
+        spawn_area,
+        (base_radius_x + padding) * 2,
+        (base_radius_y + padding) * 2,
+    );
 }
 
 pub fn generate(
@@ -51,29 +43,22 @@ pub fn generate(
     struct_seed: Vec2u,
 ) ?structures.StructureResult {
     _ = starting_sprite;
-    _ = bounds;
+    _ = cx;
+    _ = cy;
     _ = struct_seed;
-    const i_area = @as(i32, @intCast(spawn_area));
     const i_wx = @as(i32, @bitCast(wx));
     const i_wy = @as(i32, @bitCast(wy));
 
-    const base_radius_x = state.getRange(i32, 6, 12);
-    const base_radius_y = state.getRange(i32, 4, 7);
-    const padding = 3;
-    const size_x = (base_radius_x + padding) * 2;
-    const size_y = (base_radius_y + padding) * 2;
+    // the hashed radii are already baked into the bounds (see getBounds), so no re-rolls are needed
+    const size_x = bounds.x_end - bounds.x_start;
+    const size_y = bounds.y_end - bounds.y_start;
+    const base_radius_x = @divExact(size_x, 2) - padding;
+    const base_radius_y = @divExact(size_y, 2) - padding;
 
-    // Determine the randomized offset position of the structure within the chunk
-    const max_pos_x = @max(1, i_area - size_x);
-    const max_pos_y = @max(1, i_area - size_y);
+    const struct_x = i_wx - bounds.x_start;
+    const struct_y = i_wy - bounds.y_start;
 
-    const pos_x = state.getLimit(i32, max_pos_x);
-    const pos_y = state.getLimit(i32, max_pos_y);
-
-    const struct_x = i_wx - (cx * i_area + pos_x);
-    const struct_y = i_wy - (cy * i_area + pos_y);
-
-    // Check if the current world tile falls within the bounding box of the ruin
+    // check if the current world tile falls within the bounding box of the ruin
     if (struct_x >= 0 and struct_y >= 0 and struct_x < size_x and struct_y < size_y) {
         const center_x = size_x >> 1;
         const center_y = size_y >> 1;
