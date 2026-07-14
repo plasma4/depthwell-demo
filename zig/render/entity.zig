@@ -36,6 +36,8 @@ const NUMBER_WIDTHS: [10]f32 = .{
 
 /// List of monospace characters starting from
 const MONOSPACE_CHARS = "!\"%$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz(|)~";
+/// Width of each character relative to the font size (6/16).
+const CHARACTER_WIDTH_FRACTION: f32 = 6.0 / 16.0;
 
 /// Current number of entities (reset every frame).
 pub var entity_count: u64 = 0;
@@ -89,19 +91,37 @@ pub fn updateEntities(time_diff: f64) void {
     // );
 
     // also draw string showing progress
-    var buf: [64]u8 = undefined;
-    const msg = std.fmt.bufPrint(
-        &buf,
-        "{d} block{s} mined",
-        .{ blocks_mined, if (blocks_mined == 1) "" else "s" },
-    ) catch unreachable;
+    // draws info on # of chunks and data usage
+
+    var buf: [128]u8 = undefined;
+    const store = &dw.world.mod_store;
+
+    const msg = if (dw.is_debug)
+        std.fmt.bufPrint(
+            &buf,
+            "{d} block{s} mined | mods: {d} chunk{s} / {d:.2}KB",
+            .{
+                blocks_mined,
+                if (blocks_mined == 1) "" else "s",
+                store.index.count(),
+                if (store.index.count() == 1) "" else "s",
+                @as(f64, @floatFromInt(store.cellBytes())) / 1000.0,
+            },
+        ) catch unreachable
+    else
+        std.fmt.bufPrint(
+            &buf,
+            "{d} block{s} mined",
+            .{ blocks_mined, if (blocks_mined == 1) "" else "s" },
+        ) catch unreachable;
+
     dw.entity.drawString(msg, .{ 19.5, 8.5 }, .{
         .font_size = 7.5,
-        .lcha = .{ 0.45, 0.22, 1.8, 1.0 },
+        .lcha = .{ 0.45, 0.04, 1.8, 1.0 },
     });
     dw.entity.drawString(msg, .{ 20.0, 9.0 }, .{
         .font_size = 7.5,
-        .lcha = .{ 0.85, 0.24, 1.8, 1.0 },
+        .lcha = .{ 0.85, 0.08, 1.8, 1.0 },
     });
 
     memory.setScratchProp(0, entity_count);
@@ -259,7 +279,7 @@ fn drawNumberFast(number: u64, position: Vec2f32, options: TextConfig) void {
     }
 }
 
-/// A compile-time lookup table mapping ASCII characters to their index in MONOSPACE_CHARS.
+/// A compile-time lookup table mapping ASCII characters to their index in `MONOSPACE_CHARS`.
 /// `-1` represents an invalid character.
 /// `-2` represents a space character (valid but skipped during rendering).
 const CHAR_MAP: [256]i16 = blk: {
@@ -271,9 +291,6 @@ const CHAR_MAP: [256]i16 = blk: {
     }
     break :blk map;
 };
-
-/// Width of each character relative to the font size (6/16).
-const CHARACTER_WIDTH_FRACTION: f32 = 6.0 / 16.0;
 
 /// Draws a single monospace character.
 pub fn drawCharacter(

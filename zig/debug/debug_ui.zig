@@ -152,6 +152,14 @@ pub const buttons = [_]ButtonDef{
         .action = teleportRandomly,
     },
     .{
+        .name = "Clear caches",
+        .action = clearCaches,
+    },
+    .{
+        .name = "Audit worldgen odds",
+        .action = dw.audit.runAroundPlayer,
+    },
+    .{
         .name = "Toggle creative",
         .toggle = &dw.inventory.IN_CREATIVE,
     },
@@ -178,6 +186,10 @@ fn teleportToEdge() void {
         .{ dw.CHUNK_SIZE_SQ * 5 / 2, dw.CHUNK_SIZE_SQ * 5 / 2 },
     );
     main.findSafeSpawn();
+}
+
+fn clearCaches() void {
+    dw.world.clearCaches(true);
 }
 
 /// Internal random number for teleport PRNG.

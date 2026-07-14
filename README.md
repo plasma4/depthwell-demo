@@ -31,9 +31,15 @@ For inventory hotkeys:
 
 ### Building
 
-To build `node_modules`, run `npm install`.
+To build `node_modules` and begin, run `npm install`.
 
-Run `zig build` to build Zig code and automatically detect `main.aseprite` changes, `zig test "zig/root.zig"` to run (all) tests, and `zig build -Dgen-enums` to simultaneously build and generate `enums.ts` if changes were made. (See `build.zig` for details on compiling a final version.)
+Run:
+
+- `zig build` to build Zig code (automatically detects `main.aseprite` changes)
+- `zig build -Dgen-enums` to build _and_ generate `enums.ts` if changes were made.
+- `zig test "zig/root.zig"` to run (all) tests
+
+See `build.zig` for more options on compiling a final version! It's enormously helpful to use the Zig Language Server in VSCode/VSCodium and set it to "watch" mode, which automatically builds the WASM while providing highlighting any errors as well as "Go to Definition" quality-of-life.
 
 Useful variables to customize include `CONFIG` in `src/main.ts`, `engine.wireframeOpacity`, `engine.baseSpeed`, and `zig/state/player.zig` config options.
 
@@ -42,13 +48,11 @@ Alternatively, use and modify `.githooks/pre-commit`.
 
 #### About version control
 
-NOTE: you can re-enable whether diffs are visually shown through `.vscode/settings.json` (ideal with Git-only version control).
+NOTE: you can change whether diffs are visually shown through `.vscode/settings.json` (ideal with Git-only version control). Use `git symbolic-ref HEAD refs/heads/main` to go update Git to see main changes when using Jujitsu, if you plan to keep VSCode diffs.
 
-It is quite helpful to use the Zig Language Server in VSCode/VSCodium and set it to "watch" mode, which automatically builds the WASM while providing highlighting any errors.
+Run `jj git init` and `jj bookmark track main --remote=origin` after cloning if you plan to use Jujitsu.
 
-You can also easily build for Windows by using a shell script executor, or you can convert the commands to their Windows equivalents very easily.
-
-Depthwell supports both Git and Jujitsu using `.sh` files. Git VCS is supported by default; to use Jujitsu building for release, simply run `./build.sh` (after running `chmod +x ./build.sh`).
+Git VCS is supported by default; to use Jujitsu building for release, simply run `./build.sh` (after running `chmod +x ./build.sh`). You can also easily build/push for Windows by converting the commands to their Windows equivalents very easily.
 
 To commit to the main branch, you can use `./push.sh` (after running `chmod +x ./push.sh`) or create an alias in your config.
 

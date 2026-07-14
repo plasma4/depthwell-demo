@@ -87,6 +87,9 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
         dw.mouse.mouse_chunk_coord = null;
     }
 
+    // update particles
+    dw.particles.tick(iterations);
+
     // Iterations may be > 1 if FPS is low as a correction factor.
     for (0..iterations) |_| {
         // Smelting only advances while the furnace menu is open (paused otherwise).
@@ -98,11 +101,12 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
         dw.player.move(logic_speed); // logic that moves the player/camera based on keys
         dw.player.tickAnimation(); // advance player sprite animation + facing on the logic tick
         dw.water.tickWater(); // fluid sim
+
+        // Process item animation ticks and inventory collection!
+        inventory.tickDroppedItems();
+
         memory.game.frame +%= 1;
     }
-
-    // Process item animation ticks and inventory collection!
-    inventory.tickDroppedItems();
 
     // Generate chunks around the SimBuffer in the background.
     dw.world.SimBuffer.precacheChunks(
