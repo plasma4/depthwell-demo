@@ -35,7 +35,7 @@ pub fn drawChunkPreview() void {
 
     bg.size *= 1.01; // a tad larger! this second entity acts as the border visually
     // dark green if this chunk was NOT modified, dark blue if WAS modified
-    bg.lcha = if (dw.world.mod_store.get(player_coord.asDepthCoordinate(depth))) |_|
+    bg.lcha = if (dw.world.mod_store.contains(player_coord.asDepthCoordinate(depth)))
         .{ 0.32, 0.35, 4.0, 0.4 }
     else
         .{ 0.32, 0.35, 3.0, 0.4 };
@@ -200,11 +200,11 @@ pub fn drawChunkPreview() void {
         bg.lcha = .{ 0.84, 0.35, 3.5, 0.6 };
         addEntity(bg);
 
-        // Draw border for D-1 (teal border; more blue if modified)
+        // Draw border for D-1 (teal border; bluer hue if modified)
         var border_bg = bg;
         border_bg.size *= 1.02;
         const key_d1 = player_coord.asDepthCoordinate(depth).getParent();
-        border_bg.lcha = if (dw.world.mod_store.get(key_d1) != null)
+        border_bg.lcha = if (dw.world.mod_store.contains(key_d1))
             .{ 0.32, 0.35, 4.0, 0.4 } // dark blue if WAS modified
         else
             .{ 0.32, 0.35, 3.2, 0.4 }; // dark teal if NOT modified
@@ -272,7 +272,7 @@ pub fn drawChunkPreview() void {
             border_bg = bg;
             border_bg.size *= 1.02;
             const key_d2 = key_d1.getParent();
-            border_bg.lcha = if (dw.world.mod_store.get(key_d2) != null)
+            border_bg.lcha = if (dw.world.mod_store.contains(key_d2))
                 .{ 0.32, 0.35, 4.0, 0.4 } // dark blue if WAS modified
             else
                 .{ 0.32, 0.35, 3.2, 0.4 }; // dark teal if NOT modified

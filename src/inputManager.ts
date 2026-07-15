@@ -1,6 +1,9 @@
 import * as Zig from "./enums";
 
-/** Represents the state of inputs for external use. Priority values allow for "last-win" inputting for inputs that oppose each other (such as left/right or zoom in/out). */
+/**
+ * Represents the state of inputs for external use.
+ * Priority values allow for "last-win" inputting for inputs that oppose each other (such as left/right or zoom in/out).
+ */
 export interface InputState {
     heldMask: number;
     keysHeld: number;
@@ -163,7 +166,7 @@ export function updateInput(state: InputState) {
     cleanHeld |= state.verticalPriority;
     cleanHeld |= state.plusMinusPriority;
 
-    // a funny side effect of the logic being like this is that in very low-FPS situations you can lift a key early to cancel its pressed status
+    // a funny side effect of the logic being like this is that in low-FPS/frame-perfect situations you can lift a key early to cancel its pressed status
     state.keysPressed = cleanHeld & ~state.keysHeld;
     state.currentlyHeld = cleanHeld;
     state.keysHeld = cleanHeld;

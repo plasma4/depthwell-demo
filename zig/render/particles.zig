@@ -55,19 +55,18 @@ var next_slot: usize = 0;
 pub const BurstConfig = struct {
     /// How many particles to spawn.
     count: usize = 10,
-    /// Speed range in viewport pixels per render frame. Kept wide so burst speeds visibly vary.
+    /// Speed range in viewport pixels per render frame.
     speed_min: f32 = 0.6,
-    speed_max: f32 = 1.6,
+    speed_max: f32 = 2.0,
     /// Square edge length range in viewport pixels.
     size_min: f32 = 0.8,
     size_max: f32 = 3.0,
     /// Spin magnitude range (radians per render frame); direction is randomized.
     spin_min: f32 = 0.02,
     spin_max: f32 = 0.12,
-    /// Lifetime range of each spawned particle, in render frames; sampled per particle so
-    /// individual bits of a burst dissipate at visibly different moments.
-    lifetime_min: u16 = 14,
-    lifetime_max: u16 = 30,
+    /// Lifetime range of each spawned particle, in render frames.
+    lifetime_min: u16 = 12,
+    lifetime_max: u16 = 28,
 };
 
 /// Kills every particle. Called on world restart from `startup.init()`.
@@ -128,23 +127,32 @@ pub fn maybeSpawnSpriteBurst(chance: f32, s: Sprite, origin: Vec2f32, config: Bu
     spawnSpriteBurst(s, origin, config);
 }
 
-/// Advances and draws every live particle. Called once per render frame from `updateEntities()`.
+/// Moves every live particle. TODO: add interpolation
+pub fn tick(ticks: u32) void {
+    @setFloatMode(.optimized);
+    for (&pool) |*p| {
+        p.frames_left = @intCast(@as(u32, p.frames_left) -| ticks);
+        p.position += p.velocity * @as(Vec2f32, @splat(@floatFromInt(ticks)));
+        p.rotation += p.spin * @as(f32, @floatFromInt(ticks));
+    }
+}
+
+/// Draws every live particle. Called once per render frame from `updateEntities()`.
 pub fn draw() void {
     @setFloatMode(.optimized);
     for (&pool) |*p| {
-        if (p.frames_left == 0) continue;
-        p.frames_left -= 1;
-
-        p.position += p.velocity;
-        p.rotation += p.spin;
+        if (p.frames_left <= 0) continue;
 
         // Interpolate opacity linearly down to 0 at the end of the lifetime
         const fade = @as(f32, @floatFromInt(p.frames_left)) / @as(f32, @floatFromInt(p.lifetime));
 
         dw.entity.addEntity(.{
             .sprite = .particle,
-            .position = p.position,
-            .size = p.size,
+            .position = p.position + p.velocity * @as(
+                Vec2f32,
+                @splat(@as(f32, @floatCast(dw.chunks.current_dt)) + 1.0),
+            ),
+            .size = p.size + p.spin * (@as(f32, @floatCast(dw.chunks.current_dt)) + 1.0),
             .rotation = p.rotation,
             .lcha = .{ p.lcha[0], p.lcha[1], p.lcha[2], p.lcha[3] * fade * MAX_OPACITY },
         });

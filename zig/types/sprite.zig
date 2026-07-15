@@ -40,18 +40,21 @@ const DECOR_START = MASK_START + 24;
 
 /// Number of fruit sprites.
 const FRUIT_COUNT = 10;
-/// ID for `Sprite.gear`, which is after furances.
+/// ID for `Sprite.gear`, which is after a list of fruit.
 const GEAR_ID = DECOR_START + 5 + FRUIT_COUNT;
+/// ID for `Sprite.basic_core`, which is after furnaces.
+const CORE_ID = GEAR_ID + 18;
 
 /// Index where inventory slot sprites start.
-pub const INVENTORY_START = GEAR_ID + 35;
+pub const INVENTORY_START = CORE_ID + 20;
 /// Index where numbers (0-9) start.
 pub const NUMBER_START = INVENTORY_START + 4;
 /// ID for `Sprite.particle`, which is after a bunch of character glyphs.
 pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
-    if (max_sprite_value != 265) @compileError("Max sprite value unexpected!");
+    // modify this value manually, simple sanity check
+    if (max_sprite_value != 268) @compileError("Max sprite value unexpected!");
 }
 
 /// Sprite IDs with numbers based on their location in the sprite sheet.
@@ -122,13 +125,13 @@ pub const Sprite = enum(u16) {
 
     // Decor (THIS IS COUPLED TO WGSL CODE)
     small_tree = DECOR_START,
-    /// Left/base tile of the 2x1 big-tree assembly; stored in BOTH cells,
-    /// and resolved to `moss_shrub1` (left) / `moss_shrub1_right` (right) at render time via the `.group` variant.
+    /// Left half of the 2x1 big tree; each half is stored as its own block id and requires the other
+    /// directly beside it (see the `requires` rules below), so the pair always breaks as a unit.
     moss_shrub1,
-    /// Render-only right frame of `moss_shrub1` (never stored as a block id).
+    /// Right half of `moss_shrub1`; only ever valid directly right of it.
     moss_shrub1_right,
     moss_shrub2,
-    /// Render-only right frame of `moss_shrub2` (never stored as a block id).
+    /// Right half of `moss_shrub2`; only ever valid directly right of it.
     moss_shrub2_right,
     blemon_fruit = GEAR_ID - FRUIT_COUNT,
     teal_lemon_fruit,
@@ -144,19 +147,21 @@ pub const Sprite = enum(u16) {
     rock,
     bush, // 2 variations
     spiral_plant = GEAR_ID + 4,
-    ceiling_flower = GEAR_ID + 5, // 2 variations
-    mushroom = GEAR_ID + 7, // 3 variations
-    big_mushroom = GEAR_ID + 10, // 3 variations
-    forest_furnace = GEAR_ID + 13,
+    plant_base = GEAR_ID + 5,
+    cornflower = GEAR_ID + 6, // 2 variations
+    ceiling_flower = GEAR_ID + 8, // 2 variations
+    mushroom = GEAR_ID + 10, // 3 variations
+    big_mushroom = GEAR_ID + 13, // 3 variations
+    forest_furnace = GEAR_ID + 16,
     lava_furnace,
-    basic_core = GEAR_ID + 15,
-    core1 = GEAR_ID + 17,
-    core2 = GEAR_ID + 19,
-    core3 = GEAR_ID + 21,
-    core4 = GEAR_ID + 23,
-    campfire = GEAR_ID + 25, // 4 variations + 4 water variations, 8 total
-    campfire_water = GEAR_ID + 25 + 4,
-    chest = GEAR_ID + 25 + 8,
+    basic_core = CORE_ID,
+    core1 = CORE_ID + 2,
+    core2 = CORE_ID + 4,
+    core3 = CORE_ID + 6,
+    core4 = CORE_ID + 8,
+    campfire = CORE_ID + 10, // 4 variations + 4 water variations, 8 total
+    campfire_water = CORE_ID + 10 + 4,
+    chest = CORE_ID + 10 + 8,
     portal = INVENTORY_START - 1,
 
     /// Unselected inventory sprite.
@@ -287,6 +292,15 @@ pub const Sprite = enum(u16) {
         return self.props().anchor;
     }
 
+    /// Returns every neighbor cell this sprite requires to stay in the world: its `anchor` constraint
+    /// followed by any extra `SpriteProps.requires` entries, flattened into one list at compile-time.
+    /// The cascade in `state/world.zig` clears the block as soon as one entry fails.
+    pub inline fn supports(self: @This()) []const Support {
+        const val = @intFromEnum(self);
+        if (val < MAX_SPRITE_ID) return dense_supports_table[val];
+        return &.{};
+    }
+
     /// Returns the broad `Category` classification for this sprite.
     pub inline fn category(self: @This()) Category {
         return self.props().category;
@@ -298,7 +312,7 @@ pub const Sprite = enum(u16) {
         return is_debug and id >= 65000 and id <= 65256;
     }
 
-    /// Extracts the evolved form of this sprite at compile time.
+    /// Extracts the evolved form of this sprite at compile-time.
     /// If it doesn't evolve, returns itself!
     pub inline fn evolvesTo(self: @This()) Sprite {
         const val = @intFromEnum(self);
@@ -533,14 +547,12 @@ const rules = [_]SpriteRule{
         .{ .evolves_to = .lava_stone },
     },
 
-    // 2x1 big-tree assemblies drop one 1x1 small_tree. Only the base tile is ever stored
-    // (the `_right` frame is render-only), so the rule targets the base ids alone.
+    // 2x1 big trees. Each half pins the other through `requires`, so the cascade breaks the pair as a unit
+    // whichever half goes first; only the base half drops, keeping one `small_tree` per tree.
     .{
         .{ .list = &[_]Sprite{
             .moss_shrub1,
             .moss_shrub2,
-            .moss_shrub1_right,
-            .moss_shrub2_right,
         } },
         .{
             .in_world = true,
@@ -549,6 +561,44 @@ const rules = [_]SpriteRule{
                 .static_items = &[_]Sprite{.small_tree},
             },
         },
+    },
+    .{
+        .{ .list = &[_]Sprite{
+            .moss_shrub1_right,
+            .moss_shrub2_right,
+        } },
+        .{
+            .in_world = true,
+            .drops = .{ .strategy = .none },
+        },
+    },
+    .{
+        .{ .single = .moss_shrub1 },
+        .{ .requires = &.{.{ .dx = 1, .kind = .exact, .sprite = .moss_shrub1_right }} },
+    },
+    .{
+        .{ .single = .moss_shrub1_right },
+        .{ .requires = &.{.{ .dx = -1, .kind = .exact, .sprite = .moss_shrub1 }} },
+    },
+    .{
+        .{ .single = .moss_shrub2 },
+        .{ .requires = &.{.{ .dx = 1, .kind = .exact, .sprite = .moss_shrub2_right }} },
+    },
+    .{
+        .{ .single = .moss_shrub2_right },
+        .{ .requires = &.{.{ .dx = -1, .kind = .exact, .sprite = .moss_shrub2 }} },
+    },
+
+    // Plant with base connection
+    .{
+        .{ .single = .plant_base },
+        // rests on solid ground OR another `plant_base` directly below it (a self-stacking shaft)
+        .{ .requires = &.{.{ .dy = 1, .kind = .solid_or_self }} },
+    },
+    .{
+        .{ .single = .cornflower },
+        // the flowering tip: only ever valid directly above a `plant_base`
+        .{ .requires = &.{.{ .dy = 1, .kind = .exact, .sprite = .plant_base }} },
     },
 
     // Anchor rules!
@@ -604,13 +654,15 @@ const rules = [_]SpriteRule{
             .strength = UNMINEABLE_STRENGTH,
         },
     },
-    // Normal decor
+    // Normal decor!
     .{
         .{ .list = &[_]Sprite{
             .rock,
             .bush,
             .small_tree,
             .spiral_plant,
+            .cornflower,
+            .plant_base,
             .ceiling_flower,
             .mushroom,
             .big_mushroom,
@@ -621,8 +673,7 @@ const rules = [_]SpriteRule{
             .category = .decor,
         },
     },
-    // Non-item decor (corresponds to small_tree). Only base tiles are stored; the `_right`
-    // frames stay propertyless render-only ids (like the extra grid_2x2 stone frames).
+    // Non-item decor: a tree is picked up as the `small_tree` it drops, never as its own halves.
     .{
         .{ .list = &[_]Sprite{
             .moss_shrub1,
@@ -670,6 +721,37 @@ pub const AnchorKind = enum(u2) {
     /// This sprite type must be directly below a solid block or itself.
     suspended = 3,
 };
+
+/// What a `Support` entry demands of the neighbor cell it points at.
+pub const SupportKind = enum(u2) {
+    /// The neighbor must be solid.
+    solid,
+    /// The neighbor must be solid, or another copy of the sprite being checked (self-stacking chains, like vines).
+    solid_or_self,
+    /// The neighbor must hold exactly `Support.sprite`.
+    exact,
+};
+
+/// One neighbor cell a sprite needs in order to stay in the world.
+/// - `dx`/`dy` are tile offsets from the block itself: +x is right, +y is DOWN (screen order, like `Coordinate.move()`).
+/// - `sprite` is only read for `SupportKind.exact`.
+pub const Support = struct {
+    dx: i2 = 0,
+    dy: i2 = 0,
+    kind: SupportKind,
+    sprite: Sprite = .none,
+};
+
+/// The `Support` list implied by an `AnchorKind`, so that `anchor` and `SpriteProps.requires`
+/// collapse into the single list the cascade walks (see `Sprite.supports()`).
+fn anchorSupports(a: AnchorKind) []const Support {
+    return switch (a) {
+        .none => &.{},
+        .floor => &.{.{ .dy = 1, .kind = .solid }},
+        .ceiling => &.{.{ .dy = -1, .kind = .solid }},
+        .suspended => &.{.{ .dy = -1, .kind = .solid_or_self }},
+    };
+}
 
 /// Broad classification of a sprite, replacing scattered ID-range arithmetic.
 /// Add new variants freely; `Category` is `u3`, so up to 8 fit in `SpriteFlags`.
@@ -720,6 +802,9 @@ pub const SpriteProps = struct {
     hitbox: HitboxKind = .full,
     /// Backs `Sprite.anchor()`: where this sprite can appear; see `AnchorKind`.
     anchor: AnchorKind = .none,
+    /// Neighbor requirements beyond `anchor` (such as the two halves of a 2x1 shrub pinning each other).
+    /// Merged with the `anchor` constraint by `Sprite.supports()`; see `Support`.
+    requires: []const Support = &.{},
     /// What item(s) this sprite drops when mined; see `DropConfig`.
     drops: DropConfig = .{ .strategy = .self },
     /// If set, the sprite this evolves into at increased depth. See `Sprite.evolvesTo()`.
@@ -758,7 +843,7 @@ const SpriteRule = struct {
     SpriteProps,
 };
 
-/// Helper function to match target variants at compile time.
+/// Helper function to match target variants at compile-time.
 fn matchesTarget(s: Sprite, target: Target) bool {
     switch (target) {
         .single => |t| return s == t,
@@ -792,6 +877,7 @@ fn mergeProps(dest: *SpriteProps, src: SpriteProps) void {
     if (src.instant_mine) dest.instant_mine = src.instant_mine;
     if (src.hitbox != .full) dest.hitbox = src.hitbox;
     if (src.anchor != .none) dest.anchor = src.anchor;
+    if (src.requires.len != 0) dest.requires = src.requires;
     if (src.drops.strategy != .self or src.drops.static_items.len != 0 or src.drops.dynamic_fn != null) {
         dest.drops = src.drops;
     }
@@ -835,6 +921,8 @@ pub const MAX_SPRITE_ID = blk: {
         if (field.value > max_val) {
             if (field.value >= 60000)
                 @compileError("Sprite enum values must not be between the reserved range of 60000-65534.");
+            if (field.value >= 16384)
+                @compileError("Sprite enum values cannot be greater than 2**14 (save.zig restriction).");
             max_val = @intCast(field.value);
         }
     }
@@ -893,7 +981,24 @@ const dense_flags_table: [MAX_SPRITE_ID]SpriteFlags = blk: {
     break :blk table;
 };
 
-/// Cleans a sprite tag name into a human-readable name at compile time.
+/// Precomputed `anchor` and `requires` support lists: one flat list per sprite (see `Sprite.supports()`).
+const dense_supports_table: [MAX_SPRITE_ID][]const Support = blk: {
+    @setEvalBranchQuota(20000);
+    var table: [MAX_SPRITE_ID][]const Support = @splat(&.{});
+
+    for (0..MAX_SPRITE_ID) |i| {
+        const p = dense_props_table[i];
+        const from_anchor = anchorSupports(p.anchor);
+        if (p.requires.len == 0) {
+            table[i] = from_anchor;
+        } else {
+            table[i] = from_anchor ++ p.requires;
+        }
+    }
+    break :blk table;
+};
+
+/// Cleans a sprite tag name into a human-readable name at compile-time.
 fn cleanTagName(comptime raw: []const u8) []const u8 {
     // 1. Calculate the final size first (skipping numbers and ' right' suffix)
     var out_len: usize = 0;
@@ -995,6 +1100,18 @@ comptime {
     // length, so the mapping is a constant offset. Enforce that here.
     if (ORE_START - BAR_START != GEM_START - ORE_START)
         @compileError("Bar range is not parallel to the ore range; oreToBar() would be wrong.");
+
+    // Equal-length ranges are not enough: the two must also line up name-for-name, or a reordered ore
+    // would smelt into someone else's bar. Cheap to check, and it catches an insertion into either range.
+    for (ORE_START..GEM_START) |ore_id| {
+        const ore: Sprite = @enumFromInt(ore_id);
+        if (!std.mem.eql(u8, @tagName(ore.oreToBar()), @tagName(ore) ++ "_bar"))
+            @compileError("Ore `" ++ @tagName(ore) ++ "` smelts into `" ++ @tagName(ore.oreToBar()) ++ "`; the bar range drifted out of order.");
+    }
+
+    // GEM_COUNT positions MASK_START (and bounds `isOverlay()`), so it must match the actual gem span.
+    if (@intFromEnum(Sprite.electrit) - GEM_START + 1 != GEM_COUNT)
+        @compileError("GEM_COUNT does not match the quartz..electrit range.");
 
     // isOverlay() bounds-tests one contiguous ore+gem range; verify it matches the props table exactly.
     var o: u16 = 0;

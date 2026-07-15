@@ -31,9 +31,15 @@ For inventory hotkeys:
 
 ### Building
 
-To build `node_modules`, run `npm install`.
+To build `node_modules` and begin, run `npm install`.
 
-Run `zig build` to build Zig code and automatically detect `main.aseprite` changes, `zig test "zig/root.zig"` to run (all) tests, and `zig build -Dgen-enums` to simultaneously build and generate `enums.ts` if changes were made. (See `build.zig` for details on compiling a final version.)
+Run:
+
+- `zig build` to build Zig code (automatically detects `main.aseprite` changes)
+- `zig build -Dgen-enums` to build _and_ generate `enums.ts` if changes were made.
+- `zig test "zig/root.zig"` to run (all) tests
+
+See `build.zig` for more options on compiling a final version! It's enormously helpful to use the Zig Language Server in VSCode/VSCodium and set it to "watch" mode, which automatically builds the WASM while providing highlighting any errors as well as "Go to Definition" quality-of-life.
 
 Useful variables to customize include `CONFIG` in `src/main.ts`, `engine.wireframeOpacity`, `engine.baseSpeed`, and `zig/state/player.zig` config options.
 
@@ -42,13 +48,11 @@ Alternatively, use and modify `.githooks/pre-commit`.
 
 #### About version control
 
-NOTE: you can re-enable whether diffs are visually shown through `.vscode/settings.json` (ideal with Git-only version control).
+NOTE: you can change whether diffs are visually shown through `.vscode/settings.json`.
 
-It is quite helpful to use the Zig Language Server in VSCode/VSCodium and set it to "watch" mode, which automatically builds the WASM while providing highlighting any errors.
+Run `jj git init` and `jj bookmark track main --remote=origin` after cloning if you plan to use Jujitsu.
 
-You can also easily build for Windows by using a shell script executor, or you can convert the commands to their Windows equivalents very easily.
-
-Depthwell supports both Git and Jujitsu using `.sh` files. Git VCS is supported by default; to use Jujitsu building for release, simply run `./build.sh` (after running `chmod +x ./build.sh`).
+Git VCS is supported by default; to use Jujitsu building for release, simply run `./build.sh` (after running `chmod +x ./build.sh`). You can also easily build/push for Windows by converting the commands to their Windows equivalents very easily.
 
 To commit to the main branch, you can use `./push.sh` (after running `chmod +x ./push.sh`) or create an alias in your config.
 
@@ -76,7 +80,7 @@ Here are the basic terms (note that there are, for example, 16 possible subpixel
 - 1 Chunk = 16 Blocks = 256 Pixels = 4,096 Subpixels
 - **Depth**: How "deep" the player is. Depth starts at $6$ (see `STARTING_ZOOM_TIMES` in `zig/startup.zig`). Each time you enter a portal, the world zooms in by $4\text{x}$, making everything look 4 times larger, and the depth increases by 1.
 - **$D$**: Shorthand for the current depth. You can think of depth $D-1$ as the coordinate space you occupied right _before_ entering a portal.
-- **The Event Horizon ($H$)**: Shorthand for $D-32$. When you are deep in the fractal ($D \ge 32 + 6$), the game stops tracking individual blocks shallower than 32 levels above you, replacing them with a simplified 4x4 background grid. (This is not necessarily related to game mechanics but instead internal.)
+- **The Event Horizon ($H$)**: Shorthand for $D-32$. When you are deep in the fractal ($D \ge 32 + 6$), the game stops tracking individual blocks shallower than 32 levels above you. This is because at $H$, each block is $2^{64}$ times wider than than the current depth, and recursive logic can stop. (This is internal and, when functional, shouldn't be noticeable or affect gameplay. More explanations below.)
 
 The player starts off at `STARTING_ZOOM_TIMES`, which defaults to 4. So, $D$ starts off as 4 and $D-1$ doesn't exist until $D$ increases further.
 
@@ -129,7 +133,7 @@ In binary, this is represented as a sequence of 2-bit pairs: `10 11 01 00 11 10`
 
 When you zoom past 32 levels, the 64-bit suffix overflows. The oldest 2-bit steps fall off and are converted into 3-bit top-left origin offsets (`left_cell_x` and `top_cell_y`) ranging from `0` to `6`.
 
-To prevent massive RAM overhead, the global prefix stacks (`left_path` and `top_path`) pack these 3-bit steps into 64-bit slots:
+To minimize space use, the global prefix stacks (`left_path` and `top_path`) pack these 3-bit steps into 64-bit slots:
 
 - Since $\lfloor 64 / 3 \rfloor = 21$, we pack exactly **21 historical steps** into a single `u64` integer.
 - The game uses dynamic division and modulo math (`idx / 21` and `(idx % 21) * 3`) to find and extract these values on the fly.
@@ -140,7 +144,7 @@ Of course, to have a fractal _mining_ game, you must store if the player has mod
 
 > Does this chunk have any blocks where the player replaced a block of type A with type B?
 
-(Air/empty space is itself a type of block.) If the answer is YES (even if it's just one block in a chunk with 256 blocks that's different), then a modified chunk is recorded within the `ModificationStore` (with a `DepthCoordinate` referencing both location and height).
+(Air/empty space is itself a type of block.) If the answer is YES, that chunk gets an entry in the `ModificationStore` (keyed by a `DepthCoordinate` referencing both location and height). The entry is _sparse_, as it records only the individual cells that differ, so a single edited block in a 256-block chunk costs one cell, not a whole chunk. See "The fractal modification buffer" below for the layout.
 
 But wait, what is a block? Here is `zig/memory.zig`:
 
@@ -233,13 +237,11 @@ By using `Vec2f` vectors and bit-folding, `FastHash.hash2d()` provides enough va
 
 #### Terrain and biomes
 
-TODO: complete this with more details and new noise algorithms
-
 The first pass of the terrain logic determines the "flavor" of the chunk. We calculate two main values: **moisture** and **density**.
 
 Instead of standard Perlin noise, there's multiple algorithms being used simultaneously:
 
-- Basic value noise is used for large terrain details.
+- Basic value noise is used for large terrain details and a starting point for a few other ones.
 - Worley noise (or cellular/Voronoi noise) that creates sharp, jagged ("crisp") noise. Specifically, F2-F1 Worley noise is being used.
 - To create a more varied texture, the code uses fractal brownian motion (FBM) to warp the input coordinates.
 
@@ -260,15 +262,20 @@ Using the `selectSprite()` helper, we branch the logic:
 
 The final pass handles the "flavor" of the world. These are things such as mushrooms, spiral plants, and ceiling flowers. Since this pass is less computationally expensive, we switch back to `ChaCha12` for high-quality entropy.
 
-Decorations are context-aware. Mushrooms only spawn if the block below is solid, ceiling flowers if the block above is solid, and spiral plants can grow multiple blocks tall by checking for a spiral plant above on top of a solid-block above generation check.
+Decorations are context-aware. Mushrooms only spawn if the block below is solid, ceiling flowers if the block above is solid, and spiral plants can grow multiple blocks tall by checking for a spiral plant above on top of a solid-block above generation check, and so on.
 
-Critically, the generator finishes by setting the `edge_flags` of these decorations to `0xFF`. This tells the WebGPU shader that it shouldn't have erosion and edge darkening applied to it.
+Critically, the generator finishes by setting the `edge_flags` of these decorations to `0xFF`. This tells the WebGPU shader that it shouldn't have erosion and edge darkening applied to it!
+
+Decorations come in two shapes, both in `zig/state/decorations.zig`:
+
+- A **point** decoration (`points`) has a fixed `size_x`-by-`size_y` footprint growing right and down from its anchor, gated by a list of terrain `constraints` (the same comptime-sorted, cheapest-first vocabulary structures use). The list is walked in _priority order_, so a taller kind claims its own base before a shorter one can steal the cell. A multi-cell kind must own its _whole_ footprint or it would render as a fragment (a `moss_shrub1` with no `moss_shrub1_right`), so if a higher-priority decoration claims any cell it overlaps, the lower one declines to place at all through `beatenByHigher()`, the decoration analogue of `structures.isBeaten()`. Same-kind "rivals" within a footprint are settled by an up-and-to-the-left tie-break.
+- A **column** feature (`columns`, such as spiral plants) is a variable-length chain that anchors on a surface and grows cell-by-cell in one direction until it misses a roll or hits `max_length`. Its entering state is seeded across the chunk border by `computeColumnSeeds()` so a chain stays seamless.
+
+Some decorations are multi-block _stacks_ pinned together through the same neighbor-support rules the rest of the world uses (`SpriteProps.requires` / `AnchorKind`, resolved into a flat list by `Sprite.supports()`; see "Storing modifications"). The vertical plant, for instance, is a `cornflower` cap over a `plant_base` shaft standing on the floor: `cornflower` requires a `plant_base` directly below it, and `plant_base` requires solid ground _or_ another `plant_base` below it (a self-stacking shaft). When the modification cascade finds a block whose required neighbors are gone, it breaks, so mining the base of a plant topples the whole thing as a unit, exactly as breaking one half of a shrub drops the pair.
 
 #### Entities
 
-Entities represent a generic type of sprite, with color shifts, rotation, and size changes.
-
-Here is their definition:
+Entities represent a generic type of sprite, with color shifts, rotation, and size changes. Here is their definition:
 
 ```zig
 /// Entity data (before being sent to WGSL, using internal viewport).
@@ -367,61 +374,76 @@ if (progress != 255 and progress != 0) {
 }
 ```
 
-You can see how because the entities are _ordered_, it's easy to add a shadow. Additionally, the usage of white text or masks works perfectly with OKLCH (which stands for lightness, chroma, and hue). This means that not only can entities have various small color shifts, but they can also perfectly be masked with a white sprite (see the sprite sheet up top)!
+You can see how because the entities are _ordered_, it's easy to add a shadow. Additionally, the usage of white text or masks works perfectly with OKLCH (which stands for lightness, chroma, and hue). This means that not only can entities have various small color shifts, but they can also perfectly be masked with a white sprite (see the sprite sheet up top)! (Remember that a sprite is a physical 16x16 area of the sprite sheet, and entities can easily render this.)
 
 #### The fractal modification buffer
 
 Depthwell stores modifications with some fancy lineage inheritance: modifications are stored per-layer, and when generating a chunk at Depth $D$, the engine recursively climbs and calculates the history of the `ModificationStore` and its resulting cache properties.
 
-The _goal_ with modifications is to ensure the following:
+The original goal with modifications was to ensure the following:
 
-1. Read _existing_ modifications to extract rectangular groups of chunks: ~1000 reads/second for as long as possible due to potential of requiring 16-32 new chunks in SimBuffer during some frames and camera features in the future.
-2. Write a _new_ modification (60fps for as long as possible). In practice, this is very easy with hash maps.
-3. Increment the depth (below 3 seconds for as long as possible).
-4. Minimize heap fragmentation and "allocation churn."
-5. The entire state can be stored inside RAM.
+1. Read _existing_ modifications to extract rectangular groups of chunks: ~1000 reads/second for as long as possible due to potential of requiring 16-32 new chunks in SimBuffer during some frames and camera features in the future. In practice, this is **easy** with basic caching algorithms.
+2. Write a _new_ modification (60fps for as long as possible). In practice, this is **very easy** with hash maps. The real bottleneck might even be edge flags update logic, which is currently fairly naive.
+3. Increment the depth (below 3 seconds for as long as possible). In practice, this is **easy** because the read requirements of procedurally generating chunks are more strict (we must be able to generate 4 chunks/frame at 60fps on mid-tier hardware to prevent frame drops).
+4. Minimize heap fragmentation and "allocation churn". Not too bad if allocators are used right.
+5. The entire state can be stored inside RAM. Not too bad with save compression logic principles applied to modifications as well.
 
-Therefore, the current solution is to hash a `DepthCoordinate` using `std.hash.autoHash`. A `std.HashMap` stores these hashes and indexes a dynamically allocated array of `Chunk`s (the dense data representing a chunk's entire modifications) utilizing a segmented list storage setup. See some definitions and more details:
+Therefore, the current solution is to hash a `DepthCoordinate` and use it to index a per-chunk `ModEntry`. A `ModEntry` is _sparse_: rather than a full 4KiB `Chunk`, it stores only the cells the player (or the water sim) actually authored, as an `authored` bitmap (one bit per block) plus a packed `ModCell` array kept in ascending block-index order.
+
+A `ModCell` holds just the only three fields that cannot be recovered by regenerating the chunk: `id`, `base_id`, and `hp`. Everything else (`seed`, `edge_flags`, `light`, `group_x/y`, waterlogging) is _derived_ and is rebuilt by `materializeChunk()`, which replays every authored cell over a freshly generated chunk and then reruns the flag pass. So a chunk the player mined 30 blocks out of costs ~210 bytes here, not 4KiB. See some definitions and more details:
 
 ```zig
+/// One authored cell: the only `Block` fields that cannot be recovered by regenerating the chunk.
+pub const ModCell = extern struct { id: Sprite, base_id: Sprite, hp: u8 };
+
+/// The modifications to a single chunk, as a sparse set of authored cells rather than a full `Chunk`.
+/// Should ONLY be mutated through `ModificationStore.beginWrite()`: for saving functionality.
+pub const ModEntry = struct {
+    /// Cells whose value came from a player edit or the water sim rather than from procedural generation.
+    /// Bit `i` (block index `by * CHUNK_SIZE + bx`) set means `cells[rank(i)]` holds that cell's value.
+    authored: [AUTHORED_WORDS]u64 = @splat(0),
+    /// Authored cells in ascending block-index order. The first `count` are live; the rest is spare capacity.
+    cells: []ModCell = &.{},
+    /// Live entries in `cells`. Always equals the population count of `authored`.
+    count: u16 = 0,
+    ...
+}
+
 /// Stores and handles modifications of chunks. Functions across depths.
+/// Uses `memory.main_allocator`, NOT the world arena (due to entry freeing being possible).
 pub const ModificationStore = struct {
-    /// `HashMap`-based system to store indexes to `history`.
-    index: std.HashMap(
+    /// Maps a chunk to its index in `entries`. Indices are stable for the life of the store
+    /// (see `entries`), which the budgeted save snapshot relies on.
+    index: std.HashMapUnmanaged(
         DepthCoordinate,
         usize,
         DepthCoordinateContext,
         std.hash_map.default_max_load_percentage,
-    ),
-    /// Expandable list that stores modified `Chunk` data (256KiB pre-allocation).
-    history: SegmentedList(Chunk, 128) = .{},
+    ) = .empty,
 
-    pub fn init(allocator: std.mem.Allocator) ModificationStore {
-        return .{
-            .index = std.HashMap(
-                DepthCoordinate,
-                usize,
-                DepthCoordinateContext,
-                std.hash_map.default_max_load_percentage,
-            ).init(allocator),
-        };
-    }
+    /// Every modification entry. Can only be appended to so an index (and a pointer) into it stays valid across later insertions:
+    /// `save.zig` freezes a plan of `entries` indices and resolves them frames later,
+    /// and an entry can be mutated while another is created.
+    entries: SegmentedList(ModEntry, 256) = .{},
+    /// Indices in `entries` whose chunk was removed, ready to be handed out again.
+    /// `entries` itself must never shrink (the save plan holds indices into it), so freed slots are recycled instead.
+    free_entries: std.ArrayList(usize) = .empty,
+    /// Incremented whenever `entries` is dropped (`init()`/`clear()`), invalidating any external index
+    /// into it. A budgeted save snapshot compares this to detect a mid-save wipe and abort.
+    generation: u64 = 0,
+    allocator: std.mem.Allocator = undefined,
+    /// Whether the containers below hold real allocations. Guards `deinit()` before the first `init()`.
+    live: bool = false,
 
-    /// Gets an existing modification for reading.
-    pub fn get(self: *const @This(), key: DepthCoordinate) ?*const Chunk {
-        const id = self.index.get(key) orelse return null;
-        return self.history.at(id);
-    }
-
-    /// Completely wipes all user modifications. Should be followed by `world.clearCaches(true)`.
-    pub fn clear(self: *@This()) void {
-        self.index.clearRetainingCapacity();
-        self.history.clearRetainingCapacity();
-    }
+    ...
+    /// Gets an existing entry for reading, or null if the chunk is unmodified.
+    pub fn get(self: *const @This(), key: DepthCoordinate) ?*const ModEntry { ... }
+    /// The authored value at one block, or null if still procedural. O(1) fast path for ancestor lookups.
+    pub fn getCell(self: *const @This(), key: DepthCoordinate, block_idx: u8) ?ModCell { ... }
+    /// The ONLY way to mutate the store: shadows the entry for any in-flight save, then returns a `ModWriter`.
+    pub fn beginWrite(self: *@This(), key: DepthCoordinate) ModWriter { ... }
+    ...
 };
-
-/// Stores and handles modifications of chunks across various depths.
-pub var mod_store: ModificationStore = undefined;
 
 /// Stores what location a modification with an active suffix and quadrant, as well as its depth, to easily identify it.
 pub const DepthCoordinate = struct {
@@ -429,8 +451,8 @@ pub const DepthCoordinate = struct {
     /// Semantically equivalent to null.
     pub const invalid: @This() = .{
         .depth = 0,
-        .quadrant = undefined,
-        .suffix = undefined,
+        .quadrant = 0,
+        .suffix = .{ 0, 0 },
     };
 
     /// Active suffix (stored as a vector). Should not be set manually; must call `getParent()` to decrease the depth for depths beyond `HORIZON_DEPTH`.
@@ -448,26 +470,37 @@ pub const DepthCoordinate = struct {
 ```
 
 ```zig
-/// A static 2x2 grid of seeds only updated when depth increases or game startup. See `README.md` for a more detailed and intuitive explanation for what this does.
+/// A static 2x2 grid of seeds only updated when depth increases or game startup.
 pub const QuadCache = struct {
     pub const PATH_PREALLOC_SIZE = 256;
+    pub const SEED_CACHE_SIZE = 256; // TODO: evaluate why making this large causes a crash
+    pub const SEED_CACHE_WAYS = 4;
+    pub const SEED_CACHE_SETS = SEED_CACHE_SIZE / SEED_CACHE_WAYS;
+
+    /// Ring length of the per-depth rolling buffers below, indexed by `depth % HISTORY_LEN`.
+    /// Must exceed `HORIZON_DEPTH` so a live depth D and its horizon ancestor D-`HORIZON_DEPTH` don't collide.
+    pub const HISTORY_LEN = 64;
+
+    ...
+
+    // Rolling buffers for the sliding window, indexed by `depth % HISTORY_LEN`.
+    origins_x: [HISTORY_LEN]u3 = @splat(0),
+    origins_y: [HISTORY_LEN]u3 = @splat(0),
+    historical_seeds: [HISTORY_LEN]seeding.ChunkSeeds = undefined,
 
     /// The 512-bit hashes for the 4 active quadrants (sequentially from D to D-31).
     /// (0: NW, 1: NE, 2: SW, 3: SE)
     path_hashes: ChunkSeeds align(memory.MAIN_ALIGN_BYTES),
-    /// The 4-by-4 material grid representing the "event horizon" at D-32.
+    /// The 4-by-4 material grid representing the "event horizon" at H (D-32).
     /// The inner 2-by-2 (indices [1..2][1..2]) corresponds to the active quadrants.
     ancestor_materials: [4][4]Block,
+
     /// A list representing the prefix stack of the top left quadrant's X-coordinate.
+    /// NOT for use with ancestory logic.
     left_path: SegmentedList(u64, PATH_PREALLOC_SIZE),
     /// A list representing the prefix stack of the top left quadrant's Y-coordinate.
+    /// NOT for use with ancestory logic.
     top_path: SegmentedList(u64, PATH_PREALLOC_SIZE),
-
-    // These 4 properties are used to determine if a QuadCache is at the very edge of the world for chunk gen/zooming in.
-    most_top: bool = true,
-    most_bottom: bool = true,
-    most_left: bool = true,
-    most_right: bool = true,
     ...
 ```
 
@@ -476,10 +509,11 @@ pub const QuadCache = struct {
 Entering a portal shifts a bunch of data around, particularly the cache and all coordinate paths:
 
 - The current world-path is pushed to the prefix data.
-- The active suffix/quadrant ID are reset (or "rebased"), in a way that allows for the _maximum_ amount of coverable distance before a crash. If the player ever travels to a coordinate or the game accesses a chunk that cannot be represented with either of the four quadrants, the **game will crash**. Specifically, the logic explaining the coordinate system mentioned the concepts of "below average" and "above average", and the idea is basically to zoom in in such a way that the quad-cache maximizes the amount of distance you'd have to travel in any quadrant before you're out-of-bounds. In practice, this is in the _quintillions of chunks_ precisely because of this rebasing implementation.
+- The active suffix/quadrant ID are reset (or "rebased"), in a way that allows for the _maximum_ amount of coverable distance before a crash. If the player ever travels to a coordinate or the game accesses a chunk that cannot be represented with either of the four quadrants, the **game will crash**. Specifically, the logic explaining the coordinate system mentioned the concepts of "below average" and "above average", and the idea is basically to zoom in in such a way that the quad-cache maximizes the amount of distance you'd have to travel in any quadrant before you're out-of-bounds. In practice, this is eternally in the _quintillions of chunks_ precisely because of this rebasing implementation.
+    - If you were to overanalyze theoretical game limits, you'd probably want to note that `performance.now()` breaks after reaching $2^{64}$ with a theoretical browser with gradually lowered precision, but you could reload repeatedly.
 - The `SimBuffer` is purged, and the world re-generates at Depth $D+1$ using the inherited properties of the portal block.
 
-See the big chunk of comments in `pushLayer()` for specific details on zoom logic. Since the game has hard bounds, instead of looping, there's quite a bit of extra logic here than you might expect.
+(See the big chunk of comments in `pushLayer()` for specific details on zoom logic.) Since the game has hard bounds, instead of looping, there's quite a bit more logic here than you might expect!
 
 #### More rebasing explanation
 
@@ -496,7 +530,7 @@ Modifications of "higher" $D$-values are prioritized, and lower $D$-values are u
 - Reading performance is an amortized O(1) due to only needing to consider block sizes between depth $D-32$ to $D$.
 - Writing performance is an amortized O(1) due to needing to modify a `HashMap`.
 - Increasing depth is, surprisingly, an O(1) operation due to a lack of modification culling (to allow for a "spectator view" on death), and storing where things are with a 256-bit `DepthCoordinate` and assuming that collisions are impossible.
-- Space complexity is O(n) based on the number of modified chunks. Even if all modifications are reversed, each modified chunk still takes up 2KiB in history. However, this is stored as a `SegmentedList` to prevent large unused gaps in WASM memory.
+- Space complexity is O(n) based on the number of modified _cells_, not chunks: a `ModEntry` only holds the blocks actually authored (a `ModCell` is 5 bytes), so a lightly edited chunk costs a few hundred bytes rather than a full 4KiB `Chunk`. Removing a chunk's edits recycles its entry slot and cell block, but `entries` itself never shrinks (the budgeted save holds indices into it), so it is stored as a `SegmentedList` to prevent large unused gaps in WASM memory.
 
 #### Storing chunks with a simulation distance
 
@@ -504,7 +538,7 @@ The "simulation distance" is 16-by-16 chunks, and is a dedicated buffer of 256 c
 
 It's possible, however, that the camera might move super fast in a frame and temporarily cause renders outside the standard `SimBuffer` (which is around the player, and the only existing chunk buffer), so the game will first try to find if a chunk is in the array of simulation chunks, and if it isn't then it will dynamically generate it temporarily (which is still fairly fast, since we're using data-oriented design).
 
-#### Smart chunk loading
+#### Smart chunk preloading
 
 Despite the fact that chunks are procedural and written in Zig (you'd think that means blazing fast), there's a lot of heavy computation internally due to needing to calculate several FBM+Worley passes, _per block_. This optimization improves performance by 8 times in practice.
 
@@ -514,7 +548,7 @@ The algorithm does this each frame (with a default budget of 2; budget increases
 
 1. The player's current velocity creates a "leading edge." This algorithm tracks your player's current speed and direction. It prioritizes generating chunks immediately in front of you (your "leading edge") before looking at side or diagonal directions.
 2. The engine quietly spends its frame budget generating a 68-chunk "ring" just outside your visible screen. By the time you walk or fall into a new area, the chunks are already generated and waiting in memory.
-3. Finally, the `ChunkCache` provides a "second chance" that stores recently visited chunks. This uses a 4-way set-associative cache (which is effectively $O(1)$ in more cases than a `HashMap`); implementation details can be seen in `zig/state/world.zig`.
+3. Finally, the `ChunkCache` provides a "second chance" that stores recently visited chunks. This uses a 4-way set-associative cache (which is effectively O(1) in more cases than a `HashMap`); implementation details can be seen in `zig/state/world.zig`.
     - Technical info: if a chunk has been accessed recently, its reference bit is kept.
     - If the cache fills up, older chunks with cleared reference bits are evicted, eliminating memory allocation or garbage collection overhead.
 
@@ -526,7 +560,7 @@ Chunks that get accessed from the `SimBuffer` do not update the `ChunkCache`, al
 
 Lighting is computed on the CPU every frame in `zig/render/lighting.zig`, right after the visible block buffer is assembled and before it is handed to the GPU. Every block receives a `light` value from 0 to 255, and the WGSL shader multiplies that block's OKLAB lightness by `light / 255` (so 0 is pitch black and 255 is full brightness). A companion field, `lighting_color`, records whether the "winning" (strongest) light is warm/orange (fire) or neutral white.
 
-Instead of an additive light map or a naive FIFO queue, Depthwell uses **Dial's algorithm (bucketed Dijkstra)** to propagate light. The system maintains a "gravity shelf" of bucket lists, one for each possible brightness level from the maximum source strength (320) down to ambient (0).
+Instead of an additive light map or a naive FIFO queue, Depthwell uses an inverted **Dial's algorithm** (bucketed Dijkstra) to propagate light. The system maintains a "gravity shelf" of bucket lists, one for each possible brightness level from the maximum source strength down to ambient (0).
 By processing these buckets in strictly descending order (brightest to dimmest), the flood guarantees that each cell is finalized at its brightest possible value on its first visit.
 
 How much light is lost per step (the "falloff") depends on what it passes through:
@@ -535,7 +569,7 @@ How much light is lost per step (the "falloff") depends on what it passes throug
 - **Solid** blocks lose the most (`SOLID_FALLOFF = 26`), but the cost scales with how mined the block is (its `hp`): a nearly-broken block lets through almost as much light as air.
 - **Liquid** sits in between (`LIQUID_FALLOFF = 18`), and a waterlogged block is capped so it never blocks light more than water would.
 
-A diagonal step costs `sqrt(2)` times the orthogonal falloff (approximated with integer math), turning the square 8-neighbor grid into a mostly circular-looking falloff.
+A diagonal step costs `sqrt(2)` times the orthogonal falloff (approximated with integer math), turning the square 8-neighbor grid into a mostly circular-looking falloff (8-sided polygon).
 
 Light sources include the player (a bright, moving source seeded from their continuous sub-pixel position across the 2x2 blocks they overlap), campfires and furnaces (warm/orange), and glowing plates.
 
@@ -549,6 +583,30 @@ The interface between the TypeScript engine and the Zig core is managed via a pr
 
 - The **scratch buffer** is a gigantic, dynamically expanding shared heap used for high-bandwidth data transfers (mainly, drawing chunks).
 - There's also **scratch properties**, which are an array with 20 properties of 64-bit integers and floats used for metadata (also used for drawing chunks).
+
+#### Saving and loading
+
+Depthwell serializes the _entire_ game state into a single versioned, self-describing binary blob in `zig/state/save.zig`. Zig builds the blob in a persistent buffer; the actual atomic write to OPFS (and the per-frame budgeting that drives it) lives on the JS side. (This is pre-demo, so saves may break at any time on a core-logic change: currently there's no compatibility goals, so even back-compatibility isn't guaranteed.)
+
+The layout is little-endian:
+
+- magic `"DWSV"`, then a `VERSION` u32 (packed `a.b.c` from `parseVersion()`).
+- a run of **sections**, each `tag u16 | section_version u16 | byte_len u64 | payload`. Tags (`sprite_table`, `header_core`, `quadcache`, `inventory`, `menus`, `tools`, `misc`, `mod_store`) are an enum whose numbers are _never_ renumbered or repurposed, as new ones only ever append.
+- an `.end` marker (tag `0`), then a 32-byte **BLAKE3** hash over every preceding byte, so a truncated or corrupted file is rejected on load.
+
+Two ideas keep saves robust and cheap:
+
+- **Identities are stored by name, not by enum ordinal.** The `SPRITE_TABLE` section is written first so the loader can map the raw sprite ids embedded in `MOD_STORE` cells back to names, then resolve those against the _running_ build's `Sprite` enum. Adding or reordering sprites therefore never invalidates a save; a name the current build no longer knows just degrades to `.none`.
+- **`MOD_STORE` stores only authored cells.** Exactly like the in-memory `ModEntry` (see "The fractal modification buffer"), the save holds only the blocks the player actually changed; everything else is regenerated on load via `world.materializeChunk()`. Each chunk record is therefore variable-length.
+
+Because a big save cannot block the frame, `MOD_STORE` is written **budgeted** across many frames:
+
+1. `beginSnapshot()` writes the header and every small section (all captured at that instant), opens the `MOD_STORE` section, and freezes a _plan_ (the key and `entries` index of each modified chunk).
+2. `writeBatch(n)` then encodes up to `n` chunks per call until the plan is drained.
+3. To keep the multi-frame snapshot **atomic** even though the player keeps mining meanwhile, the store is copy-on-write against the plan: when the game is about to mutate a planned-but-not-yet-encoded entry, `shadowEntryForSave()` first stashes that entry's start-of-snapshot payload into a side map, and the batch encodes from the shadow. The blob thus reflects the world exactly as it was at `beginSnapshot()`.
+4. A hard wipe of `mod_store` mid-snapshot (a new game or a load) bumps its `generation`, which the snapshot compares against and aborts on.
+
+One global guard sits above all of this: `in_tick`. The simulation sets it while a tick is mid-flight, and both `exportAll()` and `beginSnapshot()` refuse to serialize while it is set. This is because a half-applied tick can be invalid, and it is better to _abort_ than to save something wrong.
 
 ### Why WGSL (WebGPU)?
 
@@ -608,4 +666,4 @@ For the water, there's similar complicated modulo wrapping logic; however, this 
 
 ### Copyright
 
-Copyright (c) 2026 Leo Zhang. All rights reserved. Distribution of any portions of code or raw assets without explicit permission is strictly prohibited.
+Copyright (c) 2026 Leo Zhang. All rights reserved. Distribution of any portions of code or raw assets without explicit written permission is strictly prohibited.
