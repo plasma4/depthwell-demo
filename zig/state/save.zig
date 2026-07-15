@@ -1,11 +1,13 @@
 //! NOTE: This game is pre-demo so all saves may break at any time due to core logic changes!Forward-compatibility is never planned, only back.
-//! Serializes the full game state to a versioned, self-describing binary blob for the OPFS host.
-//! This file is the format engine: framing, primitives, the sprite-name remap table, and the per-section (de)serialization.
-//! The atomic OPFS write and per-frame budgeting are handled by the JS host.
+//! Serializes the full game state to a versioned, self-describing binary blob for the OPFS/generic file-system host.
+//! The atomic OPFS write and per-frame budgeting are handled by JS.
 //!
 //! Sprite and tool identities are stored by name, never by enum ordinal, so adding or reordering sprites never invalidates a save.
-//! `SPRITE_TABLE` maps the raw ids embedded in `MOD_STORE` blocks back to names,
+//! `SPRITE_TABLE` maps the raw ids embedded in `MOD_STORE` cells back to names,
 //! which the loader resolves against the running build's `Sprite` (unknown names degrade to `.none`).
+//!
+//! `MOD_STORE` holds only the cells the player authored, not whole chunks: everything else in a chunk is regenerated on load
+//! (see `world.materializeChunk()`). A record is therefore variable-length.
 //!
 //! Format (little-endian):
 //! - magic "DWSV" | `VERSION` u32
@@ -16,10 +18,10 @@
 //!
 //! For importing process:
 //! - `beginSnapshot()` writes the header and every small section (all captured at start), opens the MOD_STORE section,
-//!   and freezes a plan (the key + history index of each modified chunk).
+//!   and freezes a plan (the key + entry index of each modified chunk).
 //! - `writeBatch()` then encodes up to N chunks per call. To keep the save atomic (handled partially by JS OPFS operations),
-//!   whenever the game mutates a planned chunk before it has been encoded,
-//!  `shadowChunkForSave()` first copies that chunk's start-of-snapshot contents into a side map,and the batch encodes from the shadow.
+//!   whenever the game mutates a planned entry before it has been encoded,
+//!   `shadowEntryForSave()` first serializes that entry's start-of-snapshot payload into a side map.
 //! - A wipe of `mod_store` mid-snapshot (new game / load) bumps its generation and aborts.
 const std = @import("std");
 const dw = @import("../root.zig");
@@ -34,13 +36,14 @@ const furnace = @import("../menus/furnace.zig");
 
 const Sprite = dw.Sprite;
 const Block = memory.Block;
-const Chunk = memory.Chunk;
 const DepthCoordinate = world.DepthCoordinate;
 
 /// Magic 4-byte header.
 const MAGIC = "DWSV";
 
 /// Current version of the game.
+/// NOTE: since the game is pre-demo, arbitrary changes can be made to the save logic.
+/// Version should be kept at 0.0.0, and back-compat can be disregarded!
 pub const VERSION: u32 = parseVersion("0.0.0");
 
 /// Packs `a.b.c`-formatted version string into a u32 at comptime: `a` (major, range 0-255) in the high byte,
@@ -227,16 +230,6 @@ fn remapSpriteId(old_id: u16) Sprite {
     if (id_remap.count() == 0) return @enumFromInt(old_id);
     if (id_remap.get(old_id)) |s| return s;
     return .none;
-}
-
-/// Reads a `Block` stored verbatim (all 16 bytes), remapping its `id`/`base_id` through the sprite table.
-/// This way, save made by a build with different sprite ordinals still resolves to the right sprites.
-fn readBlock(r: *Reader) !Block {
-    var b: Block = undefined;
-    try r.readInto(std.mem.asBytes(&b));
-    b.id = remapSpriteId(@intFromEnum(b.id));
-    b.base_id = remapSpriteId(@intFromEnum(b.base_id));
-    return b;
 }
 
 fn writeSpriteTable(w: *Writer) !void {
@@ -453,29 +446,61 @@ fn readMisc(r: *Reader) !void {
     dw.player.facing_right = try r.boolean();
 }
 
-// Modification section that stores DepthCoordinate (suffix [2]u64 | depth u64 | quadrant u32) + 256 full blocks (4 KiB).
+// MOD_STORE record (section version 2), per modified chunk:
+//   key      : suffix[0] u64 | suffix[1] u64 | depth u64 | quadrant u32   (28 bytes)
+//   authored : [CHUNK_SIZE_SQ / 64]u64                                    (32 bytes; which cells the player owns)
+//   cells    : PackedCell (u32), once per set bit, ascending              (4 bytes each)
+// The cell count is the population count of `authored`, so it is never stored twice.
+// Sprite ids go out as ids (remapped through SPRITE_TABLE on load), never as build-local table indices.
+
+/// Bytes one authored cell occupies on disk.
+const MOD_CELL_BYTES: u64 = @sizeOf(PackedCell);
+/// Bytes of a record's fixed key prefix.
+const MOD_KEY_BYTES: u64 = 8 + 8 + 8 + 4;
+/// Bytes of a record's `authored` bitmap.
+const MOD_AUTHORED_BYTES: u64 = @sizeOf(@FieldType(world.ModEntry, "authored"));
+
+/// Bytes the payload (everything after the key) of one entry serializes to.
+fn entryPayloadBytes(entry: *const world.ModEntry) u64 {
+    return MOD_AUTHORED_BYTES + @as(u64, entry.count) * MOD_CELL_BYTES;
+}
+
+fn writeEntryKey(w: *Writer, key: DepthCoordinate) !void {
+    try w.int(u64, key.suffix[0]);
+    try w.int(u64, key.suffix[1]);
+    try w.int(u64, key.depth);
+    try w.int(u32, key.quadrant);
+}
+
+/// Writes an entry's payload: the authored bitmap, then each authored cell in ascending block-index order.
+fn writeEntryPayload(w: *Writer, entry: *const world.ModEntry) !void {
+    for (entry.authored) |word| try w.int(u64, word);
+    for (entry.cells[0..entry.count]) |cell| {
+        const packed_cell: PackedCell = .{
+            .id = @intCast(@intFromEnum(cell.id)),
+            .base_id = @intCast(@intFromEnum(cell.base_id)),
+            .hp = @intCast(cell.hp),
+        };
+        try w.int(u32, @bitCast(packed_cell));
+    }
+}
 
 /// Serializes every chunk the player has modified, keyed by its `DepthCoordinate`.
-/// Reads the index/history live (non-budgeted).
+/// Reads the index/entries live (non-budgeted).
 fn writeModStore(w: *Writer) !void {
-    const at = try w.beginSection(.mod_store, 1);
+    const at = try w.beginSection(.mod_store, 2);
     try w.varint(world.mod_store.index.count());
 
     var it = world.mod_store.index.iterator();
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
-        const chunk = world.mod_store.history.at(entry.value_ptr.*);
-        try w.int(u64, key.suffix[0]);
-        try w.int(u64, key.suffix[1]);
-        try w.int(u64, key.depth);
-        try w.int(u32, key.quadrant);
-        try w.bytes(std.mem.sliceAsBytes(chunk.blocks[0..]));
+    while (it.next()) |e| {
+        try writeEntryKey(w, e.key_ptr.*);
+        try writeEntryPayload(w, world.mod_store.entries.at(e.value_ptr.*));
     }
     w.endSection(at);
 }
 
-/// Rebuilds `mod_store` from the saved chunk records: clears it, then re-appends each chunk to the history and re-keys the index.
-/// Sprite IDs inside each block are remapped by `readBlock()`.
+/// Rebuilds `mod_store` from the saved records. Sprite ids are remapped so a save written by a build with
+/// different enum ordinals still resolves to the right sprites; an id this build no longer has degrades to `.none`.
 fn readModStore(r: *Reader) !void {
     // we do NOT need to reset the mod store because importAll() resets before section dispatch
     const n = try r.varint();
@@ -486,14 +511,32 @@ fn readModStore(r: *Reader) !void {
             .depth = try r.int(u64),
             .quadrant = try r.int(u32),
         };
-        var chunk: Chunk = undefined;
-        for (&chunk.blocks) |*b| b.* = try readBlock(r);
 
-        const slot = world.mod_store.history.len;
-        try world.mod_store.history.append(world.alloc, chunk);
-        try world.mod_store.index.put(key, slot);
+        var authored: @FieldType(world.ModEntry, "authored") = undefined;
+        var count: usize = 0;
+        for (&authored) |*word| {
+            word.* = try r.int(u64);
+            count += @popCount(word.*);
+        }
+
+        var cells: [dw.CHUNK_SIZE_SQ]world.ModCell = undefined;
+        for (cells[0..count]) |*cell| {
+            const packed_cell: PackedCell = @bitCast(try r.int(u32));
+            cell.id = remapSpriteId(@intCast(packed_cell.id));
+            cell.base_id = remapSpriteId(@intCast(packed_cell.base_id));
+            cell.hp = @intCast(packed_cell.hp);
+            if (cell.hp > Block.MAX_HP) return SaveError.BadData;
+        }
+
+        try world.mod_store.loadEntry(key, authored, cells[0..count]);
     }
 }
+
+const PackedCell = packed struct(u32) {
+    id: u14,
+    base_id: u14,
+    hp: u4,
+};
 
 /// True while `handleTick()` is executing; set/cleared by `tick()` in `root.zig` and cleared again by `startup.init()`.
 /// A panic/trap mid-tick leaves it set, so `exportAll()` and `beginSnapshot()` refuse to serialize the half-applied tick forever
@@ -683,12 +726,8 @@ pub fn getExportLen() usize {
     return save_buf.items.len;
 }
 
-/// One modified chunk to serialize: its `DepthCoordinate` key and its index into `mod_store.history`.
+/// One modified chunk to serialize: its `DepthCoordinate` key and its index into `mod_store.entries`.
 const PlanEntry = struct { key: DepthCoordinate, idx: usize };
-
-/// Byte size of one serialized MOD_STORE chunk record: the `DepthCoordinate` key (u64 x3 + u32) plus every block verbatim.
-/// Must match what `writeBatchInner()` emits; `beginSnapshotInner()` precomputes the section length from it so the stream is never backpatched and stays hashable strictly in order.
-const CHUNK_RECORD_BYTES: u64 = 8 + 8 + 8 + 4 + @sizeOf(@FieldType(Chunk, "blocks"));
 
 /// Number of bytes `Writer.varint()` emits for `value`.
 fn varintLen(value: u64) u64 {
@@ -710,12 +749,22 @@ var hashed_upto: usize = 0;
 var snapshot_gen: u64 = 0;
 var snapshot_active: bool = false;
 
-/// `mod_store.history.len` at `beginSnapshot()`. Chunks at indices below this are in the plan;
+/// `mod_store.entries.len` at `beginSnapshot()`. Entries at indices below this are in the plan;
 /// any appended after are new mods excluded from this snapshot and never need shadowing.
-var snapshot_history_len: usize = 0;
-/// Copy-on-write side store: `history` index -> that chunk's contents at snapshot start, filled by
-/// `shadowChunkForSave()` the first time the game touches a still-unencoded planned chunk.
-var shadow: std.AutoHashMapUnmanaged(usize, Chunk) = .empty;
+var snapshot_entries_len: usize = 0;
+/// Copy-on-write side store: `entries` index -> that entry's payload, already serialized, as of snapshot
+/// start. Filled by `shadowEntryForSave()` the first time the game touches a still-unencoded planned entry.
+///
+/// Storing encoded bytes rather than a copy of the entry keeps the preserved size fixed, which is what lets
+/// `beginSnapshotInner()` precompute the section length even though entries grow as the player keeps editing.
+var shadow: std.AutoHashMapUnmanaged(usize, []u8) = .empty;
+
+/// Drops every preserved payload. `shadow` owns its values, unlike the old whole-`Chunk` map.
+fn clearShadow() void {
+    var it = shadow.valueIterator();
+    while (it.next()) |bytes| save_alloc.free(bytes.*);
+    shadow.clearRetainingCapacity();
+}
 
 /// Starts a budgeted snapshot: resets `save_buf`, writes the header and small sections, opens MOD_STORE and freezes the modified-chunk plan.
 /// Returns the number of chunks to write (feed to `writeBatch()`), or -1 on failure.
@@ -726,7 +775,7 @@ pub fn beginSnapshot() i64 {
         return -1;
     }
     plan.clearRetainingCapacity();
-    shadow.clearRetainingCapacity();
+    clearShadow();
     plan_cursor = 0;
     save_buf.clearRetainingCapacity();
     snapshot_active = false;
@@ -763,18 +812,25 @@ fn beginSnapshotInner() !void {
     try writeTools(&w);
     try writeMisc(&w);
 
-    snapshot_history_len = world.mod_store.history.len;
+    snapshot_entries_len = world.mod_store.entries.len;
     var it = world.mod_store.index.iterator();
     while (it.next()) |entry| {
         try plan.append(save_alloc, .{ .key = entry.key_ptr.*, .idx = entry.value_ptr.* });
     }
 
-    // open the MOD_STORE section with its exact length precomputed from the fixed record size,
-    // so nothing needs backpatching and the stream can be hashed strictly in order
+    // Open the MOD_STORE section with its exact length precomputed, so nothing needs backpatching and the
+    // stream can be hashed strictly in order. Records are variable-length now, so the length is summed over
+    // the frozen plan rather than derived from a fixed record size; `shadowEntryForSave()` preserves each
+    // planned entry at exactly the size counted here, so later edits cannot invalidate this total.
+    var payload_len: u64 = varintLen(plan.items.len);
+    for (plan.items) |e| {
+        payload_len += MOD_KEY_BYTES + entryPayloadBytes(world.mod_store.entries.at(e.idx));
+    }
+
     try w.int(u16, @intFromEnum(SectionTag.mod_store));
-    try w.int(u16, 1); // section version
+    try w.int(u16, 2); // section version
     mod_store_len_off = save_buf.items.len;
-    try w.int(u64, varintLen(plan.items.len) + plan.items.len * CHUNK_RECORD_BYTES);
+    try w.int(u64, payload_len);
     try w.varint(plan.items.len);
     snapshot_gen = world.mod_store.generation;
 
@@ -783,18 +839,36 @@ fn beginSnapshotInner() !void {
     hashed_upto = save_buf.items.len;
 }
 
-/// NOTE: MUST BE CALLED WHEN MOD_STORE IS MUTATED THROUGH `.at()` ACCESS BEFORE MODIFICATION!
-/// Preserves a planned chunk's snapshot-start contents before the game mutates it, so the in-flight save stays coherent at start-time.
-/// Called from the world's block-mutation paths with the chunk's `history` index; no-op unless a snapshot is active and the chunk is still unencoded.
-pub fn shadowChunkForSave(idx: usize) void {
+/// Preserves a planned entry's snapshot-start payload before the game mutates it, so the in-flight save stays
+/// coherent as of the instant it began.
+///
+/// Do NOT call this directly: `ModificationStore.beginWrite()` is the only way to mutate an entry and it
+/// calls this first, so no mutation path can forget to. No-op unless a snapshot is active and the entry is
+/// both planned and still unencoded.
+pub fn shadowEntryForSave(idx: usize) void {
     if (!snapshot_active) return;
-    if (idx >= snapshot_history_len) return; // appended after the snapshot began; not planned
+    if (idx >= snapshot_entries_len) return; // appended after the snapshot began; not planned
     if (shadow.contains(idx)) return; // already preserved at its start-of-snapshot state
-    const preserved = world.mod_store.history.at(idx).*;
-    shadow.put(save_alloc, idx, preserved) catch {
+
+    const entry = world.mod_store.entries.at(idx);
+    const size: usize = @intCast(entryPayloadBytes(entry));
+
+    preserve(idx, entry, size) catch {
         // can't preserve it -> abort rather than emit an incoherent save
         snapshot_active = false;
     };
+}
+
+fn preserve(idx: usize, entry: *const world.ModEntry, size: usize) !void {
+    var list: std.ArrayList(u8) = try .initCapacity(save_alloc, size);
+    errdefer list.deinit(save_alloc);
+
+    var w: Writer = .{ .list = &list };
+    try writeEntryPayload(&w, entry);
+    // The plan's precomputed section length counted exactly `size` bytes for this entry.
+    std.debug.assert(list.items.len == size);
+
+    try shadow.put(save_alloc, idx, try list.toOwnedSlice(save_alloc));
 }
 
 /// Encodes more chunks of the frozen plan into `save_buf`.
@@ -832,13 +906,13 @@ fn writeBatchInner(w: *Writer, max_chunks: usize) !void {
     const end = @min(plan_cursor + max_chunks, plan.items.len);
     while (plan_cursor < end) : (plan_cursor += 1) {
         const e = plan.items[plan_cursor];
-        // prefer the copy-on-write snapshot if the game has since touched this chunk
-        const chunk: *const Chunk = if (shadow.getPtr(e.idx)) |c| c else world.mod_store.history.at(e.idx);
-        try w.int(u64, e.key.suffix[0]);
-        try w.int(u64, e.key.suffix[1]);
-        try w.int(u64, e.key.depth);
-        try w.int(u32, e.key.quadrant);
-        try w.bytes(std.mem.sliceAsBytes(chunk.blocks[0..]));
+        try writeEntryKey(w, e.key);
+        // prefer the copy-on-write payload if the game has since touched this entry
+        if (shadow.get(e.idx)) |preserved| {
+            try w.bytes(preserved);
+        } else {
+            try writeEntryPayload(w, world.mod_store.entries.at(e.idx));
+        }
     }
 }
 
@@ -852,4 +926,57 @@ fn finalizeSnapshot(w: *Writer) !void {
     var hash_buf: [32]u8 = undefined;
     snapshot_hasher.final(&hash_buf);
     try w.bytes(&hash_buf);
+}
+
+const testing = std.testing;
+
+test "mod_store: encoding/decoding is correct" {
+    world.mod_store.init(testing.allocator);
+    defer world.mod_store.deinit();
+
+    // dead beef haha
+    const key: DepthCoordinate = .{
+        .suffix = .{ 0xDEAD, 0xBEEF },
+        .depth = 11,
+        .quadrant = 2,
+    };
+    const cells = [_]struct { i: u8, cell: world.ModCell }{
+        .{ .i = 0, .cell = .{ .id = .stone, .base_id = .none, .hp = 0 } },
+        .{ .i = 77, .cell = .{ .id = .water, .base_id = .none, .hp = 15 } },
+        .{ .i = 255, .cell = .{ .id = .none, .base_id = .stone, .hp = 4 } },
+    };
+    for (cells) |c| world.mod_store.beginWrite(key).setCell(c.i, c.cell);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(save_alloc);
+    var w: Writer = .{ .list = &buf };
+
+    const entry = world.mod_store.get(key).?;
+    try writeEntryPayload(&w, entry);
+    // The precomputed size the snapshot plan budgets must match what the writer actually emits.
+    try testing.expectEqual(entryPayloadBytes(entry), buf.items.len);
+
+    // Re-read into a fresh store, exactly as readModStore() does (an empty remap table is the identity).
+    world.mod_store.init(testing.allocator);
+    var r: Reader = .{ .buf = buf.items };
+
+    var authored: @FieldType(world.ModEntry, "authored") = undefined;
+    var count: usize = 0;
+    for (&authored) |*word| {
+        word.* = try r.int(u64);
+        count += @popCount(word.*);
+    }
+    try testing.expectEqual(cells.len, count);
+
+    var decoded: [dw.CHUNK_SIZE_SQ]world.ModCell = undefined;
+    for (decoded[0..count]) |*cell| {
+        const packed_cell: PackedCell = @bitCast(try r.int(u32));
+        cell.id = remapSpriteId(@intCast(packed_cell.id));
+        cell.base_id = remapSpriteId(@intCast(packed_cell.base_id));
+        cell.hp = @intCast(packed_cell.hp);
+    }
+    try world.mod_store.loadEntry(key, authored, decoded[0..count]);
+
+    for (cells) |c| try testing.expectEqual(c.cell, world.mod_store.getCell(key, c.i).?);
+    try testing.expectEqual(@as(?world.ModCell, null), world.mod_store.getCell(key, 1));
 }
