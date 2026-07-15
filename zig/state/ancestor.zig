@@ -229,16 +229,13 @@ pub fn getParentInfo(key: DepthCoordinate, bx: u4, by: u4) ParentInfo {
 }
 
 /// Retrieves a full chunk at any depth, handling cache and procedural generation.
+/// The cache holds materialized chunks (`mod_store` carries no block data of its own), so a hit already
+/// includes the player's edits and a miss replays them as part of generating the slot.
 pub fn getAncestorChunk(key: DepthCoordinate) *const Chunk {
-    // Check user modifications first...
-    if (world.mod_store.get(key)) |mod| return mod;
-
-    // Check the ancestor cache
     if (ancestor_cache.get(key)) |cached| return cached;
 
-    // Generate the chunk into the cache slot
     const slot = ancestor_cache.allocateSlot(key);
-    world.generateChunk(slot, key);
+    world.materializeChunk(slot, key);
     return slot;
 }
 
@@ -337,21 +334,27 @@ pub fn applyAncestorLogic(
         }
     }
 
+    // A submerged waterloggable parent must stay submerged in its children. Generating them dry leaves the
+    // pool out of equilibrium, so the sim floods them on the chunk's first tick and writes a modification
+    // entry for terrain the player never touched. On a waterloggable block, `hp` IS its water volume.
+    // (Liquids need no propagation: `BlockSpec.compile()` already fills a liquid id to `MAX_HP`.)
+    const inherited_water: u4 = if (parent_sprite.isWaterloggable()) parent_block.hp else 0;
+
     // Inherit plant still!
     if (parent_sprite == .spiral_plant)
-        return .{ .id = .spiral_plant, .seed = noise_hash_2 };
+        return .{ .id = .spiral_plant, .seed = noise_hash_2, .water_volume = inherited_water };
 
     if (parent_sprite == .mushroom) {
         // Only make specific sub-blocks of a mushroom parent become big mushroom!
         return if ((bx % 4 == 1 or bx % 4 == 2) and by % 4 == 3)
-            .{ .id = .big_mushroom, .seed = noise_hash_2 }
+            .{ .id = .big_mushroom, .seed = noise_hash_2, .water_volume = inherited_water }
         else
             .{}; // bypass edges logic too
     }
 
     // Fallback for all other non-foundation blocks (decorations, chests, furnaces, liquids, etc.)
     if (!parent_sprite.isFoundation()) {
-        return .{ .id = parent_sprite.evolvesTo(), .seed = noise_hash_2 };
+        return .{ .id = parent_sprite.evolvesTo(), .seed = noise_hash_2, .water_volume = inherited_water };
     }
 
     // var seed = parent_block.seed;
@@ -409,16 +412,21 @@ pub fn applyAncestorLogic(
 }
 
 /// Traces the lineage of a single block type. Target depth is described in the `DepthCoordinate`.
+///
+/// A modified chunk does NOT force a full materialization here: the lineage trace stays procedural,
+/// and the player's edit is overlaid on the single cell that was asked for.
+/// Cached chunks are already materialized, so they need no overlay.
 pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
     const target_depth = key.depth;
     if (target_depth == STARTING_ZOOM_TIMES) {
         const block_idx = (@as(usize, by) << dw.CHUNK_SIZE_LOG2) | bx;
 
-        if (world.mod_store.get(key)) |modified| return modified.blocks[block_idx];
+        // A cache hit is already materialized (mods overlaid by `materializeChunk()`), so no separate
+        // `mod_store` lookup is needed: a miss replays the edits as part of generating the slot.
         if (ancestor_cache.get(key)) |cached| return cached.blocks[block_idx];
 
         const slot = ancestor_cache.allocateSlot(key);
-        world.generateBaseChunk(slot, key.asCoord());
+        world.materializeChunk(slot, key);
         return slot.blocks[block_idx];
     }
 
@@ -428,7 +436,7 @@ pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
 
     const block_idx = (@as(usize, by) << dw.CHUNK_SIZE_LOG2) | bx;
 
-    if (world.mod_store.get(key)) |modified| return modified.blocks[block_idx];
+    // A cache hit is already materialized (mods overlaid).
     if (ancestor_cache.get(key)) |cached| return cached.blocks[block_idx];
 
     const p = getParentInfo(key, bx, by);
@@ -469,7 +477,9 @@ pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
         }
     }
 
-    return applyAncestorLogic(parent_block, neighbors, key, bx, by).compile();
+    var block = applyAncestorLogic(parent_block, neighbors, key, bx, by).compile();
+    if (world.mod_store.getCell(key, @intCast(block_idx))) |cell| cell.applyTo(&block);
+    return block;
 }
 
 /// Fetches a 6x6 neighborhood of parent IDs for the generator. Requires a specific depth and location.

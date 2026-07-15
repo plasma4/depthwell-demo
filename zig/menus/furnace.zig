@@ -233,8 +233,8 @@ pub fn draw() void {
     // Slot centers, in UV and in viewport pixels.
     const input_uv: Vec2f32 = menu_center - Vec2f32{ 0.1, 0.0 };
     const output_uv: Vec2f32 = menu_center + Vec2f32{ 0.1, 0.0 };
-    const input_px = util.uvToPx(input_uv);
-    const output_px = util.uvToPx(output_uv);
+    const input_px = dw.entity.uvToViewport(input_uv);
+    const output_px = dw.entity.uvToViewport(output_uv);
 
     const SLOT_SIZE: f64 = 20.0;
     const ITEM_SIZE: f32 = 16.0;

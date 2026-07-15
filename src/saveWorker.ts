@@ -7,9 +7,6 @@
  * - once a message arrives, truncate+write+flush complete synchronously
  * - a save transferred during `pagehide` survives even though the page and worker are forced to shut down in a short time window
  *
- * The handle is acquired once at startup and held for the whole session and the lock forces the main thread to read the slot through this worker as well.
- * The slot is cleared after every committed normal save, so a non-empty slot is always newer than the committed `MAIN` save.
- *
  * A torn write fails BLAKE3 validation and the loader falls back to `MAIN`/`BAK`
  * (this way we can easily verify validity if a device crash occurs or similar)!
  */
@@ -22,6 +19,8 @@ interface FileSystemSyncAccessHandle {
     close(): void;
 }
 
+// The handle is acquired once at startup and held for the whole session and the lock forces the main thread to read the slot through this worker as well.
+// The slot is cleared after every committed normal save, so a non-empty slot is always newer than the committed `MAIN` save.
 declare global {
     interface FileSystemFileHandle {
         createSyncAccessHandle(): Promise<FileSystemSyncAccessHandle>;

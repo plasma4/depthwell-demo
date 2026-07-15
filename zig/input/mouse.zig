@@ -24,7 +24,7 @@ pub const ClickFocus = enum(u32) {
     canvas,
     /// Click started specifically on an inventory slot.
     inventory,
-    /// Click started specifically on an in-world indicator overlay such as above furances/cores.
+    /// Click started specifically on an in-world indicator overlay such as above furnaces/cores.
     indicator,
     /// Click started specifically on a smelting menu panel.
     smelting,

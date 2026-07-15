@@ -143,13 +143,21 @@ const render_sliders = [_]SliderDef{
 
 /// List of debug buttons that either execute functions or toggle booleans.
 pub const buttons = [_]ButtonDef{
-    // .{
-    //     .name = "Teleport to edge",
-    //     .action = teleportToEdge,
-    // },
+    .{
+        .name = "Teleport to edge",
+        .action = teleportToEdge,
+    },
     .{
         .name = "Teleport randomly",
         .action = teleportRandomly,
+    },
+    .{
+        .name = "Clear caches",
+        .action = clearCaches,
+    },
+    .{
+        .name = "Audit worldgen odds",
+        .action = dw.audit.runAroundPlayer,
     },
     .{
         .name = "Toggle creative",
@@ -178,6 +186,10 @@ fn teleportToEdge() void {
         .{ dw.CHUNK_SIZE_SQ * 5 / 2, dw.CHUNK_SIZE_SQ * 5 / 2 },
     );
     main.findSafeSpawn();
+}
+
+fn clearCaches() void {
+    dw.world.clearCaches(true);
 }
 
 /// Internal random number for teleport PRNG.
