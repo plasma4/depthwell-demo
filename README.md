@@ -154,7 +154,7 @@ But wait, what is a block? Here is `zig/memory.zig`:
 /// - word0: `id` | `edge_flags` | `light`
 /// - word1: `hp` | `seed` (the shader reads the whole word as seed0, so `hp` is folded into the seed for free)
 /// - word2: `base_id` | `id_edge_flags` | `lighting_color`
-/// - word3: `waterlogged` | `_pad`
+/// - word3: `waterlogged` | `group_x` | `group_y` | `_pad`
 pub const Block = packed struct(u128) {
     /// A block with an `id` of `none`.
     pub const empty: Block = .makeBasicBlock(.none, 0);
@@ -196,22 +196,27 @@ pub const Block = packed struct(u128) {
     /// - 1: warm orange glow
     lighting_color: u8 = 0,
 
-    /// Dual-purpose directional waterlogging field (bits 0-4 used):
-    /// - For liquid blocks: represents adjacent water heights/volumes.
-    /// - For non-liquid blocks: bits represent surrounding waterlogged cardinal directions.
-    ///   - bit 0: top (liquid block directly above)
+    /// Packed directional waterlogging field (bits 0-10 used; see `WaterloggedState` in zig/state/water.zig).
+    /// - For liquid blocks: only bit 0 is read (liquid directly above).
+    /// - For non-liquid blocks: encodes the surrounding water for the shader's surface fill and interpolation.
+    ///   - bit 0: top (water of any depth directly above; fully submerges/fills the block)
     ///   - bit 1: bottom (full liquid block directly below at HP=15)
-    ///   - bit 2: whether ripple occurs from the top (top ripple cutoff)
-    ///   - bit 3: left (liquid block directly to the left)
-    ///   - bit 4: right (liquid block directly to the right)
-    waterlogged: u8 = 0,
+    ///   - bit 2: top ripple cutoff (adjacent water surface is exposed to air)
+    ///   - bits 3-6: left adjacent liquid volume (0-15; 0 means no liquid to the left)
+    ///   - bits 7-10: right adjacent liquid volume (0-15; 0 means no liquid to the right)
+    waterlogged: u12 = 0,
+    /// Column of this tile within its `Assembly` footprint (0-based, 0..w-1). See `zig/types/assembly.zig`.
+    /// CPU-render-only: consumed by variation.resolveVariant() for `.group` sprites; never uploaded to the shader.
+    group_x: u4 = 0,
+    /// Row of this tile within its `Assembly` footprint (0-based, 0..h-1). See `group_x`.
+    group_y: u4 = 0,
     /// Unused portion of block data.
-    _pad: u24 = 0,
+    _pad: u12 = 0,
     ...
 }
 ```
 
-Well, now you know what a block contains.
+Well, now you know what a block contains. Two of these fields — the `edge_flags`/`id_edge_flags` neighbor masks and the `group_x`/`group_y` footprint position — power higher-level abstractions worth their own explanations; see "Edge flags" and "Sprite variation and assemblies" below.
 
 The most complex part of Depthwell's architecture, though, is ensuring that a hole mined at Depth 0 results in an empty 4-by-4 region at Depth 1, 16-by-16 at Depth 2, and so on. This is handled through a neat little **lineage check** during chunk generation.
 
@@ -375,6 +380,18 @@ if (progress != 255 and progress != 0) {
 ```
 
 You can see how because the entities are _ordered_, it's easy to add a shadow. Additionally, the usage of white text or masks works perfectly with OKLCH (which stands for lightness, chroma, and hue). This means that not only can entities have various small color shifts, but they can also perfectly be masked with a white sprite (see the sprite sheet up top)! (Remember that a sprite is a physical 16x16 area of the sprite sheet, and entities can easily render this.)
+
+#### Sprite variation and assemblies
+
+An `id` in a `Block` is only the _base_ atlas tile; the tile actually drawn is resolved once per visible block per frame by `resolveVariant()` in `zig/types/variation.zig`, on the CPU right after lighting and before upload. It's a data-driven table: each sprite maps to at most one `VariantRule`, and every variant's frames must be contiguous atlas IDs starting at the base (`base+0 … base+count-1`), which a comptime check enforces. The kinds cover the common needs:
+
+- `grid_2x2` / `checkerboard` tile by tile-coordinate parity, so plain stone reads like a 32x32 texture instead of an obvious grid.
+- `seed_pick` chooses a frame from the block's seed (biased toward the base), giving mushrooms and bushes silent variety.
+- `animate` cycles frames on a fixed `period_frames` cadence (campfires, hovering cores).
+- `water_top` swaps to the surface sprite when nothing covers the block above.
+- `group` handles multi-tile assemblies (below).
+
+An **assembly** (`zig/types/assembly.zig`) is a rectangular group of tiles — a big tree, say — treated as one unit but stored as a single generic base `Sprite` in _every_ cell. Each cell also stores its position inside the footprint in `Block.group_x`/`group_y` (each a `u4`, so assemblies cap at 15x15). The `group` variant flattens `(group_x, group_y)` into a frame offset (`group_y * group_w + group_x`) at render time, so one stored sprite id expands into the correct per-cell atlas frame (left/right and so on). `stampChunk()` writes an assembly's cells during generation, and `originDelta()` lets the support/cascade logic walk any cell back to the group's top-left origin so the whole assembly breaks as a unit when mined. Comptime cross-checks tie each registered footprint to its `.group` variation rule, so a stored `(group_x, group_y)` can never index past the sprite's atlas frames.
 
 #### The fractal modification buffer
 
@@ -632,6 +649,17 @@ When a tile is sampled from the atlas, it is immediately converted from linear s
 
 (OKLAB is just awesome!)
 
+#### Edge flags
+
+Both `edge_flags` and `id_edge_flags` on a `Block` are an 8-bit "who are my neighbors?" bitmask, packed in reading order (top-left, top, top-right, left, right, bottom-left, bottom, bottom-right — the block itself is skipped). `zig/types/types.zig` names one bit per direction (`EdgeFlags.TOP_LEFT = 0x01` … `BOTTOM_RIGHT = 0x80`), and `EdgeFlags.getFlagBit(dx, dy)` maps a neighbor offset back to its bit.
+
+The two fields answer slightly different questions:
+
+- `edge_flags` records whether each neighbor is "the same _kind_ of surface." For a solid block, a set bit means a solid neighbor; for a liquid, it means a solid-or-liquid neighbor. This is what the shader's erosion pass reads to decide which corners to round and which edges to notch, and it's what makes a wall read as one continuous mass rather than a grid of squares.
+- `id_edge_flags` is stricter: a bit is set only when the neighbor's `id` is _exactly_ this block's `id`. It drives the ore/gem overlay mask so a copper vein connects only to other copper, not to the stone around it.
+
+One critical convention: decorations, air, and anything that shouldn't erode have both masks forced to `0xFF` (all neighbors "present") after the final generation pass. A fully-surrounded block has no exposed edges, so the shader skips erosion and edge-darkening entirely — that's how a mushroom or flower renders as its flat sprite instead of being chewed up by the wall algorithm. Any code that recomputes flags (after mining, placing, or a water change) must re-apply this reset, or decorations start eroding.
+
 #### Procedural erosion
 
 Instead of using thousands of unique sprites for different wall shapes, Depthwell uses a single "foundation" sprite and a procedural erosion algorithm. (This also means less work in terms of drawing sprites.)
@@ -663,6 +691,19 @@ You can imagine the specific position as effectively being `(chunk ID + sub-chun
 For the water, there's similar complicated modulo wrapping logic; however, this is based on the chunk's and subpixel position and is easier to reason about. (For water, it's modulo 256 instead of 512.)
 
 (There are a lot more details within `zig/render/chunk.zig` as to how this is exported. For the water, see `zig/state/water.zig` for update calculations.)
+
+#### Water simulation
+
+The water itself is a cellular automaton living in `zig/state/water.zig`, run over the loaded `SimBuffer`. There's no separate "water" grid: a cell's volume from 0 to 15 is stored right in a block's `hp` field (which for a solid block instead means mining progress — the two never coexist). Water lives both as full `water` blocks and as _waterlogging_ inside decorations and crafters (anything `isWaterloggable()`), which lets a pool soak through a bush without deleting it.
+
+The core invariant is **mass conservation**: `tickWater()` only ever _moves_ volume between cells within the `SimBuffer`, never creating or destroying it. (A debug flag, `VERIFY_WATER_MASS`, asserts the total is stable each tick.) A tick runs in phases:
+
+1. Collect chunks that hold water and haven't yet settled; if none, the whole tick is skipped.
+2. Sweep active chunks bottom-up so falling water moves one cell per tick without being double-moved (guarded by the per-cell `water_updated` bitset), then spread laterally (tracked by `lateral_received`). Every cell whose volume actually changed is recorded in `cells_changed`.
+3. Chunks that saw no movement are marked settled and skipped by future ticks until something disturbs them.
+4. Recompute the `edge_flags` and `waterlogged` masks for every chunk touched this tick (plus chunks queued by manual placement via `queueWaterFlags()`), so the shader's surface fill, ripples, and left/right volume interpolation stay correct.
+
+Because volume travels between blocks whose neighbors may live in adjacent chunks, the flag pass and the sweep both reach across chunk borders inside the `SimBuffer`. Only the cells the sim actually moved are persisted (via `cells_changed`), so a large calm ocean costs almost nothing per tick, and a settled body of water drops out of the active set entirely.
 
 ### Copyright
 
