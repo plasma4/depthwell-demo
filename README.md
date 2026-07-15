@@ -48,7 +48,7 @@ Alternatively, use and modify `.githooks/pre-commit`.
 
 #### About version control
 
-NOTE: you can change whether diffs are visually shown through `.vscode/settings.json` (ideal with Git-only version control). Use `git symbolic-ref HEAD refs/heads/main` to go update Git to see main changes when using Jujitsu, if you plan to keep VSCode diffs.
+NOTE: you can change whether diffs are visually shown through `.vscode/settings.json`.
 
 Run `jj git init` and `jj bookmark track main --remote=origin` after cloning if you plan to use Jujitsu.
 
