@@ -15,25 +15,11 @@ const Rect = structures.Rect;
 pub const spawn_area: u32 = 128;
 pub const max_w: u32 = 20;
 pub const max_h: u32 = 20;
-pub const target_chance: f64 = 0.30;
+pub const target_chance: f64 = 0.36;
 
-pub fn getBounds(state: *HashState, cx: i32, cy: i32) Rect {
-    const i_area = @as(i32, @intCast(spawn_area));
+pub fn getBounds(state: *HashState, cx: i32, cy: i32) ?Rect {
     const radius = state.getRange(i32, 5, 10);
-    const max_pos_x = i_area - (radius * 2);
-    const max_pos_y = i_area - (radius * 2);
-
-    const pos_x = @as(i32, @intCast(state.getLimit(u32, @intCast(max_pos_x))));
-    const pos_y = @as(i32, @intCast(state.getLimit(u32, @intCast(max_pos_y))));
-
-    const x_start = cx * i_area + pos_x;
-    const y_start = cy * i_area + pos_y;
-    return .{
-        .x_start = x_start,
-        .y_start = y_start,
-        .x_end = x_start + (radius * 2),
-        .y_end = y_start + (radius * 2),
-    };
+    return structures.jitter(state, cx, cy, spawn_area, radius * 2, radius * 2);
 }
 
 pub fn generate(
@@ -47,21 +33,17 @@ pub fn generate(
     struct_seed: Vec2u,
 ) ?structures.StructureResult {
     _ = starting_sprite;
-    _ = bounds;
-    const i_area = @as(i32, @intCast(spawn_area));
+    _ = cx;
+    _ = cy;
     const i_wx = @as(i32, @bitCast(wx));
     const i_wy = @as(i32, @bitCast(wy));
 
-    const radius = state.getRange(i32, 5, 10);
+    // the hashed radius is already baked into the bounds (see getBounds), so no re-rolls are needed
+    const radius = @divExact(bounds.x_end - bounds.x_start, 2);
     const core_radius = radius - 2;
-    const max_pos_x = i_area - (radius * 2);
-    const max_pos_y = i_area - (radius * 2);
 
-    const pos_x = @as(i32, @intCast(state.getLimit(u32, @intCast(max_pos_x))));
-    const pos_y = @as(i32, @intCast(state.getLimit(u32, @intCast(max_pos_y))));
-
-    const struct_x = i_wx - (cx * i_area + pos_x);
-    const struct_y = i_wy - (cy * i_area + pos_y);
+    const struct_x = i_wx - bounds.x_start;
+    const struct_y = i_wy - bounds.y_start;
 
     if (struct_x >= 0 and struct_y >= 0 and struct_x < radius * 2 and struct_y < radius * 2) {
         // Get center of the geode relative to the area

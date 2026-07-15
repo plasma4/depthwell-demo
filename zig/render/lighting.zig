@@ -28,7 +28,8 @@ pub const AMBIENT_LIGHT_DEBUG: u8 = 255;
 pub var DEBUG_LIGHT = false;
 
 // Light strength values for various sources:
-pub const PLAYER_LIGHT: u16 = 300;
+pub var PLAYER_LIGHT: u16 = 300;
+pub const MAX_PLAYER_LIGHT: u16 = 400;
 // ---
 pub const CAMPFIRE_LIGHT: u16 = 240;
 pub const FURNACE_LIGHT: u16 = 80;
@@ -37,13 +38,12 @@ pub const PLATE_LIGHT: u16 = 160;
 pub const LAVA_LIGHT: u16 = 60;
 
 // Orthogonal decay rates per block type. Air should always be the lowest (decays slowest)!
-// Logic is optimized and dependent around air falloff being 10 and solid falloff being 26.
 pub const AIR_FALLOFF: u16 = 10;
 pub const SOLID_FALLOFF: u16 = 26;
-pub const LIQUID_FALLOFF: u16 = 18;
+pub const LIQUID_FALLOFF: u16 = SOLID_FALLOFF - 12;
 
 /// Brightest possible seed value; bounds the number of Dial buckets.
-const MAX_SOURCE: u16 = @max(PLAYER_LIGHT, @max(CAMPFIRE_LIGHT, @max(FURNACE_LIGHT, PLATE_LIGHT)));
+const MAX_SOURCE: u16 = @max(MAX_PLAYER_LIGHT, @max(CAMPFIRE_LIGHT, @max(FURNACE_LIGHT, PLATE_LIGHT)));
 const NUM_BUCKETS: usize = MAX_SOURCE + 1;
 
 comptime {
@@ -116,7 +116,7 @@ inline fn diagCost(ortho: u16) u16 {
 /// Simulates the worst-case (straight line, air) light path to find max reach distance in blocks.
 fn maxAirReachBlocks() comptime_int {
     comptime {
-        var brightest_possible_source: u16 = @max(PLAYER_LIGHT, @max(CAMPFIRE_LIGHT, PLATE_LIGHT));
+        var brightest_possible_source: u16 = @max(MAX_PLAYER_LIGHT, @max(CAMPFIRE_LIGHT, PLATE_LIGHT));
         var blocks: comptime_int = 0;
         const light = @min(AMBIENT_LIGHT, AMBIENT_LIGHT_DEBUG);
         while (brightest_possible_source > AIR_FALLOFF and (brightest_possible_source - AIR_FALLOFF) > light) {

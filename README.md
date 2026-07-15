@@ -31,9 +31,15 @@ For inventory hotkeys:
 
 ### Building
 
-To build `node_modules`, run `npm install`.
+To build `node_modules` and begin, run `npm install`.
 
-Run `zig build` to build Zig code and automatically detect `main.aseprite` changes, `zig test "zig/root.zig"` to run (all) tests, and `zig build -Dgen-enums` to simultaneously build and generate `enums.ts` if changes were made. (See `build.zig` for details on compiling a final version.)
+Run:
+
+- `zig build` to build Zig code (automatically detects `main.aseprite` changes)
+- `zig build -Dgen-enums` to build _and_ generate `enums.ts` if changes were made.
+- `zig test "zig/root.zig"` to run (all) tests
+
+See `build.zig` for more options on compiling a final version! It's enormously helpful to use the Zig Language Server in VSCode/VSCodium and set it to "watch" mode, which automatically builds the WASM while providing highlighting any errors as well as "Go to Definition" quality-of-life.
 
 Useful variables to customize include `CONFIG` in `src/main.ts`, `engine.wireframeOpacity`, `engine.baseSpeed`, and `zig/state/player.zig` config options.
 
@@ -42,13 +48,11 @@ Alternatively, use and modify `.githooks/pre-commit`.
 
 #### About version control
 
-NOTE: you can re-enable whether diffs are visually shown through `.vscode/settings.json` (ideal with Git-only version control).
+NOTE: you can change whether diffs are visually shown through `.vscode/settings.json` (ideal with Git-only version control). Use `git symbolic-ref HEAD refs/heads/main` to go update Git to see main changes when using Jujitsu, if you plan to keep VSCode diffs.
 
-It is quite helpful to use the Zig Language Server in VSCode/VSCodium and set it to "watch" mode, which automatically builds the WASM while providing highlighting any errors.
+Run `jj git init` and `jj bookmark track main --remote=origin` after cloning if you plan to use Jujitsu.
 
-You can also easily build for Windows by using a shell script executor, or you can convert the commands to their Windows equivalents very easily.
-
-Depthwell supports both Git and Jujitsu using `.sh` files. Git VCS is supported by default; to use Jujitsu building for release, simply run `./build.sh` (after running `chmod +x ./build.sh`).
+Git VCS is supported by default; to use Jujitsu building for release, simply run `./build.sh` (after running `chmod +x ./build.sh`). You can also easily build/push for Windows by converting the commands to their Windows equivalents very easily.
 
 To commit to the main branch, you can use `./push.sh` (after running `chmod +x ./push.sh`) or create an alias in your config.
 
@@ -140,7 +144,7 @@ Of course, to have a fractal _mining_ game, you must store if the player has mod
 
 > Does this chunk have any blocks where the player replaced a block of type A with type B?
 
-(Air/empty space is itself a type of block.) If the answer is YES (even if it's just one block in a chunk with 256 blocks that's different), then a modified chunk is recorded within the `ModificationStore` (with a `DepthCoordinate` referencing both location and height).
+(Air/empty space is itself a type of block.) If the answer is YES, that chunk gets an entry in the `ModificationStore` (keyed by a `DepthCoordinate` referencing both location and height). The entry is _sparse_ — it records only the individual cells that differ, so a single edited block in a 256-block chunk costs one cell, not a whole chunk. See "The fractal modification buffer" below for the layout.
 
 But wait, what is a block? Here is `zig/memory.zig`:
 
@@ -381,47 +385,47 @@ The _goal_ with modifications is to ensure the following:
 4. Minimize heap fragmentation and "allocation churn."
 5. The entire state can be stored inside RAM.
 
-Therefore, the current solution is to hash a `DepthCoordinate` using `std.hash.autoHash`. A `std.HashMap` stores these hashes and indexes a dynamically allocated array of `Chunk`s (the dense data representing a chunk's entire modifications) utilizing a segmented list storage setup. See some definitions and more details:
+Therefore, the current solution is to hash a `DepthCoordinate` and use it to index a per-chunk **`ModEntry`**. A `ModEntry` is _sparse_: rather than a full 4KiB `Chunk`, it stores only the cells the player (or the water sim) actually authored, as an `authored` bitmap (one bit per block) plus a packed `ModCell` array kept in ascending block-index order. A `ModCell` holds just the three _authoritative_ fields that cannot be recovered by regenerating the chunk — `id`, `base_id`, and `hp`. Everything else (`seed`, `edge_flags`, `light`, `group_x/y`, waterlogging) is _derived_ and is rebuilt by `materializeChunk()`, which replays every authored cell over a freshly generated chunk and then reruns the flag pass. So a chunk the player mined 30 blocks out of costs ~210 bytes here, not 4KiB. See some definitions and more details:
 
 ```zig
-/// Stores and handles modifications of chunks. Functions across depths.
-pub const ModificationStore = struct {
-    /// `HashMap`-based system to store indexes to `history`.
-    index: std.HashMap(
-        DepthCoordinate,
-        usize,
-        DepthCoordinateContext,
-        std.hash_map.default_max_load_percentage,
-    ),
-    /// Expandable list that stores modified `Chunk` data (256KiB pre-allocation).
-    history: SegmentedList(Chunk, 128) = .{},
+/// One authored cell: the only `Block` fields that cannot be recovered by regenerating the chunk.
+pub const ModCell = extern struct { id: Sprite, base_id: Sprite, hp: u8 };
 
-    pub fn init(allocator: std.mem.Allocator) ModificationStore {
-        return .{
-            .index = std.HashMap(
-                DepthCoordinate,
-                usize,
-                DepthCoordinateContext,
-                std.hash_map.default_max_load_percentage,
-            ).init(allocator),
-        };
-    }
-
-    /// Gets an existing modification for reading.
-    pub fn get(self: *const @This(), key: DepthCoordinate) ?*const Chunk {
-        const id = self.index.get(key) orelse return null;
-        return self.history.at(id);
-    }
-
-    /// Completely wipes all user modifications. Should be followed by `world.clearCaches(true)`.
-    pub fn clear(self: *@This()) void {
-        self.index.clearRetainingCapacity();
-        self.history.clearRetainingCapacity();
-    }
+/// The modifications to a single chunk, as a sparse set of authored cells rather than a full `Chunk`.
+pub const ModEntry = struct {
+    /// Bit `i` set means `cells[rank(i)]` holds the authored value for block index `i`.
+    authored: [AUTHORED_WORDS]u64 = @splat(0),
+    /// Authored cells in ascending block-index order; the first `count` are live, the rest spare capacity.
+    cells: []ModCell = &.{},
+    /// Live entries in `cells`; always equals the population count of `authored`.
+    count: u16 = 0,
+    // get(i)/isAuthored(i)/applyTo(chunk)/rank(i) omitted; mutate ONLY via ModWriter (see beginWrite()).
 };
 
-/// Stores and handles modifications of chunks across various depths.
-pub var mod_store: ModificationStore = undefined;
+/// Stores and handles modifications of chunks. Functions across depths.
+pub const ModificationStore = struct {
+    /// Maps a chunk to its stable index in `entries` (the budgeted save snapshot relies on stability).
+    index: std.HashMapUnmanaged(DepthCoordinate, usize, DepthCoordinateContext, std.hash_map.default_max_load_percentage) = .empty,
+    /// Every modification entry. `SegmentedList` only appends, so an index stays valid across later inserts.
+    entries: SegmentedList(ModEntry, 256) = .{},
+    /// Indices in `entries` whose chunk was removed, ready to be reused (`entries` itself never shrinks).
+    free_entries: std.ArrayList(usize) = .empty,
+    /// Bumped on init()/clear(); a budgeted save compares it to detect a mid-save wipe and abort.
+    generation: u64 = 0,
+    allocator: std.mem.Allocator = undefined,
+    live: bool = false,
+
+    /// Gets an existing entry for reading, or null if the chunk is unmodified.
+    pub fn get(self: *const @This(), key: DepthCoordinate) ?*const ModEntry { ... }
+    /// The authored value at one block, or null if still procedural. O(1) fast path for ancestor lookups.
+    pub fn getCell(self: *const @This(), key: DepthCoordinate, block_idx: u8) ?ModCell { ... }
+    /// The ONLY way to mutate the store: shadows the entry for any in-flight save, then returns a `ModWriter`.
+    pub fn beginWrite(self: *@This(), key: DepthCoordinate) ModWriter { ... }
+};
+
+/// Stores and handles modifications of chunks across various depths. Lives on `main_allocator`, NOT the
+/// world arena, because it frees entries and recycles cell blocks (which an arena cannot do).
+pub var mod_store: ModificationStore = .{};
 
 /// Stores what location a modification with an active suffix and quadrant, as well as its depth, to easily identify it.
 pub const DepthCoordinate = struct {
@@ -429,8 +433,8 @@ pub const DepthCoordinate = struct {
     /// Semantically equivalent to null.
     pub const invalid: @This() = .{
         .depth = 0,
-        .quadrant = undefined,
-        .suffix = undefined,
+        .quadrant = 0,
+        .suffix = .{ 0, 0 },
     };
 
     /// Active suffix (stored as a vector). Should not be set manually; must call `getParent()` to decrease the depth for depths beyond `HORIZON_DEPTH`.
@@ -451,6 +455,18 @@ pub const DepthCoordinate = struct {
 /// A static 2x2 grid of seeds only updated when depth increases or game startup. See `README.md` for a more detailed and intuitive explanation for what this does.
 pub const QuadCache = struct {
     pub const PATH_PREALLOC_SIZE = 256;
+    /// Ring length of the per-depth rolling buffers below, indexed by `depth % HISTORY_LEN`.
+    /// Must exceed `HORIZON_DEPTH` so a live depth D and its horizon ancestor D-`HORIZON_DEPTH` never
+    /// alias one slot (up to `HORIZON_DEPTH + 1` depths are live at once), and be a power of two.
+    pub const HISTORY_LEN = 64;
+
+    /// Per-depth history rings. `historical_seeds[depth % HISTORY_LEN]` gives the quadrant seeds a past
+    /// rebase depth was generated with; ancestor generation reads it back through `getQuadrantSeed()`.
+    /// (Reads and writes MUST share `HISTORY_LEN` — a mismatch reads a foreign/uninitialized slot and the
+    /// fractal re-rolls differently past the horizon, i.e. the "shifting world" bug.)
+    origins_x: [HISTORY_LEN]u3 = @splat(0),
+    origins_y: [HISTORY_LEN]u3 = @splat(0),
+    historical_seeds: [HISTORY_LEN]seeding.ChunkSeeds = undefined,
 
     /// The 512-bit hashes for the 4 active quadrants (sequentially from D to D-31).
     /// (0: NW, 1: NE, 2: SW, 3: SE)
@@ -496,7 +512,7 @@ Modifications of "higher" $D$-values are prioritized, and lower $D$-values are u
 - Reading performance is an amortized O(1) due to only needing to consider block sizes between depth $D-32$ to $D$.
 - Writing performance is an amortized O(1) due to needing to modify a `HashMap`.
 - Increasing depth is, surprisingly, an O(1) operation due to a lack of modification culling (to allow for a "spectator view" on death), and storing where things are with a 256-bit `DepthCoordinate` and assuming that collisions are impossible.
-- Space complexity is O(n) based on the number of modified chunks. Even if all modifications are reversed, each modified chunk still takes up 2KiB in history. However, this is stored as a `SegmentedList` to prevent large unused gaps in WASM memory.
+- Space complexity is O(n) based on the number of modified _cells_, not chunks: a `ModEntry` only holds the blocks actually authored (a `ModCell` is 5 bytes), so a lightly edited chunk costs a few hundred bytes rather than a full 4KiB `Chunk`. Removing a chunk's edits recycles its entry slot and cell block, but `entries` itself never shrinks (the budgeted save holds indices into it), so it is stored as a `SegmentedList` to prevent large unused gaps in WASM memory.
 
 #### Storing chunks with a simulation distance
 

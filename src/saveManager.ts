@@ -38,7 +38,7 @@ export class SaveManager {
     public constructor(engine: GameEngine) {
         this.engine = engine;
         // Ask the browser not to evict our saves under storage pressure (best-effort).
-        void navigator.storage?.persist?.();
+        navigator.storage?.persist?.();
 
         try {
             this.worker = new Worker(
@@ -82,7 +82,7 @@ export class SaveManager {
     /** Acquires a tab lock: returns true if successful and false if another tab with lock is open. */
     public tryAcquireTabExclusiveLock(): Promise<boolean> {
         return new Promise<boolean>((resolveResult) => {
-            void navigator.locks
+            navigator.locks
                 .request(
                     "depthwell-game",
                     { ifAvailable: true }, // fail immediately instead of queueing
@@ -246,6 +246,7 @@ export class SaveManager {
         ----
     */
 
+    // TODO: should we even gzip here or is compression good enough? we need to do practical gameplay+perf tests and evaluations
     private async gzip(bytes: Uint8Array): Promise<Uint8Array> {
         const stream = new Blob([bytes as any]) // typescript funny
             .stream()
@@ -381,7 +382,7 @@ export class SaveManager {
     public emergencySaveSync(): void {
         try {
             if (!this.worker || !this.workerReady) {
-                void this.save(false, false).catch((err) =>
+                this.save(false, false).catch((err) =>
                     console.warn("Fallback emergency save failed:", err),
                 );
                 return;
@@ -533,7 +534,7 @@ export class SaveManager {
                 // already gone
             }
         }
-        // The emergency slot is lock-held by the worker; clear it there instead of removeEntry().
+        // The emergency slot is lock-held by the worker; it's cleared there instead of removeEntry().
         if (this.workerReady) this.worker?.postMessage({ kind: "clear" });
     }
 }

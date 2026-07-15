@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
     inline for (root_info.@"struct".decls) |struct_declaration| {
         const T = @TypeOf(@field(dw, struct_declaration.name));
 
-        // Extract all functions from root.zig. (ALL functions from root.zig should be marked as "pub".)
+        // Extract all functions from root.zig. (ALL functions from root.zig should be marked as "pub", excluding the panic handler.)
         if (@typeInfo(T) == .@"fn") {
             const fn_info = @typeInfo(T).@"fn";
             if (!(std.mem.eql(u8, struct_declaration.name, "panic") or std.mem.eql(u8, struct_declaration.name, "GenerateOffsets"))) {

@@ -7,33 +7,23 @@
 //!        T
 //!        T
 //!
-//! To gate placement on terrain (as this tree only appears on ground), we:
-//!  - sample ONLY base terrain via `procedural.getBaseSpriteType(cx, cy, bx, by).sprite.isFoundation()`.
-//!  - check the anchoring floor first and early-out (cheap); only then scan the larger clearance box.
-//! Most candidates fail the floor test, so further tests run rarely.
-//!
-//!  TODO: see if `computeColumnSeeds()`-like approach is more viable if more constraints stack up.
-const std = @import("std");
+//! Placement is gated on BASE terrain only (pre-ore, pre-structure) by the `constraints` list.
 const dw = @import("../../root.zig");
 const HashState = dw.seeding.HashState;
 const Vec2u = dw.utils.Vec2u;
 const Sprite = dw.Sprite;
 const structures = @import("../structures.zig");
-const procedural = dw.procedural;
 const Rect = structures.Rect;
 
-const CHUNK_SIZE = dw.CHUNK_SIZE;
-
-pub const spawn_area: u32 = 16;
+pub const spawn_area: u32 = 8;
 pub const max_w: u32 = size_x;
 pub const max_h: u32 = size_y;
 
-/// Baseline spawn chance per grid cell.
-/// (Before general-structure collision compensation, but doesn't factor in `treeIsGrounded()`.)
-pub const target_chance: f64 = 0.80;
+/// Spawn chance per grid cell, before `constraints` thin it out. Tune against `debug/audit.zig`.
+pub const target_chance: f64 = 0.50;
 
-const size_x: u32 = 5;
-const size_y: u32 = 7;
+const size_x: i32 = 5;
+const size_y: i32 = 7;
 
 /// Column the single-wide trunk occupies (centered).
 const trunk_x: i32 = size_x / 2;
@@ -43,49 +33,24 @@ const canopy_rows: i32 = 4;
 const canopy_cy: i32 = 2;
 const canopy_r_sq: i32 = 5;
 
-pub fn getBounds(state: *HashState, cx: i32, cy: i32) Rect {
-    const i_area = @as(i32, @intCast(spawn_area));
-    const max_pos_x = @as(u32, @intCast(i_area - @as(i32, size_x)));
-    const max_pos_y = @as(u32, @intCast(i_area - @as(i32, size_y)));
+/// Terrain rules; `structures.zig` runs them cheapest-first and memoizes the verdict per grid cell.
+pub const constraints = [_]structures.Constraint{
+    // 3 foundation cells centered under the trunk, in the row just below the box: the ground it stands on.
+    .{ .solid = .{
+        .x0 = .{ .at = .start, .off = trunk_x - 1 },
+        .x1 = .{ .at = .start, .off = trunk_x + 2 },
+        .y0 = .{ .at = .end },
+        .y1 = .{ .at = .end, .off = 1 },
+    } },
+    // The trunk shaft must be empty base terrain, so the tree is never buried in rock.
+    .{ .empty = .{
+        .x0 = .{ .at = .start, .off = trunk_x },
+        .x1 = .{ .at = .start, .off = trunk_x + 1 },
+    } },
+};
 
-    const pos_x = @as(i32, @intCast(state.getLimit(u32, max_pos_x)));
-    const pos_y = @as(i32, @intCast(state.getLimit(u32, max_pos_y)));
-
-    const x_start = cx * i_area + pos_x;
-    const y_start = cy * i_area + pos_y;
-    return .{
-        .x_start = x_start,
-        .y_start = y_start,
-        .x_end = x_start + @as(i32, size_x),
-        .y_end = y_start + @as(i32, size_y),
-    };
-}
-
-/// Base-terrain (pre-ore, pre-structure) foundation test at absolute world block (wx, wy).
-inline fn baseSolid(wx: i32, wy: i32) bool {
-    const cx: u32 = @intCast(@divFloor(wx, @as(i32, CHUNK_SIZE)));
-    const cy: u32 = @intCast(@divFloor(wy, @as(i32, CHUNK_SIZE)));
-    const bx: u4 = @intCast(@mod(wx, @as(i32, CHUNK_SIZE)));
-    const by: u4 = @intCast(@mod(wy, @as(i32, CHUNK_SIZE)));
-    return procedural.getBaseSpriteType(cx, cy, bx, by).sprite.isFoundation();
-}
-
-/// Terrain constraint for a tree anchored at bounding-box origin (x0, y0) (deeper = larger y).
-fn treeIsGrounded(x0: i32, y0: i32) bool {
-    // we order checks from cheap to expensive
-    // start with 3 foundation cells centered under the trunk (deeper row, just below the box)
-    const floor_y = y0 + @as(i32, size_y);
-    var dx: i32 = trunk_x - 1;
-    while (dx <= trunk_x + 1) : (dx += 1) {
-        if (!baseSolid(x0 + dx, floor_y)) return false; // early-out: no ground here
-    }
-
-    // the vertical trunk shaft must be empty base terrain so the tree isn't buried in rock
-    var by: i32 = 0;
-    while (by < @as(i32, size_y)) : (by += 1) {
-        if (baseSolid(x0 + trunk_x, y0 + by)) return false;
-    }
-    return true;
+pub fn getBounds(state: *HashState, cx: i32, cy: i32) ?Rect {
+    return structures.jitter(state, cx, cy, spawn_area, size_x, size_y);
 }
 
 pub fn generate(
@@ -106,12 +71,12 @@ pub fn generate(
     const i_wx = @as(i32, @bitCast(wx));
     const i_wy = @as(i32, @bitCast(wy));
 
-    // bounds already carry the hashed anchor (see getBounds), so no re-rolls of `state` are needed
+    // bounds already carry the hashed anchor (see getBounds()), so no re-rolls of `state` are needed
     const struct_x = i_wx - bounds.x_start;
     const struct_y = i_wy - bounds.y_start;
-    if (struct_x < 0 or struct_y < 0 or struct_x >= @as(i32, size_x) or struct_y >= @as(i32, size_y)) return null;
+    if (struct_x < 0 or struct_y < 0 or struct_x >= size_x or struct_y >= size_y) return null;
 
-    // resolve this cell's body sprite FIRST (cheap); only body cells pay for the terrain gate
+    // terrain is already gated by `constraints`, so this only resolves the cell's body sprite
     const body: ?Sprite = blk: {
         // Draw the wooden trunk! Simple column below the canopy down to the base.
         if (struct_x == trunk_x and struct_y >= canopy_rows) break :blk .wood;
@@ -126,9 +91,6 @@ pub fn generate(
         break :blk null;
     };
 
-    if (body) |sprite| {
-        if (!treeIsGrounded(bounds.x_start, bounds.y_start)) return null;
-        return .{ .id = sprite };
-    }
+    if (body) |sprite| return .{ .id = sprite };
     return null;
 }
