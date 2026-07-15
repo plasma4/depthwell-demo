@@ -357,7 +357,7 @@ fn generateEnums(b: *std.Build, paths: []const []const u8) void {
     b.getInstallStep().dependOn(&install_ts.step);
 }
 
-/// Regenerates the `// #region generated-constants` block in `src/shader.wgsl` from the Sprite enum.
+/// Regenerates the `#CONSTANT REGION, DO NOT MODIFY MANUALLY#` block in `src/shader.wgsl` from the `Sprite` enum.
 /// Similar to `generateEnums()`: hashes `paths`, skips entirely when unchanged,
 /// otherwise builds and runs `zig/generate_shader.zig` (which rewrites the shader in place and updates the cache).
 fn generateShaderConstants(b: *std.Build, paths: []const []const u8) void {

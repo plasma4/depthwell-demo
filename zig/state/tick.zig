@@ -74,9 +74,9 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
             memory.game.getBlockYInChunk(),
         );
 
-        if (memory.game.depth > dw.HORIZON_DEPTH) {
+        if (memory.game.depth >= dw.HORIZON_DEPTH) {
             var key = memory.game.getPlayerCoord().asDepthCoordinate(memory.game.depth);
-            const target_depth = memory.game.depth - dw.HORIZON_DEPTH;
+            const target_depth = @max(memory.game.depth - dw.HORIZON_DEPTH, dw.startup.STARTING_ZOOM_TIMES);
             while (key.depth > target_depth) {
                 key = key.getParent();
             }
@@ -86,6 +86,9 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
         dw.mining.selected_hp = 255;
         dw.mouse.mouse_chunk_coord = null;
     }
+
+    // update particles
+    dw.particles.tick(iterations);
 
     // Iterations may be > 1 if FPS is low as a correction factor.
     for (0..iterations) |_| {
@@ -98,11 +101,11 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
         dw.player.move(logic_speed); // logic that moves the player/camera based on keys
         dw.player.tickAnimation(); // advance player sprite animation + facing on the logic tick
         dw.water.tickWater(); // fluid sim
+
+        inventory.tickDroppedItems(); // process item animation ticks and inventory collection!
+
         memory.game.frame +%= 1;
     }
-
-    // Process item animation ticks and inventory collection!
-    inventory.tickDroppedItems();
 
     // Generate chunks around the SimBuffer in the background.
     dw.world.SimBuffer.precacheChunks(

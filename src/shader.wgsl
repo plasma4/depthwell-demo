@@ -6,7 +6,7 @@
 // Sprites are saved as a .png in a sprite sheet 128 pixels wide, and each asset is 16x16.
 // See zig/state/world.zig's Sprite definitions for sprite type list.
 
-// #region generated-constants
+// #CONSTANT REGION, DO NOT MODIFY MANUALLY#
 // Auto-generated from zig/types/sprite.zig by zig/generate_shader.zig (runs during `zig build`).
 // Do NOT edit values between the markers by hand; edit the Sprite enum instead.
 const TILES_PER_ROW: f32 = 16.0;
@@ -15,8 +15,8 @@ const STONE_START: u32 = 12u;
 const ORE_START: u32 = 36u;
 const GEM_START: u32 = 42u;
 const GEM_MASK_START: u32 = 56u;
-const WATER_START: u32 = 264u;
-// #endregion generated-constants
+const WATER_START: u32 = 267u;
+// #CONSTANT REGION END#
 
 const PI = radians(180.0);
 const TAU = radians(360.0);

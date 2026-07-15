@@ -642,9 +642,17 @@ export class GameEngine {
         return new WasmTypeMap[typeCode](this.memory.buffer, ptr, size) as any;
     }
 
-    /** Internal property for a temporary access of the scratch view (unsigned ints). Value 0 is the pointer, value 1 is the length, value 2 is the max capacity, value 3 is pointer to the GameState, and values 4-7 are custom properties (as WASM can only return 1 value, this provides 4 extra temporary "slots" to return things). */
+    /**
+     * Internal property for a temporary access of the scratch view (unsigned ints).
+     * Value 0 is the pointer, value 1 is the length, value 2 is the max capacity, value 3 is pointer to the GameState, and values 4-7 are custom properties
+     * (as WASM can only return 1 value, this provides 4 extra temporary "slots" to return things).
+     */
     private _tempScratchViewU64: BigUint64Array | null = null;
-    /** Internal property for a temporary access of the scratch view (floats). Value 0 is the pointer, value 1 is the length, value 2 is the max capacity, value 3 is pointer to the GameState, and values 4-7 are custom properties (as WASM can only return 1 value, this provides 4 extra temporary "slots" to return things). */
+    /**
+     * Internal property for a temporary access of the scratch view (floats).
+     * Value 0 is the pointer, value 1 is the length, value 2 is the max capacity, value 3 is pointer to the GameState, and values 4-7 are custom properties
+     * (as WASM can only return 1 value, this provides 4 extra temporary "slots" to return things).
+     */
     private _tempScratchViewF64: Float64Array | null = null;
     /** Returns 8 values in the scratch buffer; (zero-indexed) value 0 is the pointer, value 1 is the length, value 2 is the max capacity, and values 3-7 are custom properties when necessary. */
     public getScratchView(): BigUint64Array {
@@ -731,7 +739,9 @@ export class GameEngine {
      * Reads a UTF-8 string from WASM memory. Pass in/request a custom offset by doing something like this:
      * ```ts
         let str1 = "hello", str2 = "hi"
-        // In practice, you would either do the reading or writing from Zig. You would pass the string pointers and lengths to Zig through arguments if you're reading from Zig, and return pointers/lengths with getScratchProperty or some agreed-upon format.
+        // In practice, you would either do the reading or writing from Zig.
+        // You would pass the string pointers and lengths to Zig through arguments if you're reading from Zig,
+        // and return pointers/lengths with getScratchProperty or some agreed-upon format.
 
         let ptr1 = engine.writeStr(str1); // Write a string, setting the scratch buffer's length to 5.
         let ptr2 = engine.writeStr(str2, false); // Append after hello, don't reset!

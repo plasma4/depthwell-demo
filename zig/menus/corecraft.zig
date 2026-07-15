@@ -137,8 +137,8 @@ fn doCraft(recipe: Recipe) void {
 
 /// Draws the input requirements of the hovered recipe as a row just above the panel.
 fn drawRequirements(recipe: Recipe) void {
-    const panel_px = util.uvToPx(MENU_POS);
-    const panel_center_x = panel_px[0] + util.uvToPx(MENU_SIZE)[0] / 2.0;
+    const panel_px = dw.entity.uvToViewport(MENU_POS);
+    const panel_center_x = panel_px[0] + dw.entity.uvToViewport(MENU_SIZE)[0] / 2.0;
     const row_y = panel_px[1] - 12.0;
 
     const k: f64 = @floatFromInt(recipe.inputs.len);

@@ -3,8 +3,8 @@
 //! Values are written as plain WGSL `const`s so they are part of the one shader source
 //! (which survives minification as a nice bonus).
 //!
-//! Run automatically by `zig build` (see `generateShaderConstants` in build.zig), guarded by a content
-//! hash of the files these values derive from so the host tool is not rebuilt on unrelated changes.
+//! Run automatically by `zig build` (see `generateShaderConstants` in build.zig),
+//! guarded by a content hash of the files these values derive from so the host tool is not rebuilt on unrelated changes.
 const std = @import("std");
 
 /// Points to definitions from zig/root.zig.
@@ -14,8 +14,8 @@ const Sprite = dw.Sprite;
 const sprite = dw.sprite;
 
 const SHADER_PATH = "src/shader.wgsl";
-const START_MARKER = "// #region generated-constants";
-const END_MARKER = "// #endregion generated-constants";
+const START_MARKER = "// #CONSTANT REGION, DO NOT MODIFY MANUALLY#";
+const END_MARKER = "// #CONSTANT REGION END#";
 
 pub fn main(init: std.process.Init) !void {
     var buffer: [512 * 1024]u8 = undefined;

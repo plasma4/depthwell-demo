@@ -23,7 +23,7 @@ const Vec2u = dw.utils.Vec2u;
 const Vec4u = dw.utils.Vec4u;
 
 // Lots of values controllable by debug sliders here!
-pub const dual_value_scale = TuningFloat(16.0);
+pub const dual_value_scale = TuningFloat(21.0);
 pub const base_gem_odds = TuningFloat(0.25);
 pub const procedural_cell_size = TuningFloat(1.0);
 pub const fbm_scale = TuningFloat(1.0);
@@ -161,6 +161,13 @@ var base_terrain_cache: [BASE_CACHE_SLOTS]BaseTerrainCacheEntry = @splat(.{});
 /// Current seed the cache holds; a mismatch (reseed) invalidates every entry at once.
 var base_cache_key: u64 = 0;
 
+/// Identity of the terrain every cache downstream of it holds; a mismatch drops the cache.
+/// Release-only, like the caches themselves: debug recomputes, since the sliders mutate output live.
+pub inline fn terrainGeneration() u64 {
+    const seed = memory.game.getHashSeed(.moisture);
+    return seed[0] ^ seed[1];
+}
+
 /// Direct-mapped slot for a world block; mixes the coords so adjacent cells do not collide.
 inline fn baseCacheIndex(wx: u32, wy: u32) usize {
     const h = (@as(u64, wx) *% 0x9E3779B97F4A7C15) ^ (@as(u64, wy) *% 0x85EBCA77C2B2AE63);
@@ -179,6 +186,8 @@ pub fn getBaseSpriteType(
     block_y: u4,
 ) BaseTerrainData {
     // Debug drags terrain sliders live, so caching would serve stale samples; always recompute there.
+    // TODO: sliders are rare, we can do better here actually
+    // TODO: also benchmark perf
     if (dw.is_debug) return computeBaseSpriteType(chunk_x, chunk_y, block_x, block_y);
 
     const wx = chunk_x * 16 + block_x;
@@ -206,24 +215,27 @@ fn computeBaseSpriteType(
     block_x: u4,
     block_y: u4,
 ) BaseTerrainData {
+    const wx = chunk_x * 16 + block_x;
+    const wy = chunk_y * 16 + block_y;
+
+    // NOTE: `use_f2_f1` is false here, so this takes fbm+getPerlinNoise.
     const moisture = getFbmValue( // acts as a biome selector
         memory.game.getHashSeed(.moisture),
-        chunk_x * 16 + block_x,
-        chunk_y * 16 + block_y,
+        wx,
+        wy,
         .{
             .cell_size = 425.0, // very LARGE cells for biome generation
-            .fbm_shift_size = 20.0, // minimize shift potential
-            .horizontally_wide = false,
+            .fbm_shift_size = 0.0,
+            .use_f2_f1 = false,
         },
     );
     const density = getFbmValue( // more granular density
         memory.game.getHashSeed(.density),
-        chunk_x * 16 + block_x,
-        chunk_y * 16 + block_y,
+        wx,
+        wy,
         .{
             .cell_size = 80.0, // smaller cells for cave terrain
             .fbm_shift_size = 24.0,
-            .horizontally_wide = true,
             .use_f2_f1 = true,
         },
     );
@@ -257,7 +269,6 @@ pub fn addOresAndGems(
         .{
             .cell_size = 21.0,
             .fbm_shift_size = 8.0,
-            .horizontally_wide = false,
             .use_f2_f1 = true,
         },
     );
@@ -268,7 +279,6 @@ pub fn addOresAndGems(
         .{
             .cell_size = 36.0,
             .fbm_shift_size = 60.0,
-            .horizontally_wide = false,
             .use_f2_f1 = true,
         },
     );
@@ -343,7 +353,6 @@ pub fn addOresAndGems(
                     .{
                         .cell_size = 35.0,
                         .fbm_shift_size = 0.0,
-                        .horizontally_wide = false,
                         .use_f2_f1 = false,
                     },
                 );
@@ -353,8 +362,7 @@ pub fn addOresAndGems(
                     x,
                     .{
                         .cell_size = 45.0,
-                        .fbm_shift_size = 18.0,
-                        .horizontally_wide = false,
+                        .fbm_shift_size = 0.0,
                         .use_f2_f1 = false,
                     },
                 );
@@ -445,244 +453,6 @@ pub inline fn isWithin(v: f32, min: comptime_float, max: comptime_float) bool {
     return v >= min and v <= max; // inclusive may mean more aggressive LLVM optimizations when inlining, for free
 }
 
-/// Vertical growth direction of a hash-anchored column feature, selecting both its anchoring surface and
-/// the direction the world column is traversed by `world.computeColumnSeeds()`/`applyColumnFeature()`.
-pub const GrowDir = enum {
-    /// Hangs DOWN from a ceiling (foundation above), such as hanging vines. Columns are walked top -> bottom.
-    down,
-    /// Rises UP from a floor (foundation below), such as reeds/sapling trunks. Columns are walked bottom -> top.
-    up,
-};
-
-/// Comptime description of a decoration grown by a stateful vertical walk down a single world column
-/// (hanging vines, floor reeds, dripstone, ...). The state machine in `stepColumn()` is identical for both
-/// directions: it anchors on any foundation and grows into the empty cells past it; only the traversal order
-/// and the cross-border seed scan flip with `dir`. Purely position-hashed, so a feature resolves identically
-/// on both sides of any chunk border with no neighbor-chunk state.
-pub const ColumnFeature = struct {
-    /// Block written into an empty cell the feature claims.
-    sprite: Sprite,
-    /// Growth direction; also decides traversal order in the caller.
-    dir: GrowDir,
-    /// Longest run past the anchor, in blocks. Bounds the cross-border scan to this many rows.
-    /// Must stay < 2 * CHUNK_SIZE so the scan only ever reaches the two neighbor chunks in that direction.
-    max_length: u32,
-    /// Chance the feature spawns in the cell immediately past its anchoring surface.
-    anchor_odds: f64,
-    /// Chance the feature extends one more cell past its previous segment.
-    grow_odds: f64,
-    /// Position-hash seed category for the anchor roll.
-    anchor_seed: memory.SeedType = .decorations1,
-    /// Position-hash seed category for the growth roll.
-    grow_seed: memory.SeedType = .decorations2,
-    /// Comptime salt XORed into every roll so two features sharing a `SeedType` never anchor on the same cells.
-    /// Keep 0 for the original hanging vine so its determinism is unchanged.
-    salt: u64 = 0,
-};
-
-/// Compile-time invariant check for a `ColumnFeature`. Call from a comptime block per instance/use.
-pub fn assertColumnFeature(comptime f: ColumnFeature) void {
-    if (f.max_length >= 2 * CHUNK_SIZE)
-        @compileError("ColumnFeature.max_length must stay < 2 * CHUNK_SIZE so the cross-border scan reaches at most the two neighbor chunks.");
-}
-
-/// Carried state for a column feature's walk down (or up) a single world column.
-/// Seeded across the chunk border by `world.computeColumnSeeds()`, then advanced per cell by `stepColumn()`.
-pub const ColumnState = struct {
-    /// The feature is currently growing and has reached the cell adjacent to the one being evaluated.
-    alive: bool = false,
-    /// Cells past the anchoring surface so far (1 = directly adjacent to it); capped by `ColumnFeature.max_length`.
-    depth: u32 = 0,
-};
-
-/// True if the surface at world (wx, wy) anchors feature `f` in the cell directly past it.
-inline fn columnAnchorHit(comptime f: ColumnFeature, wx: u64, wy: u64) bool {
-    return FastHash.hash2d(memory.game.getHashSeed(f.anchor_seed), wx ^ f.salt, wy) <= oddsNum(f.anchor_odds);
-}
-
-/// True if feature `f` extends into the empty cell at world (wx, wy).
-inline fn columnGrowHit(comptime f: ColumnFeature, wx: u64, wy: u64) bool {
-    return FastHash.hash2d(memory.game.getHashSeed(f.grow_seed), wx ^ f.salt, wy) <= oddsNum(f.grow_odds);
-}
-
-/// Advances feature `f`'s state machine by one cell while scanning a world column in its growth direction.
-/// `is_solid` marks a foundation cell, which acts as an anchoring surface for anything growing past it.
-/// Returns true when the feature should occupy this (empty) cell.
-pub fn stepColumn(comptime f: ColumnFeature, state: *ColumnState, wx: u64, wy: u64, is_solid: bool) bool {
-    comptime assertColumnFeature(f);
-    if (is_solid) {
-        // this foundation cell anchors any feature growing directly past it
-        state.alive = columnAnchorHit(f, wx, wy);
-        state.depth = 0;
-        return false;
-    }
-    if (!state.alive) return false;
-    state.depth += 1;
-    // depth 1 (directly past the surface) is governed solely by the anchor roll;
-    // deeper cells each roll an independent growth continuation, capped at max_length.
-    if (state.depth > 1 and (state.depth > f.max_length or !columnGrowHit(f, wx, wy))) {
-        state.alive = false;
-        return false;
-    }
-    return true;
-}
-
-/// The original hanging vine (spiral plant), expressed as a downward `ColumnFeature`.
-/// `salt = 0` and the historic `.decorations1`/`.decorations2` seeds keep its output bit-identical.
-pub const vine_feature: ColumnFeature = .{
-    .sprite = .spiral_plant,
-    .dir = .down,
-    .max_length = 20,
-    .anchor_odds = 0.02,
-    .grow_odds = 0.7,
-};
-
-/// Longest a hanging vine may extend below its ceiling anchor, in blocks. Retained for external references.
-pub const MAX_VINE_LENGTH: u32 = vine_feature.max_length;
-
-/// Back-compat alias/wrappers so existing vine call sites need no changes.
-pub const VineState = ColumnState;
-pub fn stepVine(state: *ColumnState, wx: u64, wy: u64, is_solid: bool) bool {
-    return stepColumn(vine_feature, state, wx, wy, is_solid);
-}
-
-/// Generates decorative blocks (such as mushrooms or ceiling plants).
-/// Continues from step 5 in `addOres()`.
-///
-/// Hanging vines (spiral plant) are traced per column and cross chunk borders seamlessly: `vine_seeds[bx]`
-/// carries the vine state entering the top of each column from `world.computeVineSeeds()`.
-/// `chunk_x`/`chunk_y` are this chunk's base-depth suffix coords, used for absolute world positions.
-///
-/// 6. Adds blocks, primarily decorations, that require certain anchor types (`AnchorKind` in types/sprite.zig).
-pub fn addDecorations(
-    target_chunk: *memory.Chunk,
-    rng_decor: *seeding.ChaCha12,
-    chunk_x: u64,
-    chunk_y: u64,
-    vine_seeds: *const [CHUNK_SIZE]VineState,
-) void {
-    // First, we handle blocks with a floor anchor kind.
-    for (0..CHUNK_SIZE) |block_y| {
-        var forced_next_sprite_type: Sprite = .none; // .none means nothing is forced
-        for (0..CHUNK_SIZE) |block_x| {
-            const idx = block_x + block_y * CHUNK_SIZE;
-            var block = &target_chunk.blocks[idx];
-            if (forced_next_sprite_type != .none) {
-                // semantically, .none makes sense, simply an alternative to optional type
-                block.id = forced_next_sprite_type;
-                forced_next_sprite_type = .none;
-                continue;
-            }
-
-            if (!block.isEmpty()) continue;
-            // Check calculated bitmask directly to avoid isAdjacentBlockSolid logic discrepancies
-            if ((block.edge_flags & types.EdgeFlags.BOTTOM) != 0) {
-                const val = rng_decor.next();
-
-                // Only initiate 2x1 tree placement on even columns to prevent asymmetric overwrites
-                if (block_x % 2 == 0 and block_x != CHUNK_SIZE - 1) {
-                    const other_block_x = block_x + 1;
-                    const other_block = &target_chunk.blocks[other_block_x + block_y * CHUNK_SIZE];
-                    if (other_block.isEmpty() and ((other_block.edge_flags & types.EdgeFlags.BOTTOM) != 0)) {
-                        if (val >= oddsNum(0.98)) {
-                            block.id = .moss_shrub1;
-                            forced_next_sprite_type = .moss_shrub1_right;
-                            continue;
-                        } else if (val >= oddsNum(0.97)) {
-                            block.id = .moss_shrub2;
-                            forced_next_sprite_type = .moss_shrub2_right;
-                            continue;
-                        }
-                    }
-                }
-
-                if (val <= oddsNum(0.030)) {
-                    block.id = .bush;
-                } else if (val <= oddsNum(0.060)) {
-                    block.id = .rock;
-                } else if (val <= oddsNum(0.073)) {
-                    block.id = .small_tree;
-                } else if (val <= oddsNum(0.093)) {
-                    block.id = .mushroom;
-                } else if (val <= oddsNum(0.098)) {
-                    block.id = .campfire;
-                } else if (val <= oddsNum(0.104)) {
-                    block.id = .forest_furnace;
-                } else if (val <= oddsNum(0.108)) {
-                    block.id = .lava_furnace;
-                } else if (val <= oddsNum(0.120)) {
-                    block.id = .basic_core;
-                }
-            }
-        }
-    }
-
-    // fused vine + ceiling-flower pass: one top-to-bottom walk per column instead of two full sweeps.
-    // vines are position-hashed so they cross borders seamlessly; the flower is rolled after the vine step and
-    // gated on emptiness so a vine keeps priority. flowers now consume rng_decor column-major (was row-major),
-    // which reshuffles which cells flower but stays deterministic.
-    for (0..CHUNK_SIZE) |block_x| {
-        var state = vine_seeds[block_x];
-        const wx: u64 = chunk_x * CHUNK_SIZE + block_x;
-        for (0..CHUNK_SIZE) |block_y| {
-            var block = &target_chunk.blocks[block_x + block_y * CHUNK_SIZE];
-            const wy: u64 = chunk_y * CHUNK_SIZE + block_y;
-
-            const place_vine = stepColumn(vine_feature, &state, wx, wy, block.isFoundation());
-            if (place_vine and block.isEmpty()) {
-                block.id = vine_feature.sprite;
-                continue;
-            }
-            if (!block.isEmpty()) continue;
-            // Direct bitmask query to bypass isAdjacentBlockSolid inconsistencies
-            if ((block.edge_flags & types.EdgeFlags.TOP) != 0 and rng_decor.next() <= oddsNum(0.15)) {
-                block.id = .ceiling_flower;
-            }
-        }
-    }
-
-    // final pass to reset edge flags for blocks that should NOT be eroded
-    // update: now logic is in chunk.zig
-    // for (0..dw.CHUNK_SIZE_SQ) |id| {
-    //     var block = &target_chunk.blocks[id];
-    //     if (!block.isFoundation()) block.edge_flags = 0xFF;
-    // }
-}
-
-/// Stamps a `ColumnFeature` into `target_chunk`, walking each column in the feature's growth direction with
-/// the per-column state that entered this chunk (`seeds[bx]`, from `world.computeColumnSeeds()`).
-/// Writes only into empty cells so a feature never clobbers a floor/ceiling decoration it passes through.
-/// Downward features walk top -> bottom; upward features walk bottom -> top (see `GrowDir`).
-pub fn applyColumnFeature(
-    comptime f: ColumnFeature,
-    target_chunk: *memory.Chunk,
-    seeds: *const [CHUNK_SIZE]ColumnState,
-    chunk_x: u64,
-    chunk_y: u64,
-) void {
-    comptime assertColumnFeature(f);
-    for (0..CHUNK_SIZE) |block_x| {
-        var state = seeds[block_x];
-        const wx: u64 = chunk_x * CHUNK_SIZE + block_x;
-        for (0..CHUNK_SIZE) |i| {
-            // enter from the anchoring side: top for downward growth, bottom for upward growth
-            const block_y = switch (f.dir) {
-                .down => i,
-                .up => CHUNK_SIZE - 1 - i,
-            };
-            var block = &target_chunk.blocks[block_x + block_y * CHUNK_SIZE];
-            const wy: u64 = chunk_y * CHUNK_SIZE + block_y;
-            const place = stepColumn(f, &state, wx, wy, block.isFoundation());
-            if (place and block.isEmpty()) block.id = f.sprite;
-        }
-    }
-}
-
-// Keep the generic stamper analyzed for both directions even though live vines fuse with the flower pass.
-comptime {
-    _ = &applyColumnFeature;
-}
-
 /// Quintic fade 6t^5 - 15t^4 + 10t^3 (Perlin's smootherstep): zero 1st AND 2nd derivative at 0/1.
 inline fn fade(t: f32) f32 {
     // Alternative: -20t^7 + 70t^6 - 84t^5 + 35t^4.
@@ -735,8 +505,9 @@ fn getBilinearValueNoise(seed_vector: Vec2u, x: u32, y: u32, cell_size: f32) f32
 /// If F2-F1 calculations are requested, then Worley noise is used instead.
 ///
 /// Use for: terraced blocks, cellular clusters, and erosion basins.
-fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, comptime options: TerrainOptions) f32 {
-    if (!options.use_f2_f1) {
+/// TODO: Make options less confusing, esp. with f2_f1 toggle
+fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 {
+    if (comptime !options.use_f2_f1) {
         // Excellent for sharp branching networks and rich ore veins
         return fbm(getPerlinNoise, seed_vector, x, y, options.cell_size, 3);
     }
