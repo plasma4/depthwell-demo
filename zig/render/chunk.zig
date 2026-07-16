@@ -170,8 +170,7 @@ inline fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
         block.id = dw.variation.resolveVariant(block.*, i % wb, i / wb, frame);
         // Underlay sprites (ore/gem backgrounds) get the same variation treatment, so plain stone tiles for example.
         if (block.base_id != .none) {
-            // Underlays are never assembly tiles, so their group offset is always (0, 0).
-            block.base_id = dw.variation.resolveSpriteVariant(block.base_id, block.seed, block.edge_flags, 0, 0, i % wb, i / wb, frame);
+            block.base_id = dw.variation.resolveSpriteVariant(block.base_id, block.seed, block.edge_flags, i % wb, i / wb, frame);
         }
     }
 }

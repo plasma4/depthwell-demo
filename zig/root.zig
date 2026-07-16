@@ -86,7 +86,6 @@ pub const geometry = @import("types/geometry.zig");
 pub const sprite = @import("types/sprite.zig");
 pub const Sprite = sprite.Sprite;
 pub const variation = @import("types/variation.zig");
-pub const assembly = @import("types/assembly.zig");
 
 pub const drops = @import("state/drops.zig");
 pub const seeding = @import("state/seeding.zig");

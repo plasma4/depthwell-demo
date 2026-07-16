@@ -766,8 +766,7 @@ pub const Category = enum(u3) {
     /// World decoration (non-solid placeable: plants, furniture, interactables).
     /// Assumed to be instantly mineable.
     decor,
-    /// Fixed interactive installation (furnace, core, chest, portal). Unmineable by normal pickaxe and waterloggable like decor;
-    /// typically the interactive tile(s) of a multi-tile assembly.
+    /// Fixed interactive installation (furnace, core, chest, portal). Unmineable by normal pickaxe and waterloggable like decor.
     crafter,
 };
 

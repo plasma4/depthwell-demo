@@ -287,15 +287,6 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                             }
                         }
 
-                        // Multi-tile assemblies break as a unit: clear the sibling cells the single-cell
-                        // modifyBlockHp() above didn't touch (drop already happened once, for this cell).
-                        world.clearAssemblyRest(
-                            mouse.mouse_chunk_coord.?,
-                            mouse.mouse_block_x,
-                            mouse.mouse_block_y,
-                            block,
-                        );
-
                         // Only auto-replace if the block being mined is different from the held item.
                         if (sprite_type.isInWorld()) {
                             if (inventory.removeFromInventory(sprite_type)) { // make sure it's possible to use
@@ -370,16 +361,14 @@ inline fn isToolBreakable(s: Sprite) bool {
     return sprite.getSpriteProps(s).strength == sprite.UNMINEABLE_STRENGTH;
 }
 
-/// Whether the cell at (bx, by) is the support directly beneath a protected installation an unmineable,
-/// floor-anchored assembly resting on its bottom row. Such support cannot be dug out without the structure tool.
+/// Whether the cell at (bx, by) is the support directly beneath a protected installation:
+/// an unmineable, floor-anchored block resting on it. Such support cannot be dug out without the structure tool.
 fn restsOnProtectedInstallation(coord: world.Coordinate, bx: u4, by: u4) bool {
     const above = if (by > 0)
         world.getBlockAt(coord, bx, by - 1, memory.game.depth)
     else
         world.getBlockAt(coord.moveY(-1) orelse return false, bx, dw.CHUNK_SIZE - 1, memory.game.depth);
-    if (above.anchor() != .floor or !isToolBreakable(above.id)) return false;
-    // Only the footprint's bottom row physically rests on the cell below it.
-    return above.group_y == dw.assembly.footprintOf(above.id).h - 1;
+    return above.anchor() == .floor and isToolBreakable(above.id);
 }
 
 comptime {
