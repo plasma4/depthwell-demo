@@ -21,7 +21,7 @@ const decorations = dw.decorations;
 
 const Sprite = dw.Sprite;
 
-/// Blocks per axis sampled by `runAroundPlayer()`.
+/// Blocks per axis sampled by `sampleWorldAroundPlayer()`.
 const DEFAULT_SPAN: i32 = 2048;
 
 /// Distinct sprites tracked in the block mix.
@@ -29,7 +29,7 @@ const MAX_TRACKED_SPRITES = 64;
 
 /// Runs the audit on a region centered on the player's base-depth position, and logs the result.
 /// Depth is ignored: everything here is a property of the base layer the whole fractal descends from.
-pub fn runAroundPlayer() void {
+pub fn sampleWorldAroundPlayer() void {
     if (!dw.is_debug) return;
 
     const coord = memory.game.getPlayerCoord();

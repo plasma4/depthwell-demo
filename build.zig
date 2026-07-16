@@ -218,8 +218,8 @@ pub fn build(b: *std.Build) void {
         // only rebuilt when the source values (sprite.zig / mining.zig) actually change.
         generateShaderConstants(b, &[_][]const u8{"zig/types/sprite.zig"});
 
-        // Bake per-tile atlas colors into zig/render/particle_colors.zig; hash-guarded like the
-        // shader constants. The WASM compile depends on the run so the imported file is fresh.
+        // Bake per-tile sprite sheet colors into zig/render/particle_colors.zig;
+        // hash-guarded like the shader constants.
         const particle_gen = generateParticleColors(b, &[_][]const u8{
             "public/assets/main.png",
         });
