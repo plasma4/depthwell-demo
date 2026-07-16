@@ -31,7 +31,7 @@ pub const constraints = [_]structures.Constraint{
 pub fn generate(local_x: i32, local_y: i32, state: *HashState) ?Sprite {
     _ = local_x;
     _ = state;
-    // Top cell is the flower, with plant vine beneath.
+    // Top cell is the flower, with plant stem beneath.
     if (local_y == 0) return .cornflower;
-    return .plant_base;
+    return .plant_stem;
 }

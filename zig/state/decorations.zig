@@ -115,7 +115,7 @@ inline fn anchorState(comptime kind: usize, ax: i32, ay: i32, seed: Vec2u) HashS
 /// it rolled, and the terrain under its footprint accepts it.
 /// Says nothing about whether another anchor beats it (see `anchored()`).
 fn stands(comptime kind: usize, ax: i32, ay: i32, seed: Vec2u) bool {
-    @setEvalBranchQuota(20000); // `getChance()` comptime-searches for a rational approximation of the odds
+    @setEvalBranchQuota(20000); // getChance() comptime-searches for a rational approximation of the odds
     var state = anchorState(kind, ax, ay, seed);
     if (!state.getChance(points[kind].chance)) return false;
     return structures.satisfies(foundationSolid, constraint_table[kind], footprint(kind, ax, ay));
@@ -207,10 +207,10 @@ pub fn resolve(wx: u32, wy: u32, seed: Vec2u) ?Sprite {
     return null;
 }
 
-/// Fills every empty cell of a freshly generated base chunk with its decoration.
+/// Fills all empty cells of a freshly generated base chunk with decorations.
 ///
-/// Columns first, then points, and neither ever overwrites an occupied cell.
-/// Reads no edge flags: a decoration probes terrain itself, so it neither depends on nor perturbs them,
+/// Does columns-first, then points, and neither ever overwrites an occupied cell.
+/// Doesn't read edge flags: a decoration probes terrain itself, so it neither depends on nor perturbs them,
 /// which is what keeps a neighbor's edits from shuffling this chunk's decorations.
 pub fn stampChunk(chunk: *Chunk, cx: u64, cy: u64, column_seeds: *const [CHUNK_SIZE]ColumnState) void {
     stampColumns(chunk, cx, cy, column_seeds);
@@ -235,7 +235,7 @@ fn stampColumns(chunk: *Chunk, cx: u64, cy: u64, column_seeds: *const [CHUNK_SIZ
         const wx: u64 = cx * CHUNK_SIZE + block_x;
 
         inline for (columns, 0..) |feature, i| {
-            // one carried state per feature; only `Vine` exists today, so the seeds array is its alone
+            // one carried state per feature
             var state = if (i == 0) column_seeds[block_x] else ColumnState{};
 
             for (0..CHUNK_SIZE) |block_y| {
@@ -266,7 +266,7 @@ pub const ColumnFeature = struct {
     /// Growth direction; also decides traversal order in the caller.
     dir: GrowDir,
     /// Longest run past the anchor, in blocks. Bounds the cross-border scan to this many rows.
-    /// Must stay < 2 * CHUNK_SIZE so the scan only ever reaches the two neighbor chunks in that direction.
+    /// Must stay less than `2 * CHUNK_SIZE` so the scan only ever reaches the two neighbor chunks in that direction.
     max_length: u32,
     /// Odds a surface cell anchors the chain in the cell directly past it.
     anchor_odds: f64,
@@ -279,9 +279,10 @@ pub const ColumnFeature = struct {
     salt: u64 = 0,
 };
 
-pub fn assertColumnFeature(comptime f: ColumnFeature) void {
+/// At compile-time, verifies that column features are correct.
+pub fn validateColumnFeature(comptime f: ColumnFeature) void {
     if (f.max_length >= 2 * CHUNK_SIZE)
-        @compileError("ColumnFeature.max_length must stay < 2 * CHUNK_SIZE so the cross-border scan reaches at most the two neighbor chunks.");
+        @compileError("ColumnFeature.max_length must stay less than 2 * CHUNK_SIZE.");
 }
 
 /// Carried state for a column feature's walk down (or up) a single world column.
@@ -309,7 +310,7 @@ inline fn columnGrowHit(comptime f: ColumnFeature, wx: u64, wy: u64) bool {
 /// `is_solid` marks a foundation cell, which acts as an anchoring surface for anything growing past it.
 /// Returns true when the feature should occupy this (empty) cell.
 pub fn stepColumn(comptime f: ColumnFeature, state: *ColumnState, wx: u64, wy: u64, is_solid: bool) bool {
-    comptime assertColumnFeature(f);
+    comptime validateColumnFeature(f);
     if (is_solid) {
         // this foundation cell anchors any feature growing directly past it
         state.alive = columnAnchorHit(f, wx, wy);

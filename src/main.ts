@@ -493,8 +493,8 @@ if (is_dev && engine.isDebug) {
         btn.onclick = onClick;
         container.appendChild(btn);
     };
-    addSaveButton("Manual save", () => engine.saveManager.save());
-    addSaveButton("Manual load", async () => await engine.saveManager.load());
+    addSaveButton("Force save", () => engine.saveManager.save());
+    addSaveButton("Force load", async () => await engine.saveManager.load());
     addSaveButton("Reset", async () => {
         engine.start();
     });

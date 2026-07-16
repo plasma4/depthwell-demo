@@ -147,7 +147,7 @@ pub const Sprite = enum(u16) {
     rock,
     bush, // 2 variations
     spiral_plant = GEAR_ID + 4,
-    plant_base = GEAR_ID + 5,
+    plant_stem = GEAR_ID + 5,
     cornflower = GEAR_ID + 6, // 2 variations
     ceiling_flower = GEAR_ID + 8, // 2 variations
     mushroom = GEAR_ID + 10, // 3 variations
@@ -591,14 +591,14 @@ const rules = [_]SpriteRule{
 
     // Plant with base connection
     .{
-        .{ .single = .plant_base },
+        .{ .single = .plant_stem },
         // rests on solid ground OR another `plant_base` directly below it (a self-stacking shaft)
         .{ .requires = &.{.{ .dy = 1, .kind = .solid_or_self }} },
     },
     .{
         .{ .single = .cornflower },
         // the flowering tip: only ever valid directly above a `plant_base`
-        .{ .requires = &.{.{ .dy = 1, .kind = .exact, .sprite = .plant_base }} },
+        .{ .requires = &.{.{ .dy = 1, .kind = .exact, .sprite = .plant_stem }} },
     },
 
     // Anchor rules!
@@ -662,7 +662,7 @@ const rules = [_]SpriteRule{
             .small_tree,
             .spiral_plant,
             .cornflower,
-            .plant_base,
+            .plant_stem,
             .ceiling_flower,
             .mushroom,
             .big_mushroom,
@@ -766,8 +766,7 @@ pub const Category = enum(u3) {
     /// World decoration (non-solid placeable: plants, furniture, interactables).
     /// Assumed to be instantly mineable.
     decor,
-    /// Fixed interactive installation (furnace, core, chest, portal). Unmineable by normal pickaxe and waterloggable like decor;
-    /// typically the interactive tile(s) of a multi-tile assembly.
+    /// Fixed interactive installation (furnace, core, chest, portal). Unmineable by normal pickaxe and waterloggable like decor.
     crafter,
 };
 

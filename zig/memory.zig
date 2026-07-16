@@ -247,7 +247,7 @@ pub const MemorySizes = struct {
 /// - word0: `id` | `edge_flags` | `light`
 /// - word1: `hp` | `seed` (the shader reads the whole word as seed0, so `hp` is folded into the seed for free)
 /// - word2: `base_id` | `id_edge_flags` | `lighting_color`
-/// - word3: `waterlogged` | `group_x` | `group_y` | `_pad`
+/// - word3: `waterlogged` | `_pad`
 pub const Block = packed struct(u128) {
     /// A block with an `id` of `none`.
     pub const empty: Block = .makeBasicBlock(.none, 0);
@@ -298,13 +298,8 @@ pub const Block = packed struct(u128) {
     ///   - bits 3-6: left adjacent liquid volume (0-15; 0 means no liquid to the left)
     ///   - bits 7-10: right adjacent liquid volume (0-15; 0 means no liquid to the right)
     waterlogged: u12 = 0,
-    /// Column of this tile within its `Assembly` footprint (0-based, 0..w-1). See `zig/types/assembly.zig`.
-    /// CPU-render-only: consumed by variation.resolveVariant() for `.group` sprites; never uploaded to the shader.
-    group_x: u4 = 0,
-    /// Row of this tile within its `Assembly` footprint (0-based, 0..h-1). See `group_x`.
-    group_y: u4 = 0,
     /// Unused portion of block data.
-    _pad: u12 = 0,
+    _pad: u20 = 0,
 
     /// Makes a simple block of a certain type, with max light and no edge flags and mine level.
     /// Uses the BOTTOM 32 bits from `seed_bits` to place into `seed`.
@@ -662,7 +657,7 @@ fn growScratchBuffer(len: usize, new_scratch_len: usize) [*]u8 {
 /// The scratch base is 64-aligned and 48 is a multiple of 16, so every entity stays 16-byte aligned (matching `WGSLEntity`'s alignment)
 /// without any per-call alignment bookkeeping.
 ///
-/// Must be called from an aligned start (such as right after `scratchReset()`), as the tight packing relies on the
+/// Precondition: called from an aligned start (such as right after `scratchReset()`), as the tight packing relies on the
 /// running `scratch_len` being a multiple of `@sizeOf(WGSLEntity)`.
 pub inline fn scratchPushEntity() *WGSLEntity {
     const off: usize = @intCast(mem.scratch_len);

@@ -230,7 +230,7 @@ comptime {
 /// Sibling of `computeVineSeeds()`: computes entering `ColumnState` per column for a `ColumnFeature`
 /// by tracing terrain in neighbor chunks along the growth direction.
 fn computeColumnSeeds(comptime f: dw.decorations.ColumnFeature, coord: Coordinate, depth: u64) [CHUNK_SIZE]dw.decorations.ColumnState {
-    comptime dw.decorations.assertColumnFeature(f);
+    comptime dw.decorations.validateColumnFeature(f);
     var seeds: [CHUNK_SIZE]dw.decorations.ColumnState = @splat(.{});
     const wx_col_base: u64 = coord.suffix[0] * CHUNK_SIZE;
 
@@ -278,7 +278,6 @@ fn computeColumnSeeds(comptime f: dw.decorations.ColumnFeature, coord: Coordinat
 /// - `seed` is `CHUNK_SIZE_SQ` deterministic draws in block-index order (`generateBaseChunk()`, `generateChunk()`).
 /// - `light` and `lighting_color` are written only into the per-frame render scratch buffer (`applyLighting()`).
 /// - `edge_flags`, `id_edge_flags`, and `waterlogged` are recomputed from neighbor `id`+`hp` by the flag passes.
-/// - `group_x` and `group_y` are stamped during generation and cleared by any edit.
 pub const ModCell = extern struct {
     id: Sprite,
     /// The underlay behind an overlay sprite. Authoritative, NOT derivable: `modifyBlockType()` picks it
@@ -292,8 +291,6 @@ pub const ModCell = extern struct {
         block.id = self.id;
         block.base_id = self.base_id;
         block.hp = @intCast(self.hp);
-        block.group_x = 0;
-        block.group_y = 0;
     }
 
     /// Captures the authoritative fields of a materialized `Block`.
@@ -1919,9 +1916,6 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
     else
         .none;
 
-    // Single-cell placement: assembly offset is always the origin (0, 0).
-    // A future multi-tile placeable will stamp the whole footprint here (see dw.assembly.stampChunk).
-    // (TODO)
     mod_store.beginWrite(key).setCell(idx, .{ .id = new_sprite, .base_id = new_base, .hp = initial_hp });
 
     if (SimBuffer.get(coord)) |sim_chunk| {
@@ -1932,8 +1926,6 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
         block.edge_flags = 0xFF;
         block.id_edge_flags = 0xFF;
         block.waterlogged = 0;
-        block.group_x = 0;
-        block.group_y = 0;
     }
 
     // Placing water must register the slot so the optimized `tickWater` scan picks it up.
@@ -1949,14 +1941,12 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
         block.edge_flags = 0xFF;
         block.id_edge_flags = 0xFF;
         block.waterlogged = 0;
-        block.group_x = 0;
-        block.group_y = 0;
     }
 
     return updateLocalEdgeFlags(coord, bx, by);
 }
 
-/// Resets one block's fields to the "empty cell" sentinels (id + underlay + hp + edge/waterlog + assembly offset).
+/// Resets one block's fields to the "empty cell" sentinels (id + underlay + hp + edge/waterlog).
 /// Leaves `seed` alone: it is a property of the cell, not of what occupies it.
 ///
 /// Must agree field-for-field with the `ModCell` `internalClearBlock()` stores, so a cleared cell reads
@@ -1968,8 +1958,6 @@ inline fn clearBlockFields(b: *Block) void {
     b.edge_flags = 0xFF;
     b.id_edge_flags = 0xFF;
     b.waterlogged = 0;
-    b.group_x = 0;
-    b.group_y = 0;
 }
 
 /// Clears a single cell to empty across `mod_store`, `SimBuffer`, and `chunk_cache` (no drop, no worklist).
@@ -1980,53 +1968,6 @@ fn internalClearBlock(target_coord: Coordinate, lbx: u4, lby: u4) void {
     mod_store.beginWrite(key).setCell(block_id, .{ .id = .none, .base_id = .none, .hp = 0 });
     if (SimBuffer.get(target_coord)) |sc| clearBlockFields(&sc.blocks[block_id]);
     if (chunk_cache.findIndex(target_coord)) |index| clearBlockFields(&chunk_cache.chunks[index].blocks[block_id]);
-}
-
-/// Resolves a possibly out-of-chunk cell offset (`cx`, `cy`, relative to `coord`) into a concrete chunk coordinate and local cell,
-/// or null past the world edge. Footprints are <= 15x15, so at most one chunk step in each axis is ever needed
-/// (adjacent-chunk access, as the lighting halo already does).
-const CellRef = struct { coord: Coordinate, lx: u4, ly: u4 };
-inline fn resolveCell(coord: Coordinate, cx: i32, cy: i32) ?CellRef {
-    if (cx >= 0 and cx < CHUNK_SIZE and cy >= 0 and cy < CHUNK_SIZE) {
-        return .{ .coord = coord, .lx = @intCast(cx), .ly = @intCast(cy) };
-    }
-    const ndx = @divFloor(cx, CHUNK_SIZE);
-    const ndy = @divFloor(cy, CHUNK_SIZE);
-    const nc = coord.move(.{ ndx, ndy }) orelse return null;
-    return .{ .coord = nc, .lx = @intCast(@mod(cx, CHUNK_SIZE)), .ly = @intCast(@mod(cy, CHUNK_SIZE)) };
-}
-
-/// True while `updateLocalEdgeFlags()` is draining `flag_worklist`;
-/// guards `clearAssemblyRest()` against re-entering that drain (which would clear the worklist mid-iteration).
-var in_edge_flag_update = false;
-
-/// Clears every cell of `block`'s multi-tile assembly EXCEPT (`bx`, `by`). Does not drop items (the caller drops once).
-/// Since the caller already removed the cell a group breaks as one unit. No-op for single-tile blocks.
-/// `block` must be the pre-removal snapshot; its group_x/group_y locate the origin.
-///
-/// Edge-flag refresh: when called from inside the cascade drain (`in_edge_flag_update`),
-/// cleared siblings are queued onto `flag_worklist` for that same drain; otherwise each is refreshed directly.
-pub fn clearAssemblyRest(coord: Coordinate, bx: u4, by: u4, block: Block) void {
-    const f = dw.assembly.footprintOf(block.id);
-    if (f.w <= 1 and f.h <= 1) return;
-    const ox = @as(i32, bx) - block.group_x;
-    const oy = @as(i32, by) - block.group_y;
-    var dy: i32 = 0;
-    while (dy < f.h) : (dy += 1) {
-        var dx: i32 = 0;
-        while (dx < f.w) : (dx += 1) {
-            const cx = ox + dx;
-            const cy = oy + dy;
-            if (cx == @as(i32, bx) and cy == @as(i32, by)) continue; // caller cleared the origin cell
-            const cell = resolveCell(coord, cx, cy) orelse continue;
-            internalClearBlock(cell.coord, cell.lx, cell.ly);
-            if (in_edge_flag_update) {
-                flag_worklist.append(alloc, .{ .coord = cell.coord, .bx = cell.lx, .by = cell.ly }) catch memory.oom();
-            } else {
-                _ = updateLocalEdgeFlags(cell.coord, cell.lx, cell.ly);
-            }
-        }
-    }
 }
 
 /// Custom type for edge flag information that stores a `Coordinate` and block within the chunk.
@@ -2090,7 +2031,7 @@ const BlockWindow = struct {
         if (self.indexOf(cx, cy)) |i| self.cells[i] = null;
     }
 
-    /// Forgets everything, after a clear that may have touched cells beyond this window (an assembly).
+    /// Forgets everything, after a clear so no stale copy of the removed cell lingers in the window.
     inline fn reset(self: *BlockWindow) void {
         self.cells = @splat(null);
     }
@@ -2107,12 +2048,6 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
         .by = by,
     }) catch memory.oom();
     defer flag_worklist.clearRetainingCapacity();
-
-    // Mark the drain active so clearAssemblyRest() (reached from the cascade below) queues onto this worklist instead of re-entering the drain.
-    // Nested calls keep it set until the outermost returns.
-    const was_updating = in_edge_flag_update;
-    in_edge_flag_update = true;
-    defer in_edge_flag_update = was_updating;
 
     var original_block_broken = false;
     var checks_done: usize = 0; // prevent running out of memory
@@ -2175,8 +2110,6 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
 
                     // Internal block modification to avoid recursion.
                     internalClearBlock(target_coord, lbx, lby);
-                    // Multi-tile assemblies break as a unit so an unsupported group never leaves halves.
-                    clearAssemblyRest(target_coord, lbx, lby, current_block);
                     window.reset();
 
                     flag_worklist.append(alloc, .{ // use append() instead of at() to prevent panics

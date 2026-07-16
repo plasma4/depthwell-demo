@@ -143,10 +143,10 @@ const render_sliders = [_]SliderDef{
 
 /// List of debug buttons that either execute functions or toggle booleans.
 pub const buttons = [_]ButtonDef{
-    .{
-        .name = "Teleport to edge",
-        .action = teleportToEdge,
-    },
+    // .{
+    //     .name = "Teleport to edge",
+    //     .action = teleportToEdge,
+    // },
     .{
         .name = "Teleport randomly",
         .action = teleportRandomly,
@@ -155,10 +155,10 @@ pub const buttons = [_]ButtonDef{
         .name = "Clear caches",
         .action = clearCaches,
     },
-    .{
-        .name = "Audit worldgen odds",
-        .action = dw.audit.runAroundPlayer,
-    },
+    // .{
+    //     .name = "Sample worldgen odds",
+    //     .action = dw.audit.sampleWorldAroundPlayer,
+    // },
     .{
         .name = "Toggle creative",
         .toggle = &dw.inventory.IN_CREATIVE,
