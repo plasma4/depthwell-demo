@@ -161,8 +161,8 @@ pub const HashState = struct {
 
     /// Directly extracts a full 64-bit unsigned integer.
     /// If a completely unused 64-bit word is available in the pool, it consumes and returns it.
-    /// Otherwise, it increments `y` to pull a new 64-bit word, leaving the existing partial
-    /// entropy pool completely untouched so subsequent smaller gets can still use it.
+    /// Otherwise, it increments `y` to pull a new 64-bit word,
+    /// leaving the existing partial entropy pool untouched for future `get()`s.
     pub inline fn getRaw(self: *HashState) u64 {
         if (self.bits_left == 64) {
             self.bits_left = 0;
@@ -171,13 +171,12 @@ pub const HashState = struct {
             const next_y = self.y + 1;
             const next_value = FastHash.hash2d(self.seed_vector, self.x, next_y);
             self.y = next_y;
-            // self.value and self.bits_left are completely unchanged
             return next_value;
         }
     }
 
     /// Determines a boolean outcome for a given probability chance using `<= oddsNum()`.
-    /// Automatically optimizes near-power-of-two chances at compile-time to use the much faster and
+    /// Automatically optimizes near-power-of-two chances at compile-time to use the much faster,
     /// entropy-preserving `get()` path instead of pulling a full 64-bit word with `getRaw()`.
     pub inline fn getChance(self: *HashState, comptime chance: comptime_float) bool {
         const OptResult = struct { k: u8, n: u64 };

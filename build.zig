@@ -218,8 +218,8 @@ pub fn build(b: *std.Build) void {
         // only rebuilt when the source values (sprite.zig / mining.zig) actually change.
         generateShaderConstants(b, &[_][]const u8{"zig/types/sprite.zig"});
 
-        // Bake per-tile atlas colors into zig/render/particle_colors.zig; hash-guarded like the
-        // shader constants. The WASM compile depends on the run so the imported file is fresh.
+        // Bake per-tile sprite sheet colors into zig/render/particle_colors.zig;
+        // hash-guarded like the shader constants.
         const particle_gen = generateParticleColors(b, &[_][]const u8{
             "public/assets/main.png",
         });
@@ -233,8 +233,8 @@ pub fn build(b: *std.Build) void {
             exe.step.dependOn(&install_main.step);
             exe.step.dependOn(&install_masked.step);
 
-            // Extract colors only after the fresh atlas lands in public/assets. The hash was taken
-            // from the pre-export file, so an atlas change converges over two watcher builds.
+            // Extract colors only after the fresh sprite sheet lands in public/assets.
+            // The hash was taken from the pre-export file, so a sprite sheet change converges over two watcher builds.
             if (particle_gen) |gen_step| gen_step.dependOn(&install_main.step);
         } else {
             std.debug.print("Aseprite executable not found; skipping step. Either add to your system PATH or use -Daseprite.", .{});
@@ -402,7 +402,7 @@ fn generateShaderConstants(b: *std.Build, paths: []const []const u8) void {
 
 /// Regenerates `zig/render/particle_colors.zig` from the exported sprite atlas PNGs.
 /// Similar to `generateEnums()`: hashes `paths`, skips entirely when unchanged,
-/// otherwise builds and runs `zig/generate_pixel_data.zig` (which rewrites the data file in place and updates cache).
+/// otherwise builds and runs `zig/generate_pixel_data.zig` (which rewrites the file in-place and updates cache).
 /// Returns the run step (for sequencing against the atlas export), or null when skipped.
 fn generateParticleColors(b: *std.Build, paths: []const []const u8) ?*std.Build.Step {
     const cache_root = b.cache_root.path orelse ".";

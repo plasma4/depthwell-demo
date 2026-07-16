@@ -86,7 +86,6 @@ pub const geometry = @import("types/geometry.zig");
 pub const sprite = @import("types/sprite.zig");
 pub const Sprite = sprite.Sprite;
 pub const variation = @import("types/variation.zig");
-pub const assembly = @import("types/assembly.zig");
 
 pub const drops = @import("state/drops.zig");
 pub const seeding = @import("state/seeding.zig");
@@ -153,9 +152,7 @@ pub export fn prepareVisibleData(time_interpolated: f64, time_diff: f64, canvas_
     render.prepareVisibleData(time_interpolated, time_diff, canvas_w, canvas_h);
 }
 
-// Atlas dimensions, still used by engineMaker.ts (verbose log). The sprite-layout START constants
-// (STONE_START, ORE_START, …) are no longer exported: they are baked into shader.wgsl at build time
-// by zig/generate_shader.zig, sourced directly from the Sprite enum.
+// Dimensions of sprite sheet
 pub export fn getTilesPerRow() u32 {
     // Sprites are saved as a .png in a sprite sheet 256 pixels wide from build.zig
     // each individual sprite is 16x16, so there's 16 tiles/row (or 16 columns)

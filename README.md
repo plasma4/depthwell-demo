@@ -67,9 +67,22 @@ chmod +x .githooks/pre-commit
 
 ### Architecture details
 
-Game is created using Zig and WebGPU, and meant to be web-first. A final product that uses Mach Engine for native building is planned, but _web will always be free and receive updates_. The internal viewport is 480x270 (but it automatically scales with the DPI/base resolution). Functions are exported from `root.zig`.
+Game is created using Zig and WebGPU, and meant to be web-first. A final product that uses Mach Engine for native building is planned, but _web will always be free and receive updates_. The internal viewport is 480x270 (but it automatically scales with the DPI/base resolution). Functions are exported from `zig/root.zig`.
 
 By using `ChaCha12` and `Blake3` and a seed with 1-100 `a-z` characters, the game can generate over `10^140` possible maps, with depth and chunk sizes only practically bound by storage/RAM limits! Performance-sensitive areas are generated using `FastHash`, which uses 128-bit seed vectors at a time.
+
+#### How chunks come to life
+
+Before the specifics, here's the fixed pipeline a chunk runs through. Every stage is a deterministic function of the seed and the chunk's position, so the same chunk regenerates identically whether it is streamed in for the first time, revisited from cache, or rebuilt on load. Later stages only ever _read_ what earlier ones produced (think of this as a "dependency order"), never the reverse, which is what keeps the whole thing order-independent across chunk borders:
+
+1. **Base terrain** sets up the world! Each cell samples moisture and density noise to pick its foundation block (a stone variation, lava stone, air for caves, water in pools). This is the "raw" world with no features yet.
+2. **Ores and gems** get added to the terrain. A second noise pass overlays ore "veins" onto these terrain blocks. Ores/gems record the stone visually beneath them as `base_id`.
+3. **Structures.** Larger, terrain-gated features (chambers, pillars, geodes, trees) are placed by a prioritized, collision-resolved planner. This uses hashing, attempts to minimize biases, and decides _whether and where_ a structure exists at all.
+4. **Decorations** appear after, which are context-aware plants (mushrooms, flowers, vines, shrubs) that only check local terrain (whether there's a solid block above and below, for example).
+5. **Modifications** then get applied, which are any player edits (or water flowing changes) recorded in the `ModificationStore`. These are "replayed" over the freshly generated chunk, overriding whatever generation produced. This is the only stage that isn't purely procedural, and it, of course, has the highest priority.
+6. **Derived passes.** Finally, edge flags and waterlogging are (re-)computed again after modifications, from the settled block ids/neighbors, and a lighting value pass occurs right before sending data to WGSL. These are render/simulation state so they're re-calculated rather than stored.
+
+Note that when the player tries to modify part of the world, min(e?)ability is checked based on the tool, and adjacent blocks are removed according to a set of rules (edge flag logic or multi-block data).
 
 #### Coordinates and basics
 
@@ -82,7 +95,7 @@ Here are the basic terms (note that there are, for example, 16 possible subpixel
 - **$D$**: Shorthand for the current depth. You can think of depth $D-1$ as the coordinate space you occupied right _before_ entering a portal.
 - **The Event Horizon ($H$)**: Shorthand for $D-32$. When you are deep in the fractal ($D \ge 32 + 6$), the game stops tracking individual blocks shallower than 32 levels above you. This is because at $H$, each block is $2^{64}$ times wider than than the current depth, and recursive logic can stop. (This is internal and, when functional, shouldn't be noticeable or affect gameplay. More explanations below.)
 
-The player starts off at `STARTING_ZOOM_TIMES`, which defaults to 4. So, $D$ starts off as 4 and $D-1$ doesn't exist until $D$ increases further.
+The player starts off at `STARTING_ZOOM_TIMES`, which defaults to 6. So, $D$ starts off as 6 and $D-1$ doesn't exist until $D$ increases further.
 
 The camera and the player work with (integeric) subpixels, while entities are considered in terms of (floating-point) pixels. Seeding of specific blocks in chunks and modifications concern themselves with blocks. Asking something "where" it is involves just chunks (see later).
 
@@ -196,22 +209,22 @@ pub const Block = packed struct(u128) {
     /// - 1: warm orange glow
     lighting_color: u8 = 0,
 
-    /// Dual-purpose directional waterlogging field (bits 0-4 used):
-    /// - For liquid blocks: represents adjacent water heights/volumes.
-    /// - For non-liquid blocks: bits represent surrounding waterlogged cardinal directions.
-    ///   - bit 0: top (liquid block directly above)
+    /// Packed directional waterlogging field (bits 0-10 used; see `WaterloggedState` in zig/state/water.zig).
+    /// - For liquid blocks: only bit 0 is read (liquid directly above).
+    /// - For non-liquid blocks: encodes the surrounding water for the shader's surface fill and interpolation.
+    ///   - bit 0: top (water of any depth directly above; fully submerges/fills the block)
     ///   - bit 1: bottom (full liquid block directly below at HP=15)
-    ///   - bit 2: whether ripple occurs from the top (top ripple cutoff)
-    ///   - bit 3: left (liquid block directly to the left)
-    ///   - bit 4: right (liquid block directly to the right)
-    waterlogged: u8 = 0,
+    ///   - bit 2: top ripple cutoff (adjacent water surface is exposed to air)
+    ///   - bits 3-6: left adjacent liquid volume (0-15; 0 means no liquid to the left)
+    ///   - bits 7-10: right adjacent liquid volume (0-15; 0 means no liquid to the right)
+    waterlogged: u12 = 0,
     /// Unused portion of block data.
-    _pad: u24 = 0,
+    _pad: u20 = 0,
     ...
 }
 ```
 
-Well, now you know what a block contains.
+Well, now you know what a block contains. The `edge_flags`/`id_edge_flags` neighbor masks power a higher-level abstraction worth its own explanation; see "Edge flags" below.
 
 The most complex part of Depthwell's architecture, though, is ensuring that a hole mined at Depth 0 results in an empty 4-by-4 region at Depth 1, 16-by-16 at Depth 2, and so on. This is handled through a neat little **lineage check** during chunk generation.
 
@@ -376,6 +389,19 @@ if (progress != 255 and progress != 0) {
 
 You can see how because the entities are _ordered_, it's easy to add a shadow. Additionally, the usage of white text or masks works perfectly with OKLCH (which stands for lightness, chroma, and hue). This means that not only can entities have various small color shifts, but they can also perfectly be masked with a white sprite (see the sprite sheet up top)! (Remember that a sprite is a physical 16x16 area of the sprite sheet, and entities can easily render this.)
 
+#### Sprite variation
+
+An `id` in a `Block` is only the _base_/default tile, so the tile actually drawn is resolved once per visible block per frame by `resolveVariant()` in `zig/types/variation.zig`, on the CPU right after lighting and before upload. While a lot of sprites simply resolve to themselves, some decorations and the plain stone type, for example, have multiple variants. It's a data-driven table: each sprite maps to at most one `VariantRule`, and all visual variants are stored consecutively, which a comptime check enforces. The kinds cover the common needs:
+
+- `grid_2x2` / `checkerboard` tile by tile-coordinate parity, so plain stone reads like a 32x32 texture instead of an obvious grid.
+- `seed_pick` chooses a frame from the block's seed (biased toward the base), giving mushrooms and bushes silent variety. (Mostly here because the old shader biased towards the first sprite.)
+- `animate` cycles frames on a fixed `period_frames` cadence (campfires, hovering cores).
+- `water_top` swaps to the surface sprite when nothing covers the block above.
+
+Variation is seeded on a per-block basis and is visual-only. Multi-tile features are instead built from _distinct_ sprites glued together by neighbor-support rules based on interaction rules `SpriteProps.requires` (see "Decoration pass"), so breaking either half topples the other through the same edge flag/adjacent block cascade the rest of the world uses. There is no separate "multi-tile object" abstraction; a group is just sprites that require each other!
+
+(Note that ore/gem rendering is significantly more nuanced and uses image masks! You'll want to dig into the shader to unpack details.)
+
 #### The fractal modification buffer
 
 Depthwell stores modifications with some fancy lineage inheritance: modifications are stored per-layer, and when generating a chunk at Depth $D$, the engine recursively climbs and calculates the history of the `ModificationStore` and its resulting cache properties.
@@ -385,26 +411,26 @@ The original goal with modifications was to ensure the following:
 1. Read _existing_ modifications to extract rectangular groups of chunks: ~1000 reads/second for as long as possible due to potential of requiring 16-32 new chunks in SimBuffer during some frames and camera features in the future. In practice, this is **easy** with basic caching algorithms.
 2. Write a _new_ modification (60fps for as long as possible). In practice, this is **very easy** with hash maps. The real bottleneck might even be edge flags update logic, which is currently fairly naive.
 3. Increment the depth (below 3 seconds for as long as possible). In practice, this is **easy** because the read requirements of procedurally generating chunks are more strict (we must be able to generate 4 chunks/frame at 60fps on mid-tier hardware to prevent frame drops).
-4. Minimize heap fragmentation and "allocation churn". Not too bad if allocators are used right.
+4. Minimize heap fragmentation and "allocation churn". Not too bad if allocators are used correctly.
 5. The entire state can be stored inside RAM. Not too bad with save compression logic principles applied to modifications as well.
 
-Therefore, the current solution is to hash a `DepthCoordinate` and use it to index a per-chunk `ModEntry`. A `ModEntry` is _sparse_: rather than a full 4KiB `Chunk`, it stores only the cells the player (or the water sim) actually authored, as an `authored` bitmap (one bit per block) plus a packed `ModCell` array kept in ascending block-index order.
+Therefore, the current solution is to hash a `DepthCoordinate` and use it to index a per-chunk `ModEntry`. A `ModEntry` is _sparse_: rather than a full 4KiB `Chunk`, it stores only the cells the player (or the water sim) actually modified, as an `modified` bitmap (one bit per block) plus a packed `ModCell` array kept in ascending block-index order.
 
-A `ModCell` holds just the only three fields that cannot be recovered by regenerating the chunk: `id`, `base_id`, and `hp`. Everything else (`seed`, `edge_flags`, `light`, `group_x/y`, waterlogging) is _derived_ and is rebuilt by `materializeChunk()`, which replays every authored cell over a freshly generated chunk and then reruns the flag pass. So a chunk the player mined 30 blocks out of costs ~210 bytes here, not 4KiB. See some definitions and more details:
+A `ModCell` holds just the only three fields that cannot be recovered by regenerating the chunk: `id`, `base_id`, and `hp`. Everything else (`seed`, `edge_flags`, `light`, waterlogging) is _derived_ and is rebuilt by `materializeChunk()`, which replays every modified cell over a freshly generated chunk and then reruns the flag pass. So a chunk the player mined 30 blocks out of costs ~210 bytes here, not 4KiB. See some definitions and more details:
 
 ```zig
-/// One authored cell: the only `Block` fields that cannot be recovered by regenerating the chunk.
+/// One modified cell: the only `Block` fields that cannot be recovered by regenerating the chunk.
 pub const ModCell = extern struct { id: Sprite, base_id: Sprite, hp: u8 };
 
-/// The modifications to a single chunk, as a sparse set of authored cells rather than a full `Chunk`.
+/// The modifications to a single chunk, as a sparse set of modified cells rather than a full `Chunk`.
 /// Should ONLY be mutated through `ModificationStore.beginWrite()`: for saving functionality.
 pub const ModEntry = struct {
     /// Cells whose value came from a player edit or the water sim rather than from procedural generation.
     /// Bit `i` (block index `by * CHUNK_SIZE + bx`) set means `cells[rank(i)]` holds that cell's value.
-    authored: [AUTHORED_WORDS]u64 = @splat(0),
-    /// Authored cells in ascending block-index order. The first `count` are live; the rest is spare capacity.
+    modified: [MODIFIED_WORDS]u64 = @splat(0),
+    /// Modified cells in ascending block-index order. The first `count` are live; the rest is spare capacity.
     cells: []ModCell = &.{},
-    /// Live entries in `cells`. Always equals the population count of `authored`.
+    /// Live entries in `cells`. Always equals the population count of `modified`.
     count: u16 = 0,
     ...
 }
@@ -438,7 +464,7 @@ pub const ModificationStore = struct {
     ...
     /// Gets an existing entry for reading, or null if the chunk is unmodified.
     pub fn get(self: *const @This(), key: DepthCoordinate) ?*const ModEntry { ... }
-    /// The authored value at one block, or null if still procedural. O(1) fast path for ancestor lookups.
+    /// The modified value at one block, or null if still procedural. O(1) fast path for ancestor lookups.
     pub fn getCell(self: *const @This(), key: DepthCoordinate, block_idx: u8) ?ModCell { ... }
     /// The ONLY way to mutate the store: shadows the entry for any in-flight save, then returns a `ModWriter`.
     pub fn beginWrite(self: *@This(), key: DepthCoordinate) ModWriter { ... }
@@ -519,7 +545,7 @@ Entering a portal shifts a bunch of data around, particularly the cache and all 
 
 Because the coordinate tracking suffix uses a 64-bit integer, and each depth traversal consumes exactly 2 bits, a player can natively traverse exactly 32 depths ($2^{64}$ chunks) without exceeding standard integer bounds.
 
-To manage near-infinite zoom, Depthwell stores seeds for each quadrant in `path_hashes` (4 because the code generates 4 BLAKE3 hashes for various parts of seeding, from terrain to WGSL decoration).
+To manage near-infinite zoom, Depthwell stores seeds for each quadrant in `path_hashes` (4 because the code generates four 64-bit BLAKE3 hashes for various parts of seeding, from terrain to WGSL decoration).
 
 Once increasing the depth past 32, the engine executes a "rebase" each time. The player is re-centered inside the 64-bit bounds, and the highest 2 bits (the overflow nibble) "fall off" the top of the suffix into the `QuadCache` history arrays.
 
@@ -530,7 +556,7 @@ Modifications of "higher" $D$-values are prioritized, and lower $D$-values are u
 - Reading performance is an amortized O(1) due to only needing to consider block sizes between depth $D-32$ to $D$.
 - Writing performance is an amortized O(1) due to needing to modify a `HashMap`.
 - Increasing depth is, surprisingly, an O(1) operation due to a lack of modification culling (to allow for a "spectator view" on death), and storing where things are with a 256-bit `DepthCoordinate` and assuming that collisions are impossible.
-- Space complexity is O(n) based on the number of modified _cells_, not chunks: a `ModEntry` only holds the blocks actually authored (a `ModCell` is 5 bytes), so a lightly edited chunk costs a few hundred bytes rather than a full 4KiB `Chunk`. Removing a chunk's edits recycles its entry slot and cell block, but `entries` itself never shrinks (the budgeted save holds indices into it), so it is stored as a `SegmentedList` to prevent large unused gaps in WASM memory.
+- Space complexity is O(n) based on the number of modified _cells_, not chunks: a `ModEntry` only holds the blocks actually modified (a `ModCell` is 5 bytes), so a lightly edited chunk costs a few hundred bytes rather than a full 4KiB `Chunk`. Removing a chunk's edits recycles its entry slot and cell block, but `entries` itself never shrinks (the budgeted save holds indices into it), so it is stored as a `SegmentedList` to prevent large unused gaps in WASM memory.
 
 #### Storing chunks with a simulation distance
 
@@ -596,8 +622,8 @@ The layout is little-endian:
 
 Two ideas keep saves robust and cheap:
 
-- **Identities are stored by name, not by enum ordinal.** The `SPRITE_TABLE` section is written first so the loader can map the raw sprite ids embedded in `MOD_STORE` cells back to names, then resolve those against the _running_ build's `Sprite` enum. Adding or reordering sprites therefore never invalidates a save; a name the current build no longer knows just degrades to `.none`.
-- **`MOD_STORE` stores only authored cells.** Exactly like the in-memory `ModEntry` (see "The fractal modification buffer"), the save holds only the blocks the player actually changed; everything else is regenerated on load via `world.materializeChunk()`. Each chunk record is therefore variable-length.
+- **Sprite IDs are stored by name, not by enum ordinal.** The `SPRITE_TABLE` section is written first so the loader can map the raw sprite ids IDs in `MOD_STORE` cells back to names, then resolve those against the _running_ build's `Sprite` enum. Adding or reordering sprites therefore never invalidates a save; a name the current build no longer knows just degrades to `.none`.
+- **`MOD_STORE` stores only _modified_ cells.** Exactly like the in-memory `ModEntry` (see "The fractal modification buffer"), the save holds only the blocks the player actually changed; everything else is regenerated on load via `world.materializeChunk()`. Each chunk record is therefore variable-length.
 
 Because a big save cannot block the frame, `MOD_STORE` is written **budgeted** across many frames:
 
@@ -632,6 +658,17 @@ When a tile is sampled from the atlas, it is immediately converted from linear s
 
 (OKLAB is just awesome!)
 
+#### Edge flags
+
+Both `edge_flags` and `id_edge_flags` on a `Block` are an 8-bit "who are my neighbors?" bitmask, packed in a readable way (top-left, top, top-right, left, **critically, no center block!**, right, bottom-left, bottom, bottom-right). `zig/types/types.zig` names one bit per direction (`EdgeFlags.TOP_LEFT = 0x01`, all the way to `BOTTOM_RIGHT = 0x80`), and `EdgeFlags.getFlagBit(dx, dy)` maps a neighbor offset back to its bit.
+
+The two fields answer slightly different questions:
+
+- Edge flags record whether each neighbor is "**the same _kind_ of surface**." For a solid block, a set bit means a solid neighbor; for a liquid, it means a solid-or-liquid neighbor. This is what the shader's erosion pass reads to decide which corners to round and which edges to notch, and it's what makes a wall read as one continuous mass rather than a grid of squares.
+- `id_edge_flags` is stricter: a bit is set only when the neighbor's `id` is _exactly_ this block's `id`. It drives the ore/gem overlay mask so a copper vein connects only to other copper, not to the stone around it.
+
+One critical convention: decorations, air, and anything that shouldn't erode have both masks forced to `0xFF` (all neighbors "present") after the final generation pass. A fully-surrounded block has no exposed edges, so the shader skips erosion and edge-darkening entirely! Any code that recomputes flags (after mining, placing, or a water change) has to re-apply this reset by the time chunk data gets sent to the shader, or decorations will look wrong.
+
 #### Procedural erosion
 
 Instead of using thousands of unique sprites for different wall shapes, Depthwell uses a single "foundation" sprite and a procedural erosion algorithm. (This also means less work in terms of drawing sprites.)
@@ -655,7 +692,8 @@ Ores and gems are rendered using a multi-texture "masking" trick to save atlas s
 
 The background isn't simply a static image. Instead it's created with a custom multi-octave fractal brownian motion (FBM) implementation!
 
-It uses a 2D noise function (FBM, which you can find in The Book of Shaders webpage) and this is applied multiple times. For performance reasons the number of octaves is heavily toned down, and there's a subtle parallax effect with 8x, 32x, and 64x "slower" layers versus the camera's movement.
+For every pixel a 2D noise function is used (FBM, which you can find more details for in The Book of Shaders webpage!) and this is applied multiple times. For performance reasons the number of octaves is heavily toned down, and there's a subtle parallax effect with 8x, 32x, and 64x "slower" layers versus the camera's movement.
+
 (As in, for every 64 pixels the players move, the 3 layers would move 8, 2, and 1 pixels respectively. These layers also have different RGB color choices and looks!)
 
 You can imagine the specific position as effectively being `(chunk ID + sub-chunk location) modulo 512`, with a coordinate warping system, and basic trig-based lighting at the end.
@@ -663,6 +701,19 @@ You can imagine the specific position as effectively being `(chunk ID + sub-chun
 For the water, there's similar complicated modulo wrapping logic; however, this is based on the chunk's and subpixel position and is easier to reason about. (For water, it's modulo 256 instead of 512.)
 
 (There are a lot more details within `zig/render/chunk.zig` as to how this is exported. For the water, see `zig/state/water.zig` for update calculations.)
+
+#### Water simulation
+
+The water itself is a cellular automaton living in `zig/state/water.zig`, run over the loaded `SimBuffer`. There's no separate "water" grid: a cell's volume from 0 to 15 is stored right in a block's `hp` field (which for a solid block instead means mining progress so the two never coexist). Water lives both as full `water` blocks and as _waterlogging_ inside decorations and crafters (anything `isWaterloggable()`), which lets a pool soak through a bush without deleting it.
+
+The core rule is **mass conservation**: `tickWater()` only ever _moves_ volume between cells within the `SimBuffer`, never creating or destroying it. (A debug flag, `VERIFY_WATER_MASS`, asserts the total is stable each tick.) A tick runs in phases:
+
+1. Collect chunks that hold water and haven't yet settled; if none, the whole tick is skipped.
+2. Sweep active chunks bottom-up so falling water moves one cell per tick without being double-moved (guarded by the per-cell `water_updated` bitset), then spread laterally (tracked by `lateral_received`). Every cell whose volume actually changed is recorded in `cells_changed`.
+3. Chunks that saw no movement are marked settled and skipped by future ticks until something disturbs them.
+4. Recompute the `edge_flags` and `waterlogged` masks for every chunk touched this tick (plus chunks queued by manual placement via `queueWaterFlags()`), so the shader's surface fill, ripples, and left/right volume interpolation stay correct.
+
+Because volume travels between blocks whose neighbors may live in adjacent chunks, the flag pass and the sweep both reach across chunk borders inside the `SimBuffer`. Only the cells the sim actually moved are persisted (via `cells_changed`), so a large calm ocean costs almost nothing per tick, and a settled body of water drops out of the active set entirely.
 
 ### Copyright
 

@@ -481,7 +481,7 @@ pub fn drawInventory(time_diff: f64) void {
 
         addEntity(.{
             .sprite = if (menus.furnace and active_sprite.isOre())
-                .inventory_selected_red
+                .inventory_selected_orange
                 // make greener if it's in the world, but not an item
             else if (is_selected) .inventory_selected else .inventory,
             .position = bg_pos,
@@ -570,7 +570,9 @@ pub fn drawInventory(time_diff: f64) void {
         const row: f32 = @floatFromInt(i / INVENTORY_WIDTH);
 
         const inventory_pos: Vec2f32 = .{ 32 + col * spacing, 32 + row * spacing };
-        const pos = inventory_pos - size_vec / Vec2f32{ base_size / 4.0, base_size / 4.0 } - Vec2f32{ base_size / 16.0, base_size / 16.0 };
+        const pos = inventory_pos -
+            size_vec / Vec2f32{ base_size / 4.0, base_size / 4.0 } -
+            Vec2f32{ base_size / 16.0, base_size / 16.0 };
 
         // number automatically resizes to be smaller for large values!
         var count = inventory_counts[@intFromEnum(active_sprite)];
@@ -581,7 +583,8 @@ pub fn drawInventory(time_diff: f64) void {
         // calculate wobble angle with sine wave (angle is in radians)
         // if the item is implied to be more common (more digit count in the number), then wobble less!
         const item_wobble = inventory_wobble_progress[id];
-        const wobble_angle = std.math.sin(item_wobble * wobble_speed) * item_wobble * wobble_size / (digit_count_minus_one + 1.0);
+        const wobble_angle = std.math.sin(item_wobble * wobble_speed) *
+            item_wobble * wobble_size / (digit_count_minus_one + 1.0);
 
         // wrap and convert hue to f32
         // hue is affected by ID in active slots AND wobble angles!
@@ -615,8 +618,8 @@ pub fn drawInventory(time_diff: f64) void {
     drawSelectedName(time_diff);
 }
 
-/// Draws the selected item's name in a banner above the inventory, tinted by the sprite's dominant atlas color with a darker drop shadow.
-/// Text has a vertical ripple effect that retriggers whenever the selection changes, plus an OKLCH brightening gradient.
+/// Draws the selected item's name in a banner above the inventory, tinted based on the sprite's most common colors.
+/// Text has a vertical ripple effect that retriggers whenever the selection changes and has a neat gradient effect.
 fn drawSelectedName(time_diff: f64) void {
     const sprite_to_name = selected_sprite;
     if (sprite_to_name != last_named_sprite) {

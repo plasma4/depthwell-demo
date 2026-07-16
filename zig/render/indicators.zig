@@ -1,7 +1,7 @@
 //! Draws visual indicators above certain block types and routes indicator clicks to their menus.
 //!
-//! A single block window scan (see scanIndicators()) feeds both the per-frame drawing pass and the hover test used for click down-capture,
-//! so the drawn icon and its clickable hitbox can never drift apart.
+//! A single block window scan (see `scanIndicators()`) feeds both the per-frame drawing pass hover testing,
+//! so the drawn icon and its clickable hitbox can't ever drift apart.
 const std = @import("std");
 const dw = @import("../root.zig");
 
@@ -61,7 +61,7 @@ const IndicatorKind = enum {
     loot,
 
     /// Classifies a stored block id into the indicator it displays, or null for non-indicator blocks.
-    /// Block ids are stored as the base sprite (variation is render-only), so exact matching is valid here.
+    /// Block IDs are stored as the base sprite (variation is render-only), so exact matching is valid here.
     fn fromBlock(id: Sprite) ?IndicatorKind {
         return switch (id) {
             .forest_furnace, .lava_furnace => .furnace,
@@ -82,10 +82,9 @@ const IndicatorKind = enum {
     }
 
     /// Pointer to this indicator's open/close flag in `menus`, or null for display-only indicators.
-    /// A menu-backed kind's `MenusList` field name must match the tag name; the inline switch enforces that at comptime.
+    /// A menu-backed kind's `MenusList` field name must match the tag name!
     fn menuFlag(self: IndicatorKind) ?*bool {
         return switch (self) {
-            // .tree => null,
             inline else => |k| &@field(menus, @tagName(k)),
         };
     }
@@ -135,8 +134,6 @@ fn cameraView() CameraView {
 }
 
 /// Computes an indicator's on-screen geometry for a block at the given chunk-relative cell.
-/// `off_sub_x`/`off_sub_y` shift the icon within the block (subpixels; 256 per tile)
-/// so a multi-tile assembly's single icon can sit over its footprint center rather than its origin cell.
 /// Returns null when the block is too far away (>= 5 blocks) to display an icon.
 fn indicatorGeom(
     view: CameraView,
@@ -144,14 +141,12 @@ fn indicatorGeom(
     chunk_dy: i32,
     local_bx: u4,
     local_by: u4,
-    off_sub_x: i64,
-    off_sub_y: i64,
 ) ?IndicatorGeom {
     const game = &memory.game;
 
     // Center subpixels relative to player coordinates
-    const block_sub_x = chunk_dx * 4096 + @as(i64, local_bx) * 256 + 128 + off_sub_x;
-    const block_sub_y = chunk_dy * 4096 + @as(i64, local_by) * 256 + 128 + off_sub_y;
+    const block_sub_x = chunk_dx * 4096 + @as(i64, local_bx) * 256 + 128;
+    const block_sub_y = chunk_dy * 4096 + @as(i64, local_by) * 256 + 128;
 
     const dx_sub = block_sub_x - game.player_pos[0];
     const dy_sub = block_sub_y - game.player_pos[1];
@@ -211,20 +206,12 @@ fn scanIndicators(view: CameraView, visitor: anytype) void {
             const block = chunk.getBlock(local_bx, local_by);
 
             const kind = IndicatorKind.fromBlock(block.id) orelse continue;
-            // One indicator per assembly: only the group origin (top-left) cell shows it,
-            // and the icon is nudged to the footprint center (256 subpixels per tile, so (w-1)*128 in x).
-            if (block.group_x != 0 or block.group_y != 0) continue;
-            const footprint = dw.assembly.footprintOf(block.id);
-            const off_sub_x = @as(i64, footprint.w - 1) * 128;
-            const off_sub_y = @as(i64, footprint.h - 1) * 128;
             const geom = indicatorGeom(
                 view,
                 chunk_dx,
                 chunk_dy,
                 local_bx,
                 local_by,
-                off_sub_x,
-                off_sub_y,
             ) orelse continue;
             const ref: BlockRef = .{ .coord = target_coord, .bx = local_bx, .by = local_by };
             if (visitor.visit(block.id, kind, geom, ref)) return;

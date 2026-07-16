@@ -3,26 +3,33 @@
 //! The atomic OPFS write and per-frame budgeting are handled by JS.
 //!
 //! Sprite and tool identities are stored by name, never by enum ordinal, so adding or reordering sprites never invalidates a save.
-//! `SPRITE_TABLE` maps the raw ids embedded in `MOD_STORE` cells back to names,
-//! which the loader resolves against the running build's `Sprite` (unknown names degrade to `.none`).
+//! `SPRITE_TABLE` maps the raw IDs embedded in `MOD_STORE` cells back to names,
+//! which the loader resolves against the current game's `Sprite` (unknown names degrade to `.none`).
+//! (This means versions don't need to be incremented at all after modifying `Sprite`.)
 //!
-//! `MOD_STORE` holds only the cells the player authored, not whole chunks: everything else in a chunk is regenerated on load
+//! `MOD_STORE` holds only the cells the player modified, not whole chunks: everything else in a chunk is regenerated on load
 //! (see `world.materializeChunk()`). A record is therefore variable-length.
 //!
-//! Format (little-endian):
+//! Little-endian format:
 //! - magic "DWSV" | `VERSION` u32
 //! - sections, repeated: tag u16 enum | section_version u16 | byte_len u64 | payload[byte_len]
 //! - end marker: tag `.end` (also u16, 0)
 //! - BLAKE3 32-byte hash over every preceding byte
 //!
 //!
-//! For importing process:
+//! Process for importing:
 //! - `beginSnapshot()` writes the header and every small section (all captured at start), opens the MOD_STORE section,
 //!   and freezes a plan (the key + entry index of each modified chunk).
 //! - `writeBatch()` then encodes up to N chunks per call. To keep the save atomic (handled partially by JS OPFS operations),
 //!   whenever the game mutates a planned entry before it has been encoded,
 //!   `shadowEntryForSave()` first serializes that entry's start-of-snapshot payload into a side map.
-//! - A wipe of `mod_store` mid-snapshot (new game / load) bumps its generation and aborts.
+//! - A wipe of `mod_store` mid-snapshot (from new game or load) bumps its generation and aborts.
+comptime {
+    if (@import("builtin").cpu.arch.endian() != .little) {
+        @compileError("Depthwell only works in little-endian architectures");
+    }
+}
+
 const std = @import("std");
 const dw = @import("../root.zig");
 
@@ -226,8 +233,6 @@ fn toolFromName(name: []const u8) ?mining.Tools {
 var id_remap: std.AutoHashMapUnmanaged(u16, Sprite) = .empty;
 
 fn remapSpriteId(old_id: u16) Sprite {
-    // No table loaded (e.g. a save without SPRITE_TABLE): assume the ids are this build's own.
-    if (id_remap.count() == 0) return @enumFromInt(old_id);
     if (id_remap.get(old_id)) |s| return s;
     return .none;
 }
@@ -253,6 +258,7 @@ fn readSpriteTable(r: *Reader) !void {
             try id_remap.put(save_alloc, old_id, s);
         }
     }
+    if (id_remap.count() == 0) return SaveError.BadData;
 }
 
 /// Right after sprite logic: exports the `GameState` as one huge hunk.
@@ -448,21 +454,21 @@ fn readMisc(r: *Reader) !void {
 
 // MOD_STORE record (section version 2), per modified chunk:
 //   key      : suffix[0] u64 | suffix[1] u64 | depth u64 | quadrant u32   (28 bytes)
-//   authored : [CHUNK_SIZE_SQ / 64]u64                                    (32 bytes; which cells the player owns)
+//   modified : [CHUNK_SIZE_SQ / 64]u64                                    (32 bytes; which cells the player owns)
 //   cells    : PackedCell (u32), once per set bit, ascending              (4 bytes each)
-// The cell count is the population count of `authored`, so it is never stored twice.
-// Sprite ids go out as ids (remapped through SPRITE_TABLE on load), never as build-local table indices.
+// The cell count is the population count of `modified`, so it is never stored twice.
+// Sprite IDs are remapped through SPRITE_TABLE on load based on enum names!
 
-/// Bytes one authored cell occupies on disk.
+/// Bytes one modified cell occupies on disk.
 const MOD_CELL_BYTES: u64 = @sizeOf(PackedCell);
 /// Bytes of a record's fixed key prefix.
 const MOD_KEY_BYTES: u64 = 8 + 8 + 8 + 4;
-/// Bytes of a record's `authored` bitmap.
-const MOD_AUTHORED_BYTES: u64 = @sizeOf(@FieldType(world.ModEntry, "authored"));
+/// Bytes of a record's `modified` bitmap.
+const MOD_MODIFIED_BYTES: u64 = @sizeOf(@FieldType(world.ModEntry, "modified"));
 
 /// Bytes the payload (everything after the key) of one entry serializes to.
 fn entryPayloadBytes(entry: *const world.ModEntry) u64 {
-    return MOD_AUTHORED_BYTES + @as(u64, entry.count) * MOD_CELL_BYTES;
+    return MOD_MODIFIED_BYTES + @as(u64, entry.count) * MOD_CELL_BYTES;
 }
 
 fn writeEntryKey(w: *Writer, key: DepthCoordinate) !void {
@@ -472,9 +478,9 @@ fn writeEntryKey(w: *Writer, key: DepthCoordinate) !void {
     try w.int(u32, key.quadrant);
 }
 
-/// Writes an entry's payload: the authored bitmap, then each authored cell in ascending block-index order.
+/// Writes an entry's payload: the modified bitmap, then each modified cell in ascending block-index order.
 fn writeEntryPayload(w: *Writer, entry: *const world.ModEntry) !void {
-    for (entry.authored) |word| try w.int(u64, word);
+    for (entry.modified) |word| try w.int(u64, word);
     for (entry.cells[0..entry.count]) |cell| {
         const packed_cell: PackedCell = .{
             .id = @intCast(@intFromEnum(cell.id)),
@@ -499,8 +505,7 @@ fn writeModStore(w: *Writer) !void {
     w.endSection(at);
 }
 
-/// Rebuilds `mod_store` from the saved records. Sprite ids are remapped so a save written by a build with
-/// different enum ordinals still resolves to the right sprites; an id this build no longer has degrades to `.none`.
+/// Rebuilds `mod_store` from the saved records.
 fn readModStore(r: *Reader) !void {
     // we do NOT need to reset the mod store because importAll() resets before section dispatch
     const n = try r.varint();
@@ -512,9 +517,9 @@ fn readModStore(r: *Reader) !void {
             .quadrant = try r.int(u32),
         };
 
-        var authored: @FieldType(world.ModEntry, "authored") = undefined;
+        var modified: @FieldType(world.ModEntry, "modified") = undefined;
         var count: usize = 0;
-        for (&authored) |*word| {
+        for (&modified) |*word| {
             word.* = try r.int(u64);
             count += @popCount(word.*);
         }
@@ -528,7 +533,7 @@ fn readModStore(r: *Reader) !void {
             if (cell.hp > Block.MAX_HP) return SaveError.BadData;
         }
 
-        try world.mod_store.loadEntry(key, authored, cells[0..count]);
+        try world.mod_store.loadEntry(key, modified, cells[0..count]);
     }
 }
 
@@ -960,9 +965,9 @@ test "mod_store: encoding/decoding is correct" {
     world.mod_store.init(testing.allocator);
     var r: Reader = .{ .buf = buf.items };
 
-    var authored: @FieldType(world.ModEntry, "authored") = undefined;
+    var modified: @FieldType(world.ModEntry, "modified") = undefined;
     var count: usize = 0;
-    for (&authored) |*word| {
+    for (&modified) |*word| {
         word.* = try r.int(u64);
         count += @popCount(word.*);
     }
@@ -975,7 +980,7 @@ test "mod_store: encoding/decoding is correct" {
         cell.base_id = remapSpriteId(@intCast(packed_cell.base_id));
         cell.hp = @intCast(packed_cell.hp);
     }
-    try world.mod_store.loadEntry(key, authored, decoded[0..count]);
+    try world.mod_store.loadEntry(key, modified, decoded[0..count]);
 
     for (cells) |c| try testing.expectEqual(c.cell, world.mod_store.getCell(key, c.i).?);
     try testing.expectEqual(@as(?world.ModCell, null), world.mod_store.getCell(key, 1));
