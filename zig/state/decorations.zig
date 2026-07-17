@@ -15,25 +15,24 @@ const Rect = structures.Rect;
 const Constraint = structures.Constraint;
 const CHUNK_SIZE = dw.CHUNK_SIZE;
 
-pub const Vine = @import("decorations/Vine.zig");
-
-/// Column features, stamped before any point decoration.
-pub const columns = .{Vine.feature};
+/// Column features, stamped before any point decoration; the single source of truth for how many exist.
+pub const columns = @import("decorations/vines.zig").features;
 
 /// Point decorations in priority order; the first to claim a block wins it.
 /// Taller/wider kinds go first, so ground clutter cannot steal a cell out from under a multi-block footprint.
 pub const points = .{
     @import("decorations/Plant.zig"),
     @import("decorations/Shrub.zig"),
+    CeilingDecor(.ceiling_flower, 0.15),
     FloorDecor(.bush, 0.030),
     FloorDecor(.rock, 0.030),
+    FloorDecor(.purple_rock, 0.002),
     FloorDecor(.small_tree, 0.013),
     FloorDecor(.mushroom, 0.020),
     FloorDecor(.campfire, 0.005),
     FloorDecor(.forest_furnace, 0.006),
     FloorDecor(.lava_furnace, 0.004),
     FloorDecor(.basic_core, 0.012),
-    CeilingDecor(.ceiling_flower, 0.15),
 };
 
 /// A 1x1 decoration standing on the ground: very common!
@@ -212,7 +211,7 @@ pub fn resolve(wx: u32, wy: u32, seed: Vec2u) ?Sprite {
 /// Does columns-first, then points, and neither ever overwrites an occupied cell.
 /// Doesn't read edge flags: a decoration probes terrain itself, so it neither depends on nor perturbs them,
 /// which is what keeps a neighbor's edits from shuffling this chunk's decorations.
-pub fn stampChunk(chunk: *Chunk, cx: u64, cy: u64, column_seeds: *const [CHUNK_SIZE]ColumnState) void {
+pub fn stampChunk(chunk: *Chunk, cx: u64, cy: u64, column_seeds: *const [columns.len][CHUNK_SIZE]ColumnState) void {
     stampColumns(chunk, cx, cy, column_seeds);
 
     const seed = dw.memory.game.getHashSeed(.decorations1);
@@ -229,14 +228,14 @@ pub fn stampChunk(chunk: *Chunk, cx: u64, cy: u64, column_seeds: *const [CHUNK_S
 }
 
 /// Walks each column top-to-bottom, advancing every column feature's state machine one cell at a time.
-/// `column_seeds` carries the state entering row 0 from the chunk(s) above, so a chain crosses the border.
-fn stampColumns(chunk: *Chunk, cx: u64, cy: u64, column_seeds: *const [CHUNK_SIZE]ColumnState) void {
+/// `column_seeds[i]` carries feature `i`'s state entering row 0 from the chunk(s) above, so every chain crosses the border.
+fn stampColumns(chunk: *Chunk, cx: u64, cy: u64, column_seeds: *const [columns.len][CHUNK_SIZE]ColumnState) void {
     for (0..CHUNK_SIZE) |block_x| {
         const wx: u64 = cx * CHUNK_SIZE + block_x;
 
         inline for (columns, 0..) |feature, i| {
             // one carried state per feature
-            var state = if (i == 0) column_seeds[block_x] else ColumnState{};
+            var state = column_seeds[i][block_x];
 
             for (0..CHUNK_SIZE) |block_y| {
                 const block = &chunk.blocks[block_x + block_y * CHUNK_SIZE];

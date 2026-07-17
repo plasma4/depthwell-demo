@@ -192,43 +192,29 @@ pub fn generateBaseChunk(chunk: *Chunk, coord: Coordinate) void {
     addEdgeFlags(chunk, coord.asDepthCoordinate(depth), null);
 
     // Decorate the base chunk here so that child depths inherit the results.
-    // Hanging vines need the vine state entering each column from the chunk(s) above so they cross the border.
-    const vine_seeds = computeVineSeeds(coord.asDepthCoordinate(depth));
-    dw.decorations.stampChunk(chunk, cx, cy, &vine_seeds);
+    // Column features need the state entering each column from the chunk(s) above so their chains cross the border.
+    const column_seeds = computeColumnFeatureSeeds(coord.asDepthCoordinate(depth));
+    dw.decorations.stampChunk(chunk, cx, cy, &column_seeds);
 
     resetEmptyEdgeFlags(chunk);
 }
 
-/// Computes the hanging-vine (spiral plant) state entering the top of each of this chunk's columns,
-/// by deterministically tracing terrain in the chunk(s) directly above.
-/// A vine cell can sit at most `Vine.MAX_LENGTH` blocks below its ceiling, so scanning that many rows up captures every ceiling that could feed a vine into row 0.
-/// Terrain above is recomputed solidity-only via `resolveFoundationSolid()`
-/// (matching how the neighbor chunk generated itself), keeping vines seamless across the border without caching neighbors.
-fn computeVineSeeds(key: DepthCoordinate) [CHUNK_SIZE]dw.decorations.ColumnState {
-    return computeColumnSeeds(dw.decorations.Vine.feature, key);
+/// Computes the entering `ColumnState` per column for every column feature,
+/// so each hanging chain crosses the chunk border seamlessly.
+/// Feature `i`'s seeds land in slot `i`, matching how `decorations.stampColumns()` indexes them.
+fn computeColumnFeatureSeeds(key: DepthCoordinate) [dw.decorations.columns.len][CHUNK_SIZE]dw.decorations.ColumnState {
+    var seeds: [dw.decorations.columns.len][CHUNK_SIZE]dw.decorations.ColumnState = undefined;
+    inline for (dw.decorations.columns, 0..) |feature, i| {
+        seeds[i] = computeColumnSeeds(feature, key);
+    }
+    return seeds;
 }
 
-// Compile-time proof that the upward-growth paths (`columnCellBeyond(.up)` + `computeColumnSeeds`) type-check.
-// No upward feature is live yet: to add one, declare a `.dir = .up` ColumnFeature in `decorations/`, add it to
-// `decorations.columns`, and seed it here with `computeColumnSeeds(my_feature, coord, depth)`.
-comptime {
-    const up_probe: dw.decorations.ColumnFeature = .{
-        .sprite = .spiral_plant,
-        .dir = .up,
-        .max_length = 12,
-        .anchor_odds = 0.05,
-        .grow_odds = 0.6,
-        .salt = 0x9E3779B97F4A7C15,
-    };
-    _ = &struct {
-        fn probe(key: DepthCoordinate) [CHUNK_SIZE]dw.decorations.ColumnState {
-            return computeColumnSeeds(up_probe, key);
-        }
-    }.probe;
-}
-
-/// Sibling of `computeVineSeeds()`: computes entering `ColumnState` per column for a `ColumnFeature`
-/// by tracing terrain in neighbor chunks along the growth direction.
+/// Computes entering `ColumnState` per column for a single `ColumnFeature`
+/// by deterministically tracing terrain in the chunk(s) directly along its growth direction.
+/// A cell can sit at most `f.max_length` blocks past its anchoring surface, so scanning that many rows captures every surface that could feed a chain into row 0.
+/// Terrain beyond is recomputed solidity-only via `resolveFoundationSolid()`
+/// (matching how the neighbor chunk generated itself), keeping chains seamless across the border without caching neighbors.
 fn computeColumnSeeds(comptime f: dw.decorations.ColumnFeature, key: DepthCoordinate) [CHUNK_SIZE]dw.decorations.ColumnState {
     comptime dw.decorations.validateColumnFeature(f);
 
@@ -1923,16 +1909,18 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
         }
     }
 
-    // Determine the overlay's underlay from what was here before,
-    // so replacing (say) a blue_stone block with gold keeps showing blue_stone behind the ore mask
-    // Priority: inherit a previous overlay's underlay, else grow inside the previous solid block, else fall back to plain stone.
-    // Non-ore/gem placements carry no underlay.
+    // Determine the overlay's underlay from what was here before (with fallback to plain stone),
+    // so replacing (say) a stone block with gold keeps showing that stone type behind the ore mask
     const new_base: Sprite = if (new_sprite.isOverlay())
         (if (prev_block.base_id != .none) prev_block.base_id else if (prev_block.isFoundation()) prev_block.id else .stone)
     else
         .none;
 
-    mod_store.beginWrite(key).setCell(idx, .{ .id = new_sprite, .base_id = new_base, .hp = initial_hp });
+    mod_store.beginWrite(key).setCell(idx, .{
+        .id = new_sprite,
+        .base_id = new_base,
+        .hp = initial_hp,
+    });
 
     if (SimBuffer.get(coord)) |sim_chunk| {
         const block: *Block = &sim_chunk.blocks[idx];
@@ -2123,7 +2111,12 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                 if (broken) {
                     if (item.bx == bx and item.by == by and item.coord.eql(coord)) original_block_broken = true;
                     // water already drops in modifyBlockHp()
-                    if (current_sprite != .water) dw.inventory.dropItem(current_sprite, target_coord, lbx, lby);
+                    if (current_sprite != .water) dw.inventory.dropItem(
+                        current_sprite,
+                        target_coord,
+                        lbx,
+                        lby,
+                    );
 
                     // Internal block modification to avoid recursion.
                     internalClearBlock(target_coord, lbx, lby);
@@ -2169,7 +2162,9 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                             const neighbor_block = window.get(nx + ndx, ny + ndy);
 
                             const is_solid_or_liquid = neighbor_block.isSolid() or neighbor_block.isLiquid();
-                            if ((!current_sprite.isLiquid() and shouldHaveEdgeFlags(neighbor_block.id)) or (current_sprite.isLiquid() and is_solid_or_liquid)) {
+                            if ((!current_sprite.isLiquid() and shouldHaveEdgeFlags(neighbor_block.id)) or
+                                (current_sprite.isLiquid() and is_solid_or_liquid))
+                            {
                                 flags |= types.EdgeFlags.getFlagBit(ndx, ndy);
                             }
                             if (neighbor_block.id == current_sprite) {

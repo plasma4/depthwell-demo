@@ -42,8 +42,10 @@ const DECOR_START = MASK_START + 24;
 const FRUIT_COUNT = 10;
 /// ID for `Sprite.gear`, which is after a list of fruit.
 const GEAR_ID = DECOR_START + 5 + FRUIT_COUNT;
+/// ID for `Sprite.bush`, which is after cornflower.
+const BUSH_ID = GEAR_ID + 15;
 /// ID for `Sprite.basic_core`, which is after furnaces.
-const CORE_ID = GEAR_ID + 18;
+const CORE_ID = BUSH_ID + 14;
 
 /// Index where inventory slot sprites start.
 pub const INVENTORY_START = CORE_ID + 20;
@@ -54,7 +56,12 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 268) @compileError("Max sprite value unexpected!");
+    if (max_sprite_value != 279) {
+        var buf: [64]u8 = undefined;
+        @compileError("Max sprite value of " ++
+            (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
+            " unexpected!");
+    }
 }
 
 /// Sprite IDs with numbers based on their location in the sprite sheet.
@@ -144,15 +151,23 @@ pub const Sprite = enum(u16) {
     circuspin,
     bacon,
     gear = GEAR_ID,
-    rock,
-    bush, // 2 variations
-    spiral_plant = GEAR_ID + 4,
-    plant_stem = GEAR_ID + 5,
-    cornflower = GEAR_ID + 6, // 2 variations
-    ceiling_flower = GEAR_ID + 8, // 2 variations
-    mushroom = GEAR_ID + 10, // 3 variations
-    big_mushroom = GEAR_ID + 13, // 3 variations
-    forest_furnace = GEAR_ID + 16,
+    gear2,
+    lathe,
+    rock_visual,
+    rock, // 2 variations
+    flint = GEAR_ID + 6,
+    purple_rock,
+    cordage,
+    flint_hatchet,
+    twinklemoss,
+    spiralvine,
+    plant_stem,
+    cornflower = GEAR_ID + 13, // 2 variations
+    bush = BUSH_ID, // 2 variations
+    ceiling_flower = BUSH_ID + 2, // 4 variations
+    mushroom = BUSH_ID + 6, // 3 variations
+    big_mushroom = BUSH_ID + 9, // 3 variations
+    forest_furnace = BUSH_ID + 12,
     lava_furnace,
     basic_core = CORE_ID,
     core1 = CORE_ID + 2,
@@ -162,7 +177,7 @@ pub const Sprite = enum(u16) {
     campfire = CORE_ID + 10, // 4 variations + 4 water variations, 8 total
     campfire_water = CORE_ID + 10 + 4,
     chest = CORE_ID + 10 + 8,
-    portal = INVENTORY_START - 1,
+    portal = CORE_ID + 10 + 9,
 
     /// Unselected inventory sprite. Looks like a blue rounded rectangle.
     inventory = INVENTORY_START,
@@ -353,9 +368,16 @@ pub const Sprite = enum(u16) {
     }
 
     /// Converts a sprite into an entity ID, handling atlas ID remaps.
-    pub inline fn asEntity(self: @This()) u32 {
+    pub inline fn asEntity(self: @This()) u16 {
         const id = @intFromEnum(self);
-        return if (id >= GEM_START and id < GEM_START + GEM_COUNT) id + GEM_COUNT else if (self.isLiquid()) id + 1 else id;
+        return if (id >= GEM_START and id < GEM_START + GEM_COUNT)
+            id + GEM_COUNT
+        else if (self == .rock)
+            @intFromEnum(@This().rock_visual)
+        else if (self.isLiquid())
+            id + 1
+        else
+            id;
     }
 };
 
@@ -533,7 +555,7 @@ const rules = [_]SpriteRule{
     },
     .{
         .{ .single = .mossy_stone },
-        .{ .evolves_to = .spiral_plant },
+        .{ .evolves_to = .spiralvine },
     },
     .{
         .{ .single = .purple_strange_stone },
@@ -607,13 +629,12 @@ const rules = [_]SpriteRule{
     .{
         .{ .list = &[_]Sprite{
             .rock,
+            .purple_rock,
             .bush,
             .mushroom,
             .big_mushroom,
             .small_tree,
 
-            .chest,
-            .portal,
             .forest_furnace,
             .lava_furnace,
             .basic_core,
@@ -621,7 +642,9 @@ const rules = [_]SpriteRule{
             .core2,
             .core3,
             .core4,
-            .campfire,
+            .chest,
+            .lathe,
+            .portal,
         } },
         .{
             .anchor = .floor,
@@ -636,8 +659,8 @@ const rules = [_]SpriteRule{
             .category = .decor,
         },
     },
-    // Crafters: fixed interactive installations. Unmineable by a normal pickaxe (strength sentinel)
-    // and waterloggable like decor; the floor-anchor rule above already set anchor/in_world.
+    // Unmineable-by-default items. Unmineable by a normal pickaxe and waterloggable
+    // Floor anchor rule requirement above
     .{
         .{ .list = &[_]Sprite{
             .forest_furnace,
@@ -648,6 +671,7 @@ const rules = [_]SpriteRule{
             .core3,
             .core4,
             .chest,
+            .lathe,
             .portal,
         } },
         .{
@@ -659,9 +683,11 @@ const rules = [_]SpriteRule{
     .{
         .{ .list = &[_]Sprite{
             .rock,
+            .purple_rock,
             .bush,
             .small_tree,
-            .spiral_plant,
+            .spiralvine,
+            .twinklemoss,
             .cornflower,
             .plant_stem,
             .ceiling_flower,
@@ -694,9 +720,14 @@ const rules = [_]SpriteRule{
         .{ .single = .ceiling_flower },
         .{ .anchor = .ceiling },
     },
+
     // Suspended anchor (like ceiling, but can be directly below itself too)
     .{
-        .{ .single = .spiral_plant },
+        .{ .single = .spiralvine },
+        .{ .anchor = .suspended },
+    },
+    .{
+        .{ .single = .twinklemoss },
         .{ .anchor = .suspended },
     },
 };

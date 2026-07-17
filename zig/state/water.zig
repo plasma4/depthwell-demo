@@ -76,7 +76,7 @@ pub fn queueWaterFlags(cx: SimIndexType, cy: SimIndexType) void {
 /// Helper to get the volume of a block (0 to 15 for water/waterlogged blocks, 0 otherwise).
 /// (Integer casting automatically enforces HP being within `u4` range.)
 pub inline fn getVolume(ptr: Block) u4 {
-    if (ptr.id.isLiquid()) {
+    if (ptr.isLiquid()) {
         return @intCast(ptr.hp);
     }
     if (ptr.isWaterloggable()) {

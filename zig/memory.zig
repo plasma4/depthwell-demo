@@ -27,7 +27,7 @@ const ZOOM_FACTOR = dw.ZOOM_FACTOR;
 
 /// Represents a specific category a `[2]u64` slice of `memory.game.seed2` represents.
 /// Use `memory.game.getHashSeed()` to request said slice.
-pub const SeedType = enum {
+pub const SeedType = enum(u4) {
     /// Determines the moisture property at base depth for terrain.
     moisture,
     /// Determines the density property at base depth for terrain.

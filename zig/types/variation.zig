@@ -27,8 +27,6 @@ pub const VariantKind = enum {
     seed_pick,
     /// Time-based cycling: offset `(frame / period_frames) % count`.
     animate,
-    /// Liquid surface: offset 1 (top sprite) when no solid/liquid fully covers the block above.
-    water_top,
 };
 
 /// One variation rule, applied to the sprite named in the `rules` table below.
@@ -48,17 +46,18 @@ const rules = [_]struct { Sprite, VariantRule }{
     .{ .edge_stone, .{ .kind = .checkerboard, .count = 2 } },
     // 50% seed variation.
     .{ .bush, .{ .kind = .seed_pick, .count = 2 } },
-    .{ .ceiling_flower, .{ .kind = .seed_pick, .count = 2 } },
+    .{ .rock, .{ .kind = .seed_pick, .count = 2 } },
+    .{ .ceiling_flower, .{ .kind = .seed_pick, .count = 4 } },
     .{ .cornflower, .{ .kind = .seed_pick, .count = 2 } },
     // 3 frames, weighted 50% toward the base frame.
     .{ .mushroom, .{ .kind = .seed_pick, .count = 3 } },
     .{ .big_mushroom, .{ .kind = .seed_pick, .count = 3 } },
-    // Liquid top surface (formerly special-cased inline in chunk.zig).
-    .{ .water, .{ .kind = .water_top, .count = 2 } },
 
     // Campfire animation has 4 contiguous frames, advancing every 6 render frames.
-    // There's a HARDCODED custom resolution to use the underwater variant if waterlogged.
+    // There's a HARDCODED custom resolveVariant() check to use the underwater variant if waterlogged!
     .{ .campfire, .{ .kind = .animate, .count = 4, .period_frames = 6 } },
+    // needed for custom variant
+    .{ .campfire_water, .{ .kind = .animate, .count = 4, .period_frames = 7 } },
 
     .{ .basic_core, .{ .kind = .animate, .count = 2, .period_frames = 17 } },
     .{ .core1, .{ .kind = .animate, .count = 2, .period_frames = 8 } },
@@ -148,6 +147,7 @@ pub fn resolveSpriteVariant(
     ty: u64,
     frame: u32,
 ) Sprite {
+    _ = edge_flags;
     const id = @intFromEnum(sprite);
     if (id >= dw.sprite.MAX_SPRITE_ID) return sprite;
     const rule = variant_table[id] orelse return sprite;
@@ -157,7 +157,6 @@ pub fn resolveSpriteVariant(
         .checkerboard => @intCast((tx & 1) ^ (ty & 1)),
         .seed_pick => seedPick(seed, rule.count),
         .animate => @intCast((frame / rule.period_frames) % rule.count),
-        .water_top => if ((edge_flags & ABOVE_BIT) == 0) 1 else 0,
     };
 
     return @enumFromInt(id + offset);

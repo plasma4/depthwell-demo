@@ -341,8 +341,8 @@ pub fn applyAncestorLogic(
     const inherited_water: u4 = if (parent_sprite.isWaterloggable()) parent_block.hp else 0;
 
     // Inherit plant still!
-    if (parent_sprite == .spiral_plant)
-        return .{ .id = .spiral_plant, .seed = noise_hash_2, .water_volume = inherited_water };
+    if (parent_sprite == .spiralvine)
+        return .{ .id = .spiralvine, .seed = noise_hash_2, .water_volume = inherited_water };
 
     if (parent_sprite == .mushroom) {
         // Only make specific sub-blocks of a mushroom parent become big mushroom!

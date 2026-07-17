@@ -295,7 +295,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                                     mouse.mouse_block_x,
                                     mouse.mouse_block_y,
                                     sprite_type,
-                                    block, // pre-mined block seeds the ore's underlay (see modifyBlockType)
+                                    block, // pre-mined block seeds the ore's underlay/base
                                 )) {
                                     // If TRUE, then the block was NOT successfully modified, so revert the selection.
                                     // This fixes funny issues involving de-selection due to invalid placement.
