@@ -201,7 +201,7 @@ fn teleportRandomly() void {
     const game = &memory.game;
 
     // select a random location X/Y through hashing
-    const s = seeding.mixBaseSeed(game.seed, teleport_rand);
+    const s = seeding.mixBaseSeed(game.seed, @enumFromInt(teleport_rand | 0xFFFF));
     const h1 = seeding.FastHash.hash2d(
         s.value[0..2].*, // peer type resolution helps out here
         @intCast(game.player_pos[0]),

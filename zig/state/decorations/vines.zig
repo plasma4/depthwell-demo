@@ -11,7 +11,8 @@ pub const features = [_]decorations.ColumnFeature{
         .max_length = 20,
         .anchor_odds = 0.02,
         .grow_odds = 0.7,
-        .salt = 0,
+        .anchor_seed = .vine1,
+        .grow_seed = .vine2,
     },
     .{
         .sprite = .twinklemoss,
@@ -19,6 +20,7 @@ pub const features = [_]decorations.ColumnFeature{
         .max_length = 24,
         .anchor_odds = 0.01,
         .grow_odds = 0.8,
-        .salt = 0x9E3779B97F4A7C15,
+        .anchor_seed = .vine3,
+        .grow_seed = .vine4,
     },
 };

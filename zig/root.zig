@@ -188,11 +188,11 @@ pub export fn tick(logic_speed: f64, iterations: u32) void {
 pub export fn mixSeed(number: u64) i64 {
     // IMPORTANT! For some reason, it appears that this returns an `i64` even with `u64` return type.
     // Therefore, that's the type we return.
-    return @intCast(seeding.mixBaseSeed(memory.game.seed, number).value[0] >> 1);
+    return @intCast(seeding.mixBaseSeed(memory.game.seed, @enumFromInt(number)).value[0] >> 1);
 }
 pub export fn mixSeedF64(number: u64) f64 { // same thing as mix_seed but f64
     return @as(f64, @floatFromInt(
-        seeding.mixBaseSeed(memory.game.seed, number).value[0] >> 1,
+        seeding.mixBaseSeed(memory.game.seed, @enumFromInt(number)).value[0] >> 1,
     )) / seeding.POW_2_64;
 }
 

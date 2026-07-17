@@ -77,16 +77,16 @@ pub fn init(new_game: bool) void {
     }
 
     const seed = memory.game.seed;
-    var temp_seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, 1));
+    var temp_seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .seed2_init));
     inline for (&memory.game.seed2) |*s| {
         s.* = temp_seed.next();
     }
 
     // Start off by determining where the player starts off exactly with layer pushing
-    dw.sound.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, 2));
-    dw.particles.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, 3));
+    dw.sound.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .sound));
+    dw.particles.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .particles));
 
-    var rng = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, 100));
+    var rng = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .startup_layers));
     for (0..STARTING_ZOOM_TIMES) |_| {
         // Set the player position to somewhere random in the current chunk
         if (SET_PLAYER_SPAWN_RANDOMLY) memory.game.setPlayerPosDumb(.{

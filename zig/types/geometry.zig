@@ -108,8 +108,8 @@ pub const Shape = struct {
 
         // Find the distance between these two inner rectangles.
         // We calculate the 1D distance on each axis.
-        const dx = @max(0.0, @max(inner1_min[0] - inner2_max[0], inner2_min[0] - inner1_max[0]));
-        const dy = @max(0.0, @max(inner1_min[1] - inner2_max[1], inner2_min[1] - inner1_max[1]));
+        const dx = @max(0.0, inner1_min[0] - inner2_max[0], inner2_min[0] - inner1_max[0]);
+        const dy = @max(0.0, inner1_min[1] - inner2_max[1], inner2_min[1] - inner1_max[1]);
 
         // If the distance between the inner rects is less than the sum of radii, they hit!
         const dist_sq = dx * dx + dy * dy;

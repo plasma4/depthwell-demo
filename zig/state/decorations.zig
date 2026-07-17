@@ -29,7 +29,6 @@ pub const points = .{
     FloorDecor(.purple_rock, 0.002),
     FloorDecor(.small_tree, 0.013),
     FloorDecor(.mushroom, 0.020),
-    FloorDecor(.campfire, 0.005),
     FloorDecor(.forest_furnace, 0.006),
     FloorDecor(.lava_furnace, 0.004),
     FloorDecor(.basic_core, 0.012),
@@ -214,7 +213,7 @@ pub fn resolve(wx: u32, wy: u32, seed: Vec2u) ?Sprite {
 pub fn stampChunk(chunk: *Chunk, cx: u64, cy: u64, column_seeds: *const [columns.len][CHUNK_SIZE]ColumnState) void {
     stampColumns(chunk, cx, cy, column_seeds);
 
-    const seed = dw.memory.game.getHashSeed(.decorations1);
+    const seed = dw.memory.game.getHashSeed(.vine1);
     for (0..CHUNK_SIZE) |block_y| {
         for (0..CHUNK_SIZE) |block_x| {
             const block = &chunk.blocks[block_x + block_y * CHUNK_SIZE];
@@ -272,10 +271,8 @@ pub const ColumnFeature = struct {
     /// Odds a live chain extends one more cell.
     grow_odds: f64,
     /// Seeds the anchor and grow rolls, so two features never share a hash.
-    anchor_seed: dw.memory.SeedType = .decorations1,
-    grow_seed: dw.memory.SeedType = .decorations2,
-    /// Mixed into the position hash, so two features with the same seeds still differ.
-    salt: u64 = 0,
+    anchor_seed: dw.memory.SeedType,
+    grow_seed: dw.memory.SeedType,
 };
 
 /// At compile-time, verifies that column features are correct.
@@ -295,13 +292,13 @@ pub const ColumnState = struct {
 
 /// True if the surface at world (`wx`, `wy`) anchors feature `f` in the cell directly past it.
 inline fn columnAnchorHit(comptime f: ColumnFeature, wx: u64, wy: u64) bool {
-    const hash = dw.seeding.FastHash.hash2d(dw.memory.game.getHashSeed(f.anchor_seed), wx ^ f.salt, wy);
+    const hash = dw.seeding.FastHash.hash2d(dw.memory.game.getHashSeed(f.anchor_seed), wx, wy);
     return hash <= dw.seeding.oddsNum(f.anchor_odds);
 }
 
 /// True if feature `f` extends into the empty cell at world (`wx`, `wy`).
 inline fn columnGrowHit(comptime f: ColumnFeature, wx: u64, wy: u64) bool {
-    const hash = dw.seeding.FastHash.hash2d(dw.memory.game.getHashSeed(f.grow_seed), wx ^ f.salt, wy);
+    const hash = dw.seeding.FastHash.hash2d(dw.memory.game.getHashSeed(f.grow_seed), wx, wy);
     return hash <= dw.seeding.oddsNum(f.grow_odds);
 }
 
@@ -344,7 +341,7 @@ test "a multi-block decoration owns its whole footprint" {
     memory.game.seed = .{};
     var rng = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(memory.game.seed, 1));
     for (&memory.game.seed2) |*v| v.* = rng.next();
-    const seed = memory.game.getHashSeed(.decorations1);
+    const seed = memory.game.getHashSeed(.vine1);
 
     var checked: usize = 0;
     inline for (points, 0..) |D, kind| {

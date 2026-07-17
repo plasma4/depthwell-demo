@@ -32,19 +32,41 @@ pub var PLAYER_LIGHT: u16 = 300;
 pub const MAX_PLAYER_LIGHT: u16 = 400;
 // ---
 pub const CAMPFIRE_LIGHT: u16 = 240;
-pub const FURNACE_LIGHT: u16 = 80;
+pub const FURNACE_LIGHT: u16 = AMBIENT_LIGHT;
+pub const LAVA_LIGHT: u16 = 60;
 // ---
 pub const PLATE_LIGHT: u16 = 160;
-pub const LAVA_LIGHT: u16 = 60;
+pub const TWINKLEVINE_LIGHT: u16 = 80;
 
 // Orthogonal decay rates per block type. Air should always be the lowest (decays slowest)!
-pub const AIR_FALLOFF: u16 = 10;
-pub const SOLID_FALLOFF: u16 = 26;
+pub const AIR_FALLOFF: u16 = 12;
+pub const SOLID_FALLOFF: u16 = 28;
 pub const LIQUID_FALLOFF: u16 = SOLID_FALLOFF - 12;
 
 /// Brightest possible seed value; bounds the number of Dial buckets.
-const MAX_SOURCE: u16 = @max(MAX_PLAYER_LIGHT, @max(CAMPFIRE_LIGHT, @max(FURNACE_LIGHT, PLATE_LIGHT)));
+const MAX_SOURCE: u16 = @max(MAX_PLAYER_LIGHT, CAMPFIRE_LIGHT, FURNACE_LIGHT, TWINKLEVINE_LIGHT, PLATE_LIGHT);
 const NUM_BUCKETS: usize = MAX_SOURCE + 1;
+
+inline fn blockEmission(id: Sprite) u16 {
+    return switch (id) {
+        .campfire => CAMPFIRE_LIGHT,
+        .forest_furnace, .lava_furnace => FURNACE_LIGHT,
+        .white_plate => PLATE_LIGHT,
+        .twinklemoss => TWINKLEVINE_LIGHT,
+        .lava_stone => LAVA_LIGHT,
+        else => 0,
+    };
+}
+
+/// Returns true if the block is a warm light source, which creates an orange light glow in the shader.
+inline fn isOrangeSource(id: Sprite) bool {
+    return switch (id) {
+        .campfire => true,
+        .forest_furnace, .lava_furnace => true,
+        .lava_stone => true,
+        else => false,
+    };
+}
 
 comptime {
     // Orthogonal cost is stored per-cell as u8; every falloff must fit.
@@ -66,26 +88,6 @@ fn resetArena() void {
     cost_buffer = std.array_list.Aligned(u8, .@"16").initCapacity(alloc, 2048) catch memory.oom();
     orange_buffer = std.array_list.Aligned(u16, .@"16").initCapacity(alloc, 2048) catch memory.oom();
     white_buffer = std.array_list.Aligned(u16, .@"16").initCapacity(alloc, 2048) catch memory.oom();
-}
-
-inline fn blockEmission(id: Sprite) u16 {
-    return switch (id) {
-        .campfire => CAMPFIRE_LIGHT,
-        .forest_furnace, .lava_furnace => CAMPFIRE_LIGHT,
-        .white_plate => PLATE_LIGHT,
-        .lava_stone => LAVA_LIGHT,
-        else => 0,
-    };
-}
-
-/// Returns true if the block is a warm light source, which creates an orange light glow in the shader.
-inline fn isOrangeSource(id: Sprite) bool {
-    return switch (id) {
-        .campfire => true,
-        .forest_furnace, .lava_furnace => true,
-        .lava_stone => true,
-        else => false,
-    };
 }
 
 /// Orthogonal per-step light cost for entering `block`. Fits in u8 (<= SOLID_FALLOFF).
@@ -116,11 +118,11 @@ inline fn diagCost(ortho: u16) u16 {
 /// Simulates the worst-case (straight line, air) light path to find max reach distance in blocks.
 fn maxAirReachBlocks() comptime_int {
     comptime {
-        var brightest_possible_source: u16 = @max(MAX_PLAYER_LIGHT, @max(CAMPFIRE_LIGHT, PLATE_LIGHT));
+        var brightness: u16 = MAX_SOURCE;
         var blocks: comptime_int = 0;
         const light = @min(AMBIENT_LIGHT, AMBIENT_LIGHT_DEBUG);
-        while (brightest_possible_source > AIR_FALLOFF and (brightest_possible_source - AIR_FALLOFF) > light) {
-            brightest_possible_source -= AIR_FALLOFF;
+        while (brightness > AIR_FALLOFF and (brightness - AIR_FALLOFF) > light) {
+            brightness -= AIR_FALLOFF;
             blocks += 1;
         }
         return blocks;
