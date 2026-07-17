@@ -93,6 +93,7 @@ declare global {
     interface Window {
         engine?: GameEngine;
     }
+    // use var instead of let to prevent TS from complaining
     var engine: GameEngine | undefined;
     var WasmTypeCode: object;
     var Zig: object;
@@ -147,7 +148,7 @@ if (!CONFIG.noAlertOnError) {
         }
 
         alert(errorMessage);
-        engine.saveManager?.releaseTabExclusiveLock();
+        globalThis.engine?.saveManager?.releaseTabExclusiveLock();
     };
 
     window.onerror = (message, source, lineno, colno, error) => {
