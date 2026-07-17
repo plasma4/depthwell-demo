@@ -961,7 +961,13 @@ test "mod_store: encoding/decoding is correct" {
     // The precomputed size the snapshot plan budgets must match what the writer actually emits.
     try testing.expectEqual(entryPayloadBytes(entry), buf.items.len);
 
-    // Re-read into a fresh store, exactly as readModStore() does (an empty remap table is the identity).
+    // Re-read into a fresh store, exactly as readModStore() does!
+    for ([_]Sprite{ .stone, .water, .none }) |s| {
+        try id_remap.put(save_alloc, @intFromEnum(s), s);
+    }
+    defer id_remap.deinit(save_alloc);
+
+    world.mod_store.deinit(); // drop the store we just wrote before re-reading into a fresh one
     world.mod_store.init(testing.allocator);
     var r: Reader = .{ .buf = buf.items };
 
