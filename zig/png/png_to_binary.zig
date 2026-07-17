@@ -48,11 +48,11 @@ pub const Bitmap = struct {
         return fromPngData(allocator, data);
     }
 
-    /// Parse raw PNG file bytes into a Bitmap.
+    /// Parse raw PNG file bytes into a `Bitmap`.
     pub fn fromPngData(allocator: Allocator, data: []const u8) !Bitmap {
         var idat_chunks = try std.ArrayListUnmanaged([]const u8).initCapacity(allocator, 10);
 
-        // Validate signature
+        // Validate the signature
         const png_sig = "\x89PNG\r\n\x1a\n";
         if (data.len < 8 or !std.mem.eql(u8, data[0..8], png_sig))
             return PngError.InvalidSignature;
@@ -245,13 +245,13 @@ pub const Bitmap = struct {
         };
     }
 
-    /// Get pixel at (x, y).
+    /// Gets a pixel at `(x, y)`.
     pub fn getPixel(self: *const Bitmap, x: u32, y: u32) ColorRgba {
         if (x >= self.width or y >= self.height) return .transparent;
         return self.pixels[@as(usize, y) * @as(usize, self.width) + @as(usize, x)];
     }
 
-    /// Set pixel at (x, y).
+    /// Sets a pixel at `(x, y)`.
     pub fn setPixel(self: *Bitmap, x: u32, y: u32, color: ColorRgba) void {
         if (x >= self.width or y >= self.height) return;
         self.pixels[@as(usize, y) * @as(usize, self.width) + @as(usize, x)] = color;
@@ -304,8 +304,8 @@ pub const Bitmap = struct {
         );
     }
 
-    /// Alpha-weighted average (premultiplied). More perceptually correct when
-    /// averaging sprites with transparency.
+    /// Alpha-weighted average (premultiplied).
+    /// More perceptually correct when averaging sprites with transparency.
     pub fn averageColorWeighted(self: *const Bitmap) ColorRgba {
         return averageWeightedOfSlice(self.pixels);
     }

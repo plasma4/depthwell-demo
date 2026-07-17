@@ -6,6 +6,17 @@ const SAVE_DIR = "saves";
 const MAIN = "world.dw";
 const BAK = "world.bak";
 
+// Player-facing description per `saveLastImportError()` code. Mirrors `setImportError()`
+// in `zig/state/save.zig`; keep the two in sync when a `SaveError` is added.
+const IMPORT_ERROR_LABELS: Record<number, string> = {
+    1: "the save was incomplete (Truncated)",
+    2: "the file isn't a Depthwell save (BadMagic)",
+    3: "the save is from a newer version (UnsupportedVersion)",
+    4: "the save is corrupted (InvalidTag)",
+    5: "the save is corrupted (BadData)",
+    6: "the device ran out of memory (OutOfMemory)",
+};
+
 // (gzip stream headers (RFC 1952) used to detect a compressed blob on load)
 const GZIP_MAGIC0 = 0x1f;
 const GZIP_MAGIC1 = 0x8b;
@@ -435,23 +446,19 @@ export class SaveManager {
      * Does not yield to the event loop (preventing data corruption).
      */
     private applyBytesSync(bytes: Uint8Array, sourceName: string): boolean {
-        // Copy bytes into WASM heap and parse synchronously
+        // Copy bytes into WASM heap and parse synchronously.
         const ptr = Number(
             this.engine.exports.savePrepareImport(BigInt(bytes.length)),
         );
         if (ptr === 0) {
-            alert("Import failed; resetting.");
-            console.warn("Import failed during " + sourceName);
-            this.engine.start();
+            console.warn("Import staging failed during " + sourceName);
             return false;
         }
         new Uint8Array(this.engine.memory.buffer, ptr, bytes.length).set(bytes);
 
         const success = this.engine.exports.saveImportAll(BigInt(bytes.length));
         if (!success) {
-            alert("Import failed; resetting.");
             console.warn("Import failed during " + sourceName);
-            this.engine.start();
             return false;
         }
 
@@ -461,13 +468,40 @@ export class SaveManager {
         return true;
     }
 
-    /** Loads the committed save (falling back to BAK) and applies it. Returns whether it loaded. */
+    /**
+     * Reports a load that exhausted every source: one alert naming the Zig-side error category,
+     * then a single reset to a fresh game. Call just once per failed load!
+     */
+    private reportImportFailure(): void {
+        const code = this.engine.exports.saveLastImportError();
+        const label = IMPORT_ERROR_LABELS[code] ?? "an unknown error";
+        console.warn(`Save import failed because ${label}`);
+        this.engine.start();
+        alert(
+            `Loading the save failed: ${label}. Sorry about that :(\nResetting and starting a new game.`,
+        );
+    }
+
+    /**
+     * Loads the committed save, falling back emergency -> MAIN -> BAK.
+     * Returns true when the game is left in a running state, so either a save was applied,
+     * or every source failed and `reportImportFailure()` reset to a fresh game!
+     *
+     * Returns whether a save existed, so the caller should start a fresh game itself if false.
+     */
     public async load(): Promise<boolean> {
-        // The emergency slot is only non-empty when it is newer than MAIN (commits clear it),
-        // so it takes priority; a torn slot write fails validation and falls through to MAIN.
+        let attempted = false;
+        const tryApply = (bytes: Uint8Array, name: string): boolean => {
+            attempted = true;
+            // commit the bytes synchronously in a single frame execution slice
+            return this.applyBytesSync(bytes, name);
+        };
+
+        // The emergency slot is only non-empty when it is newer than MAIN (commits clear it)
+        // Torn slots fail validation and fall through to MAIN
         const emergency = await this.readEmergency();
         if (emergency && emergency.length > 0) {
-            if (this.applyBytesSync(emergency, "emergency slot")) return true;
+            if (tryApply(emergency, "emergency slot")) return true;
         }
 
         const dir = await this.dir();
@@ -477,8 +511,13 @@ export class SaveManager {
         for (const name of [MAIN, BAK]) {
             const bytes = await this.readAndDecompress(dir, name);
             if (!bytes) continue;
-            // Commit the bytes synchronously in a single frame execution slice
-            if (this.applyBytesSync(bytes, name)) return true;
+            if (tryApply(bytes, name)) return true;
+        }
+
+        // A save existed but no source could be applied so report once and reset to a fresh game.
+        if (attempted) {
+            this.reportImportFailure();
+            return true;
         }
         return false;
     }
@@ -489,7 +528,9 @@ export class SaveManager {
         if (this.isGzip(bytes)) {
             raw = await this.gunzip(bytes);
         }
-        return this.applyBytesSync(raw, "imported bytes");
+        if (this.applyBytesSync(raw, "imported bytes")) return true;
+        this.reportImportFailure();
+        return false;
     }
 
     /**

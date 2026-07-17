@@ -249,6 +249,9 @@ pub export fn saveImportAll(len: u64) bool {
 pub export fn saveFinalizeLoad() void {
     save.finalizeLoad();
 }
+pub export fn saveLastImportError() u32 {
+    return save.lastImportError();
+}
 
 // Import debugging API and functions if optimization level is Debug.
 comptime {

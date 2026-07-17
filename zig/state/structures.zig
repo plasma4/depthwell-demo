@@ -692,7 +692,7 @@ fn addStructuresPerBlock(starting_sprite: Sprite, wx: u32, wy: u32, struct_seed:
 test "the per-chunk candidate prepass agrees with a per-block scan, block for block" {
     const memory = dw.memory;
     memory.game.seed = .{};
-    var rng = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(memory.game.seed, 1));
+    var rng = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(memory.game.seed, .seed2_init));
     for (&memory.game.seed2) |*v| v.* = rng.next();
 
     const struct_seed = memory.game.getHashSeed(.structures);

@@ -108,6 +108,29 @@ pub const SaveError = error{
     OutOfMemory,
 };
 
+/// Category of the most recent failed import, for the host to show the player once.
+/// 0 means the last import succeeded. This mapping is mirrored by `IMPORT_ERROR_LABELS` in `saveManager.ts`;
+/// keep the two in sync when adding a `SaveError`.
+var last_import_error: u32 = 0;
+
+fn setImportError(err: anyerror) void {
+    last_import_error = switch (err) {
+        error.Truncated => 1,
+        error.BadMagic => 2,
+        error.UnsupportedVersion => 3,
+        error.InvalidTag => 4,
+        error.BadData => 5,
+        error.OutOfMemory => 6,
+        else => 0,
+    };
+}
+
+/// The category code of the most recent import failure (0 = none),
+/// This is read by the host after a failed load.
+pub fn lastImportError() u32 {
+    return last_import_error;
+}
+
 const Writer = struct {
     list: *std.ArrayList(u8),
 
@@ -601,6 +624,7 @@ pub fn getExportPtr() usize {
 pub fn prepareImport(len: usize) usize {
     load_buf.clearRetainingCapacity();
     load_buf.resize(save_alloc, len) catch {
+        setImportError(error.OutOfMemory);
         logger.err(@src(), "Allocation failed while preparing for import!", .{});
         return 0;
     };
@@ -613,14 +637,17 @@ pub fn prepareImport(len: usize) usize {
 pub fn importAll(len: usize) bool {
     const buf = load_buf.items[0..len];
     validate(buf) catch |err| {
+        setImportError(err);
         logger.err(@src(), "Save validation failed: {s}", .{@errorName(err)});
         return false;
     };
     dw.startup.init(false);
     deserialize(buf) catch |err| {
+        setImportError(err);
         logger.err(@src(), "Save import failed: {s}", .{@errorName(err)});
         return false;
     };
+    last_import_error = 0;
     return true;
 }
 

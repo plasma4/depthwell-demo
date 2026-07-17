@@ -339,7 +339,7 @@ const testing = std.testing;
 test "a multi-block decoration owns its whole footprint" {
     const memory = dw.memory;
     memory.game.seed = .{};
-    var rng = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(memory.game.seed, 1));
+    var rng = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(memory.game.seed, .seed2_init));
     for (&memory.game.seed2) |*v| v.* = rng.next();
     const seed = memory.game.getHashSeed(.vine1);
 
