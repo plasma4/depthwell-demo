@@ -88,13 +88,14 @@ pub fn reset() void {
 fn rollLoot(ref: dw.indicators.BlockRef) void {
     stacks = @splat(.{});
 
-    const salted = seeding.mixBaseSeed(memory.game.seed, LOOT_SALT +% ref.coord.quadrant);
-    var chest_seed = seeding.mixCoordinateSeed(
-        salted,
-        ref.coord.suffix[0] *% dw.CHUNK_SIZE +% ref.bx,
-        ref.coord.suffix[1] *% dw.CHUNK_SIZE +% ref.by,
+    var chest_seed = seeding.mixChunkSeeds(
+        world.quad_cache.getQuadrantSeed(ref.coord.quadrant, memory.game.depth),
+        .{
+            ref.coord.suffix[0] *% dw.CHUNK_SIZE +% ref.bx,
+            ref.coord.suffix[1] *% dw.CHUNK_SIZE +% ref.by,
+        },
         memory.game.depth,
-    );
+    ).value[0];
     var rng = seeding.ChaCha12.init(&chest_seed);
 
     const n: usize = @intCast(MIN_LOOT + rng.next() % (MAX_LOOT - MIN_LOOT + 1));

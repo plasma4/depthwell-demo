@@ -630,10 +630,10 @@ pub fn finalizeLoad() void {
     const g = &memory.game;
 
     // seed2 and the sound/particle rngs derive from the seed, never saved
-    var temp_seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, 1));
+    var temp_seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .seed2_init));
     inline for (&g.seed2) |*s| s.* = temp_seed.next();
-    dw.sound.seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, 2));
-    dw.particles.seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, 3));
+    dw.sound.seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .sound));
+    dw.particles.seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .particles));
 
     world.max_possible_suffix = world.getMaxSuffixAtDepth(g.depth);
 
@@ -961,7 +961,13 @@ test "mod_store: encoding/decoding is correct" {
     // The precomputed size the snapshot plan budgets must match what the writer actually emits.
     try testing.expectEqual(entryPayloadBytes(entry), buf.items.len);
 
-    // Re-read into a fresh store, exactly as readModStore() does (an empty remap table is the identity).
+    // Re-read into a fresh store, exactly as readModStore() does!
+    for ([_]Sprite{ .stone, .water, .none }) |s| {
+        try id_remap.put(save_alloc, @intFromEnum(s), s);
+    }
+    defer id_remap.deinit(save_alloc);
+
+    world.mod_store.deinit(); // drop the store we just wrote before re-reading into a fresh one
     world.mod_store.init(testing.allocator);
     var r: Reader = .{ .buf = buf.items };
 

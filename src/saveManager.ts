@@ -441,6 +441,7 @@ export class SaveManager {
         );
         if (ptr === 0) {
             alert("Import failed; resetting.");
+            console.warn("Import failed during " + sourceName);
             this.engine.start();
             return false;
         }
@@ -449,15 +450,14 @@ export class SaveManager {
         const success = this.engine.exports.saveImportAll(BigInt(bytes.length));
         if (!success) {
             alert("Import failed; resetting.");
+            console.warn("Import failed during " + sourceName);
             this.engine.start();
             return false;
         }
 
         // Finalize state derivation synchronously
         this.engine.exports.saveFinalizeLoad();
-        this.engine.startDelta = Number(
-            this.engine.exports.mixSeed(60n) % 120000n,
-        );
+        this.engine.mixSeed();
         return true;
     }
 

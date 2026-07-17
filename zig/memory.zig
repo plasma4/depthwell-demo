@@ -37,9 +37,13 @@ pub const SeedType = enum(u4) {
     /// Seed type that should EXCLUSIVELY be used for PRNG that does not affect gameplay/terrain generation.
     visual,
     /// Position-keyed hash for decorations that must stay consistent across chunk borders (such as hanging vines).
-    decorations1,
+    vine1,
     /// Position-keyed hash for decorations that must stay consistent across chunk borders (such as hanging vines).
-    decorations2,
+    vine2,
+    /// Position-keyed hash for decorations that must stay consistent across chunk borders (such as hanging vines).
+    vine3,
+    /// Position-keyed hash for decorations that must stay consistent across chunk borders (such as hanging vines).
+    vine4,
     /// Used for ore generation at base depth.
     ores1,
     /// Used for ore generation at base depth.
@@ -116,7 +120,7 @@ pub const GameState = extern struct {
 
     /// Second seed based on the original `seed` value: derived from `ChaCha12` for use in `FastHash`.
     /// Derived from the base `seed` automatically, regardless of array length.
-    seed2: [32]u64 align(16) = @splat(0),
+    seed2: [@typeInfo(SeedType).@"enum".fields.len * 2]u64 align(16) = @splat(0),
 
     /// Returns a `hash2d()` seed vector for procedural generation.
     /// See `SeedType` definition for the possible categories and their purposes.

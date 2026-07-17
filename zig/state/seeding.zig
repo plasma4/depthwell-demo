@@ -50,11 +50,19 @@ test "basic usage example" {
 //     return z ^ (z >> 31);
 // }
 
+pub const SeedStream = enum(u64) {
+    seed2_init = 1,
+    sound,
+    particles,
+    startup_layers,
+    _, // @enumFromInt is frequently used to "bypass" this enum
+};
+
 /// Mixes a base seed with another value.
 /// Since BLAKE3 is cryptographic, this will yield high-quality mixing.
 ///
 /// For better performance, consider using a custom nonce with `ChaCha12` instead.
-pub fn mixBaseSeed(layer_seed: Seed, number: u64) Seed {
+pub inline fn mixBaseSeed(layer_seed: Seed, number: SeedStream) Seed {
     // Using packed here is disallowed (due to including an array).
     // This struct be extern or else asBytes will recieve garbage data.
     const PackedInput = extern struct { // temporary struct for faster mixing :)
@@ -63,7 +71,7 @@ pub fn mixBaseSeed(layer_seed: Seed, number: u64) Seed {
     };
     const input: PackedInput = .{
         .seed = layer_seed.value,
-        .number = number,
+        .number = @intFromEnum(number),
     };
 
     var out_seed: Seed = undefined;
@@ -73,7 +81,7 @@ pub fn mixBaseSeed(layer_seed: Seed, number: u64) Seed {
 
 /// Mixes in the layer seed with X/Y values and depth using BLAKE3.
 /// Used when appending on part of a seed to a quadrant.
-pub fn mixCoordinateSeed(layer_seed: Seed, x: u64, y: u64, depth: u64) Seed {
+pub inline fn mixCoordinateSeed(layer_seed: Seed, x: u64, y: u64, depth: u64) Seed {
     const PackedInput = extern struct { // temporary struct for faster mixing :)
         seed: [8]u64,
         x: u64,
@@ -93,7 +101,7 @@ pub fn mixCoordinateSeed(layer_seed: Seed, x: u64, y: u64, depth: u64) Seed {
 }
 
 /// Generates 4 sets of seeds for every chunk when combining X/Y active suffix coordinates with the seed of a quadrant.
-pub fn mixChunkSeeds(quadrant_seed: Seed, coord_vector: Vec2u, depth: u64) ChunkSeeds {
+pub inline fn mixChunkSeeds(quadrant_seed: Seed, coord_vector: Vec2u, depth: u64) ChunkSeeds {
     const PackedInput = extern struct { // do the packing thing again
         seed: [8]u64,
         c1: u64,
