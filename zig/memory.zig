@@ -116,7 +116,7 @@ pub const GameState = extern struct {
 
     /// Second seed based on the original `seed` value: derived from `ChaCha12` for use in `FastHash`.
     /// Derived from the base `seed` automatically, regardless of array length.
-    seed2: [32]u64 align(16) = @splat(0),
+    seed2: [@typeInfo(SeedType).@"enum".fields.len * 2]u64 align(16) = @splat(0),
 
     /// Returns a `hash2d()` seed vector for procedural generation.
     /// See `SeedType` definition for the possible categories and their purposes.
