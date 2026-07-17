@@ -62,6 +62,7 @@ export interface EngineExports extends WebAssembly.Exports {
     readonly savePrepareImport: (arg0: bigint) => bigint;
     readonly saveImportAll: (arg0: bigint) => boolean;
     readonly saveFinalizeLoad: () => void;
+    readonly saveLastImportError: () => number;
 }
 
 // Generated enum and struct data from types.zig:
