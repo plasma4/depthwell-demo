@@ -119,7 +119,7 @@ fn auditStructures(x0: i32, y0: i32, span: i32, seed: dw.utils.Vec2u, per_millio
 fn auditDecorations(x0: i32, y0: i32, span: i32, per_million: f64) void {
     logger.log(@src(), "{s:<16} {s:>6} {s:>8} {s:>8} {s:>10}", .{ "decor", "chance", "standing", "placed", "per 1M" });
 
-    const seed = memory.game.getHashSeed(.decorations1);
+    const seed = memory.game.getHashSeed(.vine1);
     inline for (0..decorations.points.len) |kind| {
         const D = decorations.points[kind];
 
@@ -154,7 +154,7 @@ fn auditBlocks(x0: i32, y0: i32, span: i32) void {
     var total: u64 = 0;
     var dropped: u64 = 0;
 
-    const decor_seed = memory.game.getHashSeed(.decorations1);
+    const decor_seed = memory.game.getHashSeed(.vine1);
 
     var wy = y0;
     while (wy < y0 + span) : (wy += 1) {

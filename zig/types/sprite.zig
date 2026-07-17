@@ -635,6 +635,7 @@ const rules = [_]SpriteRule{
             .big_mushroom,
             .small_tree,
 
+            .campfire,
             .forest_furnace,
             .lava_furnace,
             .basic_core,
@@ -651,18 +652,12 @@ const rules = [_]SpriteRule{
             .in_world = true,
         },
     },
-    // Campfire is a craft output (see menus/corecraft.zig), so it must be a holdable/placeable item.
-    .{
-        .{ .single = .campfire },
-        .{
-            .item = true,
-            .category = .decor,
-        },
-    },
+
     // Unmineable-by-default items. Unmineable by a normal pickaxe and waterloggable
     // Floor anchor rule requirement above
     .{
         .{ .list = &[_]Sprite{
+            .campfire,
             .forest_furnace,
             .lava_furnace,
             .basic_core,

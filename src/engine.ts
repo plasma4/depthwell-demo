@@ -796,8 +796,11 @@ export class GameEngine {
                 8,
             ),
         );
+        this.mixSeed();
+    }
 
-        // use a random seed mixing value here: mixSeed is ONLY dependent on memory.game.seed being valid
+    public mixSeed() {
+        // use a random seed mixing value (60) here: mixSeed is ONLY dependent on memory.game.seed being valid
         this.startDelta = Number(this.exports.mixSeed(60n) % 120000n);
     }
 
