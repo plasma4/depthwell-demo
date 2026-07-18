@@ -43,7 +43,7 @@ const FRUIT_COUNT = 10;
 /// ID for `Sprite.gear`, which is after a list of fruit.
 const GEAR_ID = DECOR_START + 5 + FRUIT_COUNT;
 /// ID for `Sprite.bush`, which is after cornflower.
-const BUSH_ID = GEAR_ID + 15;
+const BUSH_ID = GEAR_ID + 17;
 /// ID for `Sprite.basic_core`, which is after furnaces.
 const CORE_ID = BUSH_ID + 14;
 
@@ -56,7 +56,7 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 279) {
+    if (max_sprite_value != 281) {
         var buf: [64]u8 = undefined;
         @compileError("Max sprite value of " ++
             (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
@@ -155,14 +155,16 @@ pub const Sprite = enum(u16) {
     lathe,
     rock_visual,
     rock, // 2 variations
-    flint = GEAR_ID + 6,
-    purple_rock,
+    purple_rock = GEAR_ID + 6,
+    flint,
+    charcoal,
+    clay,
     cordage,
     flint_hatchet,
     twinklemoss,
     spiralvine,
     plant_stem,
-    cornflower = GEAR_ID + 13, // 2 variations
+    cornflower = GEAR_ID + 15, // 2 variations
     bush = BUSH_ID, // 2 variations
     ceiling_flower = BUSH_ID + 2, // 4 variations
     mushroom = BUSH_ID + 6, // 3 variations
@@ -630,6 +632,7 @@ const rules = [_]SpriteRule{
         .{ .list = &[_]Sprite{
             .rock,
             .purple_rock,
+            .flint,
             .bush,
             .mushroom,
             .big_mushroom,
@@ -679,6 +682,7 @@ const rules = [_]SpriteRule{
         .{ .list = &[_]Sprite{
             .rock,
             .purple_rock,
+            .flint,
             .bush,
             .small_tree,
             .spiralvine,

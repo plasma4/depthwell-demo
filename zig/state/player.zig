@@ -264,7 +264,7 @@ pub fn move(logic_speed: f64) void {
 }
 
 /// Updates the player_chunk and returns the chunk carry (displacement).
-/// This keeps game.player_pos normalized and updates fractal quadrant logic.
+/// This keeps `game.player_pos` normalized and updates fractal quadrant logic.
 fn handleLocalWrap(comptime axis: u1) i64 {
     const game = &memory.game;
     const val = game.player_pos[axis];
