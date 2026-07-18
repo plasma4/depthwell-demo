@@ -15,7 +15,7 @@ const STONE_START: u32 = 12u;
 const ORE_START: u32 = 36u;
 const GEM_START: u32 = 42u;
 const GEM_MASK_START: u32 = 56u;
-const WATER_START: u32 = 278u;
+const WATER_START: u32 = 280u;
 // #CONSTANT REGION END#
 
 const PI = radians(180.0);

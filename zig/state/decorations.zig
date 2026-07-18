@@ -19,7 +19,7 @@ const CHUNK_SIZE = dw.CHUNK_SIZE;
 pub const columns = @import("decorations/vines.zig").features;
 
 /// Point decorations in priority order; the first to claim a block wins it.
-/// Taller/wider kinds go first, so ground clutter cannot steal a cell out from under a multi-block footprint.
+/// Taller/wider kinds go first to prevent footprint stealing!
 pub const points = .{
     @import("decorations/Plant.zig"),
     @import("decorations/Shrub.zig"),
@@ -27,6 +27,7 @@ pub const points = .{
     FloorDecor(.bush, 0.030),
     FloorDecor(.rock, 0.030),
     FloorDecor(.purple_rock, 0.002),
+    FloorDecor(.flint, 0.005),
     FloorDecor(.small_tree, 0.013),
     FloorDecor(.mushroom, 0.020),
     FloorDecor(.forest_furnace, 0.006),
