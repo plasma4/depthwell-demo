@@ -351,8 +351,10 @@ pub const ModEntry = struct {
         }
 
         if (self.count == self.cells.len) {
-            const new_cap = if (self.cells.len == 0) MIN_MOD_CELLS else self.cells.len * 2;
-            std.debug.assert(new_cap <= CHUNK_SIZE_SQ); // a chunk cannot author more cells than it has
+            std.debug.assert(self.count < CHUNK_SIZE_SQ); // a chunk cannot author more cells than it has
+            // loadEntry() allocates exact-size capacities, so doubling must clamp: a save-loaded
+            // entry can otherwise double past CHUNK_SIZE_SQ while unmodified cells remain.
+            const new_cap = @min(@max(self.cells.len * 2, MIN_MOD_CELLS), CHUNK_SIZE_SQ);
             self.cells = mod_store.allocator.realloc(self.cells, new_cap) catch memory.oom();
         }
 
@@ -1326,7 +1328,7 @@ const QuadrantEdgeDetails = struct {
     most_right: bool,
 };
 
-/// A static 2x2 grid of seeds only updated when depth increases or game startup.
+/// A static 2x2 grid of seeds only updated during when depth increase or game startup.
 pub const QuadCache = struct {
     pub const PATH_PREALLOC_SIZE = 256;
     pub const SEED_CACHE_SIZE = 256; // TODO: evaluate why making this large causes a crash
