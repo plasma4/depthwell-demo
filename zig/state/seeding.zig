@@ -339,24 +339,41 @@ pub const FastHash = struct {
 
     const Vec4u = @Vector(4, u64);
 
-    /// Vectorized 4-channel wyhash/wyrand stateless mixer.
-    /// Hashes 4 coordinates in parallel (using SIMD).
+    /// Exact vectorized 4-lane version of `hash2d()`, hashing 4 coordinates in parallel (using SIMD).
+    /// Each lane `i` equals `hash2d(seed_vector, vx[i], vy[i])`.
     pub inline fn hash2d_4x(seed_vector: Vec2u, vx: Vec4u, vy: Vec4u) Vec4u {
-        const seed = @as(u64, seed_vector[0]) | (@as(u64, seed_vector[1]) << 32);
+        const h1 = (vx ^ @as(Vec4u, @splat(seed_vector[0]))) *% @as(Vec4u, @splat(0xa0761d6478bd642f));
+        const h2 = (vy ^ @as(Vec4u, @splat(seed_vector[1]))) *% @as(Vec4u, @splat(0xe7037ed1a0b428db));
 
-        const seed_vec: Vec4u = @splat(seed);
-        const mult1: Vec4u = @splat(0xa0761d6478bd642f);
-        const mult2: Vec4u = @splat(0xe7037ed1a0b428db);
+        var combined = (h1 ^ h2) +% (h1 >> @as(Vec4u, @splat(32))) +% (h2 >> @as(Vec4u, @splat(32)));
 
-        var h = vx ^ vy ^ seed_vec;
-        h *%= mult1;
-        h ^= h >> @as(Vec4u, @splat(32));
-        h *%= mult2;
-        h ^= h >> @as(Vec4u, @splat(32));
+        combined ^= combined >> @as(Vec4u, @splat(30));
+        combined *%= @as(Vec4u, @splat(0xbf58476d1ce4e5b9));
+        combined ^= combined >> @as(Vec4u, @splat(27));
+        combined *%= @as(Vec4u, @splat(0x94d049bb133111eb));
+        combined ^= combined >> @as(Vec4u, @splat(31));
 
-        return h;
+        return combined;
     }
 };
+
+test "hash2d_4x matches hash2d" {
+    var seed: Seed = undefined;
+    seedFromBytes("hash2d-lane-equality", &seed);
+    const seed_vector: Vec2u = .{ seed.value[0], seed.value[1] };
+
+    const vx: FastHash.Vec4u = .{ 0, 1, 12345, std.math.maxInt(u64) };
+    const vy: FastHash.Vec4u = .{ 0, 987654321, 1, std.math.maxInt(u64) - 7 };
+    const h = FastHash.hash2d_4x(seed_vector, vx, vy);
+
+    inline for (0..4) |i| {
+        try testing.expectEqual(FastHash.hash2d(seed_vector, vx[i], vy[i]), h[i]);
+    }
+
+    // Regression check for the old symmetric mixer: swapping X and Y must not collide.
+    const swapped = FastHash.hash2d_4x(seed_vector, vy, vx);
+    try testing.expect(!@reduce(.And, h == swapped));
+}
 
 /// ChaCha12-based PRNG hard-coded to accept 512 bits of seeding and without certain features. Basically cryptographically secure, can generate 64-byte blocks at a time, and supports skipping.
 pub const ChaCha12 = struct {
