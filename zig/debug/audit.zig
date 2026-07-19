@@ -1,4 +1,4 @@
-//! Debug-only sampler for worldgen odds.
+//! Debug-only sampler for worldgen odds, plus a live-state invariant checker (`verifySimInvariants()`).
 //!
 //! `target_chance` and terrain rules complicate statistics to the point where empirical/automated brute-forcing is needed.
 //! Here we are. This code simply tests a region around the player.
@@ -203,6 +203,70 @@ fn auditBlocks(x0: i32, y0: i32, span: i32) void {
         });
     }
     if (dropped > 0) logger.err(@src(), "block mix truncated: more than {d} distinct sprites", .{MAX_TRACKED_SPRITES});
+}
+
+/// Cross-checks live-state invariants over the loaded `SimBuffer` and the modification store,
+/// logging every violation class it finds (or a clean bill).
+/// Complements `VERIFY_WATER_MASS` in state/water.zig, which guards per-tick conservation instead.
+///
+/// Checked here (each invariant is documented at its owning definition):
+/// - `ModEntry.count` equals the population count of `ModEntry.modified` and fits its capacity
+///   (which may be any size up to `CHUNK_SIZE_SQ`: `loadEntry()` allocates exact-size).
+/// - a loaded chunk holding any water has its `SimBuffer.has_water` bit set
+///   (the bit is a lazy superset, so the reverse is allowed).
+/// - dry, non-foundation, non-liquid, non-waterloggable cells (air and plain decorations)
+///   keep the `0xFF` edge-flag sentinels so the shader skips erosion on them.
+pub fn verifySimInvariants() void {
+    if (!dw.is_debug) return;
+
+    var bad_entries: u64 = 0;
+    var entry_idx: usize = 0;
+    // iterator stuff is kinda cool
+    var it = dw.world.mod_store.entries.constIterator(0);
+    while (it.next()) |e| : (entry_idx += 1) {
+        var pop: u32 = 0;
+        for (e.modified) |w| pop += @popCount(w);
+        if (pop != e.count or e.count > e.cells.len or e.cells.len > dw.CHUNK_SIZE_SQ) {
+            logger.err(@src(), "mod entry {d} desynced: popcount {d}, count {d}, capacity {d}", .{
+                entry_idx,
+                pop,
+                e.count,
+                e.cells.len,
+            });
+            bad_entries += 1;
+        }
+    }
+
+    var water_unmarked: u64 = 0;
+    var sentinel_violations: u64 = 0;
+    const SimBuffer = dw.world.SimBuffer;
+    for (&SimBuffer.keys, 0..) |key, slot| {
+        if (key == null) continue;
+        const chunk = &SimBuffer.sim_buffer_ptr[slot];
+
+        var holds_water = false;
+        for (&chunk.blocks) |*b| {
+            if (b.isLiquid() or dw.water.getVolume(b.*) > 0) holds_water = true;
+
+            const sprite = b.id;
+            if (dw.water.getVolume(b.*) == 0 and !dw.world.shouldHaveEdgeFlags(sprite) and
+                !sprite.isLiquid() and !sprite.isWaterloggable())
+            {
+                if (b.edge_flags != 0xFF or b.id_edge_flags != 0xFF) sentinel_violations += 1;
+            }
+        }
+        if (holds_water and !SimBuffer.has_water.isSet(slot)) water_unmarked += 1;
+    }
+
+    if (bad_entries + water_unmarked + sentinel_violations == 0) {
+        logger.log(@src(), "invariant audit: clean ({d} mod entries, loaded SimBuffer slots scanned)", .{entry_idx});
+    } else {
+        logger.err(@src(), "invariant audit: {d} mod entries desynced, {d} watery chunks unmarked, {d} edge-flag sentinel violations", .{
+            bad_entries,
+            water_unmarked,
+            sentinel_violations,
+        });
+    }
 }
 
 /// A decoration's label: its own `name` if it declares one (the `FloorDecor()` kinds do), else its type name.

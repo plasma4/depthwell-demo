@@ -514,15 +514,18 @@ fn writeEntryKey(w: *Writer, key: DepthCoordinate) !void {
 
 /// Writes an entry's payload: the modified bitmap, then each modified cell in ascending block-index order.
 fn writeEntryPayload(w: *Writer, entry: *const world.ModEntry) !void {
-    for (entry.modified) |word| try w.int(u64, word);
-    for (entry.cells[0..entry.count]) |cell| {
+    try w.bytes(std.mem.asBytes(&entry.modified));
+
+    var packed_cells: [dw.CHUNK_SIZE_SQ]u32 = undefined;
+    for (entry.cells[0..entry.count], 0..) |cell, i| {
         const packed_cell: PackedCell = .{
             .id = @intCast(@intFromEnum(cell.id)),
             .base_id = @intCast(@intFromEnum(cell.base_id)),
             .hp = @intCast(cell.hp),
         };
-        try w.int(u32, @bitCast(packed_cell));
+        packed_cells[i] = @bitCast(packed_cell);
     }
+    try w.bytes(std.mem.sliceAsBytes(packed_cells[0..entry.count]));
 }
 
 /// Serializes every chunk the player has modified, keyed by its `DepthCoordinate`.
@@ -537,6 +540,17 @@ fn writeModStore(w: *Writer) !void {
         try writeEntryPayload(w, world.mod_store.entries.at(e.value_ptr.*));
     }
     w.endSection(at);
+}
+
+/// Returns the exact `MOD_STORE` payload size, excluding its section header.
+/// This lets callers reserve the final output space before the high-volume entry writes begin.
+fn modStorePayloadBytes() u64 {
+    var payload_len: u64 = varintLen(world.mod_store.index.count());
+    var it = world.mod_store.index.iterator();
+    while (it.next()) |entry| {
+        payload_len += MOD_KEY_BYTES + entryPayloadBytes(world.mod_store.entries.at(entry.value_ptr.*));
+    }
+    return payload_len;
 }
 
 /// Rebuilds `mod_store` from the saved records.
@@ -600,6 +614,12 @@ fn serialize(w: *Writer) !void {
     try writeMenus(w);
     try writeTools(w);
     try writeMisc(w);
+
+    // Reserve the exact large section plus the end marker and checksum.
+    // This avoids repeated ArrayList growth/copying while modified cells are added.
+    const mod_store_len = modStorePayloadBytes();
+    const reserve_len: usize = @intCast(@as(u64, w.list.items.len) + 12 + mod_store_len + 2 + 32);
+    try w.list.ensureTotalCapacity(save_alloc, reserve_len);
     try writeModStore(w);
 
     try w.int(u16, @intFromEnum(SectionTag.end));
@@ -861,14 +881,14 @@ fn beginSnapshotInner() !void {
         try plan.append(save_alloc, .{ .key = entry.key_ptr.*, .idx = entry.value_ptr.* });
     }
 
-    // Open the MOD_STORE section with its exact length precomputed, so nothing needs backpatching and the
-    // stream can be hashed strictly in order. Records are variable-length now, so the length is summed over
-    // the frozen plan rather than derived from a fixed record size; `shadowEntryForSave()` preserves each
-    // planned entry at exactly the size counted here, so later edits cannot invalidate this total.
+    // open the MOD_STORE section with its exact length precomputed, no backpatching needed
     var payload_len: u64 = varintLen(plan.items.len);
     for (plan.items) |e| {
         payload_len += MOD_KEY_BYTES + entryPayloadBytes(world.mod_store.entries.at(e.idx));
     }
+
+    const reserve_len: usize = @intCast(@as(u64, save_buf.items.len) + 12 + payload_len + 2 + 32);
+    try save_buf.ensureTotalCapacity(save_alloc, reserve_len);
 
     try w.int(u16, @intFromEnum(SectionTag.mod_store));
     try w.int(u16, 2); // section version

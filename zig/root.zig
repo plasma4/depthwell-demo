@@ -41,7 +41,8 @@ pub const CHUNK_SIZE_FLOAT_SQ: comptime_float = @floatFromInt(CHUNK_SIZE_SQ);
 
 /// Represents log2(ZOOM_FACTOR).
 pub const ZOOM_LOG2: comptime_int = 2;
-/// The factor for zooming, increasing the depth by 1. (So, 4 times means that the world will get 4 times wider and taller when depth increases.)
+/// The factor for zooming, increasing the depth by 1.
+/// (So, 4 times means that the world will get 4 times wider and taller during depth increase.)
 pub const ZOOM_FACTOR: comptime_int = 4;
 /// The highest possible depth value where all coordinates can be represented in 1 quadrant.
 /// Equivalent to the highest depth value where `ZOOM_LOG2 * HORIZON_DEPTH <= 64` is true.

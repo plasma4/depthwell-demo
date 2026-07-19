@@ -91,7 +91,7 @@ Here are the basic terms (note that there are, for example, 16 possible subpixel
 - 1 Pixel = 16 Subpixels
 - 1 Block = 16 Pixels
 - 1 Chunk = 16 Blocks = 256 Pixels = 4,096 Subpixels
-- **Depth**: How "deep" the player is. Depth starts at $6$ (see `STARTING_ZOOM_TIMES` in `zig/startup.zig`). Each time you enter a portal, the world zooms in by $4\text{x}$, making everything look 4 times larger, and the depth increases by 1.
+- **Depth**: How "deep" the player is. Depth starts at $6$ (see `STARTING_ZOOM_TIMES` in `zig/startup.zig`). Each time you enter a portal, the world zooms in by $4\text{x}$, making terrain look 4 times larger, and the depth increases by 1. You can think of this as "delving deeper" in to the world or descending farther. Ascending would be decreasing the depth.
 - **$D$**: Shorthand for the current depth. You can think of depth $D-1$ as the coordinate space you occupied right _before_ entering a portal.
 - **The Event Horizon ($H$)**: Shorthand for $D-32$. When you are deep in the fractal ($D \ge 32 + 6$), the game stops tracking individual blocks shallower than 32 levels above you. This is because at $H$, each block is $2^{64}$ times wider than than the current depth, and recursive logic can stop. (This is internal and, when functional, shouldn't be noticeable or affect gameplay. More explanations below.)
 
@@ -236,7 +236,7 @@ For each ancestor level, it traces upward and queries `ModificationStore` or eva
 
 You might be wondering how the engine handles a path 10,000 layers deep without lag, and the solution is to **relentlessly use the prefix stack and cache the seed**. In `zig/state/world.zig`, the big prefix path is stored using dynamic array allocations (`SegmentedList`).
 
-Why memoize and make the logic so complicated? By storing the resulting 512-bit `seed` at every level of the stack, the game no longer needs to spend resources reseeding a bunch for each chunk (while the math working out, as if every chunk was, resulting in high-quality seeding!). We never re-calculate the entire 10,000-level BLAKE3 chain; we only hash the _newest_ nibble added to the stack. This makes procedural chunk generation on depth increase effectively constant-time!
+Why memoize and make the logic so complicated? By storing the resulting 512-bit `seed` at every level of the stack, the game no longer needs to spend resources reseeding a bunch for each chunk (while the math working out, as if every chunk was, resulting in high-quality seeding!). We never re-calculate the entire 10,000-level BLAKE3 chain; we only hash the _newest_ nibble added to the stack. This makes procedural chunk generation on ascend effectively constant-time!
 
 #### Procedural generation
 
@@ -496,7 +496,7 @@ pub const DepthCoordinate = struct {
 ```
 
 ```zig
-/// A static 2x2 grid of seeds only updated when depth increases or game startup.
+/// A static 2x2 grid of seeds only updated during depth increase or game startup.
 pub const QuadCache = struct {
     pub const PATH_PREALLOC_SIZE = 256;
     pub const SEED_CACHE_SIZE = 256; // TODO: evaluate why making this large causes a crash
@@ -528,6 +528,7 @@ pub const QuadCache = struct {
     /// NOT for use with ancestory logic.
     top_path: SegmentedList(u64, PATH_PREALLOC_SIZE),
     ...
+}
 ```
 
 #### Zoom logic
