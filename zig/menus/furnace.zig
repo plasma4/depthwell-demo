@@ -206,8 +206,8 @@ fn drawDragIcon(mouse_px: Vec2f) void {
     const offsets = [3]Vec2f{ .{ -3.0, -2.0 }, .{ 3.0, -2.0 }, .{ 0.0, 0.0 } };
     const start = 3 - copies;
 
-    var i: usize = start;
-    while (i < 3) : (i += 1) {
+    // equal to (i = start; i <= 3; i++) in other conventional langs
+    for (start..3) |i| {
         const is_front = (i == 2);
         const off = offsets[i];
         addEntity(.{

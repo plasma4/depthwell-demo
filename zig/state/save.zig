@@ -273,8 +273,7 @@ fn writeSpriteTable(w: *Writer) !void {
 fn readSpriteTable(r: *Reader) !void {
     id_remap.clearRetainingCapacity();
     const n = try r.varint();
-    var i: u64 = 0;
-    while (i < n) : (i += 1) {
+    for (0..@intCast(n)) |_| {
         const old_id = try r.int(u16);
         const name = try r.str();
         if (spriteFromName(name)) |s| {
@@ -323,10 +322,12 @@ fn writeQuadCache(w: *Writer) !void {
         (@as(u8, @intFromBool(qc.most_left)) << 2) |
         (@as(u8, @intFromBool(qc.most_right)) << 3));
 
-    try w.varint(qc.left_path.len);
-    for (0..qc.left_path.len) |i| try w.int(u64, qc.left_path.at(i).*);
-    try w.varint(qc.top_path.len);
-    for (0..qc.top_path.len) |i| try w.int(u64, qc.top_path.at(i).*);
+    std.debug.assert(qc.left_path.len == qc.top_path.len);
+    const len = qc.left_path.len;
+    try w.varint(len);
+    for (0..len) |i| try w.int(u64, qc.left_path.at(i).*);
+    for (0..len) |i| try w.int(u64, qc.top_path.at(i).*);
+
     w.endSection(at);
 }
 
@@ -343,13 +344,25 @@ fn readQuadCache(r: *Reader) !void {
     qc.most_left = (edges & 4) != 0;
     qc.most_right = (edges & 8) != 0;
 
-    const left_n = try r.varint();
-    var i: u64 = 0;
-    while (i < left_n) : (i += 1) try qc.left_path.append(world.alloc, try r.int(u64));
+    // prealloc-all-at-once pattern
+    // we actually do NOT need to clear the old data, if applicable
+    // only set the new data
+    const path_len: usize = @intCast(try r.varint());
+    if (path_len > qc.left_path.prealloc_segment.len) {
+        // for some goofy reason there's an assert trigger if path len is 0
+        try qc.left_path.growCapacity(world.alloc, path_len);
+        try qc.top_path.growCapacity(world.alloc, path_len);
+    }
 
-    const top_n = try r.varint();
-    i = 0;
-    while (i < top_n) : (i += 1) try qc.top_path.append(world.alloc, try r.int(u64));
+    qc.left_path.len = path_len;
+    for (0..path_len) |i| {
+        qc.left_path.at(i).* = try r.int(u64);
+    }
+
+    qc.top_path.len = path_len;
+    for (0..path_len) |i| {
+        qc.top_path.at(i).* = try r.int(u64);
+    }
 }
 
 /// Writes inventory data (sparse, and with names rather than IDs)
@@ -379,8 +392,7 @@ fn readInventory(r: *Reader) !void {
     inventory.selected_row = try r.int(u16);
 
     const n = try r.varint();
-    var i: u64 = 0;
-    while (i < n) : (i += 1) {
+    for (0..@intCast(n)) |_| {
         const name = try r.str();
         const count = try r.varint();
         if (spriteFromName(name)) |s| {
@@ -425,8 +437,7 @@ fn readTools(r: *Reader) !void {
     const owned = try r.varint();
 
     var picked: mining.Tools = .stone;
-    var i: u64 = 0;
-    while (i < owned) : (i += 1) {
+    for (0..@intCast(owned)) |i| {
         const name = try r.str();
         const prop_len = try r.varint();
         try r.skip(@intCast(prop_len)); // reserved property blob (unknown fields skipped)
@@ -669,7 +680,7 @@ pub fn finalizeLoad() void {
 
     // A save can land between a water-adjacent block change and the next tick's batched flag recompute
     // (see queueWaterFlags()), baking stale/sentinel edge flags into the stored blocks.
-    // Re-queue every water chunk so those flags heal on the first tick after a load.
+    // So, re-queuing every water chunk so those flags heal on the first tick after a load is needed.
     var cy: usize = 0;
     while (cy < world.SIM_BUFFER_WIDTH) : (cy += 1) {
         var cx: usize = 0;

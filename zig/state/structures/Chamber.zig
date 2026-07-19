@@ -45,7 +45,7 @@ const SNAP_DEPTH: i32 = 6;
 /// seating the box so its own last row coincided with the surface would bury that row a block deep.
 const ground_row: structures.Edge = .{ .at = .end };
 
-/// Terrain rules; `structures.zig` runs them cheapest-first and memoizes the verdict per grid cell.
+/// Terrain rules! Evaluated by `structures.zig` cheapest-first; result is cached on a grid-cell level.
 /// Terrain INSIDE the footprint is deliberately unconstrained: the chamber carves out whatever it lands on.
 pub const constraints = [_]structures.Constraint{
     // Both ends of the base row rest on solid terrain. 1 sample each, and it kills every mid-air candidate.

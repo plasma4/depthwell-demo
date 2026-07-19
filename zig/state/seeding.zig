@@ -135,6 +135,22 @@ pub inline fn oddsNum(chance: comptime_float) u64 {
 
 /// Simple compile-time getter for hashing data, incrementing `y` over time.
 pub const HashState = struct {
+    /// `getChance()` max margin of error is `2^-GET_CHANCE_MARGIN_BITS`.
+    /// Raising this tightens the approximation but consumes more entropy per call.
+    /// Values up to 64 are supported, since the search below needs `k` up to
+    /// `GET_CHANCE_MARGIN_BITS - 1` and `get()` can serve at most 63 bits at once.
+    const GET_CHANCE_MARGIN_BITS = 32;
+    /// `getChance()` function max margin of error.
+    const GET_CHANCE_MARGIN = 1.0 / @as(comptime_float, 1 << GET_CHANCE_MARGIN_BITS);
+    /// Largest denominator exponent `getChance()` must search:
+    /// rounding to a denominator of `2^k` errs by at most `2^-(k+1)`,
+    /// so `k = GET_CHANCE_MARGIN_BITS - 1` always lands within the margin.
+    const GET_CHANCE_MAX_K = GET_CHANCE_MARGIN_BITS - 1;
+
+    comptime {
+        std.debug.assert(GET_CHANCE_MARGIN_BITS >= 1 and GET_CHANCE_MARGIN_BITS <= 64);
+    }
+
     value: u64 = 0,
     seed_vector: Vec2u,
     x: u64,
@@ -183,41 +199,35 @@ pub const HashState = struct {
         }
     }
 
-    /// Determines a boolean outcome for a given probability chance using `<= oddsNum()`.
-    /// Automatically optimizes near-power-of-two chances at compile-time to use the much faster,
-    /// entropy-preserving `get()` path instead of pulling a full 64-bit word with `getRaw()`.
+    /// Determines a boolean outcome for a given probability chance.
+    /// The chance is rounded at compile-time to the nearest fraction `n / 2^k`
+    /// within `GET_CHANCE_MARGIN`, using the smallest such `k`,
+    /// so only `k` bits of entropy are consumed via `get()`
+    /// (1 bit for 0.5, 2 bits for 0.25, and so on) rather than a full 64-bit word.
     pub inline fn getChance(self: *HashState, comptime chance: comptime_float) bool {
-        const OptResult = struct { k: u8, n: u64 };
-        const Opt: ?OptResult = comptime find_opt: {
+        const opt = comptime find_opt: {
             if (chance < 0.0 or chance > 1.0) {
                 @compileError("Chance must be in the range [0.0, 1.0]");
             }
-            const margin = INV_POW_2_32;
 
-            // Search for the smallest power-of-two denominator (up to 2^32)
-            // that represents the chance within the margin of error.
+            // Search for the smallest power-of-two denominator that represents
+            // the chance within the margin of error. A match is guaranteed by
+            // GET_CHANCE_MAX_K, since rounding errs by at most 2^-(k+1).
             var k: u8 = 1;
-            while (k <= 32) : (k += 1) {
+            while (k <= GET_CHANCE_MAX_K) : (k += 1) {
                 const d: comptime_float = @floatFromInt(@as(u64, 1) << k);
                 const n_float = @round(chance * d);
                 const n: u64 = @intFromFloat(n_float);
                 const approx = n_float / d;
                 const diff = if (approx > chance) approx - chance else chance - approx;
-                if (diff <= margin) {
+                if (diff <= GET_CHANCE_MARGIN) {
                     break :find_opt .{ .k = k, .n = n };
                 }
             }
-            break :find_opt null;
+            @compileError("getChance() found no match, contradicting the GET_CHANCE_MAX_K bound");
         };
 
-        if (Opt) |opt| {
-            // happy path: exact or near-exact power of two probability matches.
-            // consumes only opt.k bits of entropy instead of pulling a whole 64-bit word.
-            return self.get(u64, 1 << opt.k) < opt.n;
-        } else {
-            // aw man
-            return self.getRaw() <= oddsNum(chance);
-        }
+        return self.get(u64, 1 << opt.k) < opt.n;
     }
 
     /// Performs a 64x64-bit widening multiplication returning a 128-bit product split into low and high halves.

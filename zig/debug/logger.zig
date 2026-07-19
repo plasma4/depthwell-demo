@@ -243,8 +243,7 @@ fn writeValue(writer: anytype, val: anytype) void {
             // for ArrayList
             if (@hasField(T, "prealloc_segment") and @hasField(T, "len")) {
                 writer.writeAll("[") catch {};
-                var i: usize = 0;
-                while (i < val.len) : (i += 1) {
+                for (0..val.len) |i| {
                     if (i > 0) writer.writeAll(", ") catch {};
                     writeValue(writer, val.at(i).*);
                 }
