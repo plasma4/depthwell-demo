@@ -11,13 +11,13 @@
 //! `target_chance` is a ROLL, not a density: terrain rules throw most rolls away.
 //! it's also sadly not possible to guess the odds of terrain rules throwing odds...only approximate with auditing.
 //!
+//! Small things that need no priority collision belong in `decorations.zig` instead, which is far cheaper:
+//! every kind here costs every LOWER kind a collision scan, so this tuple wants to stay short.
+//! A placement is anchored uniformly ANYWHERE in its `spawn_area` cell and may overhang into the neighboring cells.
+//!
 //! A rule a structure can check WHILE computing its bounds belongs in `getBounds()`, not in `constraints`:
 //! rejecting there lets an expensive terrain scan bail early (see `Chamber.getBounds()`).
 //!
-//! A placement is anchored uniformly ANYWHERE in its `spawn_area` cell and may overhang into the neighboring cells.
-//!
-//! Small things that need no priority collision belong in `decorations.zig` instead, which is far cheaper:
-//! every kind here costs every LOWER kind a collision scan, so this tuple wants to stay short.
 const std = @import("std");
 const dw = @import("../root.zig");
 

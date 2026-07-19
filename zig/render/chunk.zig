@@ -265,6 +265,8 @@ inline fn updateRenderProperties(
         }
 
         if (game.depth > HORIZON_DEPTH) {
+            // we're past D=32, log more detailed info, including quadrant info
+            // when D<32 this still would all be boring/default anyway
             logger.writeOnce(2, .{
                 "{mh}Left quadrant path (compacted)",
                 qc.left_path,
