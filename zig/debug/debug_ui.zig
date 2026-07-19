@@ -155,10 +155,6 @@ pub const buttons = [_]ButtonDef{
         .name = "Clear caches",
         .action = clearCaches,
     },
-    // .{
-    //     .name = "Sample worldgen odds",
-    //     .action = dw.audit.sampleWorldAroundPlayer,
-    // },
     .{
         .name = "Toggle creative",
         .toggle = &dw.inventory.IN_CREATIVE,
@@ -167,6 +163,14 @@ pub const buttons = [_]ButtonDef{
         .name = "Toggle global light",
         .toggle = &dw.lighting.DEBUG_LIGHT,
     },
+    // .{
+    //     .name = "Sample worldgen odds",
+    //     .action = dw.audit.sampleWorldAroundPlayer,
+    // },
+    // .{
+    //     .name = "Verify invariants",
+    //     .action = dw.audit.verifySimInvariants,
+    // },
     // .{
     //     .name = "Toggle base heatmap",
     //     .toggle = &procedural.USE_BASE_HEATMAP,

@@ -1,5 +1,14 @@
 //! Handles water logic, updating the physics and edge flags as necessary.
 //! Water level goes from 0-15; the simulation keeps total water within the `SimBuffer` the same.
+//!
+//! A goal of the sweep is avoiding "water parity"!
+//! This means a falling stream should split into alternating occupied/empty (or tiny-volume) vertical cells.
+//! Mid-stream cells therefore pour at full rate (see the gravity phase of `tickWater()`)
+//! to reduce parity occurrences, and airborne cells never spread laterally (hold until resting on support),
+//! so a stream that momentarily backs up cannot spray sideways and cause more "damage".
+//!
+//! Parity can only be truly avoided for consistent sources and some amount of parity weirdness is acceptable,
+//! especially if water is being placed and water still appears mostly locally/globally visually consistent.
 const std = @import("std");
 const dw = @import("../root.zig");
 const memory = dw.memory;
@@ -117,19 +126,6 @@ pub inline fn setVolume(ptr: *Block, vol: u32) void {
 inline fn setVolumeAt(ptr: *Block, vol: u32, grid_idx: usize) void {
     setVolume(ptr, vol);
     cells_changed.set(grid_idx);
-}
-
-/// Gets pre-calculated column pressure.
-inline fn getPressureCached(
-    col_above_local: *const [16][18]u8,
-    ptr: Block,
-    bx: i32,
-    by: i32,
-) u32 {
-    const vol = getVolume(ptr);
-    if (vol == 0) return 0;
-    const col_above = col_above_local[@as(usize, @intCast(by))][@as(usize, @intCast(bx + 1))];
-    return vol + col_above;
 }
 
 /// Bit width of the packed `Block.waterlogged` field; only bits 0-10 carry data.
@@ -292,6 +288,65 @@ inline fn getLocalBlockPtr(
     return null;
 }
 
+/// Recomputes one cell's edge flags and packed `waterlogged` neighbor volumes from the chunk-local window.
+/// Shared core of `updateWaterEdgeFlags()` (single cell) and `updateChunkWaterFlags()` (whole chunk).
+/// A missing neighbor (outside the loaded `SimBuffer`) is treated as present so border cells never erode open.
+fn applyCellWaterFlags(
+    curr: *Chunk,
+    left: ?*Chunk,
+    right: ?*Chunk,
+    top: ?*Chunk,
+    bottom: ?*Chunk,
+    bx: i32,
+    by: i32,
+) void {
+    const ptr = &curr.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | bx))];
+    if (getVolume(ptr.*) == 0 and !world.shouldHaveEdgeFlags(ptr.id)) return;
+
+    var flags: u8 = 0;
+    var waterlogged: WaterloggedFlags = 0;
+
+    if (ptr.isEmpty()) {
+        flags = 0xFF;
+    } else {
+        const left_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx - 1, by);
+        const right_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx + 1, by);
+        const top_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx, by - 1);
+        const bottom_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx, by + 1);
+        const above_left_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx - 1, by - 1);
+        const above_right_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx + 1, by - 1);
+
+        const left_nb = if (left_ptr) |b| b.* else null;
+        const right_nb = if (right_ptr) |b| b.* else null;
+        const top_nb = if (top_ptr) |b| b.* else null;
+        const bottom_nb = if (bottom_ptr) |b| b.* else null;
+        const above_left_nb = if (above_left_ptr) |b| b.* else null;
+        const above_right_nb = if (above_right_ptr) |b| b.* else null;
+
+        const state = getWaterFlags(top_nb, bottom_nb, left_nb, right_nb, above_left_nb, above_right_nb);
+        waterlogged = state.flags;
+
+        inline for (.{ -1, 0, 1 }) |dy| {
+            inline for (.{ -1, 0, 1 }) |dx| {
+                if (dx == 0 and dy == 0) continue;
+
+                const neighbor = getLocalBlockPtr(curr, left, right, top, bottom, bx + dx, by + dy);
+                if (neighbor) |nb| {
+                    const is_solid_or_liquid = nb.isSolid() or nb.isLiquid() or getVolume(nb.*) > 0;
+                    if ((!ptr.isLiquid() and world.shouldHaveEdgeFlags(nb.id)) or (ptr.isLiquid() and is_solid_or_liquid)) {
+                        flags |= types.EdgeFlags.getFlagBit(dx, dy);
+                    }
+                } else {
+                    flags |= types.EdgeFlags.getFlagBit(dx, dy);
+                }
+            }
+        }
+    }
+
+    ptr.edge_flags = flags;
+    ptr.waterlogged = waterlogged;
+}
+
 /// Recalculates water edge flags and packages neighbor heights using the local cache.
 pub fn updateWaterEdgeFlags(x: i32, y: i32) void {
     if (x < 0 or x >= SIM_GRID_SIZE or y < 0 or y >= SIM_GRID_SIZE) return;
@@ -306,51 +361,7 @@ pub fn updateWaterEdgeFlags(x: i32, y: i32) void {
     const top = if (cy > 0) getChunkPtr(cx, cy - 1) else null;
     const bottom = if (cy < SIM_BUFFER_WIDTH - 1) getChunkPtr(cx, cy + 1) else null;
 
-    const ptr = &curr.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | bx))];
-    if (getVolume(ptr.*) == 0 and !world.shouldHaveEdgeFlags(ptr.id)) return;
-
-    var flags: u8 = 0;
-    var waterlogged: WaterloggedFlags = 0;
-
-    const left_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx - 1, by);
-    const right_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx + 1, by);
-    const top_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx, by - 1);
-    const bottom_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx, by + 1);
-    const above_left_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx - 1, by - 1);
-    const above_right_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx + 1, by - 1);
-
-    const left_nb = if (left_ptr) |b| b.* else null;
-    const right_nb = if (right_ptr) |b| b.* else null;
-    const top_nb = if (top_ptr) |b| b.* else null;
-    const bottom_nb = if (bottom_ptr) |b| b.* else null;
-    const above_left_nb = if (above_left_ptr) |b| b.* else null;
-    const above_right_nb = if (above_right_ptr) |b| b.* else null;
-
-    if (ptr.isEmpty()) {
-        flags = 0xFF;
-    } else {
-        const state = getWaterFlags(top_nb, bottom_nb, left_nb, right_nb, above_left_nb, above_right_nb);
-        waterlogged = state.flags;
-
-        inline for (.{ -1, 0, 1 }) |dy| {
-            inline for (.{ -1, 0, 1 }) |dx| {
-                if (dx == 0 and dy == 0) continue;
-
-                const neighbor = getLocalBlockPtr(curr, left, right, top, bottom, bx + dx, by + dy);
-                if (neighbor) |nb| {
-                    const is_solid_or_liquid = nb.isSolid() or nb.isLiquid() or getVolume(nb.*) > 0;
-                    if ((!ptr.isLiquid() and world.shouldHaveEdgeFlags(nb.id)) or (ptr.isLiquid() and is_solid_or_liquid)) {
-                        flags |= types.EdgeFlags.getFlagBit(dx, dy);
-                    }
-                } else if (ptr.edge_flags | types.EdgeFlags.getFlagBit(dx, dy) != 0) {
-                    flags |= types.EdgeFlags.getFlagBit(dx, dy);
-                }
-            }
-        }
-    }
-
-    ptr.edge_flags = flags;
-    ptr.waterlogged = waterlogged;
+    applyCellWaterFlags(curr, left, right, top, bottom, bx, by);
 }
 
 /// Single-pass water flags for whole chunk groups.
@@ -360,60 +371,13 @@ fn updateChunkWaterFlags(
     right: ?*Chunk,
     top: ?*Chunk,
     bottom: ?*Chunk,
-    cx: i32,
-    cy: i32,
 ) void {
-    _ = cx;
-    _ = cy;
     const c = curr orelse return;
     var by: i32 = 0;
     while (by < CHUNK_SIZE) : (by += 1) {
         var bx: i32 = 0;
         while (bx < CHUNK_SIZE) : (bx += 1) {
-            const ptr = &c.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | bx))];
-            if (getVolume(ptr.*) == 0 and !world.shouldHaveEdgeFlags(ptr.id)) continue;
-
-            var flags: u8 = 0;
-            var waterlogged: WaterloggedFlags = 0;
-
-            const left_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx - 1, by);
-            const right_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx + 1, by);
-            const top_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx, by - 1);
-            const bottom_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx, by + 1);
-            const above_left_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx - 1, by - 1);
-            const above_right_ptr = getLocalBlockPtr(curr, left, right, top, bottom, bx + 1, by - 1);
-
-            const left_nb = if (left_ptr) |b| b.* else null;
-            const right_nb = if (right_ptr) |b| b.* else null;
-            const top_nb = if (top_ptr) |b| b.* else null;
-            const bottom_nb = if (bottom_ptr) |b| b.* else null;
-            const above_left_nb = if (above_left_ptr) |b| b.* else null;
-            const above_right_nb = if (above_right_ptr) |b| b.* else null;
-
-            if (ptr.isEmpty()) {
-                flags = 0xFF;
-            } else {
-                const state = getWaterFlags(top_nb, bottom_nb, left_nb, right_nb, above_left_nb, above_right_nb);
-                waterlogged = state.flags;
-
-                inline for (.{ -1, 0, 1 }) |dy| {
-                    inline for (.{ -1, 0, 1 }) |dx| {
-                        if (dx == 0 and dy == 0) continue;
-                        const neighbor = getLocalBlockPtr(curr, left, right, top, bottom, bx + dx, by + dy);
-                        if (neighbor) |nb| {
-                            const is_solid_or_liquid = nb.isSolid() or nb.isLiquid() or getVolume(nb.*) > 0;
-                            if ((!ptr.isLiquid() and world.shouldHaveEdgeFlags(nb.id)) or (ptr.isLiquid() and is_solid_or_liquid)) {
-                                flags |= types.EdgeFlags.getFlagBit(dx, dy);
-                            }
-                        } else {
-                            flags |= types.EdgeFlags.getFlagBit(dx, dy);
-                        }
-                    }
-                }
-            }
-
-            ptr.edge_flags = flags;
-            ptr.waterlogged = waterlogged;
+            applyCellWaterFlags(c, left, right, top, bottom, bx, by);
         }
     }
 }
@@ -534,15 +498,23 @@ pub fn tickWater() void {
                     else
                         null;
 
-                    // Gravity first: pour into the cell below
-                    // (a full block per tick when falling into empty space but only 4 units per tick when topping up existing water)
+                    // Gravity first: pour into the cell below.
+                    // Full rate into empty space AND into a destination that is itself still falling
+                    // (its own below can accept water), so streams merge with mid-air droplets instead
+                    // of braking on them and splitting into parity columns (see the file header).
+                    // The 4-units-per-tick cap only throttles pouring onto a resting pool surface.
                     if (down_ptr) |dp| {
                         if (dp.isFlowable()) {
                             const dest_vol = getVolume(dp.*);
                             if (dest_vol < MAX_HP) {
                                 const available = MAX_HP - dest_vol;
                                 const is_free_fall = dp.id == .none;
-                                const cap: u32 = if (is_free_fall) MAX_HP else 4;
+                                const cap: u32 = if (is_free_fall)
+                                    MAX_HP
+                                else if (getLocalBlockPtr(curr, left, right, top, bottom, rbx, by + 2)) |below_dest|
+                                    (if (below_dest.isFlowable() and getVolume(below_dest.*) < MAX_HP) MAX_HP else 4)
+                                else
+                                    4;
                                 const amt = @min(@min(src_vol, available), cap);
 
                                 setVolumeAt(block_ptr, src_vol - amt, idx);
@@ -565,6 +537,18 @@ pub fn tickWater() void {
                     const down_blocked = if (down_ptr) |dp| (!dp.isFlowable() or getVolume(dp.*) >= MAX_HP) else true;
                     if (!down_blocked) continue;
                     if (lateral_received.isSet(idx)) continue;
+
+                    // Spreading additionally requires RESTING: sitting on something unflowable, or on a
+                    // full cell that is itself supported. A mid-air cell whose below is only momentarily
+                    // full (a falling stream backing up for one tick) must hold instead, or the leftover
+                    // sprays sideways into the alternating parity shelves described in the file header.
+                    const resting = if (down_ptr) |dp| blk: {
+                        if (!dp.isFlowable()) break :blk true;
+                        // down_blocked means dp is full here; resting depends on what dp sits on.
+                        const dp2 = getLocalBlockPtr(curr, left, right, top, bottom, rbx, by + 2);
+                        break :blk if (dp2) |b| (!b.isFlowable() or getVolume(b.*) >= MAX_HP) else true;
+                    } else true;
+                    if (!resting) continue;
 
                     const left_ptr = if (rbx > 0)
                         &curr.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | (rbx - 1)))]
@@ -802,7 +786,7 @@ pub fn tickWater() void {
             const top = if (chunk_y > 0) getChunkPtr(chunk_x, @intCast(chunk_y - 1)) else null;
             const bottom = if (chunk_y < SIM_BUFFER_WIDTH - 1) getChunkPtr(chunk_x, @intCast(chunk_y + 1)) else null;
 
-            updateChunkWaterFlags(curr, left, right, top, bottom, @intCast(chunk_x), chunk_y);
+            updateChunkWaterFlags(curr, left, right, top, bottom);
             if (chunk_x == SIM_BUFFER_WIDTH - 1) break;
         }
         if (chunk_y == SIM_BUFFER_WIDTH - 1) break;
