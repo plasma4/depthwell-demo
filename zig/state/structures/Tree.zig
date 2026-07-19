@@ -33,7 +33,7 @@ const canopy_rows: i32 = 4;
 const canopy_cy: i32 = 2;
 const canopy_r_sq: i32 = 5;
 
-/// Terrain rules; `structures.zig` runs them cheapest-first and memoizes the verdict per grid cell.
+/// Terrain rules! Evaluated by `structures.zig` cheapest-first; result is cached on a grid-cell level.
 pub const constraints = [_]structures.Constraint{
     // 3 foundation cells centered under the trunk, in the row just below the box: the ground it stands on.
     .{ .solid = .{

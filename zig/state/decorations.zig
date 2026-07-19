@@ -3,6 +3,7 @@
 //! - a COLUMN feature is a variable-length chain hanging off a surface (`Vine`)
 //!
 //! Anything with a real footprint, a priority collision, or a region-wide terrain gate belongs in `structures.zig`.
+//! See `structures.zig` for suggestions on which type to use.
 const std = @import("std");
 const dw = @import("../root.zig");
 const structures = @import("structures.zig");
@@ -22,7 +23,7 @@ pub const columns = @import("decorations/vines.zig").features;
 /// Taller/wider kinds go first to prevent footprint stealing!
 pub const points = .{
     @import("decorations/Plant.zig"),
-    @import("decorations/Shrub.zig"),
+    @import("decorations/Flower.zig"),
     CeilingDecor(.ceiling_flower, 0.15),
     FloorDecor(.bush, 0.030),
     FloorDecor(.rock, 0.030),

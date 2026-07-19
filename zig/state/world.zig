@@ -1242,7 +1242,7 @@ const CHUNK_CACHE_SIZE: usize = blk: {
     const integer_cache_size: usize = @intFromFloat(@ceil(raw_cache_size));
     const aligned_size = ((integer_cache_size + (CHUNK_CACHE_WAYS - 1)) / CHUNK_CACHE_WAYS) * CHUNK_CACHE_WAYS;
 
-    // Conservative minimum baseline (also the floor for tiny screens / high zoom).
+    // Add a very conservative minimum baseline for safety!
     break :blk @max(aligned_size, 256);
 };
 

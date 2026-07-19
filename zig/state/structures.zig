@@ -11,13 +11,14 @@
 //! `target_chance` is a ROLL, not a density: terrain rules throw most rolls away.
 //! it's also sadly not possible to guess the odds of terrain rules throwing odds...only approximate with auditing.
 //!
+//! Rules on whether
+//! Small things that need no priority collision belong in `decorations.zig` instead, which is far cheaper:
+//! every kind here costs every LOWER kind a collision scan, so this tuple wants to stay short.
+//! A placement is anchored uniformly ANYWHERE in its `spawn_area` cell and may overhang into the neighboring cells.
+//!
 //! A rule a structure can check WHILE computing its bounds belongs in `getBounds()`, not in `constraints`:
 //! rejecting there lets an expensive terrain scan bail early (see `Chamber.getBounds()`).
 //!
-//! A placement is anchored uniformly ANYWHERE in its `spawn_area` cell and may overhang into the neighboring cells.
-//!
-//! Small things that need no priority collision belong in `decorations.zig` instead, which is far cheaper:
-//! every kind here costs every LOWER kind a collision scan, so this tuple wants to stay short.
 const std = @import("std");
 const dw = @import("../root.zig");
 
@@ -127,7 +128,7 @@ pub const MAX_WORLD_BLOCK: i32 = blk: {
 /// Tests the BASE terrain (pre-ore, pre-structure) for a foundation block at absolute world block (`wx`, `wy`).
 ///
 /// Probing OUTSIDE the world is routine, not exceptional: a constraint reaches a row above its box,
-/// a seating scan reaches rows below it, and `isBeaten()` resolves the candidate in (`cx - 1`, `cy - 1`)
+/// a seating scan reaches rows below it, and `isBeaten()` resolves the candidate in (`cx - 1`, `cy - 1`).
 ///
 /// Bounds being `i32` easily traps what would otherwise be an integer overflow (a bit hacky).
 pub inline fn baseSolid(wx: i32, wy: i32) bool {
@@ -324,7 +325,7 @@ const StructCacheEntry = struct {
 /// A structure's bounds and verdicts are identical for every footprint cell and are also re-derived by lower kinds' priority scans,
 /// so memoizing per grid cell collapses that repeated hashing (and all terrain sampling) to O(1).
 /// Pure function of (cell, seed): the per-entry seed check self-invalidates on reseed, so no explicit clear.
-const STRUCT_CACHE_SLOTS = 256;
+const STRUCT_CACHE_SLOTS = 1024;
 var struct_cache: [structures.len][STRUCT_CACHE_SLOTS]StructCacheEntry = @splat(@splat(.{}));
 
 /// Returns the (populated) cache entry for structure `kind` at grid cell (`cx`, `cy`), computing bounds on miss.
