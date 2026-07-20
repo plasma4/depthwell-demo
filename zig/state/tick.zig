@@ -30,7 +30,7 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
                 inventory.selected_row,
             );
             if (inventory.selected_row == 0 and selected_column == 0) {
-                // reset pickaxe animation
+                // reset pickaxe text animation that shows stats
                 if (dw.inventory.name_wave == 0.0 and dw.inventory.last_named_sprite == .none) dw.inventory.last_named_sprite = .unselected;
             }
             // get index of selected sprite by checking already selected sprite type
