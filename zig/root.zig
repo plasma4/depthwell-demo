@@ -345,6 +345,9 @@ test "main_tests" {
         @import("debug/logger.zig"),
         @import("state/world.zig"),
         @import("state/save.zig"),
+        @import("state/structures.zig"),
+        // Not registered in the `structures` tuple on purpose; listed here only so its test still runs.
+        @import("state/structures/Example.zig"),
     };
 
     inline for (modules) |mod| {

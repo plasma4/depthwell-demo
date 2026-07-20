@@ -216,7 +216,7 @@ fn teleportRandomly() void {
         @intCast(game.player_pos[0]),
         @intCast(game.player_pos[1]),
     );
-    teleport_rand -%= 1;
+    teleport_rand -%= 0xFFFF;
 
     game.teleport(
         .{ .quadrant = 0, .suffix = .{

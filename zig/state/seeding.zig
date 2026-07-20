@@ -200,9 +200,8 @@ pub const HashState = struct {
     }
 
     /// Determines a boolean outcome for a given probability chance.
-    /// The chance is rounded at compile-time to the nearest fraction `n / 2^k`
-    /// within `GET_CHANCE_MARGIN`, using the smallest such `k`,
-    /// so only `k` bits of entropy are consumed via `get()`
+    /// The chance is rounded at compile-time to the nearest fraction `n / 2^k` within `GET_CHANCE_MARGIN`,
+    /// using the smallest such `k` so only `k` bits of entropy are consumed via `get()`
     /// (1 bit for 0.5, 2 bits for 0.25, and so on) rather than a full 64-bit word.
     pub inline fn getChance(self: *HashState, comptime chance: comptime_float) bool {
         const opt = comptime find_opt: {
@@ -210,11 +209,11 @@ pub const HashState = struct {
                 @compileError("Chance must be in the range [0.0, 1.0]");
             }
 
-            // Search for the smallest power-of-two denominator that represents
-            // the chance within the margin of error. A match is guaranteed by
-            // GET_CHANCE_MAX_K, since rounding errs by at most 2^-(k+1).
+            // Search for the smallest power-of-two denominator that represents the chance within the margin of error.
+            // A match is guaranteed by GET_CHANCE_MAX_K, since rounding errs by at most 2^-(k+1).
             var k: u8 = 1;
             while (k <= GET_CHANCE_MAX_K) : (k += 1) {
+                // comptime_float -> f128 precision
                 const d: comptime_float = @floatFromInt(@as(u64, 1) << k);
                 const n_float = @round(chance * d);
                 const n: u64 = @intFromFloat(n_float);
