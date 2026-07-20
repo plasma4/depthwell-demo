@@ -60,7 +60,7 @@ const IndicatorKind = enum {
     corecraft,
     loot,
 
-    /// Classifies a stored block id into the indicator it displays, or null for non-indicator blocks.
+    /// Classifies a stored block type into the indicator it displays, or null for non-indicator blocks.
     /// Block IDs are stored as the base sprite (variation is render-only), so exact matching is valid here.
     fn fromBlock(id: Sprite) ?IndicatorKind {
         return switch (id) {
