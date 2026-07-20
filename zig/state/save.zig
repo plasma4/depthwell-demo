@@ -1,4 +1,6 @@
-//! NOTE: This game is pre-demo so all saves may break at any time due to core logic changes!Forward-compatibility is never planned, only back.
+//! NOTE: This game is pre-demo so all saves can break at any time from core logic changes!
+//! Forward-compatibility is never planned, only back.
+//!
 //! Serializes the full game state to a versioned, self-describing binary blob for the OPFS/generic file-system host.
 //! The atomic OPFS write and per-frame budgeting are handled by JS.
 //!
