@@ -15,12 +15,16 @@ const Sprite = dw.Sprite;
 const structures = @import("../structures.zig");
 const Rect = structures.Rect;
 
-pub const spawn_area: u32 = 8;
+pub const spawn_area: u32 = 32;
 pub const max_w: u32 = size_x;
 pub const max_h: u32 = size_y;
 
 /// Spawn chance per grid cell, before `constraints` thin it out. Tune against `debug/audit.zig`.
-pub const target_chance: f64 = 0.50;
+pub const target_chance: f64 = 0.97;
+
+/// Flat ground is rare enough that one jitter draw per cell would waste almost every cell.
+/// Cheap to retry, because a doomed seating scan bails after a couple of columns.
+pub const attempts: u32 = 8;
 
 const size_x: i32 = 5;
 const size_y: i32 = 7;
@@ -49,9 +53,7 @@ pub const constraints = [_]structures.Constraint{
     } },
 };
 
-pub fn getBounds(state: *HashState, cx: i32, cy: i32) ?Rect {
-    return structures.jitter(state, cx, cy, spawn_area, size_x, size_y);
-}
+// No getBounds(): the box is a plain size_x-by-size_y rect, so the default jitter in structures.zig does it.
 
 pub fn generate(
     starting_sprite: Sprite,

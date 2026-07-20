@@ -2434,12 +2434,19 @@ pub fn pushLayer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
         const path_idx = depth - path_start_depth; // 0-based index of this depth in the path history
         const slot: usize = @intCast(path_idx / 21); // packed-array slot (21 3-bit cells per u64)
         const bit_shift: u6 = @intCast((path_idx % 21) * 3); // bit offset of this cell within its slot
-        if (bit_shift == 0) {
+        // Only the first cell of a fresh slot grows the list; every other write targets an existing slot.
+        // A future ascent (`popLayer()`) can re-descend a depth whose cell already holds a stale value,
+        // so writes CLEAR the 3-bit cell before setting it rather than OR-ing into it. On the forward-only
+        // path this is identical (the bits were already zero), but it stops re-descent from corrupting them.
+        if (bit_shift == 0 and slot >= quad_cache.left_path.len) {
             quad_cache.left_path.append(alloc, left_cell_x) catch memory.oom();
             quad_cache.top_path.append(alloc, top_cell_y) catch memory.oom();
         } else {
-            quad_cache.left_path.at(slot).* |= (left_cell_x << bit_shift);
-            quad_cache.top_path.at(slot).* |= (top_cell_y << bit_shift);
+            const cell_mask = @as(u64, 0b111) << bit_shift;
+            const lx = quad_cache.left_path.at(slot);
+            lx.* = (lx.* & ~cell_mask) | (left_cell_x << bit_shift);
+            const ty = quad_cache.top_path.at(slot);
+            ty.* = (ty.* & ~cell_mask) | (top_cell_y << bit_shift);
         }
 
         quad_cache.origins_x[@intCast(depth % QuadCache.HISTORY_LEN)] = @intCast(left_cell_x);
