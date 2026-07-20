@@ -12,15 +12,31 @@ const Sprite = dw.Sprite;
 const structures = @import("../structures.zig");
 const Rect = structures.Rect;
 
-pub const spawn_area: u32 = 128;
+pub const spawn_area: u32 = 64;
 pub const max_w: u32 = 20;
 pub const max_h: u32 = 20;
-pub const target_chance: f64 = 0.36;
+pub const target_chance: f64 = 0.88;
 
 pub fn getBounds(state: *HashState, cx: i32, cy: i32) ?Rect {
     const radius = state.getRange(i32, 5, 10);
     return structures.jitter(state, cx, cy, spawn_area, radius * 2, radius * 2);
 }
+
+/// The geode's outer disc, in absolute world blocks. This is the SAME test `generate()` uses to draw the
+/// shell, factored out so the encase check can ask about blocks just outside the footprint too.
+fn covers(wx: i32, wy: i32, bounds: Rect) bool {
+    const radius = @divExact(bounds.x_end - bounds.x_start, 2);
+    const dx = (wx - bounds.x_start) - radius;
+    const dy = (wy - bounds.y_start) - radius;
+    return dx * dx + dy * dy <= radius * radius;
+}
+
+/// A geode must be fully buried: a pocket of gems reads as treasure only when it is sealed in rock, not
+/// hanging in an open cave. `Encase` walls the disc regardless of its rolled radius, without a per-radius
+/// bounding box, and the default one-block halo is what the disc can touch.
+pub const constraints = [_]structures.Constraint{
+    .{ .encase = .{ .covers = covers } },
+};
 
 pub fn generate(
     starting_sprite: Sprite,
