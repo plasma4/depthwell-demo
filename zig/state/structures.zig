@@ -552,7 +552,11 @@ inline fn resolveCell(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u
     // Each attempt draws fresh jitter from the same stream,
     // so a gated kind gets several shots at a valid spot in its cell instead of one.
     // generate() reads an INDEPENDENT stream, so it neither knows nor cares how many draws were burned here.
-    inline for (0..Configs[kind].attempts) |_| {
+    //
+    // A runtime loop on purpose: the body does not use the index, and every comptime branch inside resolves
+    // the same way each pass, so `inline for` would only unroll identical code `attempts` times (30x for the
+    // portal), bloating codegen for nothing.
+    for (0..Configs[kind].attempts) |_| {
         // ANCHOR: a structure only writes getBounds() when its box is not a plain max_w-by-max_h rect.
         const anchored: ?Rect = if (@hasDecl(S, "getBounds"))
             S.getBounds(&state, cx, cy)
