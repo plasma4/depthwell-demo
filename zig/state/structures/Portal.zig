@@ -42,7 +42,12 @@ const CORNER: i32 = 3;
 /// Stands the vestibule on flat ground, sliding it down up to 6 rows to meet the surface.
 /// Seating also guarantees the floor row has terrain beneath it,
 /// so no explicit "my base rests on solid ground" constraint is needed.
-pub const seat: structures.Seat = .{ .max_drop = 6 };
+///
+/// `max_slope = 2` tolerates gently uneven ground instead of demanding a perfectly flat strip, which is
+/// rare enough to strangle the spawn rate. Seating drops to the LOWEST column, so the higher columns just
+/// embed into the footprint (carved out, reading as "dug into a rise"); nothing floats. The grade-filler
+/// below then dresses those embedded columns with a clean stone foundation.
+pub const seat: structures.Seat = .{ .max_drop = 6, .max_slope = 2 };
 
 /// Terrain rules! Evaluated by `structures.zig` cheapest-first; result is cached on a grid-cell level.
 /// Terrain INSIDE the footprint is deliberately unconstrained: the vestibule carves out whatever it lands on.
@@ -95,6 +100,13 @@ pub fn generate(
 
     // The portal stands centered on the floor, in the row just above the base shell.
     if (local_x == size_x / 2 and local_y == size_y - 2) return .{ .id = .portal };
+
+    // GRADE-FILLER: on uneven ground, seating drops to the lowest column and the higher columns embed
+    // into the footprint. Rather than carve that away and expose a raw dug notch, re-skin the embedded
+    // BASE terrain as clean foundation stone. On flat ground the interior sits above the surface, so
+    // nothing is solid here and this never fires. Sampling base terrain keeps it deterministic and
+    // eventually-consistent: it only ever restates terrain the structure already overlaps.
+    if (structures.baseSolid(@bitCast(wx), @bitCast(wy))) return .{ .id = .stone };
 
     return .{ .id = .none };
 }
