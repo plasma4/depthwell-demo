@@ -129,7 +129,7 @@ export class SaveManager {
      */
     public async acquireLockWithRetry(intervalMs: number = 500): Promise<void> {
         while (true) {
-            console.log("Attempting to acquire exclusive tab lock...");
+            // console.log("Attempting to acquire exclusive tab lock...");
             const success = await this.tryAcquireTabExclusiveLock();
 
             if (success) {
@@ -137,7 +137,7 @@ export class SaveManager {
                 return; // exit the loop to continue init
             }
 
-            console.log(`Lock busy. Retrying in ${intervalMs}ms...`);
+            console.log(`Lock busy; retrying in ${intervalMs}ms...`);
             await this.delay(intervalMs); // wait before trying again
         }
     }
@@ -464,7 +464,6 @@ export class SaveManager {
 
         // Finalize state derivation synchronously
         this.engine.exports.saveFinalizeLoad();
-        this.engine.mixSeed();
         return true;
     }
 

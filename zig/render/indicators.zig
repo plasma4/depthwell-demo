@@ -59,6 +59,7 @@ const IndicatorKind = enum {
     furnace,
     corecraft,
     loot,
+    portal,
 
     /// Classifies a stored block type into the indicator it displays, or null for non-indicator blocks.
     /// Block IDs are stored as the base sprite (variation is render-only), so exact matching is valid here.
@@ -67,6 +68,7 @@ const IndicatorKind = enum {
             .forest_furnace, .lava_furnace => .furnace,
             .basic_core, .core1, .core2, .core3, .core4 => .corecraft,
             .chest => .loot,
+            .portal => .portal,
             // .moss_shrub1, .moss_shrub2 => .tree,
             else => null,
         };
@@ -78,15 +80,41 @@ const IndicatorKind = enum {
             .furnace => .gold_bar,
             .corecraft => .craft,
             .loot => .chest,
+            .portal => .portal_visual,
         };
     }
 
-    /// Pointer to this indicator's open/close flag in `menus`, or null for display-only indicators.
+    /// Pointer to this indicator's open/close flag in `menus`, or null when it backs no menu.
     /// A menu-backed kind's `MenusList` field name must match the tag name!
     fn menuFlag(self: IndicatorKind) ?*bool {
         return switch (self) {
+            // Starts a depth descent rather than opening anything, so it owns no flag.
+            .portal => null,
             inline else => |k| &@field(menus, @tagName(k)),
         };
+    }
+
+    /// Whether clicking this indicator does anything. Display-only kinds never claim the click focus.
+    fn isClickable(self: IndicatorKind) bool {
+        return self == .portal or self.menuFlag() != null;
+    }
+
+    /// How far away (in blocks) this indicator starts showing, and so how far it can be used from.
+    /// A portal is deliberately tighter than the rest: descending is irreversible, so it should take
+    /// standing at the portal rather than merely being in the same room as one.
+    fn maxBlockDistance(self: IndicatorKind) f32 {
+        return switch (self) {
+            .portal => 3.5,
+            else => 5.0,
+        };
+    }
+
+    /// Runs what clicking this indicator does, for kinds that act instead of toggling a menu.
+    fn activate(self: IndicatorKind, ref: BlockRef) void {
+        switch (self) {
+            .portal => dw.portal.trigger(ref.coord, ref.bx, ref.by),
+            else => {},
+        }
     }
 };
 
@@ -137,6 +165,7 @@ fn cameraView() CameraView {
 /// Returns null when the block is too far away (>= 5 blocks) to display an icon.
 fn indicatorGeom(
     view: CameraView,
+    kind: IndicatorKind,
     chunk_dx: i32,
     chunk_dy: i32,
     local_bx: u4,
@@ -153,8 +182,8 @@ fn indicatorGeom(
     const dist_sq = dx_sub * dx_sub + dy_sub * dy_sub;
     const distance = @sqrt(@as(f64, @floatFromInt(dist_sq)));
 
-    const max_dist = 5.0 * 256.0; // start showing 5 blocks away
-    const min_dist = 1.5 * 256.0; // fully scaled at 1.5 blocks
+    const max_dist = kind.maxBlockDistance() * 256.0; // start showing this many blocks away
+    const min_dist = @min(1.5 * 256.0, max_dist * 0.5); // fully scaled close up, never past the cutoff
     if (distance >= max_dist) return null;
 
     const t: f32 = @floatCast(if (distance <= min_dist) 1.0 else (max_dist - distance) / (max_dist - min_dist));
@@ -208,6 +237,7 @@ fn scanIndicators(view: CameraView, visitor: anytype) void {
             const kind = IndicatorKind.fromBlock(block.id) orelse continue;
             const geom = indicatorGeom(
                 view,
+                kind,
                 chunk_dx,
                 chunk_dy,
                 local_bx,
@@ -247,8 +277,8 @@ const DrawVisitor = struct {
         // undo camera scale mult (slot_size is scale-relative)
         const rel_size: f32 = @floatCast(geom.slot_size / @as(f32, @floatCast(memory.game.camera_scale)));
 
-        // Only menu-backed indicators are clickable; display-only ones (tree) just draw.
-        if (flag != null and geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
+        // Only clickable indicators react; display-only ones (tree) just draw.
+        if (kind.isClickable() and geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
             // Down-capture for .indicator is claimed centrally in mouse.processDownCaptures()
             // (via isHoveringIndicator), so this frame's click_focus is already settled.
 
@@ -257,23 +287,28 @@ const DrawVisitor = struct {
 
             // Toggle safely when a click both starts and ends on this indicator
             if (!self.click_used and mouse.isClicked(.indicator, true)) {
-                flag.?.* = !flag.?.*;
                 self.click_used = true;
-                // The loot menu is per-chest: tell it which block backs it (or that it lost one).
-                if (kind == .loot) {
-                    const loot = @import("../menus/loot.zig");
-                    if (flag.?.*) loot.open(ref) else loot.close();
-                }
+                if (flag) |f| {
+                    f.* = !f.*;
+                    // The loot menu is per-chest: tell it which block backs it (or that it lost one).
+                    if (kind == .loot) {
+                        const loot = @import("../menus/loot.zig");
+                        if (f.*) loot.open(ref) else loot.close();
+                    }
+                } else kind.activate(ref);
             }
         }
 
         // Background inventory slot (color shifts while its menu is open)
         dw.entity.addEntity(.{
             // this creates an interesting style, just go with it
-            .sprite = if (kind == .furnace) .wood_frame else .wood,
+            .sprite = if (kind == .furnace or kind == .portal) .wood_frame else .wood,
             .position = .{ geom.screen_x, geom.screen_y },
             .size = geom.slot_size,
-            .lcha = if (kind == .furnace)
+            .lcha = if (kind == .portal)
+                // violet, and brightening as the player closes in, to read as "this takes you somewhere"
+                .{ 0.85 + 0.15 * geom.opacity, 0.06 + rel_size * 0.006, -1.9, geom.opacity }
+            else if (kind == .furnace)
                 // wood style if furnace
                 if (is_open)
                     .{ 1.0, rel_size * 0.007, 0.3, geom.opacity }
@@ -302,6 +337,12 @@ const DrawVisitor = struct {
 /// Iterates active chunks looking for icons to put above blocks and overlays contextual UI indicators.
 pub fn drawIndicators() void {
     @setFloatMode(.optimized);
+    // A portal descent owns the screen: its zoom ramp would drag every icon out of place, and nothing
+    // in the world can be interacted with until it lands.
+    if (dw.portal.isActive()) {
+        nearby_cores = .{};
+        return;
+    }
     const view = cameraView();
 
     nearby_cores = .{};
@@ -343,8 +384,8 @@ const HoverVisitor = struct {
     fn visit(self: *HoverVisitor, id: Sprite, kind: IndicatorKind, geom: IndicatorGeom, ref: BlockRef) bool {
         _ = id;
         _ = ref;
-        // Display-only indicators (no menu) are not clickable, so they never claim indicator focus.
-        if (kind.menuFlag() == null) return false;
+        // Display-only indicators are not clickable, so they never claim indicator focus.
+        if (!kind.isClickable()) return false;
         if (geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
             self.found = true;
             return true; // stop scanning at the first hit
@@ -357,6 +398,7 @@ const HoverVisitor = struct {
 /// Used by `mouse.processDownCaptures()` to claim the `.indicator` click focus.
 pub fn isHoveringIndicator() bool {
     @setFloatMode(.optimized);
+    if (dw.portal.isActive()) return false;
     var hover: HoverVisitor = .{};
     scanIndicators(cameraView(), &hover);
     return hover.found;

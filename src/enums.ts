@@ -39,6 +39,7 @@ export interface EngineExports extends WebAssembly.Exports {
     readonly jsGetTime: () => number;
     readonly jsHandleVisibleChunks: (arg0: number, arg1: number) => void;
     readonly jsHandleVisibleEntities: () => void;
+    readonly jsDrawBackground: (arg0: number) => void;
     readonly jsSetMouseType: (arg0: number) => void;
     readonly jsPlaySound: (arg0: number, arg1: number, arg2: number) => void;
     readonly main: () => void;
@@ -117,4 +118,11 @@ export const game_state_offsets = {
     keys_held_mask: 140,
     seed: 144,
     seed2: 208,
+    portal_chunk: 416,
+    bg_time: 432,
+    portal_frame: 440,
+    portal_phase: 444,
+    portal_quadrant: 445,
+    portal_bx: 446,
+    portal_by: 447,
 } as const;
