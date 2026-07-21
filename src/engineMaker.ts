@@ -155,6 +155,8 @@ export async function create(
                     wireframeOpacity: number,
                 ) => engine!.handleVisibleChunks(opacity, wireframeOpacity),
                 jsHandleVisibleEntities: () => engine!.handleVisibleEntities(),
+                jsDrawBackground: (opacity: number) =>
+                    engine!.drawBackground(opacity),
                 jsSetMouseType: (type: number) => engine!.setMouseType(type),
                 jsPlaySound: (id: number, volume: number, pitch: number) =>
                     engine!.playSound(id, volume, pitch),
@@ -254,7 +256,24 @@ export async function create(
         fragment: {
             module: shaderModule,
             entryPoint: "fs_background",
-            targets: [{ format: format }],
+            targets: [
+                {
+                    format: format,
+                    // fs_background returns premultiplied colour (rgb * opacity, opacity), so the
+                    // background cross-dissolves during a portal descent, where the D+1 background is
+                    // drawn over D's. At the usual opacity of 1 this is identical to writing opaquely.
+                    blend: {
+                        color: {
+                            srcFactor: "one",
+                            dstFactor: "one-minus-src-alpha",
+                        },
+                        alpha: {
+                            srcFactor: "one",
+                            dstFactor: "one-minus-src-alpha",
+                        },
+                    },
+                },
+            ],
         },
         primitive: {
             topology: "triangle-list",

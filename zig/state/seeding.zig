@@ -55,6 +55,12 @@ pub const SeedStream = enum(u64) {
     sound,
     particles,
     startup_layers,
+    /// Starting phase of the background animation clock, so two worlds never open on the same frame.
+    background,
+    /// Layout of the debris a portal descent swallows; replayed identically when a save resumes one.
+    portal_debris,
+    /// Per-render-frame screen tremor. Cosmetic only, and never saved.
+    screen_shake,
     _, // @enumFromInt is frequently used to "bypass" this enum
 };
 
