@@ -464,7 +464,6 @@ export class SaveManager {
 
         // Finalize state derivation synchronously
         this.engine.exports.saveFinalizeLoad();
-        this.engine.mixSeed();
         return true;
     }
 
