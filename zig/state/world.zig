@@ -435,7 +435,7 @@ pub const ModificationStore = struct {
     /// The chunk reverts to pure procedural generation on its next materialization.
     pub fn remove(self: *@This(), key: DepthCoordinate) void {
         const kv = self.index.fetchRemove(key) orelse return;
-        const entry = self.entries.at(kv.value);
+        const entry: ModEntry = self.entries.at(kv.value);
         self.allocator.free(entry.cells);
         entry.* = .{};
         self.free_entries.append(self.allocator, kv.value) catch memory.oom();
@@ -481,7 +481,7 @@ pub const ModificationStore = struct {
     /// `cells` must be in ascending block-index order and match `modified`.
     pub fn loadEntry(self: *@This(), key: DepthCoordinate, modified: [MODIFIED_WORDS]u64, cells: []const ModCell) !void {
         const idx = self.allocEntry();
-        const entry = self.entries.at(idx);
+        const entry: *ModEntry = self.entries.at(idx);
         entry.modified = modified;
         entry.count = @intCast(cells.len);
         entry.cells = try self.allocator.alloc(ModCell, @max(cells.len, MIN_MOD_CELLS));
@@ -2434,12 +2434,18 @@ pub fn pushLayer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
         const path_idx = depth - path_start_depth; // 0-based index of this depth in the path history
         const slot: usize = @intCast(path_idx / 21); // packed-array slot (21 3-bit cells per u64)
         const bit_shift: u6 = @intCast((path_idx % 21) * 3); // bit offset of this cell within its slot
-        if (bit_shift == 0) {
+
+        // only the first cell of a fresh slot grows the list; every other write targets an existing slot
+        // (stops re-descent from corrupting them)
+        if (bit_shift == 0 and slot >= quad_cache.left_path.len) {
             quad_cache.left_path.append(alloc, left_cell_x) catch memory.oom();
             quad_cache.top_path.append(alloc, top_cell_y) catch memory.oom();
         } else {
-            quad_cache.left_path.at(slot).* |= (left_cell_x << bit_shift);
-            quad_cache.top_path.at(slot).* |= (top_cell_y << bit_shift);
+            const cell_mask = @as(u64, 0b111) << bit_shift;
+            const lx: *u64 = quad_cache.left_path.at(slot);
+            lx.* = (lx.* & ~cell_mask) | (left_cell_x << bit_shift);
+            const ty: *u64 = quad_cache.top_path.at(slot);
+            ty.* = (ty.* & ~cell_mask) | (top_cell_y << bit_shift);
         }
 
         quad_cache.origins_x[@intCast(depth % QuadCache.HISTORY_LEN)] = @intCast(left_cell_x);

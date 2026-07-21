@@ -12,15 +12,30 @@ const Sprite = dw.Sprite;
 const structures = @import("../structures.zig");
 const Rect = structures.Rect;
 
-pub const spawn_area: u32 = 128;
+pub const spawn_area: u32 = 64;
 pub const max_w: u32 = 20;
 pub const max_h: u32 = 20;
-pub const target_chance: f64 = 0.36;
+pub const target_chance: f64 = 0.88;
 
 pub fn getBounds(state: *HashState, cx: i32, cy: i32) ?Rect {
     const radius = state.getRange(i32, 5, 10);
     return structures.jitter(state, cx, cy, spawn_area, radius * 2, radius * 2);
 }
+
+/// The geode's outer disc, in absolute world blocks. This is the SAME test `generate()` uses to draw the shell,
+/// factored out so the encase check can ask about blocks just outside the footprint too.
+fn covers(wx: i32, wy: i32, bounds: Rect) bool {
+    const radius = @divExact(bounds.x_end - bounds.x_start, 2);
+    const dx = (wx - bounds.x_start) - radius;
+    const dy = (wy - bounds.y_start) - radius;
+    return dx * dx + dy * dy <= radius * radius;
+}
+
+/// A geode should be mostly buried but never perfectly sealed to make it more findable and interesting!
+/// `Encase` walls the disc regardless of its rolled radius, with no per-radius bounding box.
+pub const constraints = [_]structures.Constraint{
+    .{ .encase = .{ .covers = covers, .min_open = 0.20, .max_open = 0.40 } },
+};
 
 pub fn generate(
     starting_sprite: Sprite,
@@ -38,7 +53,7 @@ pub fn generate(
     const i_wx = @as(i32, @bitCast(wx));
     const i_wy = @as(i32, @bitCast(wy));
 
-    // the hashed radius is already baked into the bounds (see getBounds), so no re-rolls are needed
+    // the hashed radius is already baked into the bounds (see getBounds()), so no re-rolls are needed
     const radius = @divExact(bounds.x_end - bounds.x_start, 2);
     const core_radius = radius - 2;
 
