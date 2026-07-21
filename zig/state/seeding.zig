@@ -55,6 +55,8 @@ pub const SeedStream = enum(u64) {
     sound,
     particles,
     startup_layers,
+    /// Starting phase of the background animation clock, so two worlds never open on the same frame.
+    background,
     _, // @enumFromInt is frequently used to "bypass" this enum
 };
 
