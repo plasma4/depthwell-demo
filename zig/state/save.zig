@@ -694,11 +694,17 @@ pub fn finalizeLoad() void {
     // inline for (&g.seed2) |*s| s.* = temp_seed.next();
     dw.sound.seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .sound));
     dw.particles.seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .particles));
+    dw.chunks.shake_seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .screen_shake));
 
     world.max_possible_suffix = world.getMaxSuffixAtDepth(g.depth);
 
     // repopulate the SimBuffer around the player using the newly loaded state
     world.SimBuffer.sync(g.getPlayerCoord(), .{ 0, 0 });
+
+    // A save taken mid-descent stores the world at D plus the frame counter; everything else the
+    // animation needs (the D+1 transition and its preview buffer) is derived, so rebuild it here.
+    // Must follow the SimBuffer sync: generating D+1 reads the D chunks it descends from.
+    dw.portal.restore();
 
     // A save can land between a water-adjacent block change and the next tick's batched flag recompute
     // (see queueWaterFlags()), baking stale/sentinel edge flags into the stored blocks.
