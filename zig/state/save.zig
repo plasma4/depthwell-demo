@@ -700,6 +700,11 @@ pub fn finalizeLoad() void {
     // repopulate the SimBuffer around the player using the newly loaded state
     world.SimBuffer.sync(g.getPlayerCoord(), .{ 0, 0 });
 
+    // A save taken mid-descent stores the world at D plus the frame counter; everything else the
+    // animation needs (the D+1 transition and its preview buffer) is derived, so rebuild it here.
+    // Must follow the SimBuffer sync: generating D+1 reads the D chunks it descends from.
+    dw.portal.restore();
+
     // A save can land between a water-adjacent block change and the next tick's batched flag recompute
     // (see queueWaterFlags()), baking stale/sentinel edge flags into the stored blocks.
     // So, re-queuing every water chunk so those flags heal on the first tick after a load is needed.

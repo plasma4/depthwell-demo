@@ -115,6 +115,65 @@ pub fn spawnBurst(origin: Vec2f32, colors: []const [4]f32, config: BurstConfig) 
     }
 }
 
+/// Tunable knobs for `spawnInwardRing()`.
+pub const InwardConfig = struct {
+    /// How many particles to spawn.
+    count: usize = 6,
+    /// Distance from `origin` particles appear at, in viewport pixels.
+    radius_min: f32 = 24.0,
+    radius_max: f32 = 44.0,
+    /// Square edge length range in viewport pixels.
+    size_min: f32 = 0.8,
+    size_max: f32 = 2.4,
+    /// Spin magnitude range (radians per render frame); direction is randomized.
+    spin_min: f32 = 0.02,
+    spin_max: f32 = 0.10,
+    /// Frames a particle takes to travel its whole radius, so it lands on `origin` as it dies.
+    travel_min: u16 = 14,
+    travel_max: u16 = 26,
+    /// Sideways drift as a fraction of inward speed, which curves the paths into a swirl.
+    swirl: f32 = 0.35,
+};
+
+/// Spawns particles on a ring around `origin` that fall inward and expire as they reach it.
+///
+/// The inverse of `spawnBurst()`: speed is derived from each particle's distance and lifetime so it
+/// converges on the centre rather than radiating away. Used for the portal descent's intake effect.
+pub fn spawnInwardRing(origin: Vec2f32, colors: []const [4]f32, config: InwardConfig) void {
+    for (0..config.count) |_| {
+        const angle = randRange(0.0, std.math.tau);
+        const radius = randRange(config.radius_min, config.radius_max);
+        const travel: u16 = @intFromFloat(randRange(
+            @floatFromInt(config.travel_min),
+            @floatFromInt(config.travel_max + 1),
+        ));
+        const spin_magnitude = randRange(config.spin_min, config.spin_max);
+
+        const dir: Vec2f32 = .{ @cos(angle), @sin(angle) };
+        // Covering exactly `radius` over `travel` frames puts the particle at the centre as it dies.
+        const speed = radius / @as(f32, @floatFromInt(travel));
+        // A perpendicular component bends the straight fall into a spiral.
+        const swirl = if (seed.float(f32) < 0.5) config.swirl else -config.swirl;
+
+        addParticle(.{
+            .position = origin + dir * @as(Vec2f32, @splat(radius)),
+            .velocity = .{
+                (-dir[0] + -dir[1] * swirl) * speed,
+                (-dir[1] + dir[0] * swirl) * speed,
+            },
+            .rotation = randRange(0.0, std.math.tau),
+            .spin = if (seed.float(f32) < 0.5) spin_magnitude else -spin_magnitude,
+            .size = randRange(config.size_min, config.size_max),
+            .lcha = if (colors.len == 0)
+                .{ 1.0, 0.0, 0.0, 1.0 } // white fallback
+            else
+                colors[@intCast(seed.next() % colors.len)] + Vec4f32{ -0.08 + 0.24 * seed.float(f32), 0.01, 0.0, 0.0 },
+            .frames_left = travel,
+            .lifetime = travel,
+        });
+    }
+}
+
 /// Spawns a burst colored from the given sprite's atlas tile (see `colorsOf()`).
 pub fn spawnSpriteBurst(s: Sprite, origin: Vec2f32, config: BurstConfig) void {
     spawnBurst(origin, palette.colorsOf(s), config);

@@ -49,6 +49,8 @@ fn resetAfterStart() void {
     dw.particles.reset();
     world.SimBuffer.reset();
     dw.water.reset();
+    // Frees the descent's preview buffer; `memory.game` above already cleared its saved fields.
+    dw.portal.reset();
 
     // dropped item ring buffer lives in the world arena reset above; detach instead of freeing
     dw.inventory.dropped_items = .{};
@@ -85,6 +87,14 @@ pub fn init(new_game: bool) void {
     // Start off by determining where the player starts off exactly with layer pushing
     dw.sound.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .sound));
     dw.particles.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .particles));
+
+    // Offset the background's animation clock by up to two minutes so two worlds never open on the
+    // same frame of it. The host used to apply this offset itself, but the clock is game state now
+    // (see `GameState.bg_time`), so the offset has to be part of that state to survive a save.
+    const BG_PHASE_SPREAD_MS = 120_000;
+    memory.game.bg_time = @as(f64, @floatFromInt(
+        seeding.mixBaseSeed(seed, .background).value[0] % BG_PHASE_SPREAD_MS,
+    )) / 1000.0;
 
     var rng = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .startup_layers));
     for (0..STARTING_ZOOM_TIMES) |_| {
