@@ -270,7 +270,7 @@ const DrawVisitor = struct {
         // Background inventory slot (color shifts while its menu is open)
         dw.entity.addEntity(.{
             // this creates an interesting style, just go with it
-            .sprite = if (kind == .furnace) .wood_icon else .wood,
+            .sprite = if (kind == .furnace) .wood_frame else .wood,
             .position = .{ geom.screen_x, geom.screen_y },
             .size = geom.slot_size,
             .lcha = if (kind == .furnace)
