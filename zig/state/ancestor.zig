@@ -239,122 +239,190 @@ pub fn getAncestorChunk(key: DepthCoordinate) *const Chunk {
     return slot;
 }
 
-/// Given a 4x4 string of 0s and 1s (skipping others).
-/// Returns an array of values between 0-15 where there is a 1. Should be called with `comptime`.
-pub inline fn get4x4List(comptime str: []const u8) []const u4 {
-    comptime {
-        var result: [16]u4 = undefined;
-        var count: usize = 0;
-        var cell_idx: usize = 0;
-        var total_cells: usize = 0;
+/// Weight one solid parent block contributes to a corner of the child grid.
+/// Four blocks meet at a corner, so a corner density runs 0 (open space) to 64 (fully buried).
+const CORNER_UNIT = 16;
+/// Density a child cell needs to stay solid.
+///
+/// A flat surface puts its corners at exactly two of four blocks solid, which is why the threshold
+/// sits there: the first row of cells inside the surface samples an eighth of the way toward the
+/// buried corners, clearing it by `SURFACE_MARGIN`.
+const SLOPE_THRESHOLD = 2 * CORNER_UNIT;
+/// How far the first cell row inside a flat surface clears `SLOPE_THRESHOLD` by.
+/// Bilinear sampling puts that row an eighth of the way from a surface corner (32) to a buried one (64).
+const SURFACE_MARGIN = (4 * CORNER_UNIT - SLOPE_THRESHOLD) / 8;
+/// Density at which a cell counts as interior. No noise may carve a cell whose unshaped density
+/// reaches this, which is what bounds every field below to the outer skin of the terrain.
+/// A flat face puts its second cell row at 44 and its third at 52, so this also sets how far a face
+/// can travel in one depth: two cells.
+const INTERIOR_DENSITY = 3 * CORNER_UNIT;
+/// Bilinear weight a cell in the corner of the 4x4 draws from the corner it sits nearest.
+/// Cell centers land on eighths, so that cell sits at (1/8, 1/8) and takes (7/8)^2 from it.
+const CORNER_CELL_WEIGHT = (7.0 / 8.0) * (7.0 / 8.0);
+/// How far the erosion noise may push the surface, in density units.
+/// This is the fine detail on top of the shape `CORNER_NOISE_AMPLITUDE` decides.
+const EROSION_AMPLITUDE = 1.5 * SURFACE_MARGIN;
+/// Cell size of the erosion noise, in child blocks (a parent block is `BLOCKS_PER_PARENT` wide).
+/// Deliberately not a multiple of `BLOCKS_PER_PARENT` so its features do not line up with the parent grid.
+const EROSION_SCALE = 7.0;
+/// How far the macro noise may move a corner of the terrain, in density units.
+///
+/// Large on purpose: at 2 units per cell of surface travel, this is what lets a face pull back or
+/// lean over a whole run of blocks instead of sitting exactly where the block counts put it.
+/// `INTERIOR_DENSITY` still caps the actual travel at two cells per depth.
+const CORNER_NOISE_AMPLITUDE = 12.0;
+/// Cell size of the macro corner noise, in PARENT blocks, so its features span many child blocks.
+///
+/// One octave per depth is correct and deliberate: the world is self-similar, so the octave added at
+/// the parent's depth arrives already baked into the corner counts, and the octave added here becomes
+/// the coarse one for the children. Descending therefore accumulates a full fBm of slope detail
+/// without any depth ever reading past its own parent.
+const CORNER_NOISE_SCALE = 6.0;
+/// Cell size of the material warp noise, in child blocks.
+const MATERIAL_WARP_SCALE = 11.0;
+/// How far the warp may drag a material border, in parent blocks.
+///
+/// A cell center already sits up to 0.375 parent blocks off center, so anything under 1.125 rounds
+/// no further than the immediate 3x3 of parents that the lookup has on hand.
+/// Under 0.125 the warp can never reach a neighbor at all and material simply stops crossing.
+const MATERIAL_WARP_STRENGTH = 0.5;
+/// Period of every noise field here, in child blocks.
+///
+/// Global child coordinates run to 2^64 at depth, far past the 2^24 where an `f32` still resolves
+/// single blocks, so they are masked into range first. The cost is one seam per million blocks,
+/// which is much cheaper than losing all sub-cell precision everywhere.
+/// Must stay a multiple of `BLOCKS_PER_PARENT` so masked child coordinates still divide down onto
+/// the parent lattice `cornerNoise()` addresses, and a multiple of `CHUNK_SIZE` so the seam falls on
+/// a chunk border rather than through one.
+const NOISE_PERIOD_MASK = (1 << 20) - 1;
 
-        for (str) |c| {
-            if (c == '0' or c == '1') {
-                if (total_cells >= 16) {
-                    @compileError("Input string contains more than 16 cells.");
-                }
-
-                if (c == '1') {
-                    result[count] = cell_idx;
-                    count += 1;
-                }
-
-                cell_idx += 1;
-                total_cells += 1;
-            }
-        }
-
-        if (total_cells != 16) {
-            @compileError("Input string must contain exactly 16 characters (0s or 1s).");
-        }
-
-        const final = result[0..count];
-        return final;
-    }
+comptime {
+    if ((NOISE_PERIOD_MASK + 1) % dw.CHUNK_SIZE != 0)
+        @compileError("The noise period must be a whole number of chunks so its seam falls on a chunk border.");
 }
 
-/// Fixed-point weight that one solid parent block contributes to a corner of the child grid.
-const CORNER_UNIT = 16;
-/// Density a child cell must reach (in `CORNER_UNIT`s) to survive the slope carve.
-/// Two of the four blocks meeting at a corner is the break-even point,
-/// which leaves flat walls flat and rounds off outer corners.
-const SLOPE_THRESHOLD = 2 * CORNER_UNIT;
-/// Half the peak-to-peak jitter applied to a corner, in `CORNER_UNIT`s.
-/// Kept below one unit so jitter only slides a slope along by about a cell,
-/// never flipping whether a corner sits inside or outside the terrain.
-const CORNER_JITTER = CORNER_UNIT / 2;
-
-/// Density at one corner of the parent block: how much terrain converges on that point.
+/// Macro noise offset at each of the parent block's four corners, in density units.
 ///
-/// `solid` counts how many of the four blocks meeting at the corner are foundations, and the jitter
-/// is hashed from the corner's position in child-block units, both of which any block touching that
-/// corner derives identically. That is what makes the carve seamless across block and chunk borders:
-/// no chunk seed and no block seed goes in, only the corner itself.
-/// Assumes at least one of the four is a foundation, so the jitter cannot underflow.
-fn cornerDensity(jitter_key: @Vector(2, u64), solid: u16, cx: u64, cy: u64) u16 {
-    std.debug.assert(solid != 0);
-    const jitter = seeding.FastHash.hash2d(jitter_key, cx, cy) % (2 * CORNER_JITTER);
-    return solid * CORNER_UNIT + @as(u16, @intCast(jitter)) - CORNER_JITTER;
+/// `px`/`py` are the parent block's top left corner in global PARENT block units, so a corner is
+/// addressed by its own position in the world and nothing else. Every block touching that corner
+/// therefore hashes the identical point and gets the identical offset, which is the only reason a
+/// field this large can move the terrain without tearing it at a block, chunk, or parent border.
+///
+/// Offsetting corners rather than cells is what produces slopes instead of nibbles: pulling one
+/// corner in while the next stays put tilts the whole surface running between them, and because the
+/// field is smooth over `CORNER_NOISE_SCALE` parent blocks, that tilt is shared by a long run of
+/// neighbors and reads as one macro slope.
+fn cornerNoise(noise_seed: dw.utils.Vec2u, px: u64, py: u64) @Vector(4, f32) {
+    const inv_scale = 1.0 / CORNER_NOISE_SCALE;
+    const offsets: @Vector(4, f32) = .{
+        procedural.getDualValueNoise(noise_seed, px, py, inv_scale)[0],
+        procedural.getDualValueNoise(noise_seed, px +% 1, py, inv_scale)[0],
+        procedural.getDualValueNoise(noise_seed, px, py +% 1, inv_scale)[0],
+        procedural.getDualValueNoise(noise_seed, px +% 1, py +% 1, inv_scale)[0],
+    };
+    return (offsets - @as(@Vector(4, f32), @splat(0.5))) * @as(@Vector(4, f32), @splat(2 * CORNER_NOISE_AMPLITUDE));
 }
 
 /// Densities at the parent block's four corners, ordered top left, top right, bottom left, bottom right.
-/// `cx`/`cy` locate the parent block's top left corner in global child-block units.
+///
+/// A corner counts how many of the four parent blocks touching it are foundations. Any block sharing
+/// that corner counts the same four, so neighboring parents always agree on the surface running
+/// between them: no seed, no coordinate, and no chunk identity enters the count, which is what keeps
+/// the result seamless across block, chunk, and quadrant borders alike.
 /// Neighbors are row-major from the top left (see `Block.edge_flags`), skipping the center.
-fn cornerDensities(parent_block: Block, n: [8]Block, jitter_key: @Vector(2, u64), cx: u64, cy: u64) [4]u16 {
-    const solid: @Vector(8, u16) = blk: {
-        var v: [8]u16 = undefined;
-        for (n, 0..) |b, i| v[i] = @intFromBool(b.isFoundation());
-        break :blk v;
-    };
-    const self_solid: u16 = @intFromBool(parent_block.isFoundation());
-    const far = dw.BLOCKS_PER_PARENT;
+fn cornerDensities(parent_block: Block, n: [8]Block) @Vector(4, f32) {
+    var solid: [8]f32 = undefined;
+    for (n, 0..) |b, i| solid[i] = @floatFromInt(@intFromBool(b.isFoundation()));
+    const self_solid: f32 = @floatFromInt(@intFromBool(parent_block.isFoundation()));
 
-    return .{
-        cornerDensity(jitter_key, self_solid + solid[0] + solid[1] + solid[3], cx, cy),
-        cornerDensity(jitter_key, self_solid + solid[1] + solid[2] + solid[4], cx +% far, cy),
-        cornerDensity(jitter_key, self_solid + solid[3] + solid[5] + solid[6], cx, cy +% far),
-        cornerDensity(jitter_key, self_solid + solid[4] + solid[6] + solid[7], cx +% far, cy +% far),
-    };
+    return @as(@Vector(4, f32), .{
+        self_solid + solid[0] + solid[1] + solid[3],
+        self_solid + solid[1] + solid[2] + solid[4],
+        self_solid + solid[3] + solid[5] + solid[6],
+        self_solid + solid[4] + solid[6] + solid[7],
+    }) * @as(@Vector(4, f32), @splat(CORNER_UNIT));
 }
 
 /// Returns whether the slope carve removes this cell of a solid parent's 4x4 child grid.
 ///
-/// Terrain is described by the four corners of the parent block rather than by the block itself,
-/// and each cell keeps its material when the bilinear sample of those corners clears
-/// `SLOPE_THRESHOLD`. Since the corners are shared, a run of blocks resolves into one continuous
-/// surface: flat where the neighbors are flat, diagonal where the terrain turns.
-/// The inner 2x2 is never carved, so a lone block shrinks to a nub instead of vanishing.
-fn carvesSlope(parent_block: Block, n: [8]Block, key: DepthCoordinate, bx: u4, by: u4) bool {
-    const lx = bx % dw.BLOCKS_PER_PARENT;
-    const ly = by % dw.BLOCKS_PER_PARENT;
-    if (lx -% 1 < 2 and ly -% 1 < 2) return false;
+/// The parent's terrain is described by its four corners rather than by the block itself, and a cell
+/// survives when the bilinear sample of those corners clears `SLOPE_THRESHOLD`. Shared corners make
+/// a run of blocks resolve into one continuous surface: flat where the neighbors are flat, and
+/// sloped at whatever angle the corner counts imply where the terrain turns.
+///
+/// Two noise fields then displace that surface, both keyed to global position so either side of any
+/// border samples them identically: `cornerNoise()` moves the corners for macro shape, and a finer
+/// per-cell field roughens what is left. Neither may touch a cell whose unshaped density has already
+/// reached `INTERIOR_DENSITY`, which confines all of it to the outer two cells of the skin.
+///
+/// A solid parent can therefore never be erased outright, and the two rules that guarantee it are
+/// deliberately written against the same constant so they cannot drift apart:
+/// a block whose densest cell reaches `INTERIOR_DENSITY` keeps at least that cell, and a block whose
+/// densest cell does not is a delicate feature (a one-block wall, an isolated nub) with no interior
+/// to erode into, so it is left exactly as its counts describe.
+fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx: u64, wy: u64, lx: u4, ly: u4) bool {
+    // `lx`/`ly` are where `wx`/`wy` sit inside their parent; the corner math below subtracts one from
+    // the other to recover the parent lattice, so a mismatched pair would silently shift the field.
+    std.debug.assert(wx % dw.BLOCKS_PER_PARENT == lx and wy % dw.BLOCKS_PER_PARENT == ly);
 
-    // Fully buried blocks cannot reach the threshold from below, so skip their four hashes.
+    // A fully buried block sits at 64 everywhere and cannot be pushed under the threshold, so skip it.
     var buried = true;
     for (n) |b| buried = buried and b.isFoundation();
     if (buried) return false;
 
-    // Corner positions are global child-block coordinates, so every chunk in the quadrant agrees on
-    // them. The quadrant seed is the only seed shared that widely; the depth is folded in so a
-    // parent's corners do not hash to the same jitter as the child corners sitting on top of them.
-    const quadrant_seed = world.quad_cache.getQuadrantSeed(key.quadrant, key.depth);
-    const jitter_key: @Vector(2, u64) = .{ quadrant_seed.value[0] ^ key.depth, quadrant_seed.value[1] };
-    const corners = cornerDensities(
-        parent_block,
-        n,
-        jitter_key,
-        (key.suffix[0] *% dw.CHUNK_SIZE) +% (bx - lx),
-        (key.suffix[1] *% dw.CHUNK_SIZE) +% (by - ly),
-    );
+    const corners = cornerDensities(parent_block, n);
 
     // Cell centers land on eighths of the parent block: 1, 3, 5, 7.
-    const u: u16 = 2 * @as(u16, lx) + 1;
-    const v: u16 = 2 * @as(u16, ly) + 1;
-    const density = (8 - u) * (8 - v) * corners[0] +
-        u * (8 - v) * corners[1] +
-        (8 - u) * v * corners[2] +
-        u * v * corners[3];
-    return density < SLOPE_THRESHOLD * 64;
+    const u = (2 * @as(f32, @floatFromInt(lx)) + 1) / 8;
+    const v = (2 * @as(f32, @floatFromInt(ly)) + 1) / 8;
+    const weights: @Vector(4, f32) = .{ (1 - u) * (1 - v), u * (1 - v), (1 - u) * v, u * v };
+
+    // Lower bound on the block's densest cell: the cell nearest the fullest corner draws
+    // `CORNER_CELL_WEIGHT` of its density from that corner and the rest from corners no smaller than
+    // the minimum. If even that cannot reach the interior, no cell in the block can, and the block
+    // has no interior to erode into.
+    const peak = CORNER_CELL_WEIGHT * @reduce(.Max, corners) + (1 - CORNER_CELL_WEIGHT) * @reduce(.Min, corners);
+    if (peak < INTERIOR_DENSITY) return false;
+    if (@reduce(.Add, corners * weights) >= INTERIOR_DENSITY) return false;
+
+    // Corner positions in global parent block units; the parent's own corner is the child's cell
+    // position with its offset inside the parent removed, scaled back down.
+    // `NOISE_PERIOD_MASK` is a multiple of `BLOCKS_PER_PARENT`, so dividing already-masked child
+    // coordinates lands on the same parent lattice everyone else derives.
+    const shaped = corners + cornerNoise(
+        noise_seed,
+        (wx - lx) / dw.BLOCKS_PER_PARENT,
+        (wy - ly) / dw.BLOCKS_PER_PARENT,
+    );
+    const erosion = procedural.getDualValueNoise(noise_seed, wx, wy, 1.0 / EROSION_SCALE)[0];
+
+    return @reduce(.Add, shaped * weights) + (erosion - 0.5) * 2 * EROSION_AMPLITUDE < SLOPE_THRESHOLD;
+}
+
+/// Picks which of the 3x3 parent blocks hands this child cell its material.
+///
+/// The cell's offset from its parent's center is dragged around by a smooth 2D warp and then rounded
+/// back onto the parent grid: cells near the middle of a parent always keep their own material,
+/// while cells near a border can cross into a neighbor. A smooth warp is what makes an ore vein's
+/// border come out as a coherent wiggle instead of the per-cell dither an independent random roll
+/// gives, and keying it to global coordinates keeps both sides of a border warping identically.
+/// Falls back to the parent itself whenever the warp lands on air, decor, or the world edge.
+fn warpedMaterial(parent_block: Block, n: [8]Block, warp: dw.utils.Vec2f32, lx: u4, ly: u4) Block {
+    const center = (dw.BLOCKS_PER_PARENT - 1.0) / 2.0;
+
+    const fx = (@as(f32, @floatFromInt(lx)) - center) / dw.BLOCKS_PER_PARENT + (warp[0] - 0.5) * 2 * MATERIAL_WARP_STRENGTH;
+    const fy = (@as(f32, @floatFromInt(ly)) - center) / dw.BLOCKS_PER_PARENT + (warp[1] - 0.5) * 2 * MATERIAL_WARP_STRENGTH;
+
+    const ox: i32 = @intFromFloat(@round(std.math.clamp(fx, -1, 1)));
+    const oy: i32 = @intFromFloat(@round(std.math.clamp(fy, -1, 1)));
+    if (ox == 0 and oy == 0) return parent_block;
+
+    // Row-major 3x3 index with the center removed, matching the neighbor order.
+    const raw = (oy + 1) * 3 + (ox + 1);
+    const source = n[@intCast(raw - @intFromBool(raw > 4))];
+
+    // `isFoundation()` also rejects edge stone, which must never bleed inward.
+    return if (source.isFoundation()) source else parent_block;
 }
 
 /// Applies deterministic logic to a child block based on its parent and 8 parent neighbors.
@@ -369,16 +437,11 @@ pub fn applyAncestorLogic(
     bx: u4,
     by: u4,
 ) memory.BlockSpec {
-    var parent_sprite = parent_block.id;
+    const parent_sprite = parent_block.id;
     // const parent_seed = parent_block.seed;
 
     if (parent_sprite.isEmpty()) return .{};
     const seeds = world.quad_cache.getChunkSeeds(key);
-    var noise_hash_1 = seeding.FastHash.hash2d(
-        .{ seeds.value[0].value[0], seeds.value[0].value[1] },
-        bx,
-        by,
-    );
     const noise_hash_2 = seeding.FastHash.hash2d(
         .{ seeds.value[0].value[2], seeds.value[0].value[3] },
         bx,
@@ -386,12 +449,6 @@ pub fn applyAncestorLogic(
     );
     if (parent_sprite == .edge_stone)
         return .{ .id = parent_sprite, .seed = noise_hash_2 };
-
-    // Structural logic!
-    const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
-    const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
-    const local_id = @as(u4, ly) * 4 + lx;
-    if (parent_sprite.isFoundation() and carvesSlope(parent_block, parent_neighbors, lx, ly)) return .{};
 
     // A submerged waterloggable parent must stay submerged in its children. Generating them dry leaves the
     // pool out of equilibrium, so the sim floods them on the chunk's first tick and writes a modification
@@ -416,48 +473,34 @@ pub fn applyAncestorLogic(
         return .{ .id = parent_sprite.evolvesTo(), .seed = noise_hash_2, .water_volume = inherited_water };
     }
 
-    // var seed = parent_block.seed;
-    var inherited_base = parent_block.base_id;
-    if (parent_sprite.isFoundation()) {
-        // we don't want non-solid blocks to become solid, since the player could be in them
-        const edges_list = comptime get4x4List(
-            \\1111
-            \\1001
-            \\1001
-            \\1111
-        );
-        inline for (edges_list) |id| {
-            if (id == local_id) {
-                if (noise_hash_1 % 4 == 0) {
-                    // 25% odds to randomly take a parent neighbor's sprite type now!
+    // Foundations from here on: only they carry a surface for the carve to shape.
+    // Nothing below may turn air into a solid, since the player could be standing in it.
+    const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
+    const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
 
-                    // each block gets different noise with right-shift
-                    const noise: u3 = @truncate(noise_hash_1);
-                    noise_hash_1 >>= @bitSizeOf(@TypeOf(noise));
+    // Every noise field below reads global child coordinates under one quadrant-wide seed, so chunk
+    // identity never enters and the fields line up across chunk borders. The depth is folded in to
+    // stop a parent's field from repeating verbatim in the children drawn on top of it.
+    const quadrant_seed = world.quad_cache.getQuadrantSeed(@intCast(key.quadrant), key.depth);
+    const noise_seed: dw.utils.Vec2u = .{ quadrant_seed.value[0] ^ key.depth, quadrant_seed.value[1] };
+    const wx = ((key.suffix[0] *% dw.CHUNK_SIZE) +% bx) & NOISE_PERIOD_MASK;
+    const wy = ((key.suffix[1] *% dw.CHUNK_SIZE) +% by) & NOISE_PERIOD_MASK;
 
-                    const parent = parent_neighbors[noise];
-                    if (!parent.isEmpty()) {
-                        parent_sprite = parent.id;
-                        inherited_base = parent.base_id;
-                    }
-                    if (parent_sprite == .edge_stone) return .{};
-                }
-            }
-        }
-    }
+    if (carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
 
-    var evolved_sprite: Sprite = parent_sprite.evolvesTo();
+    // Shape and material are decided separately: the carve above says whether the cell is terrain at
+    // all, and the warp below says which neighboring vein it belongs to.
+    const warp = procedural.getDualValueNoise(noise_seed, wx, wy, 1.0 / MATERIAL_WARP_SCALE);
+    const source = warpedMaterial(parent_block, parent_neighbors, warp, lx, ly);
+    var evolved_sprite: Sprite = source.id.evolvesTo();
 
-    const noise: u8 = @truncate(noise_hash_1);
-    noise_hash_1 >>= @bitSizeOf(@TypeOf(noise));
-    if (evolved_sprite == .blue_strange_stone and noise < 16) {
-        // 1 in 8 chance
-        evolved_sprite = .blue_stone;
-    }
+    // The warp field doubles as the patchiness of the strange stone, keeping its blue patches
+    // coherent instead of scattering single blocks through the vein.
+    if (evolved_sprite == .blue_strange_stone and warp[0] > 0.7) evolved_sprite = .blue_stone;
 
     // Ores/gems keep the parent's underlay so veins stay visually consistent across zooms (plain stone fallback).
     const base_id: Sprite = if (evolved_sprite.isOverlay())
-        (if (inherited_base != .none) inherited_base else .stone)
+        (if (source.base_id != .none) source.base_id else .stone)
     else
         .none;
 
@@ -604,28 +647,70 @@ fn testNeighborhood(solid: [3][3]bool, seed_base: u64) struct { Block, [8]Block 
     return .{ center, n };
 }
 
-test "slope carve: buried blocks stay whole and flat walls stay flat" {
+/// Sweeps every noise cell the erosion field can offer, so a "never carved" claim covers the whole
+/// field rather than whichever offset one arbitrary position happens to land on.
+fn carvesAnywhere(parent_block: Block, n: [8]Block, lx: u4, ly: u4) bool {
+    const seed: dw.utils.Vec2u = .{ 0x243f6a8885a308d3, 0x13198a2e03707344 };
+    // Sweeps whole parents, since a cell's position inside its parent is fixed by `lx`/`ly`.
+    for (0..24) |py| {
+        for (0..24) |px| {
+            const wx = px * dw.BLOCKS_PER_PARENT + lx;
+            const wy = py * dw.BLOCKS_PER_PARENT + ly;
+            if (carvesSlope(parent_block, n, seed, wx, wy, lx, ly)) return true;
+        }
+    }
+    return false;
+}
+
+test "slope carve: a buried block is never touched and a face never erodes past its skin" {
     const all_solid: [3]bool = @splat(true);
     const all_air: [3]bool = @splat(false);
     const buried = testNeighborhood(.{all_solid} ** 3, 1000);
     const wall = testNeighborhood(.{ all_air, all_solid, all_solid }, 1000);
+
     for (0..4) |ly| {
         for (0..4) |lx| {
-            try testing.expect(!carvesSlope(buried[0], buried[1], @intCast(lx), @intCast(ly)));
-            try testing.expect(!carvesSlope(wall[0], wall[1], @intCast(lx), @intCast(ly)));
+            try testing.expect(!carvesAnywhere(buried[0], buried[1], @intCast(lx), @intCast(ly)));
+
+            // The wall's two exposed rows are meant to erode. The two under them reach
+            // `INTERIOR_DENSITY`, so no combination of noise may reach them.
+            if (ly < 2) continue;
+            try testing.expect(!carvesAnywhere(wall[0], wall[1], @intCast(lx), @intCast(ly)));
         }
     }
 }
 
+test "slope carve: no solid parent can be erased outright" {
+    // Every arrangement of neighbors, so the two survival rules are checked against each other:
+    // a block with a buried corner keeps the cell nearest it, and a thin one keeps its core.
+    for (0..256) |mask| {
+        var n: [8]Block = undefined;
+        for (&n, 0..) |*b, i| {
+            b.* = .makeBasicBlock(if (mask & (@as(usize, 1) << @intCast(i)) != 0) .stone else .none, i);
+        }
+        const parent: Block = .makeBasicBlock(.stone, 99);
+
+        var survivors: usize = 0;
+        for (0..4) |ly| {
+            for (0..4) |lx| {
+                if (!carvesAnywhere(parent, n, @intCast(lx), @intCast(ly))) survivors += 1;
+            }
+        }
+        try testing.expect(survivors > 0);
+    }
+}
+
 test "slope carve: an outer corner rounds off without eating the block" {
-    // Solid to the bottom right; the top left corner of the 4x4 should erode.
+    // Solid to the bottom right, so the top left of the 4x4 sits outside the surface and the bottom
+    // right sits well inside it, whatever the noise does.
     const corner = testNeighborhood(.{
         .{ false, false, true },
         .{ false, true, true },
         .{ true, true, true },
     }, 7);
-    try testing.expect(carvesSlope(corner[0], corner[1], 0, 0));
-    try testing.expect(!carvesSlope(corner[0], corner[1], 3, 3));
+    const seed: dw.utils.Vec2u = .{ 0x243f6a8885a308d3, 0x13198a2e03707344 };
+    try testing.expect(carvesSlope(corner[0], corner[1], seed, 0, 0, 0, 0));
+    try testing.expect(!carvesAnywhere(corner[0], corner[1], 3, 3));
 }
 
 test "slope carve: neighboring parents agree on the corners they share" {
@@ -642,14 +727,44 @@ test "slope carve: neighboring parents agree on the corners they share" {
         right_map[y] = map[y][1..4].*;
     }
 
-    // The right parent sits one cell further along, so its seeds must be offset to match.
     const left = testNeighborhood(left_map, 500);
     const right = testNeighborhood(right_map, 501);
 
     const left_corners = cornerDensities(left[0], left[1]);
     const right_corners = cornerDensities(right[0], right[1]);
 
-    // Left parent's right corners are the right parent's left corners.
+    // The left parent's right corners are the right parent's left corners; if these ever disagree,
+    // the two parents draw different surfaces and the terrain splits along their shared border.
     try testing.expectEqual(left_corners[1], right_corners[0]);
     try testing.expectEqual(left_corners[3], right_corners[2]);
+
+    // The macro field has to line up on those same shared corners, including across the wrap where
+    // one parent sits at the end of the noise period and its neighbor at the start.
+    const seed: dw.utils.Vec2u = .{ 0x243f6a8885a308d3, 0x13198a2e03707344 };
+    for ([_]u64{ 40, (NOISE_PERIOD_MASK + 1) / dw.BLOCKS_PER_PARENT - 1 }) |px| {
+        const here = cornerNoise(seed, px, 12);
+        const next = cornerNoise(seed, px +% 1, 12);
+        try testing.expectEqual(here[1], next[0]);
+        try testing.expectEqual(here[3], next[2]);
+    }
+}
+
+test "material warp: a cell keeps its own material unless the warp reaches a neighbor" {
+    const grid = testNeighborhood(.{@as([3]bool, @splat(true))} ** 3, 3);
+    var neighbors = grid[1];
+    for (&neighbors) |*b| b.* = .makeBasicBlock(.iron, 0);
+
+    // Dead center of the warp field: no drag, so every cell answers with its own parent.
+    const centered: dw.utils.Vec2f32 = .{ 0.5, 0.5 };
+    for (0..4) |ly| {
+        for (0..4) |lx| {
+            const source = warpedMaterial(grid[0], neighbors, centered, @intCast(lx), @intCast(ly));
+            try testing.expectEqual(grid[0].id, source.id);
+        }
+    }
+
+    // Fully warped left: the cells on that side cross into the neighbor, the far side does not.
+    const pulled: dw.utils.Vec2f32 = .{ 0.0, 0.5 };
+    try testing.expectEqual(Sprite.iron, warpedMaterial(grid[0], neighbors, pulled, 0, 1).id);
+    try testing.expectEqual(grid[0].id, warpedMaterial(grid[0], neighbors, pulled, 3, 1).id);
 }
