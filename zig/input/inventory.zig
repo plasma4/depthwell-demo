@@ -420,6 +420,10 @@ pub fn getHoveredInventorySprite() ?Sprite {
         );
 
         if (hitbox.contains(mouse_pos)) {
+            if (active_sprite == .none) {
+                // reset pickaxe text animation that shows stats
+                if (dw.inventory.name_wave == 0.0 and dw.inventory.last_named_sprite == .none) dw.inventory.last_named_sprite = .unselected;
+            }
             return active_sprite;
         }
     }

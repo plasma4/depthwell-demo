@@ -63,14 +63,19 @@ pub fn run(x0: i32, y0: i32, span: i32) void {
 /// `offset` is the mean anchor position within the cell against the uniform expectation.
 /// A number that drifts says placements favor one corner of their cell, which would show up as a visible lattice.
 fn auditStructures(x0: i32, y0: i32, span: i32, seed: dw.utils.Vec2u, per_million: f64) void {
-    logger.log(@src(), "{s:<10} {s:>6} {s:>7} {s:>8} {s:>8} {s:>10} {s:>16}", .{
+    // Funnel: of every cell, how many survived each stage. The gaps between columns are the attrition,
+    // and the widest gap is the knob to reach for (a huge rolled->seated drop means the terrain gate,
+    // not target_chance, is what makes the structure rare). `won` is post-collision, the rest pre-.
+    logger.log(@src(), "{s:<10} {s:>6} {s:>8} {s:>8} {s:>8} {s:>8} {s:>6} {s:>10} {s:>14}", .{
         "structure",
         "chance",
         "cells",
-        "standing",
+        "anchored",
+        "seated",
         "placed",
+        "won",
         "per 1M",
-        "offset (uniform)",
+        "offset (unif)",
     });
 
     inline for (0..structures.structures.len) |kind| {
@@ -78,8 +83,11 @@ fn auditStructures(x0: i32, y0: i32, span: i32, seed: dw.utils.Vec2u, per_millio
         const area: i32 = @intCast(S.spawn_area);
 
         var cells: u64 = 0;
-        var standing: u64 = 0;
+        // Cells that reached AT LEAST the given stage, so the row reads as a monotonic funnel.
+        var anchored: u64 = 0;
+        var seated: u64 = 0;
         var placed: u64 = 0;
+        var won: u64 = 0;
         var sum_ox: f64 = 0;
         var sum_oy: f64 = 0;
 
@@ -88,27 +96,44 @@ fn auditStructures(x0: i32, y0: i32, span: i32, seed: dw.utils.Vec2u, per_millio
             var cx = @divFloor(x0, area);
             while (cx <= @divFloor(x0 + span - 1, area)) : (cx += 1) {
                 cells += 1;
-                if (structures.getStructureBounds(kind, cx, cy, seed) == null) continue;
-                standing += 1;
 
+                // Uncached, so the count is exact over the swept region regardless of cache eviction.
+                const res = structures.resolveCellForAudit(kind, cx, cy, seed);
+                switch (res.reached) {
+                    .rejected => {},
+                    .anchored => anchored += 1,
+                    .seated => {
+                        anchored += 1;
+                        seated += 1;
+                    },
+                    .placed => {
+                        anchored += 1;
+                        seated += 1;
+                        placed += 1;
+                    },
+                }
+
+                // `won` also survives the priority/collision scan, which the funnel above does not model.
                 const bounds = structures.acceptedBoundsForAudit(kind, cx, cy, seed) orelse continue;
-                placed += 1;
+                won += 1;
                 sum_ox += @floatFromInt(bounds.x_start - cx * area);
                 sum_oy += @floatFromInt(bounds.y_start - cy * area);
             }
         }
 
-        const n: f64 = @floatFromInt(placed);
+        const n: f64 = @floatFromInt(won);
         const uniform: f64 = @as(f64, @floatFromInt(area - 1)) / 2.0;
-        logger.log(@src(), "{s:<10} {d:>6.3} {d:>7} {d:>8} {d:>8} {d:>10.1} {d:>6.2}/{d:.2} ({d:.2})", .{
+        logger.log(@src(), "{s:<10} {d:>6.3} {d:>8} {d:>8} {d:>8} {d:>8} {d:>6} {d:>10.1} {d:>5.1}/{d:.1} ({d:.1})", .{
             shortName(@typeName(S)),
             S.target_chance,
             cells,
-            standing,
+            anchored,
+            seated,
             placed,
+            won,
             n * per_million,
-            if (placed > 0) sum_ox / n else 0,
-            if (placed > 0) sum_oy / n else 0,
+            if (won > 0) sum_ox / n else 0,
+            if (won > 0) sum_oy / n else 0,
             uniform,
         });
     }
