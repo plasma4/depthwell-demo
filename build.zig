@@ -173,8 +173,9 @@ pub fn build(b: *std.Build) void {
                 "--strip-dwarf",
                 "--strip-producers",
                 "--optimize-instructions",
-                "--flatten",
-                "--rereloop",
+                // No --flatten/--rereloop here: they run after the -O4 pipeline,
+                // so nothing coalesces the locals they introduce. generateChunk locals grew too big,
+                // and V8 sizes wasm frames by local count. This also bloats the file-size!
                 "--enable-simd",
                 "--enable-sign-ext",
                 "--enable-tail-call",
