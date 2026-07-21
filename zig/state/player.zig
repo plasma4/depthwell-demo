@@ -144,6 +144,9 @@ pub fn drawPlayerEntity() void {
         .sprite = currentSprite(),
         .position = dw.chunks.player_screen_pos,
         .size = if (facing_right) dw.chunks.player_screen_size else -dw.chunks.player_screen_size,
+        // A portal descent fades the player out along with the debris it swallows, so nothing has to be
+        // rescaled against the zoom once it steepens. They reappear at D+1 once the descent lands.
+        .lcha = .{ 1.0, 0.0, 0.0, dw.portal.intakeFade() },
     });
 }
 
