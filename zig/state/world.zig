@@ -1644,9 +1644,6 @@ pub fn generateChunk(chunk: *Chunk, key: DepthCoordinate) void {
         return;
     }
 
-    const chunk_seeds = quad_cache.getChunkSeeds(key);
-    var rng4 = seeding.ChaCha12.init(&chunk_seeds.value[3]);
-
     const parent_neighborhood = dw.ancestor.getAncestorNeighborhood(key);
     for (0..CHUNK_SIZE) |block_y| {
         for (0..CHUNK_SIZE) |block_x| {
@@ -1669,15 +1666,17 @@ pub fn generateChunk(chunk: *Chunk, key: DepthCoordinate) void {
                 parent_neighborhood[py + 1][px + 1],
             };
 
-            var spec = dw.ancestor.applyAncestorLogic(
+            // The seed `applyAncestorLogic()` picks is authoritative and must NOT be overwritten here:
+            // `getInheritedMaterial()` derives the same block without going through this loop, and a
+            // stream-ordered seed would disagree with it depending only on whether the ancestor cache
+            // happened to hold the chunk, which the same block's appearance must never depend on.
+            chunk.blocks[idx] = dw.ancestor.applyAncestorLogic(
                 parent_sprite,
                 neighbors,
                 key,
                 @intCast(block_x),
                 @intCast(block_y),
-            );
-            spec.seed = rng4.next();
-            chunk.blocks[idx] = spec.compile();
+            ).compile();
         }
     }
 
