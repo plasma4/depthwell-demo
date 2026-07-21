@@ -208,14 +208,14 @@ pub fn draw() void {
 
         // Draw the background where the item rests in.
         addEntity(.{
-            .sprite = .wood_icon,
+            .sprite = .wood_frame,
             .position = .{ @floatCast(center[0] - 1.6), @floatCast(center[1] - 1.6) },
             .size = @as(f32, @floatCast(grid.SLOT)),
             // looks blue!
             .lcha = .{ 0.3, 0.06, 3.0, 1.0 },
         });
         addEntity(.{
-            .sprite = .wood_icon,
+            .sprite = .wood_frame,
             .position = .{ @floatCast(center[0]), @floatCast(center[1]) },
             .size = @as(f32, @floatCast(grid.SLOT)),
             // looks blue!

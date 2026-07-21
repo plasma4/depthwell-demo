@@ -184,7 +184,7 @@ pub fn draw() void {
 
         // Slot frame (also drawn under empty slots so the grid shape reads).
         dw.entity.addEntity(.{
-            .sprite = .wood_icon,
+            .sprite = .wood_frame,
             .position = .{ @floatCast(center[0]), @floatCast(center[1]) },
             .size = @as(f32, @floatCast(grid.SLOT)),
             .lcha = .{ 0.65, -0.08, 0.0, 1.0 },

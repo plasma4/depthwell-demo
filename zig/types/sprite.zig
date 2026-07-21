@@ -48,7 +48,7 @@ const BUSH_ID = GEAR_ID + 17;
 const CORE_ID = BUSH_ID + 14;
 
 /// Index where inventory slot sprites start.
-pub const INVENTORY_START = CORE_ID + 20;
+pub const INVENTORY_START = CORE_ID + 21;
 /// Index where numbers (0-9) start.
 pub const NUMBER_START = INVENTORY_START + 4;
 /// ID for `Sprite.particle`, which is after a bunch of character glyphs.
@@ -56,7 +56,7 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 281) {
+    if (max_sprite_value != 282) {
         var buf: [64]u8 = undefined;
         @compileError("Max sprite value of " ++
             (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
@@ -179,7 +179,8 @@ pub const Sprite = enum(u16) {
     campfire = CORE_ID + 10, // 4 variations + 4 water variations, 8 total
     campfire_water = CORE_ID + 10 + 4,
     chest = CORE_ID + 10 + 8,
-    portal = CORE_ID + 10 + 9,
+    portal,
+    portal_visual = CORE_ID + 10 + 10, // indicator visual variant
 
     /// Unselected inventory sprite. Looks like a blue rounded rectangle.
     inventory = INVENTORY_START,
@@ -188,7 +189,7 @@ pub const Sprite = enum(u16) {
     /// Orange (currently used) inventory sprite to indicate the item inside can be dragged/used.
     inventory_selected_orange,
     /// Wooden-textured rounded rectangle.
-    wood_icon,
+    wood_frame,
 
     text_0 = NUMBER_START, // sprite with text 0
 
@@ -376,6 +377,8 @@ pub const Sprite = enum(u16) {
             id + GEM_COUNT
         else if (self == .rock)
             @intFromEnum(@This().rock_visual)
+        else if (self == .portal)
+            @intFromEnum(@This().portal_visual)
         else if (self.isLiquid())
             id + 1
         else
