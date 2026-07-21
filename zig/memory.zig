@@ -80,7 +80,7 @@ pub const GameState = extern struct {
     camera_scale: f64 = player.STARTING_CAMERA_SCALE,
     /// Represents the camera's zoom scale change rate (multiplier, acts as derivative of camera_scale change).
     camera_scale_change: f64 = 1.0,
-    /// Represents how many layers deep the player is. Automatically setup in startup.zig.
+    /// Represents how many layers deep the player is. Automatically setup in `startup.zig`.
     depth: u64 = 0,
 
     /// Represents which quadrant (0-3) of the `quad_cache` the player is in (starts at 0 when depth is <= 16).
@@ -294,7 +294,7 @@ pub const Block = packed struct(u128) {
     /// - 1: warm orange glow
     lighting_color: u8 = 0,
 
-    /// Packed directional waterlogging field (bits 0-10 used; see `WaterloggedState` in zig/state/water.zig).
+    /// Packed directional waterlogging field (bits 0-10 used; see `WaterloggedState` in `state/water.zig`).
     /// - For liquid blocks: only bit 0 is read (liquid directly above).
     /// - For non-liquid blocks: encodes the surrounding water for the shader's surface fill and interpolation.
     ///   - bit 0: top (water of any depth directly above; fully submerges/fills the block)
@@ -552,7 +552,7 @@ pub const WGSLEntity = extern struct {
 };
 
 /// A dynamically expandable scratch buffer for fast one-time passing through of data like strings or temporary particle data.
-/// Assumes fully single-thread communication. A separate, smaller logging_buffer is used in logger.zig.
+/// Assumes fully single-thread communication. A separate, smaller `logging_buffer` is used in `logger.zig`.
 ///
 /// Information in the scratch buffer should be assumed to be corrupted as soon as any other function that could modify the scratch buffer is called and thought of as a temporary "handshake" between Zig and TypeScript.
 pub var scratch_buffer: []align(MAIN_ALIGN_BYTES) u8 = &[_]u8{};

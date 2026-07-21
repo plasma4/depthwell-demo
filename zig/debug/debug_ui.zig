@@ -163,10 +163,10 @@ pub const buttons = [_]ButtonDef{
         .name = "Toggle global light",
         .toggle = &dw.lighting.DEBUG_LIGHT,
     },
-    // .{
-    //     .name = "Sample worldgen odds",
-    //     .action = dw.audit.sampleWorldAroundPlayer,
-    // },
+    .{
+        .name = "Log worldgen odds",
+        .action = dw.audit.sampleWorldAroundPlayer,
+    },
     // .{
     //     .name = "Verify invariants",
     //     .action = dw.audit.verifySimInvariants,
@@ -216,7 +216,7 @@ fn teleportRandomly() void {
         @intCast(game.player_pos[0]),
         @intCast(game.player_pos[1]),
     );
-    teleport_rand -%= 1;
+    teleport_rand -%= 0xFFFF;
 
     game.teleport(
         .{ .quadrant = 0, .suffix = .{
