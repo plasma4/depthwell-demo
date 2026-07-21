@@ -132,8 +132,8 @@ pub const Sprite = enum(u16) {
 
     // Decor (THIS IS COUPLED TO WGSL CODE)
     small_tree = DECOR_START,
-    /// Left half of the 2x1 big tree; each half is stored as its own block id and requires the other
-    /// directly beside it (see the `requires` rules below), so the pair always breaks as a unit.
+    /// Left half of the 2x1 big tree; each half is stored as its own block ID and requires its pair beside it
+    /// (see the `requires` rules below). The pair always breaks as a unit.
     moss_shrub1,
     /// Right half of `moss_shrub1`; only ever valid directly right of it.
     moss_shrub1_right,
@@ -298,7 +298,7 @@ pub const Sprite = enum(u16) {
     }
 
     /// True for ore/gem overlay sprites since those composited over a `base_id` stone underlay.
-    /// Ores and gems form one contiguous id range, so this is a single bounds test rather than two `props()` lookups
+    /// Ores and gems form one contiguous ID range, so this is a single bounds test rather than two `props()` lookups
     /// (`isOre() or isGem()`); a comptime check tries to keep the ranges in sync.
     pub inline fn isOverlay(self: @This()) bool {
         const id = @intFromEnum(self);

@@ -21,9 +21,7 @@ pub const target_chance: f64 = 0.09;
 const size_x: i32 = 24;
 const size_y: i32 = 12;
 
-pub fn getBounds(state: *HashState, cx: i32, cy: i32) ?Rect {
-    return structures.jitter(state, cx, cy, spawn_area, size_x, size_y);
-}
+// No getBounds(): the box is a plain size_x-by-size_y rect, so the default jitter in structures.zig does it.
 
 pub fn generate(
     starting_sprite: Sprite,
