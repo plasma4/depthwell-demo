@@ -276,6 +276,14 @@ comptime {
             memory.runScratchAllocTests();
         }
 
+        pub export fn sampleWorldAroundPlayer() void {
+            audit.sampleWorldAroundPlayer();
+        }
+
+        pub export fn verifyInvariants() void {
+            audit.verifySimInvariants();
+        }
+
         pub export fn validateSimBuffer() void {
             if (world.SimBuffer.validateSimBuffer())
                 logger.log(@src(), "Edge flag and sprite validity check passed for all resident SimBuffer chunks.", .{})
@@ -345,6 +353,10 @@ test "main_tests" {
         @import("debug/logger.zig"),
         @import("state/world.zig"),
         @import("state/save.zig"),
+        @import("state/structures.zig"),
+        @import("state/template.zig"),
+        // Not registered in the `structures` tuple on purpose; listed here only so its test still runs.
+        @import("state/structures/Example.zig"),
     };
 
     inline for (modules) |mod| {

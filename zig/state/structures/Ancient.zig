@@ -49,7 +49,7 @@ pub fn generate(
     const i_wx = @as(i32, @bitCast(wx));
     const i_wy = @as(i32, @bitCast(wy));
 
-    // the hashed radii are already baked into the bounds (see getBounds), so no re-rolls are needed
+    // the hashed radii are already baked into the bounds (see getBounds()), so no re-rolls are needed
     const size_x = bounds.x_end - bounds.x_start;
     const size_y = bounds.y_end - bounds.y_start;
     const base_radius_x = @divExact(size_x, 2) - padding;
