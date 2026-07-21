@@ -103,10 +103,6 @@ pub fn generate(
 
     // on uneven ground, seating drops to the lowest column and the higher columns embed into the footprint.
     // rather than carve that away and expose a raw dug notch, keep the natural terrain that was already there.
-    // `starting_sprite` IS the full base result for this block (getBaseSpriteType + ores/gems, applied in
-    // world.resolveBaseFoundation before we run), so we reuse it instead of recomputing or faking stone.
-    // the caller re-attaches the correct stone underlay, so an embedded ore reads exactly as normal terrain.
-    // on flat ground the interior sits above the surface, so nothing is solid here and this never fires.
     if (structures.baseSolid(@bitCast(wx), @bitCast(wy))) return .{ .id = starting_sprite };
 
     return .{ .id = .none };
