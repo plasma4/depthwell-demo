@@ -49,6 +49,8 @@ fn resetAfterStart() void {
     dw.particles.reset();
     world.SimBuffer.reset();
     dw.water.reset();
+    // Frees the descent's preview buffer; `memory.game` above already cleared its saved fields.
+    dw.portal.reset();
 
     // dropped item ring buffer lives in the world arena reset above; detach instead of freeing
     dw.inventory.dropped_items = .{};

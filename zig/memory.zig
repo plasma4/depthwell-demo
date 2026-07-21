@@ -122,6 +122,27 @@ pub const GameState = extern struct {
     /// Derived from the base `seed` during world startup, regardless of array length.
     seed2: [@typeInfo(SeedType).@"enum".fields.len * 2]u64 align(16) = @splat(0),
 
+    /// Chunk holding the portal that started the running descent (see `state/portal.zig`).
+    /// Only meaningful while `portal_phase` is not idle; saved so a descent survives a reload.
+    portal_chunk: Vec2u = .{ 0, 0 },
+
+    /// Background animation clock, in logical ticks rather than wall time.
+    /// Owned here rather than by the JS host so the portal descent can ease it to a standstill,
+    /// and so its exact value is captured by a save.
+    bg_time: f64 = 0.0,
+
+    /// Frames elapsed within the running portal descent; the animation is driven purely off this,
+    /// which is what makes it deterministic and resumable after a load.
+    portal_frame: u32 = 0,
+
+    /// The running descent's `portal.Phase`, held as its integer tag so `GameState` stays `extern`.
+    portal_phase: u8 = 0,
+    /// Quadrant of `portal_chunk`.
+    portal_quadrant: u8 = 0,
+    /// Block within `portal_chunk` the descent zooms into.
+    portal_bx: u8 = 0,
+    portal_by: u8 = 0,
+
     /// Returns a `hash2d()` seed vector for procedural generation.
     /// See `SeedType` definition for the possible categories and their purposes.
     pub inline fn getHashSeed(self: *const @This(), comptime category: SeedType) @Vector(2, u64) {

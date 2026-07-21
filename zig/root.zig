@@ -97,6 +97,7 @@ pub const player = @import("state/player.zig");
 pub const world = @import("state/world.zig");
 pub const ancestor = @import("state/ancestor.zig");
 pub const water = @import("state/water.zig");
+pub const portal = @import("state/portal.zig");
 pub const save = @import("state/save.zig");
 pub const handleTick = @import("state/tick.zig").handleTick;
 
@@ -122,6 +123,10 @@ pub extern "env" fn jsHandleVisibleChunks(opacity: f64, wireframe_opacity: f64) 
 
 /// External function that makes a call to `engine.handleVisibleEntities()`.
 pub extern "env" fn jsHandleVisibleEntities() void;
+
+/// External function that makes a call to `engine.drawBackground()`.
+/// Draws the background using the scene the most recent chunk pass published.
+pub extern "env" fn jsDrawBackground(opacity: f64) void;
 
 /// External function that makes a call to `engine.setMouseType()`.
 pub extern "env" fn jsSetMouseType(mouse_type: mouse.CursorType) void;
