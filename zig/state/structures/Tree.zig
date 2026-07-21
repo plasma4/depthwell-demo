@@ -20,11 +20,11 @@ pub const max_w: u32 = size_x;
 pub const max_h: u32 = size_y;
 
 /// Spawn chance per grid cell, before `constraints` thin it out. Tune against `debug/audit.zig`.
-pub const target_chance: f64 = 0.97;
+pub const target_chance: f64 = 0.88;
 
 /// Flat ground is rare enough that one jitter draw per cell would waste almost every cell.
 /// Cheap to retry, because a doomed seating scan bails after a couple of columns.
-pub const attempts: u32 = 8;
+pub const attempts: u32 = 20;
 
 const size_x: i32 = 5;
 const size_y: i32 = 7;
