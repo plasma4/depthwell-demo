@@ -25,7 +25,7 @@ const Sprite = dw.Sprite;
 const Coordinate = world.Coordinate;
 const Vec2f32 = dw.utils.Vec2f32;
 
-/// Length of a descent; at 60 logical ticks a second this is a bit over one second.
+/// Length of a descent; at 60fps this is a bit over one second.
 pub const TOTAL_FRAMES: u32 = 70;
 /// Frames the player takes to be drawn from where they stand into the portal's mouth.
 pub const PULL_FRAMES: u32 = 24;
@@ -52,27 +52,27 @@ pub const DEBRIS_RADIUS: i32 = 4;
 /// Distinct block types collected from that window to draw from.
 const MAX_PALETTE: usize = @intCast(4 * DEBRIS_RADIUS * DEBRIS_RADIUS);
 
-/// How many motes a descent spawns. Each is one block sprite falling in from a ring around the portal.
+/// How many shards a descent spawns. Each is one block sprite falling in from a ring around the portal.
 /// They are drawn from the sampled palette, so a type shows up as many times as it happens to be picked.
-const MOTE_COUNT: usize = 110;
+const SHARD_COUNT: usize = 1024;
 
-/// Fraction of the descent over which motes keep starting. Runs almost to the end so terrain is still
+/// Fraction of the descent over which shards keep starting. Runs almost to the end so terrain is still
 /// being drawn in as the zoom closes on `ZOOM_FACTOR`, rather than stopping partway.
-const MOTE_SPAWN_SPAN: f64 = 0.9;
+const SHARD_SPAWN_SPAN: f64 = 0.9;
 
-/// Frames one mote takes to reach the portal once it starts moving.
-const MOTE_TRAVEL_MIN: u32 = 14;
-const MOTE_TRAVEL_MAX: u32 = 28;
+/// Frames one shard takes to reach the portal once it starts moving.
+const SHARD_TRAVEL_MIN: u32 = 14;
+const SHARD_TRAVEL_MAX: u32 = 28;
 
-/// Screen-space ring, in viewport pixels, that motes drift in from.
+/// Screen-space ring, in viewport pixels, that shards drift in from.
 /// Kept in screen space on purpose: it makes them immune to the zoom, so they can keep being swallowed
 /// the whole way to `ZOOM_FACTOR` without anything having to be rescaled per frame.
-const MOTE_RADIUS_MIN: f32 = 40.0;
-const MOTE_RADIUS_MAX: f32 = 170.0;
+const SHARD_RADIUS_MIN: f32 = 15.0;
+const SHARD_RADIUS_MAX: f32 = 80.0;
 
-/// Edge length of a mote in viewport pixels, before its per-mote jitter.
+/// Edge length of a shard in viewport pixels, before its per-shard jitter.
 /// About half a block, so the debris reads as rubble rather than as loose terrain.
-const MOTE_SIZE: f32 = @as(f32, dw.CHUNK_SIZE) / 2.0;
+const SHARD_SIZE: f32 = @as(f32, dw.CHUNK_SIZE) / 2.0;
 
 /// Blue-cyan tints for the intake particles. `.particle` is a white sprite, so chroma and hue here are
 /// added straight onto it (see `DEFAULT_ENTITY_LCHA`); hue is in radians.
@@ -99,9 +99,9 @@ pub const Phase = enum(u8) {
 /// The world itself is never touched, so no modification is ever written for this.
 ///
 /// Positioned on a ring around the portal rather than at the block's real location: the point is the
-/// portal devouring its surroundings, and scattering the motes reads better than a literal 8x8 grid
+/// portal devouring its surroundings, and scattering the shards reads better than a literal 8x8 grid
 /// marching in. A block type can therefore appear any number of times, or not at all.
-const DebrisMote = struct {
+const Shard = struct {
     sprite: Sprite,
     /// Direction it drifts in from, in radians.
     angle: f32,
@@ -146,9 +146,10 @@ var fill_deadline: u32 = MIN_FILL_FRAMES;
 /// committing therefore lands on the very same world point, with nothing to jump.
 var anchor: [2]f64 = .{ 0.0, 0.0 };
 
-/// The descent's motes. A small `main_allocator` block held only while a descent runs, rather than a
-/// permanent array, since nothing outside one needs it.
-var debris: []DebrisMote = &.{};
+/// The descent's shards. Held in a fixed-sized array rather than a dynamic allocation.
+var debris: [SHARD_COUNT]Shard = undefined;
+/// How many shards are currently active in the array.
+var debris_count: usize = 0;
 
 /// Whether `transition`, `preview`, `anchor` and `debris` describe the descent `GameState` says is running.
 /// Cleared by `reset()` and by a load, which is what makes `ensureReady()` rebuild them.
@@ -341,9 +342,19 @@ fn allocatePreview() void {
     const max_cx = @as(i32, @intFromFloat(@floor((cam_x + half_w_sp) / subpixels_per_chunk))) + margin;
     const max_cy = @as(i32, @intFromFloat(@floor((cam_y + half_h_sp) / subpixels_per_chunk))) + margin;
 
-    preview_w = @intCast(max_cx - min_cx + 1);
-    preview_h = @intCast(max_cy - min_cy + 1);
-    preview_min = .{ min_cx, min_cy };
+    // Widen to also cover the window the `SimBuffer` will want the moment the descent commits.
+    // Generating those here (spread over the descent) is what keeps the landing frame from having to
+    // build all 256 of them at once; `finish()` hands them straight over. Any slot the overlay never
+    // shows still has to exist, so this is sized by the union of the two windows, not just the visible one.
+    const half_sim: i32 = world.SIM_BUFFER_WIDTH / 2;
+    const lo_x = @min(min_cx, -half_sim);
+    const lo_y = @min(min_cy, -half_sim);
+    const hi_x = @max(max_cx, half_sim - 1);
+    const hi_y = @max(max_cy, half_sim - 1);
+
+    preview_w = @intCast(hi_x - lo_x + 1);
+    preview_h = @intCast(hi_y - lo_y + 1);
+    preview_min = .{ lo_x, lo_y };
     preview_centre = .{ .suffix = transition.player_chunk, .quadrant = transition.player_quadrant };
 
     const needed = @as(usize, preview_w) * @as(usize, preview_h);
@@ -363,7 +374,7 @@ fn freeBuffers() void {
     preview_keys = &.{};
 }
 
-/// Samples the block types around the player, then lays out the motes that will be swallowed.
+/// Samples the block types around the player, then lays out the shards that will be swallowed.
 ///
 /// Read-only with respect to the world: these are decorative copies, and no modification is written.
 /// Everything is drawn from a seeded generator so a reload lays out the identical descent.
@@ -371,7 +382,7 @@ fn collectDebris() void {
     const g = &memory.game;
 
     // Sample the surrounding block types. Only the set of types matters; where each one sat does not,
-    // since the motes are scattered on a ring rather than flown in from their real positions.
+    // since the shards are scattered on a ring rather than flown in from their real positions.
     var palette: [MAX_PALETTE]Sprite = undefined;
     var palette_len: usize = 0;
 
@@ -403,38 +414,34 @@ fn collectDebris() void {
     }
     // Standing in open air leaves nothing to swallow; the particles carry the effect alone.
     if (palette_len == 0) {
-        freeDebris();
+        clearDebris();
         return;
     }
 
-    if (debris.len != MOTE_COUNT) {
-        freeDebris();
-        debris = memory.main_allocator.alloc(DebrisMote, MOTE_COUNT) catch memory.oom();
-    }
+    debris_count = SHARD_COUNT;
 
     var rng = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .portal_debris));
-    const span = MOTE_SPAWN_SPAN * @as(f64, @floatFromInt(TOTAL_FRAMES));
+    const span = SHARD_SPAWN_SPAN * @as(f64, @floatFromInt(TOTAL_FRAMES));
 
-    for (debris) |*mote| {
+    for (&debris) |*shard| {
         // Square-rooting a uniform value biases the start times later, so the intake visibly builds
         // instead of arriving all at once.
         const when = @sqrt(rng.float(f64));
-        mote.* = .{
+        shard.* = .{
             .sprite = palette[@intCast(rng.next() % palette_len)],
             .angle = @floatCast(rng.float(f64) * std.math.tau),
-            .radius = MOTE_RADIUS_MIN + (MOTE_RADIUS_MAX - MOTE_RADIUS_MIN) * rng.float(f32),
-            .size = MOTE_SIZE * (0.55 + 0.85 * rng.float(f32)),
+            .radius = SHARD_RADIUS_MIN + (SHARD_RADIUS_MAX - SHARD_RADIUS_MIN) * rng.float(f32),
+            .size = SHARD_SIZE * (0.55 + 0.85 * rng.float(f32)),
             .spin = (rng.float(f32) - 0.5) * 6.0,
             .start_frame = @intFromFloat(when * span),
-            .travel = MOTE_TRAVEL_MIN + @as(u32, @intCast(rng.next() % (MOTE_TRAVEL_MAX - MOTE_TRAVEL_MIN + 1))),
+            .travel = SHARD_TRAVEL_MIN + @as(u32, @intCast(rng.next() % (SHARD_TRAVEL_MAX - SHARD_TRAVEL_MIN + 1))),
         };
     }
 }
 
-/// Releases the mote allocation.
-fn freeDebris() void {
-    if (debris.len != 0) memory.main_allocator.free(debris);
-    debris = &.{};
+/// Drops every active shard. Nothing is freed: the array is fixed-size and lives with the module.
+fn clearDebris() void {
+    debris_count = 0;
 }
 
 /// Preview chunks to generate per frame. `CHUNKS_PER_FRAME` in the ordinary case, raised only when a
@@ -557,38 +564,46 @@ pub fn drawEffects() void {
     drawDebris(worldToScreen(anchor));
 }
 
-/// Draws each mote falling into the portal.
+/// Fade factor for portal-related visual elements (shards, particles) near the end of the descent.
+pub fn getDescentFade() f32 {
+    if (!isActive()) return 1.0;
+    const t = progress();
+    if (t < 0.8) return 1.0;
+    return @floatCast((1.0 - t) / 0.2);
+}
+
+/// Draws each shard falling into the portal.
 ///
 /// Purely screen-space: the ring, the sizes and the travel are all in viewport pixels, so the zoom
 /// ramping to `ZOOM_FACTOR` underneath costs nothing here and the debris keeps arriving throughout.
 fn drawDebris(centre: Vec2f32) void {
     const frame = memory.game.portal_frame;
 
-    for (debris) |mote| {
-        if (frame < mote.start_frame) continue;
-        const travelled: f64 = @floatFromInt(frame - mote.start_frame);
-        const u = @min(travelled / @as(f64, @floatFromInt(mote.travel)), 1.0);
+    for (debris[0..debris_count]) |*shard| {
+        if (frame < shard.start_frame) continue;
+        const travelled: f64 = @floatFromInt(frame - shard.start_frame);
+        const u = @min(travelled / @as(f64, @floatFromInt(shard.travel)), 1.0);
         if (u >= 1.0) continue; // already swallowed
 
         // Distance covered grows with the square of time, so speed rises linearly: a steady drift that
         // turns into a yank as the portal takes hold.
         const eased: f32 = @floatCast(u * u);
-        const distance = mote.radius * (1.0 - eased);
+        const distance = shard.radius * (1.0 - eased);
         const pos: Vec2f32 = .{
-            centre[0] + @cos(mote.angle) * distance,
-            centre[1] + @sin(mote.angle) * distance,
+            centre[0] + @cos(shard.angle) * distance,
+            centre[1] + @sin(shard.angle) * distance,
         };
 
-        // Fades up out of nothing, then shrinks away as it reaches the mouth.
+        // Fades up out of nothing, then fades out right as it enters the center.
         const appear = @min(eased * 6.0, 1.0);
-        const alpha = appear * (1.0 - eased * eased);
+        const alpha = appear * (1.0 - eased) * getDescentFade();
 
         dw.entity.addEntity(.{
-            .sprite = mote.sprite,
+            .sprite = shard.sprite,
             .position = pos,
-            .size = mote.size * (1.0 - 0.75 * eased),
-            .rotation = mote.spin * eased,
-            .lcha = .{ 1.0, 0.05, 4.6, alpha },
+            .size = shard.size * (1.0 - 0.75 * eased),
+            .rotation = shard.spin * eased,
+            .lcha = .{ 1.0, 0.0, 0.0, alpha },
         });
     }
 }
@@ -599,6 +614,7 @@ fn drawDebris(centre: Vec2f32) void {
 /// comes up underneath them, which is what keeps that hand-over from reading as a dissolve.
 /// They only thin out over the closing stretch, once the zoom alone carries the shot.
 fn spawnIntake() void {
+    @setFloatMode(.optimized);
     const t = progress();
     // Ramp in over the intake, hold through the overlay's arrival, then ease away at the very end.
     const ramp = smoothstep(@as(f64, @floatFromInt(memory.game.portal_frame)) / @as(f64, @floatFromInt(fill_deadline)));
@@ -611,17 +627,20 @@ fn spawnIntake() void {
     // The pool holds thousands, so a descent this short can afford to be genuinely dense.
     const count: usize = @intFromFloat(5.0 + 55.0 * intensity);
 
-    dw.particles.spawnInwardRing(worldToScreen(anchor), &PORTAL_COLORS, .{
-        .count = count,
-        // Held in world scale so the ring hugs the portal as the view zooms in.
-        .radius_min = 10.0 * zoom,
-        .radius_max = 26.0 * zoom,
-        .size_min = 0.8 * zoom,
-        .size_max = 2.6 * zoom,
-        .travel_min = 10,
-        .travel_max = 22,
-        .swirl = @floatCast(0.25 + 0.5 * intensity),
-    });
+    const cap: u16 = @intFromFloat(@round(22.0 - 22.0 * progress()));
+    if (cap > 2) {
+        dw.particles.spawnInwardRing(worldToScreen(anchor), &PORTAL_COLORS, .{
+            .count = count,
+            // Held in world scale so the ring hugs the portal as the view zooms in.
+            .radius_min = 10.0 * zoom,
+            .radius_max = 26.0 * zoom,
+            .size_min = 0.8 * zoom,
+            .size_max = 2.6 * zoom,
+            .travel_min = @min(cap, 8),
+            .travel_max = cap,
+            .swirl = @floatCast(0.25 + 0.5 * intensity),
+        });
+    }
 }
 
 /// Advances the descent by one logical frame. Called once per tick iteration from `handleTick()`.
@@ -648,11 +667,24 @@ pub fn tick() void {
 }
 
 /// Commits the descent: D+1 stops being a preview and becomes the world.
+/// Adapts the preview buffer to the one-method interface `SimBuffer.refreshAdopting()` asks for.
+const PreviewSource = struct {
+    pub fn get(_: @This(), coord: Coordinate) ?*const Chunk {
+        return previewChunk(coord);
+    }
+};
+
 fn finish() void {
     const g = &memory.game;
     ensureReady();
     // The preview left the ancestor cache holding this depth's parents, already tiered for it.
     world.commitLayer(transition, true);
+
+    // Hand the generated chunks to the SimBuffer before dropping them. The descent spent its whole
+    // length building exactly these, so this turns the landing into copies instead of generation.
+    // Skipping it does not avoid the work, only defers it: the next `player.move()` rebuilds all 256
+    // slots in one frame, and every render frame until then regenerates the visible window on top.
+    world.SimBuffer.refreshAdopting(g.getPlayerCoord(), PreviewSource{});
 
     g.portal_phase = @intFromEnum(Phase.idle);
     g.portal_frame = 0;
@@ -668,7 +700,7 @@ fn finish() void {
 /// Drops the preview buffer and forgets the derived state.
 fn releasePreview() void {
     freeBuffers();
-    freeDebris();
+    clearDebris();
     preview_w = 0;
     preview_h = 0;
     filled = 0;

@@ -199,6 +199,8 @@ pub fn tick(ticks: u32) void {
 /// Draws every live particle. Called once per render frame from `updateEntities()`.
 pub fn draw() void {
     @setFloatMode(.optimized);
+    const portal_fade = dw.portal.getDescentFade();
+
     for (&pool) |*p| {
         if (p.frames_left <= 0) continue;
 
@@ -213,7 +215,12 @@ pub fn draw() void {
             ),
             .size = p.size + p.spin * (@as(f32, @floatCast(dw.chunks.current_dt)) + 1.0),
             .rotation = p.rotation,
-            .lcha = .{ p.lcha[0], p.lcha[1], p.lcha[2], p.lcha[3] * fade * MAX_OPACITY },
+            .lcha = .{
+                p.lcha[0],
+                p.lcha[1],
+                p.lcha[2],
+                p.lcha[3] * fade * MAX_OPACITY * portal_fade,
+            },
         });
     }
 }

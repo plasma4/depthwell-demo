@@ -1058,14 +1058,73 @@ pub const SimBuffer = struct {
     /// Completely invalidates the current buffer state and rebuilds it from scratch centered around a brand-new origin.
     /// Typically triggered upon world initialization, player teleportation, or high-velocity threshold jumps.
     fn fullRefresh(new_origin: Coordinate) void {
+        openWindowAt(new_origin);
+        fillMissing();
+    }
+
+    /// Points the window at `new_origin` and empties every slot WITHOUT generating anything.
+    ///
+    /// Split out of `fullRefresh()` so a caller that already holds these chunks can `install()` them
+    /// before `fillMissing()` generates whatever is left. A portal descent does exactly that: it spends
+    /// its whole length building the next depth's chunks, and without this hand-off all 256 would be
+    /// regenerated in the single frame the depth changes.
+    pub fn openWindowAt(new_origin: Coordinate) void {
         origin = new_origin;
         ring_x = 0;
         ring_y = 0;
+        keys = @splat(null);
+        has_water = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
+        water_settled = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
+    }
+
+    /// Adopts a ready-made chunk, if `coord` lands inside the open window. Returns whether it was taken.
+    /// Precondition: `chunk` must be materialized (generation plus any modifications), exactly as
+    /// `writeChunkSimless()` would have produced it.
+    pub fn install(coord: Coordinate, chunk: *const Chunk) bool {
+        const og = origin orelse return false;
+        const dx = coord.suffix[0] -% og.suffix[0];
+        const dy = coord.suffix[1] -% og.suffix[1];
+        if ((dx | dy) >= SIM_BUFFER_WIDTH) return false;
+        if (og.moveAtDepth(.{ @intCast(dx), @intCast(dy) }, memory.game.depth)) |expected| {
+            if (!expected.eql(coord)) return false;
+        } else return false;
+
+        const id = getIndex(@intCast(dx), @intCast(dy));
+        keys[id] = coord;
+        sim_buffer_ptr[id] = chunk.*;
+        has_water.setValue(id, chunkHasWater(&sim_buffer_ptr[id]));
+        water_settled.unset(id); // a freshly loaded chunk must settle at least once
+        return true;
+    }
+
+    /// Rebuilds the window around `centre`, adopting every chunk `source` can supply and generating
+    /// only the rest. `source` needs one method: `get(Coordinate) ?*const Chunk`.
+    ///
+    /// This is the cheap path out of a depth change. A portal descent has already materialized the
+    /// next depth's chunks over its whole length, so handing them straight over turns what would be
+    /// 256 generations in one frame into 256 copies.
+    pub fn refreshAdopting(centre: Coordinate, source: anytype) void {
+        const half_width = @as(i64, SIM_BUFFER_WIDTH) / 2;
+        openWindowAt(getClampedMove(centre, -half_width, -half_width));
+        const og = origin orelse return;
 
         for (0..SIM_BUFFER_WIDTH) |cy| {
             for (0..SIM_BUFFER_WIDTH) |cx| {
-                const id = (cy << SIM_WIDTH_LOG2) | cx;
-                if (new_origin.move(.{ @intCast(cx), @intCast(cy) })) |cell_coord| {
+                const cell = og.move(.{ @intCast(cx), @intCast(cy) }) orelse continue;
+                if (source.get(cell)) |chunk| _ = install(cell, chunk);
+            }
+        }
+        fillMissing();
+    }
+
+    /// Generates every slot still empty in the open window. A no-op for slots already `install()`ed.
+    pub fn fillMissing() void {
+        const og = origin orelse return;
+        for (0..SIM_BUFFER_WIDTH) |cy| {
+            for (0..SIM_BUFFER_WIDTH) |cx| {
+                const id = getIndex(@intCast(cx), @intCast(cy));
+                if (keys[id] != null) continue;
+                if (og.move(.{ @intCast(cx), @intCast(cy) })) |cell_coord| {
                     keys[id] = cell_coord;
                     writeChunkSimless(&sim_buffer_ptr[id], cell_coord);
                     has_water.setValue(id, chunkHasWater(&sim_buffer_ptr[id]));
@@ -2552,10 +2611,6 @@ pub fn commitLayer(t: LayerTransition, keep_ancestors: bool) void {
     dw.inventory.dropped_items.clear(null);
     memory.game.teleport(null, t.new_pos); // make sure to teleport!
     installLayer(t);
-
-    // Rebuild the resident window now rather than letting the next `player.move()` trip a full refresh,
-    // so the cost lands on the frame that already changed everything.
-    SimBuffer.sync(.{ .suffix = t.player_chunk, .quadrant = t.player_quadrant }, .{ 0, 0 });
 }
 
 /// Increases the game's depth by 1, invalidates caches, moves the player, and handles data modification.
