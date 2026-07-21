@@ -1,4 +1,6 @@
-//! NOTE: This game is pre-demo so all saves may break at any time due to core logic changes!Forward-compatibility is never planned, only back.
+//! NOTE: This game is pre-demo so all saves can break at any time from core logic changes!
+//! Forward-compatibility is never planned, only back.
+//!
 //! Serializes the full game state to a versioned, self-describing binary blob for the OPFS/generic file-system host.
 //! The atomic OPFS write and per-frame budgeting are handled by JS.
 //!
@@ -687,9 +689,9 @@ pub fn importAll(len: usize) bool {
 pub fn finalizeLoad() void {
     const g = &memory.game;
 
-    // seed2 and the sound/particle rngs derive from the seed, never saved
-    var temp_seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .seed2_init));
-    inline for (&g.seed2) |*s| s.* = temp_seed.next();
+    // seed2 and the sound/particle rngs derived from the seed are already saved!
+    // var temp_seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .seed2_init));
+    // inline for (&g.seed2) |*s| s.* = temp_seed.next();
     dw.sound.seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .sound));
     dw.particles.seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .particles));
 
@@ -712,7 +714,8 @@ pub fn finalizeLoad() void {
     }
 }
 
-/// Structurally validates a save blob without touching any game state: magic, BLAKE3 hash, format version, and section framing (known tags, in-bounds lengths, end marker reached).
+/// Structurally validates a save blob without touching any game state: magic, BLAKE3 hash, format version, and section framing
+/// (known tags, in-bounds lengths, end marker reached).
 /// `importAll()` runs this before the destructive game reset so a bad blob leaves the running game intact.
 fn validate(buf: []const u8) !void {
     // header = magic(4) + format u32 + proc u32 (10 bytes) + trailing BLAKE3 hash (32 bytes)
