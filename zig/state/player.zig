@@ -59,6 +59,16 @@ pub var subpixel_accum: Vec2f = .{ 0.0, 0.0 }; // note that vectors are smartly 
 
 /// Determines if the player is on the ground.
 var is_grounded: bool = false;
+
+/// Drops the airborne/jump bookkeeping, for teleports that skip `move()` entirely.
+/// A portal descent freezes movement for its whole length,
+/// so without this the coyote window from before the descent survives it.
+pub fn resetMotionState() void {
+    is_grounded = false;
+    coyote_frames = 0;
+    subpixel_accum = .{ 0.0, 0.0 };
+}
+
 /// Frames remaining for coyote time jump.
 var coyote_frames: u8 = 0;
 
@@ -143,6 +153,8 @@ pub fn drawPlayerEntity() void {
     dw.entity.addEntity(.{
         .sprite = currentSprite(),
         .position = dw.chunks.player_screen_pos,
+        // A portal descent squeezes this down and back up again (see `portal.playerScale()`); the
+        // player stays fully opaque throughout, so nothing blinks out and returns.
         .size = if (facing_right) dw.chunks.player_screen_size else -dw.chunks.player_screen_size,
     });
 }

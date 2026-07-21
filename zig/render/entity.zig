@@ -55,6 +55,9 @@ pub fn updateEntities(time_diff: f64) void {
     // The player is a world-space entity (see render/chunk.zig for its grid-aligned position).
     dw.player.drawPlayerEntity();
 
+    // A portal descent's swallowed terrain sits above the player but below the particles feeding into it.
+    dw.portal.drawEffects();
+
     // advance and draw particles (under all UI overlays)
     dw.particles.draw();
 
