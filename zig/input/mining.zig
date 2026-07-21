@@ -135,7 +135,7 @@ pub fn canMine(tool_type: Tools, target_sprite: Sprite) bool {
 pub var has_structure_tool: bool = false;
 const STRUCTURE_STRENGTH = 1000;
 
-/// Updates mining and placing blocks. Should be called from `tick()` inside root.zig.
+/// Updates mining and placing blocks. Should be called from `handleTick()`.
 pub fn handleMiningAndPlacing(logic_speed: f64) void {
     mouse.updateMouseLocation(); // update to get correct mouse position data
 

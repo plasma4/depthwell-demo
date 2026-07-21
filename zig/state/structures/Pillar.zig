@@ -40,7 +40,7 @@ pub fn generate(
     const i_wx = @as(i32, @bitCast(wx));
     const i_wy = @as(i32, @bitCast(wy));
 
-    // will there be 2 rows of water?
+    // will there be 2 rows of water? (if true, yes)
     const water_bit = state.getChance(0.5);
 
     const struct_x = i_wx - bounds.x_start;

@@ -273,7 +273,7 @@ pub fn draw() void {
     // Slot frames.
     inline for (.{ input_px, output_px }) |slot_px| {
         addEntity(.{
-            .sprite = .wood_icon,
+            .sprite = .wood_frame,
             .position = .{ @floatCast(slot_px[0]), @floatCast(slot_px[1]) },
             .size = @floatCast(SLOT_SIZE),
             .lcha = .{ 0.65, -0.08, 0.0, 1.0 },

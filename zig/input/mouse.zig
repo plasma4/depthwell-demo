@@ -97,7 +97,7 @@ pub var mouse_block_x: u4 = 0;
 /// Assume to be invalid if `mouse_chunk` or `mouse_subpixel` are null.
 pub var mouse_block_y: u4 = 0;
 /// Whether the mouse's block position changed. If coordinate is out of bounds, then set to true.
-/// Is reset in `handleMining()`, called from `tick()` in root.zig.
+/// Is reset in `handleMining()`, called from `handleTick()`.
 pub var block_position_changed = true;
 
 /// Point coordinate of the mouse (based on the UV).
