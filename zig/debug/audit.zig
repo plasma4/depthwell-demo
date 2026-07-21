@@ -29,27 +29,30 @@ const MAX_TRACKED_SPRITES = 64;
 
 /// Runs the audit on a region centered on the player's base-depth position, and logs the result.
 /// Depth is ignored: everything here is a property of the base layer the whole fractal descends from.
+///
+/// Do note that this code WILL run faster in release!
 pub fn sampleWorldAroundPlayer() void {
+    @setRuntimeSafety(false);
     if (!dw.is_debug) return;
 
     const coord = memory.game.getPlayerCoord();
     if (coord.suffix[0] < DEFAULT_SPAN or coord.suffix[1] < DEFAULT_SPAN or
         coord.suffix[0] > dw.world.max_possible_suffix - DEFAULT_SPAN or coord.suffix[0] > dw.world.max_possible_suffix - DEFAULT_SPAN)
     {
-        logger.quick("This test touches the world boundaries and may have skewed values.");
+        logger.quick("This test touches the world boundaries and WILL have skewed values.");
     }
     const center_x: i32 = @intCast(@min(coord.suffix[0] *| dw.CHUNK_SIZE, std.math.maxInt(i32)));
     const center_y: i32 = @intCast(@min(coord.suffix[1] *| dw.CHUNK_SIZE, std.math.maxInt(i32)));
     run(center_x - @divTrunc(DEFAULT_SPAN, 2), center_y - @divTrunc(DEFAULT_SPAN, 2), DEFAULT_SPAN);
 }
 
-/// Samples the `span`-by-`span` block region whose corner is (`x0`, `y0`) and logs every tally.
+/// Samples the `span`-by-`span` block region whose corner is (`x0`, `y0`) and logs tallied information.
 pub fn run(x0: i32, y0: i32, span: i32) void {
     if (!dw.is_debug) return;
 
     const seed = memory.game.getHashSeed(.structures);
     const blocks: f64 = @floatFromInt(@as(i64, span) * @as(i64, span));
-    const per_million = 1_000_000.0 / blocks;
+    const per_million = 1_000_000.0 / blocks; // fancy _ for fun
 
     logger.log(@src(), "worldgen audit: {d}x{d} blocks", .{ span, span });
 
@@ -63,10 +66,10 @@ pub fn run(x0: i32, y0: i32, span: i32) void {
 /// `offset` is the mean anchor position within the cell against the uniform expectation.
 /// A number that drifts says placements favor one corner of their cell, which would show up as a visible lattice.
 fn auditStructures(x0: i32, y0: i32, span: i32, seed: dw.utils.Vec2u, per_million: f64) void {
-    // Funnel: of every cell, how many survived each stage. The gaps between columns are the attrition,
-    // and the widest gap is the knob to reach for (a huge rolled->seated drop means the terrain gate,
-    // not target_chance, is what makes the structure rare). `won` is post-collision, the rest pre-.
-    logger.log(@src(), "{s:<10} {s:>6} {s:>8} {s:>8} {s:>8} {s:>8} {s:>6} {s:>10} {s:>14}", .{
+    // Funnel: of every cell, how many survived each stage. The gaps between columns are the "attrition",
+    // and the widest gap is the knob to reach for (a huge rolled->seated drop means the terrain gate makes the structure rare).
+    // Note that won is post-collision, the rest pre-collision.
+    logger.log(@src(), " {s:<10} {s:>6} {s:>8} {s:>8} {s:>8} {s:>8} {s:>6} {s:>10} {s:>14}", .{
         "structure",
         "chance",
         "cells",
@@ -113,7 +116,7 @@ fn auditStructures(x0: i32, y0: i32, span: i32, seed: dw.utils.Vec2u, per_millio
                     },
                 }
 
-                // `won` also survives the priority/collision scan, which the funnel above does not model.
+                // won also survives the priority/collision scan, which the funnel above does not model.
                 const bounds = structures.acceptedBoundsForAudit(kind, cx, cy, seed) orelse continue;
                 won += 1;
                 sum_ox += @floatFromInt(bounds.x_start - cx * area);
@@ -299,7 +302,7 @@ inline fn decorName(comptime D: type) []const u8 {
     return if (@hasDecl(D, "name")) D.name else shortName(@typeName(D));
 }
 
-/// Trims `state.structures.StructureName` down to `StructureName`.
+/// Trims `a.b.ActualName` down to `ActualName`.
 inline fn shortName(comptime full: []const u8) []const u8 {
     comptime {
         var start: usize = 0;
