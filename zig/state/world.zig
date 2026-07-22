@@ -1389,6 +1389,28 @@ const QuadrantEdgeDetails = struct {
 
 /// A static 2x2 grid of seeds only updated during when depth increase or game startup.
 pub const QuadCache = struct {
+    /// Width of the `ancestor_materials` window, in blocks at H.
+    ///
+    /// Sized by what generation asks of it, not by what fits. A chunk at H+1 needs a 6x6 block window
+    /// at H (`ancestor.getAncestorNeighborhood()`), and the chunks generated around it shift that
+    /// window by `BLOCKS_PER_PARENT` each, so the union runs well past 6. A window too small to
+    /// answer is not a smaller world, it is `panicUnresolvedAncestor()`.
+    ///
+    /// Growing this is free apart from memory, and that is the point: the window refines itself on
+    /// every descent, and filling N cells needs only about N / `ZOOM_FACTOR` + 2 of the previous
+    /// grid, so the window sustains itself at any size and to any depth. Everything else here is
+    /// derived, so raising this number is the whole change.
+    pub const ANCESTOR_GRID = 16;
+    /// First index of the active 2x2, which keeps the live quadrants centered in the window.
+    pub const ANCESTOR_CENTER = ANCESTOR_GRID / 2 - 1;
+
+    comptime {
+        // Odd sizes cannot hold the 2x2 centered, and anything under 8 cannot cover one chunk's 6x6
+        // parent window with room for the neighboring chunks that shift it.
+        if (ANCESTOR_GRID % 2 != 0 or ANCESTOR_GRID < 8)
+            @compileError("ANCESTOR_GRID must be even and at least 8 to hold a centered 2x2 plus a chunk's parent window.");
+    }
+
     pub const PATH_PREALLOC_SIZE = 256;
     // NOTE: making this cache too large results in crashes due to naive copying in Debug.
     pub const SEED_CACHE_SIZE = 256;
@@ -1413,9 +1435,9 @@ pub const QuadCache = struct {
     /// The 512-bit hashes for the 4 active quadrants (sequentially from D to D-31).
     /// (0: NW, 1: NE, 2: SW, 3: SE)
     path_hashes: ChunkSeeds align(memory.MAIN_ALIGN_BYTES),
-    /// The 4-by-4 material grid representing the "event horizon" at H (D-32).
-    /// The inner 2-by-2 (indices [1..2][1..2]) corresponds to the active quadrants.
-    ancestor_materials: [4][4]Block,
+    /// The material grid representing the "event horizon" at H (D-32), `ANCESTOR_GRID` blocks square.
+    /// The central 2-by-2 (at `ANCESTOR_CENTER`) corresponds to the active quadrants.
+    ancestor_materials: [ANCESTOR_GRID][ANCESTOR_GRID]Block,
 
     /// A list representing the prefix stack of the top left quadrant's X-coordinate.
     /// NOT for use with ancestory logic.
@@ -1472,7 +1494,7 @@ pub const QuadCache = struct {
     /// Asserts the current game depth is large enough for ancestor materials to be valid.
     pub inline fn getQuadrantSpriteAncestor(self: *const @This(), quadrant: u2) Sprite {
         std.debug.assert(memory.game.depth > HORIZON_DEPTH);
-        return self.ancestor_materials[1 + (quadrant >> 1)][1 + quadrant % 2];
+        return self.ancestor_materials[ANCESTOR_CENTER + (quadrant >> 1)][ANCESTOR_CENTER + quadrant % 2];
     }
 
     /// Returns the 512-bit seed of a specified quadrant (or the global seed if the current depth is <= HORIZON_DEPTH).
@@ -2313,6 +2335,28 @@ pub fn modifyBlockHp(coord: Coordinate, bx: u4, by: u4, block: Block, hp_to_add:
     return false;
 }
 
+/// What a neighbor lookup yields once it leaves the world entirely, past the first or last chunk.
+///
+/// Bedrock rather than air, and the distinction is load-bearing. `applyAncestorLogic()` reads an
+/// empty neighbor as exposure and erodes toward it, and an empty ancestor can only ever produce
+/// empty descendants, so answering `.empty` at the border makes the world eat inward from its own
+/// edge a little further at every depth with no way back. Bedrock is what is actually out there.
+///
+/// This is ONLY for coordinates that genuinely have no chunk. A lookup that fails for any other
+/// reason is a bug and must reach `panicUnresolvedAncestor()` instead of quietly becoming terrain.
+pub const world_edge_block: Block = .makeBasicBlock(.edge_stone, 0);
+
+/// Fails loudly for an ancestor block that exists in the world but that the window cannot hold.
+///
+/// Answering these with `.empty` is how a world silently deletes itself: the void spreads down every
+/// depth at once, so the symptom surfaces as several depths going empty together, long after and far
+/// from where the lookup actually went wrong. Crashing keeps cause and effect in the same place.
+///
+/// Reaching here means `QuadCache.ANCESTOR_GRID` is too small for what generation now asks of it.
+pub fn panicUnresolvedAncestor() noreturn {
+    @panic("Ancestor lookup fell outside the horizon window; raise QuadCache.ANCESTOR_GRID.");
+}
+
 /// Basic lookup to find a block's `Sprite` type for flag calculation.
 /// Checks caches, then modifications, then falls back to procedural logic.
 /// Ensures that we do not accidentally read `SimBuffer` data if checking an ancestor depth!
@@ -2359,14 +2403,16 @@ pub fn getBlockAt(coord: Coordinate, lx: u4, ly: u4, depth: u64) Block {
             const diff_block_x = diff_chunk_x * 16 + @as(i64, lx) - @as(i64, t_bx);
             const diff_block_y = diff_chunk_y * 16 + @as(i64, ly) - @as(i64, t_by);
 
-            // Use offset 1 to center queries within the 4x4 fallback buffer
-            const x_idx = diff_block_x + 1 + @as(i64, memory.game.player_quadrant % 2);
-            const y_idx = diff_block_y + 1 + @as(i64, memory.game.player_quadrant / 2);
+            // Centre queries on the active quadrants within the window.
+            const x_idx = diff_block_x + QuadCache.ANCESTOR_CENTER + @as(i64, memory.game.player_quadrant % 2);
+            const y_idx = diff_block_y + QuadCache.ANCESTOR_CENTER + @as(i64, memory.game.player_quadrant / 2);
 
-            if (x_idx >= 0 and x_idx < 4 and y_idx >= 0 and y_idx < 4) {
-                return quad_cache.ancestor_materials[@intCast(y_idx)][@intCast(x_idx)];
-            }
-            return .empty;
+            // The window is the ONLY record of material at H, so a query it cannot represent has no
+            // answer at all. It used to be given air, which is the worst possible guess: the caller
+            // is generating terrain from this, and air here erases every depth that descends from it.
+            const grid: i64 = QuadCache.ANCESTOR_GRID;
+            if (x_idx < 0 or x_idx >= grid or y_idx < 0 or y_idx >= grid) panicUnresolvedAncestor();
+            return quad_cache.ancestor_materials[@intCast(y_idx)][@intCast(x_idx)];
         }
     }
 
@@ -2451,7 +2497,7 @@ pub const LayerTransition = struct {
     most_left: bool = true,
     most_right: bool = true,
     /// Only rebuilt once the horizon has a real ancestor depth to summarize.
-    ancestor_materials: [4][4]Block = undefined,
+    ancestor_materials: [QuadCache.ANCESTOR_GRID][QuadCache.ANCESTOR_GRID]Block = undefined,
     has_materials: bool = false,
 };
 
@@ -2470,7 +2516,7 @@ pub const LayerSnapshot = struct {
     origin_x: u3,
     origin_y: u3,
     historical_seed: ChunkSeeds,
-    ancestor_materials: [4][4]Block,
+    ancestor_materials: [QuadCache.ANCESTOR_GRID][QuadCache.ANCESTOR_GRID]Block,
     most_top: bool,
     most_bottom: bool,
     most_left: bool,
@@ -2777,7 +2823,7 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
 
     const target_horizon_depth = depth - dw.HORIZON_DEPTH;
     if (target_horizon_depth >= STARTING_ZOOM_TIMES) {
-        var next_materials: [4][4]Block = undefined;
+        var next_materials: [QuadCache.ANCESTOR_GRID][QuadCache.ANCESTOR_GRID]Block = undefined;
 
         // Ancestor at H = D - HORIZON_DEPTH. Find the exact block we are located in to summarize the region correctly.
         var trace_coord = target_coord.asDepthCoordinate(depth);
@@ -2813,10 +2859,10 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
         const old_qx = @as(i128, old_trace_coord.quadrant % 2);
         const old_qy = @as(i128, old_trace_coord.quadrant / 2);
 
-        for (0..4) |y_idx| {
-            for (0..4) |x_idx| {
-                const delta_bx: i32 = @as(i32, @intCast(x_idx)) - 1 - qx;
-                const delta_by: i32 = @as(i32, @intCast(y_idx)) - 1 - qy;
+        for (0..QuadCache.ANCESTOR_GRID) |y_idx| {
+            for (0..QuadCache.ANCESTOR_GRID) |x_idx| {
+                const delta_bx: i32 = @as(i32, @intCast(x_idx)) - QuadCache.ANCESTOR_CENTER - qx;
+                const delta_by: i32 = @as(i32, @intCast(y_idx)) - QuadCache.ANCESTOR_CENTER - qy;
                 const absolute_bx: i32 = @as(i32, @intCast(t_bx)) + delta_bx;
                 const absolute_by: i32 = @as(i32, @intCast(t_by)) + delta_by;
                 const chunk_dx = @divFloor(absolute_bx, 16);
@@ -2841,32 +2887,35 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
                         const abs_chunk_y_old: i128 = (old_qy << shift_amt) | @as(i128, old_trace_coord.suffix[1]);
                         const diff_chunk_y: i64 = @intCast(std.math.clamp(abs_chunk_y_p - abs_chunk_y_old, -2, 2));
 
-                        var parent_block: Block = .empty;
                         var p_neighbors: [8]Block align(8) = @splat(.empty);
 
-                        const px_idx = diff_chunk_x * 16 + @as(i64, p.bx) - @as(i64, old_t_bx) + 1 + @as(i64, coord.quadrant % 2);
-                        const py_idx = diff_chunk_y * 16 + @as(i64, p.by) - @as(i64, old_t_by) + 1 + @as(i64, coord.quadrant / 2);
+                        const px_idx = diff_chunk_x * 16 + @as(i64, p.bx) - @as(i64, old_t_bx) + QuadCache.ANCESTOR_CENTER + @as(i64, coord.quadrant % 2);
+                        const py_idx = diff_chunk_y * 16 + @as(i64, p.by) - @as(i64, old_t_by) + QuadCache.ANCESTOR_CENTER + @as(i64, coord.quadrant / 2);
 
-                        if (px_idx >= 0 and px_idx < 4 and py_idx >= 0 and py_idx < 4) {
-                            parent_block = quad_cache.ancestor_materials[@intCast(py_idx)][@intCast(px_idx)];
+                        // The 4x4 is a WINDOW onto a larger world, not an island in a void, so anything
+                        // off its edge is edge-extended rather than read as air.
+                        //
+                        // Substituting air here is a one-way door. Every border cell would read as
+                        // exposed, `applyAncestorLogic()` erodes exposed cells, and an empty parent can
+                        // only ever produce empty children on the next descent. The grid loses a little
+                        // more of its border every layer and never recovers any of it, so past enough
+                        // descents the entire world below the horizon is air.
+                        const grid_max = quad_cache.ancestor_materials.len - 1;
+                        const gx = std.math.clamp(px_idx, 0, @as(i64, @intCast(grid_max)));
+                        const gy = std.math.clamp(py_idx, 0, @as(i64, @intCast(grid_max)));
+                        const parent_block = quad_cache.ancestor_materials[@intCast(gy)][@intCast(gx)];
 
-                            // Populate neighbors for applyAncestorLogic from the current 4x4 ancestor grid
-                            var n_idx: usize = 0;
-                            var ndy: i32 = -1;
-                            while (ndy <= 1) : (ndy += 1) {
-                                var ndx: i32 = -1;
-                                while (ndx <= 1) : (ndx += 1) {
-                                    if (ndx == 0 and ndy == 0) continue;
-                                    const nx = px_idx + ndx;
-                                    const ny = py_idx + ndy;
-
-                                    if (nx >= 0 and nx < 4 and ny >= 0 and ny < 4) {
-                                        p_neighbors[n_idx] = quad_cache.ancestor_materials[@intCast(ny)][@intCast(nx)];
-                                    } else {
-                                        p_neighbors[n_idx] = .empty;
-                                    }
-                                    n_idx += 1;
-                                }
+                        // Populate neighbors for applyAncestorLogic from the current 4x4 ancestor grid
+                        var n_idx: usize = 0;
+                        var ndy: i32 = -1;
+                        while (ndy <= 1) : (ndy += 1) {
+                            var ndx: i32 = -1;
+                            while (ndx <= 1) : (ndx += 1) {
+                                if (ndx == 0 and ndy == 0) continue;
+                                const nx = std.math.clamp(px_idx + ndx, 0, @as(i64, @intCast(grid_max)));
+                                const ny = std.math.clamp(py_idx + ndy, 0, @as(i64, @intCast(grid_max)));
+                                p_neighbors[n_idx] = quad_cache.ancestor_materials[@intCast(ny)][@intCast(nx)];
+                                n_idx += 1;
                             }
                         }
 
@@ -2885,7 +2934,10 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
                     if (mod_store.getCell(child_key, block_idx)) |cell| {
                         cell.applyTo(&next_materials[y_idx][x_idx]);
                     }
-                } else next_materials[y_idx][x_idx] = .empty;
+                    // Only the world border reaches here, and it is bedrock, never air: this grid is
+                    // the sole record of material at H and feeds itself on every later descent, so a
+                    // cell seeded with air stays air and spreads (`world_edge_block`).
+                } else next_materials[y_idx][x_idx] = world_edge_block;
             }
         }
 
@@ -2897,6 +2949,23 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
 }
 
 const testing = std.testing;
+
+test "the horizon window can hold every block a chunk's generation asks of it" {
+    // `getAncestorNeighborhood()` reads a 6x6 block window at H per chunk at H+1, and the chunks
+    // generated around it shift that window by `BLOCKS_PER_PARENT` apiece. If the grid cannot span
+    // the union, `getBlockAt()` has no answer and panics; before it panicked it returned air, which
+    // is what emptied whole worlds. Checked here so the sizing fails at build time, not at depth 39.
+    const per_chunk_window = 6;
+    const neighbor_shift = dw.BLOCKS_PER_PARENT; // one chunk over at H+1 is this many blocks at H
+    const needed = per_chunk_window + 2 * neighbor_shift;
+    try testing.expect(QuadCache.ANCESTOR_GRID >= needed);
+
+    // The active 2x2 has to sit centred, with the same room on both sides.
+    try testing.expectEqual(
+        QuadCache.ANCESTOR_CENTER,
+        QuadCache.ANCESTOR_GRID - (QuadCache.ANCESTOR_CENTER + 2),
+    );
+}
 
 test "computeLayer: works out a transition without disturbing the live world" {
     // The portal descent installs and then restores a transition every frame it generates preview
