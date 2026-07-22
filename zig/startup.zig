@@ -39,9 +39,15 @@ var alreadyStarted = false;
 /// (Restores the seed value though!)
 fn resetAfterStart() void {
     if (!world.arena.reset(.retain_capacity)) memory.oom();
+    // The string travels with the seed it produced; separating them would leave a world that can be
+    // generated but not named.
     const saved_seed = memory.game.seed;
+    const saved_seed_string = memory.game.seed_string;
+    const saved_seed_string_len = memory.game.seed_string_len;
     memory.game = .{};
     memory.game.seed = saved_seed;
+    memory.game.seed_string = saved_seed_string;
+    memory.game.seed_string_len = saved_seed_string_len;
 
     @import("menus/furnace.zig").reset();
     @import("menus/corecraft.zig").reset();

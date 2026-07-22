@@ -310,9 +310,13 @@ fn readHeaderCore(r: *Reader, section_len: usize) !void {
     g.keys_held_mask = 0;
 }
 
+/// Section version for the quad cache. Bumped when `QuadCache.ANCESTOR_GRID` changed the size of
+/// `ancestor_materials`, since the payload is written as raw bytes and carries no shape of its own.
+const QUADCACHE_VERSION = 2;
+
 /// Exports quad cache (fractal descent state; raw internal fields + the two path lists)
 fn writeQuadCache(w: *Writer) !void {
-    const at = try w.beginSection(.quadcache, 1);
+    const at = try w.beginSection(.quadcache, QUADCACHE_VERSION);
     const qc = &world.quad_cache;
     try w.bytes(std.mem.asBytes(&qc.path_hashes));
     try w.bytes(std.mem.asBytes(&qc.origins_x));
@@ -333,7 +337,12 @@ fn writeQuadCache(w: *Writer) !void {
     w.endSection(at);
 }
 
-fn readQuadCache(r: *Reader) !void {
+fn readQuadCache(r: *Reader, section_version: u16) !void {
+    // v1 stored a 4x4 `ancestor_materials`; v2 stores `QuadCache.ANCESTOR_GRID` square. The framing
+    // length keeps the stream aligned either way, so a blind read would not fail, it would just fill
+    // the descent state with whatever followed. Refuse instead.
+    if (section_version != QUADCACHE_VERSION) return SaveError.BadData;
+
     const qc = &world.quad_cache;
     try r.readInto(std.mem.asBytes(&qc.path_hashes));
     try r.readInto(std.mem.asBytes(&qc.origins_x));
@@ -769,7 +778,6 @@ fn deserialize(buf: []const u8) !void {
         const tag_raw = try r.int(u16);
         if (tag_raw == @intFromEnum(SectionTag.end)) break;
         const section_version = try r.int(u16);
-        _ = section_version; // unused for now
         const byte_len = try r.int(u64);
         const section_end = r.pos + @as(usize, @intCast(byte_len));
         if (section_end > buf.len) return SaveError.Truncated;
@@ -780,7 +788,7 @@ fn deserialize(buf: []const u8) !void {
         switch (tag) {
             .sprite_table => try readSpriteTable(&r),
             .header_core => try readHeaderCore(&r, @intCast(byte_len)),
-            .quadcache => try readQuadCache(&r),
+            .quadcache => try readQuadCache(&r, section_version),
             .inventory => try readInventory(&r),
             .menus => try readMenus(&r),
             .tools => try readTools(&r),

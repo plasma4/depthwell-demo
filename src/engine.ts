@@ -58,7 +58,7 @@ export const MAX_DRAW_CALLS = 4;
 // const INTERNAL_HEIGHT = 270;
 
 export class GameEngine {
-    /** The engine module automatically generated from Emscripten. */
+    /** The engine module automatically generated from Zig source. */
     public readonly engineModule: WebAssembly.WebAssemblyInstantiatedSource;
     /** The exported functions from the engineModule. */
     public readonly exports: Zig.EngineExports;
@@ -462,10 +462,22 @@ export class GameEngine {
 
         // Per-frame tile warp: xy screen offset (canvas px), z rotation (radians), w uniform scale.
         // Identity is (0, 0, 0, 1); Zig publishes that whenever nothing is shaking.
-        this.sceneDataF32[20] = this.getScratchProperty(12, WasmTypeCode.Float64);
-        this.sceneDataF32[21] = this.getScratchProperty(13, WasmTypeCode.Float64);
-        this.sceneDataF32[22] = this.getScratchProperty(14, WasmTypeCode.Float64);
-        this.sceneDataF32[23] = this.getScratchProperty(15, WasmTypeCode.Float64);
+        this.sceneDataF32[20] = this.getScratchProperty(
+            12,
+            WasmTypeCode.Float64,
+        );
+        this.sceneDataF32[21] = this.getScratchProperty(
+            13,
+            WasmTypeCode.Float64,
+        );
+        this.sceneDataF32[22] = this.getScratchProperty(
+            14,
+            WasmTypeCode.Float64,
+        );
+        this.sceneDataF32[23] = this.getScratchProperty(
+            15,
+            WasmTypeCode.Float64,
+        );
 
         this.device.queue.writeBuffer(
             this.uniformBuffer,
@@ -818,6 +830,19 @@ export class GameEngine {
                 8,
             ),
         );
+
+        // Kept in GameState too, so a save records which seed produced it. The derived value above
+        // cannot be turned back into the string, so without this a world is reproducible only by
+        // whoever still has the save file.
+        const ptr = this.writeStr(seed);
+        if (ptr !== null) this.exports.setSeedString(BigInt(ptr), BigInt(seed.length));
+    }
+
+    /** The seed string a loaded world was created from, or "" if it predates the field. */
+    public getStoredSeed(): string {
+        const len = Number(this.exports.getSeedStringLen());
+        if (len === 0) return "";
+        return this.readStr(Number(this.exports.getSeedStringPtr()), len);
     }
 
     /*
