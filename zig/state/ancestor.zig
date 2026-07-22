@@ -459,6 +459,12 @@ fn warpedMaterial(parent_block: Block, n: [8]Block, warp: dw.utils.Vec2f32, lx: 
 
 /// Applies deterministic logic to a child block based on its parent and 8 parent neighbors.
 /// Returns a `memory.BlockSpec` (temp procedural information) that can be compiled to `Block` later.
+///
+/// An empty neighbor means genuinely absent material, and callers must not pass one to stand in for
+/// "outside my buffer": erosion reads empty neighbors as exposure and carves toward them, and an
+/// empty result can only ever produce further empty results at the depths below it. A caller working
+/// from a fixed window (the 4x4 in `computeLayer()`) has to edge-extend past its border instead,
+/// or it will eat its own edges a little further on every layer with no way back.
 /// Correctly determines the child's `seed` property when returning it if the block is not empty.
 /// Decorations are applied afterward in `procedural.applyAncestorDecorations()`. TODO: actually add this!
 /// TODO: also add culling system for invalid decor block configurations in ancestor, determine how to deal with spiral plant
