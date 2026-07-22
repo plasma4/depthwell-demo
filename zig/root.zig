@@ -210,6 +210,24 @@ pub export fn mixSeedF64(number: u64) f64 { // same thing as mix_seed but f64
 //     );
 // }
 
+/// Records the seed string a world was created from, alongside the derived `seed` the host writes
+/// straight into `GameState`. Call it with a scratch-buffer pointer from `writeStr()`.
+/// Over-long input is truncated rather than rejected; see `GameState.setSeedString()`.
+pub export fn setSeedString(str_ptr: u64, str_len: u64) void {
+    const ptr: [*]const u8 = @ptrFromInt(@as(usize, @intCast(str_ptr)));
+    memory.game.setSeedString(ptr[0..@intCast(str_len)]);
+}
+
+/// Length of the recorded seed string; 0 for a world saved before it was recorded.
+pub export fn getSeedStringLen() u64 {
+    return memory.game.seed_string_len;
+}
+
+/// Pointer to the recorded seed string, to be read with `getSeedStringLen()` bytes.
+pub export fn getSeedStringPtr() u64 {
+    return @intFromPtr(&memory.game.seed_string);
+}
+
 // Layout logic
 pub export fn getMemoryLayoutPtr() u64 { // pointer-like *const memory.MemoryLayout, Memory64 hack
     return @intFromPtr(memory.getMemoryLayoutPtr());

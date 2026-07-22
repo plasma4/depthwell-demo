@@ -2841,32 +2841,35 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
                         const abs_chunk_y_old: i128 = (old_qy << shift_amt) | @as(i128, old_trace_coord.suffix[1]);
                         const diff_chunk_y: i64 = @intCast(std.math.clamp(abs_chunk_y_p - abs_chunk_y_old, -2, 2));
 
-                        var parent_block: Block = .empty;
                         var p_neighbors: [8]Block align(8) = @splat(.empty);
 
                         const px_idx = diff_chunk_x * 16 + @as(i64, p.bx) - @as(i64, old_t_bx) + 1 + @as(i64, coord.quadrant % 2);
                         const py_idx = diff_chunk_y * 16 + @as(i64, p.by) - @as(i64, old_t_by) + 1 + @as(i64, coord.quadrant / 2);
 
-                        if (px_idx >= 0 and px_idx < 4 and py_idx >= 0 and py_idx < 4) {
-                            parent_block = quad_cache.ancestor_materials[@intCast(py_idx)][@intCast(px_idx)];
+                        // The 4x4 is a WINDOW onto a larger world, not an island in a void, so anything
+                        // off its edge is edge-extended rather than read as air.
+                        //
+                        // Substituting air here is a one-way door. Every border cell would read as
+                        // exposed, `applyAncestorLogic()` erodes exposed cells, and an empty parent can
+                        // only ever produce empty children on the next descent. The grid loses a little
+                        // more of its border every layer and never recovers any of it, so past enough
+                        // descents the entire world below the horizon is air.
+                        const grid_max = quad_cache.ancestor_materials.len - 1;
+                        const gx = std.math.clamp(px_idx, 0, @as(i64, @intCast(grid_max)));
+                        const gy = std.math.clamp(py_idx, 0, @as(i64, @intCast(grid_max)));
+                        const parent_block = quad_cache.ancestor_materials[@intCast(gy)][@intCast(gx)];
 
-                            // Populate neighbors for applyAncestorLogic from the current 4x4 ancestor grid
-                            var n_idx: usize = 0;
-                            var ndy: i32 = -1;
-                            while (ndy <= 1) : (ndy += 1) {
-                                var ndx: i32 = -1;
-                                while (ndx <= 1) : (ndx += 1) {
-                                    if (ndx == 0 and ndy == 0) continue;
-                                    const nx = px_idx + ndx;
-                                    const ny = py_idx + ndy;
-
-                                    if (nx >= 0 and nx < 4 and ny >= 0 and ny < 4) {
-                                        p_neighbors[n_idx] = quad_cache.ancestor_materials[@intCast(ny)][@intCast(nx)];
-                                    } else {
-                                        p_neighbors[n_idx] = .empty;
-                                    }
-                                    n_idx += 1;
-                                }
+                        // Populate neighbors for applyAncestorLogic from the current 4x4 ancestor grid
+                        var n_idx: usize = 0;
+                        var ndy: i32 = -1;
+                        while (ndy <= 1) : (ndy += 1) {
+                            var ndx: i32 = -1;
+                            while (ndx <= 1) : (ndx += 1) {
+                                if (ndx == 0 and ndy == 0) continue;
+                                const nx = std.math.clamp(px_idx + ndx, 0, @as(i64, @intCast(grid_max)));
+                                const ny = std.math.clamp(py_idx + ndy, 0, @as(i64, @intCast(grid_max)));
+                                p_neighbors[n_idx] = quad_cache.ancestor_materials[@intCast(ny)][@intCast(nx)];
+                                n_idx += 1;
                             }
                         }
 
