@@ -71,7 +71,7 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
     // straight there, and is ignored mid-descent so it cannot push a second layer during one.
     const just_increased_depth = dw.is_debug and
         !dw.portal.isActive() and
-        KeyBits.isSet(KeyBits.zoom, memory.game.keys_pressed_mask);
+        KeyBits.isSet(KeyBits.increase_depth, memory.game.keys_pressed_mask);
     // increase the depth (testing hotkey)
     if (just_increased_depth) {
         dw.world.pushLayer(
