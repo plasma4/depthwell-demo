@@ -133,6 +133,9 @@ pub const InwardConfig = struct {
     travel_max: u16 = 26,
     /// Sideways drift as a fraction of inward speed, which curves the paths into a swirl.
     swirl: f32 = 0.35,
+    /// Reverses the ring: particles start at the centre and fly out to `radius`, expiring as they land
+    /// on it. Used by the portal ascent, whose world opens outward rather than being drawn in.
+    outward: bool = false,
 };
 
 /// Spawns particles on a ring around `origin` that fall inward and expire as they reach it.
@@ -150,16 +153,20 @@ pub fn spawnInwardRing(origin: Vec2f32, colors: []const [4]f32, config: InwardCo
         const spin_magnitude = randRange(config.spin_min, config.spin_max);
 
         const dir: Vec2f32 = .{ @cos(angle), @sin(angle) };
-        // Covering exactly `radius` over `travel` frames puts the particle at the centre as it dies.
+        // Covering exactly `radius` over `travel` frames puts the particle on `origin` (inward) or on
+        // the ring (outward) as it dies.
         const speed = radius / @as(f32, @floatFromInt(travel));
-        // A perpendicular component bends the straight fall into a spiral.
+        // A perpendicular component bends the straight path into a spiral.
         const swirl = if (seed.float(f32) < 0.5) config.swirl else -config.swirl;
 
+        // Inward starts on the ring moving toward the centre; outward is the exact reverse.
+        const radial: f32 = if (config.outward) -1.0 else 1.0;
+
         addParticle(.{
-            .position = origin + dir * @as(Vec2f32, @splat(radius)),
+            .position = origin + dir * @as(Vec2f32, @splat(if (config.outward) 0.0 else radius)),
             .velocity = .{
-                (-dir[0] + -dir[1] * swirl) * speed,
-                (-dir[1] + dir[0] * swirl) * speed,
+                (-dir[0] + -dir[1] * swirl) * speed * radial,
+                (-dir[1] + dir[0] * swirl) * speed * radial,
             },
             .rotation = randRange(0.0, std.math.tau),
             .spin = if (seed.float(f32) < 0.5) spin_magnitude else -spin_magnitude,

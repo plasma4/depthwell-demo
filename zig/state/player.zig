@@ -195,8 +195,22 @@ pub fn move(logic_speed: f64) void {
             (move_input * x_mult * (1.0 - pow_fx) / FRICTION_X);
     }
 
-    // Update y velocity with gravity
-    if (coyote_frames > 0 and KeyBits.isSet(KeyBits.up, game.keys_held_mask)) {
+    // Update y velocity with gravity.
+    //
+    // Spectating flies instead: a block the player stands in at D is a quarter of a block at D-1, so
+    // an ascent lands inside solid rock more often than not. Free flight (with `isColliding()` giving
+    // way below) is what makes looking around from above possible at all, and it costs nothing since
+    // the layer cannot be modified anyway.
+    if (world.isSpectating()) {
+        var lift: f64 = 0;
+        if (KeyBits.isSet(KeyBits.up, game.keys_held_mask)) lift -= PLAYER_BASE_SPEED;
+        if (KeyBits.isSet(KeyBits.down, game.keys_held_mask)) lift += PLAYER_BASE_SPEED;
+        game.player_velocity[1] = game.player_velocity[1] * pow_fx;
+        game.player_velocity[1] += if (FRICTION_X < 1e-4)
+            lift * x_mult
+        else
+            (lift * x_mult * (1.0 - pow_fx) / FRICTION_X);
+    } else if (coyote_frames > 0 and KeyBits.isSet(KeyBits.up, game.keys_held_mask)) {
         game.player_velocity[1] = -JUMP_FORCE;
         is_grounded = false;
         coyote_frames = 0;
@@ -309,6 +323,10 @@ fn handleLocalWrap(comptime axis: u1) i64 {
 
 /// Performs an AABB check (for the player's position) against the world grid.
 pub fn isColliding(px: i64, py: i64) bool {
+    // Spectating flies through everything (see the lift branch in `move()`): the layer is read-only,
+    // so terrain is scenery rather than a surface, and an ascent frequently lands inside solid rock.
+    if (world.isSpectating()) return false;
+
     const game = &memory.game;
     const corners = [4][2]i64{
         .{ px - PLAYER_HITBOX_WIDTH / 2, py + CHUNK_SIZE_SQ / 2 - PLAYER_HITBOX_HEIGHT },

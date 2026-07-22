@@ -76,12 +76,19 @@ comptime {
     if (OVERLAY_ZOOM <= 1.0 or OVERLAY_ZOOM >= dw.ZOOM_FACTOR) @compileError("OVERLAY_ZOOM must sit between 1x and ZOOM_FACTOR.");
 }
 
-/// Which part of a descent is running. Stored in `GameState` as its integer tag.
+/// Which transition is running. Stored in `GameState` as its integer tag.
 pub const Phase = enum(u8) {
     idle,
-    /// The one and only running state; the descent is shaped by `portal_frame`, not by phase.
+    /// A D -> D+1 descent through a portal, shaped by `portal_frame`.
     descending,
+    /// A D -> D-1 ascent through an inverted portal, the same animation run in reverse.
+    ascending,
 };
+
+/// Whether the running transition is a descent (rather than an ascent). Only meaningful while active.
+inline fn isDescending() bool {
+    return memory.game.portal_phase == @intFromEnum(Phase.descending);
+}
 
 /// One block being swallowed: a purely visual echo of terrain near the player.
 /// The world itself is never touched, so no modification is ever written for this.
@@ -134,6 +141,11 @@ var fill_deadline: u32 = MIN_FILL_FRAMES;
 /// Zooming into it and then committing therefore lands on the very same world point, with nothing to jump.
 var anchor: [2]f64 = .{ 0.0, 0.0 };
 
+/// Where the shards and intake particles converge on (descent) or burst from (ascent), in subpixels
+/// relative to the player's chunk. Always the (inverted) portal block; coincides with `anchor` for a
+/// descent, but sits apart from it for an ascent, where the camera holds on the player instead.
+var effect_centre: [2]f64 = .{ 0.0, 0.0 };
+
 /// The descent's shards. Held in a fixed-sized array rather than a dynamic allocation.
 var debris: [SHARD_COUNT]Shard = undefined;
 /// How many shards are currently active in the array.
@@ -143,9 +155,9 @@ var debris_count: usize = 0;
 /// Cleared by `reset()` and by a load, which is what makes `ensureReady()` rebuild them.
 var ready: bool = false;
 
-/// Whether a descent is currently playing.
+/// Whether a portal transition (descent or ascent) is currently playing.
 pub inline fn isActive() bool {
-    return memory.game.portal_phase == @intFromEnum(Phase.descending);
+    return memory.game.portal_phase != @intFromEnum(Phase.idle);
 }
 
 /// Smooth 0-1 ease with zero slope at both ends.
@@ -176,17 +188,52 @@ inline fn zoomCurve(t: f64) f64 {
     return s * s;
 }
 
-/// How much the world's zoom is multiplied by this frame: 1x at rest, `ZOOM_FACTOR` on the last frame.
-/// The D+1 overlay divides this by `ZOOM_FACTOR`, which is why reaching it lands exactly on the committed view.
+/// Signed zoom exponent for this frame: a descent zooms in (+), an ascent zooms out (-).
+inline fn zoomSign() f64 {
+    return if (isDescending()) 1.0 else -1.0;
+}
+
+/// How much the world's zoom is multiplied by this frame.
+/// A descent runs 1x -> `ZOOM_FACTOR` (zoom in); an ascent runs 1x -> `1 / ZOOM_FACTOR` (zoom out).
+/// `overlayScale()` cancels the factor out, which is why reaching the last frame lands on the committed view.
 pub fn zoomFactor() f64 {
     if (!isActive()) return 1.0;
-    return std.math.pow(f64, @as(f64, dw.ZOOM_FACTOR), zoomCurve(progress()));
+    return std.math.pow(f64, @as(f64, dw.ZOOM_FACTOR), zoomSign() * zoomCurve(progress()));
 }
 
 /// The zoom multiplier at an arbitrary frame, for planning ahead of time.
 fn zoomFactorAt(frame: u32) f64 {
     const t = @as(f64, @floatFromInt(frame)) / @as(f64, @floatFromInt(TOTAL_FRAMES));
-    return std.math.pow(f64, @as(f64, dw.ZOOM_FACTOR), zoomCurve(t));
+    return std.math.pow(f64, @as(f64, dw.ZOOM_FACTOR), zoomSign() * zoomCurve(t));
+}
+
+/// Scale multiplier the overlay layer is drawn at, relative to `camera_scale`.
+///
+/// The overlay is the depth being ENTERED (D+1 descending, D-1 ascending), so it sits at a factor of
+/// `ZOOM_FACTOR` from the live layer: descending it is `ZOOM_FACTOR` smaller, ascending `ZOOM_FACTOR`
+/// larger. Either way the factor cancels `zoomFactor()` on the last frame, so the overlay arrives at
+/// exactly `camera_scale` and the hand-off to the committed world is invisible.
+pub fn overlayScale() f64 {
+    const factor: f64 = if (isDescending()) 1.0 / @as(f64, dw.ZOOM_FACTOR) else dw.ZOOM_FACTOR;
+    return zoomFactor() * factor;
+}
+
+/// Overlay scale at its most zoomed-out (widest footprint), which is what `allocatePreview()` sizes for.
+/// Descending that is the instant it appears (`OVERLAY_ZOOM / ZOOM_FACTOR`); ascending it is the
+/// committed frame (`1.0`), since the D-1 layer starts zoomed in and pulls out to rest.
+fn widestOverlayScale() f64 {
+    return if (isDescending()) OVERLAY_ZOOM / @as(f64, dw.ZOOM_FACTOR) else 1.0;
+}
+
+/// Zoom at which the overlay begins to reveal, driving `planFill()`'s deadline.
+/// Mirrored for an ascent: instead of zooming past `OVERLAY_ZOOM` in, it zooms past its reciprocal out.
+inline fn revealZoom() f64 {
+    return if (isDescending()) OVERLAY_ZOOM else 1.0 / OVERLAY_ZOOM;
+}
+
+/// Whether `zoom` has passed the reveal threshold, accounting for the zoom direction.
+inline fn pastReveal(zoom: f64) bool {
+    return if (isDescending()) zoom > revealZoom() else zoom < revealZoom();
 }
 
 /// Opacity the D+1 layer (chunks and background alike) is drawn at.
@@ -204,7 +251,10 @@ pub fn overlayOpacity() f64 {
 }
 
 /// How far the player has been drawn into the portal, 0 to 1.
+/// Always 0 for an ascent: the player is not pulled anywhere, they zoom out from where they stand,
+/// so the pull, squeeze and camera-ease terms that read this all fall out to identity.
 inline fn pullProgress() f64 {
+    if (!isDescending()) return 0.0;
     const frame: f64 = @floatFromInt(@min(memory.game.portal_frame, PULL_FRAMES));
     return frame / @as(f64, @floatFromInt(PULL_FRAMES));
 }
@@ -225,6 +275,17 @@ pub fn backgroundRate() f64 {
 
 /// Starts a descent through the portal at `coord`'s block (`bx`, `by`). Ignored if one is already running.
 pub fn trigger(coord: Coordinate, bx: u4, by: u4) void {
+    beginTransition(.descending, coord, bx, by);
+}
+
+/// Starts an ascent through the inverted portal at `coord`'s block (`bx`, `by`).
+/// The block is recorded only so the effects can emanate from it; the transition itself derives
+/// entirely from the player's position (see `world.computeParentLayer()`). Ignored if one is running.
+pub fn triggerAscend(coord: Coordinate, bx: u4, by: u4) void {
+    beginTransition(.ascending, coord, bx, by);
+}
+
+fn beginTransition(phase: Phase, coord: Coordinate, bx: u4, by: u4) void {
     if (isActive()) return;
 
     const g = &memory.game;
@@ -233,7 +294,7 @@ pub fn trigger(coord: Coordinate, bx: u4, by: u4) void {
     g.portal_bx = bx;
     g.portal_by = by;
     g.portal_frame = 0;
-    g.portal_phase = @intFromEnum(Phase.descending);
+    g.portal_phase = @intFromEnum(phase);
 
     ready = false;
     ensureReady();
@@ -255,16 +316,46 @@ fn ensureReady() void {
     const bx: u4 = @intCast(memory.game.portal_bx & 15);
     const by: u4 = @intCast(memory.game.portal_by & 15);
 
-    // `.block_floor` pins the landing to the portal block itself. Deriving it from the player instead
-    // would place them wherever they happened to be standing scaled up, which need not even be inside
-    // the portal, and can land inside solid terrain.
-    transition = world.computeLayer(portalCoord(), bx, by, .block_floor);
+    if (isDescending()) {
+        // `.block_floor` pins the landing to the portal block itself. Deriving it from the player
+        // instead would place them wherever they happened to be standing scaled up, which need not
+        // even be inside the portal, and can land inside solid terrain.
+        transition = world.computeLayer(portalCoord(), bx, by, .block_floor);
+        computeAnchor(bx, by);
+    } else {
+        // An ascent keeps the player's own world point (see `world.computeParentLayer()`), so the
+        // camera holds on the player and simply pulls out; the anchor is the player's own position.
+        transition = world.computeParentLayer();
+        anchor = .{
+            @floatFromInt(memory.game.player_pos[0]),
+            @floatFromInt(memory.game.player_pos[1]),
+        };
+    }
+    // The effects always radiate from the (inverted) portal block, wherever the camera settles.
+    computeEffectCentre(bx, by);
 
-    computeAnchor(bx, by);
     planFill();
     allocatePreview();
+    // A descent spreads generation over its length; an ascent's parent preview is smaller and cheaper,
+    // so it is filled up front and no reveal deadline gates it.
+    if (!isDescending()) fillPreview(@intCast(preview.len));
     collectDebris();
     ready = true;
+}
+
+/// Places `effect_centre` on the portal block, in subpixels relative to the player's chunk.
+/// This is where shards and intake particles emanate from, for both directions.
+fn computeEffectCentre(bx: u4, by: u4) void {
+    const g = &memory.game;
+    const portal = portalCoord();
+    const player_coord = g.getPlayerCoord();
+    const chunk_dx: i64 = @bitCast(portal.suffix[0] -% player_coord.suffix[0]);
+    const chunk_dy: i64 = @bitCast(portal.suffix[1] -% player_coord.suffix[1]);
+    const block: f64 = @floatFromInt(dw.CHUNK_SIZE_SQ);
+    effect_centre = .{
+        @as(f64, @floatFromInt(chunk_dx * dw.SUBPIXELS_IN_CHUNK)) + (@as(f64, @floatFromInt(bx)) + 0.5) * block,
+        @as(f64, @floatFromInt(chunk_dy * dw.SUBPIXELS_IN_CHUNK)) + (@as(f64, @floatFromInt(by)) + 0.5) * block,
+    };
 }
 
 /// Locates the D-space point matching where the player lands at D+1.
@@ -302,12 +393,14 @@ fn planFill() void {
     fill_deadline = TOTAL_FRAMES;
     var frame: u32 = 0;
     while (frame <= TOTAL_FRAMES) : (frame += 1) {
-        if (zoomFactorAt(frame) > OVERLAY_ZOOM) {
+        if (pastReveal(zoomFactorAt(frame))) {
             fill_deadline = frame;
             break;
         }
     }
-    std.debug.assert(fill_deadline >= MIN_FILL_FRAMES);
+    // An ascent generates its whole (smaller) parent preview up front in `ensureReady()`, so it has
+    // no fill floor to honour; only a descent spreads generation and needs the assert.
+    if (isDescending()) std.debug.assert(fill_deadline >= MIN_FILL_FRAMES);
 }
 
 /// Sizes and clears the D+1 preview to cover the widest view the overlay can ever show.
@@ -316,8 +409,8 @@ fn planFill() void {
 /// `zoomFactor() / ZOOM_FACTOR`, which only grows from there, so the footprint only ever shrinks.
 fn allocatePreview() void {
     const g = &memory.game;
-    // The zoom the D+1 layer is drawn at when it first becomes visible (its most zoomed-out state).
-    const widest_zoom = g.camera_scale * OVERLAY_ZOOM / @as(f64, dw.ZOOM_FACTOR);
+    // The scale the overlay layer is drawn at when its footprint is widest (its most zoomed-out state).
+    const widest_zoom = g.camera_scale * widestOverlayScale();
 
     const subpixels_per_chunk: f64 = @floatFromInt(dw.SUBPIXELS_IN_CHUNK);
     const half_w_sp = (@as(f64, dw.SCREEN_WIDTH_HALF) / widest_zoom) * dw.CHUNK_SIZE;
@@ -498,7 +591,10 @@ fn fillPreview(count: u32) void {
     world.installLayer(transition);
     defer world.restoreLayer(snapshot);
 
-    if (filled == 0) seedAncestorsFromSim(parent_coord, parent_depth);
+    // Descent-only: it warms the D parents the D+1 preview reads, which are resident in the SimBuffer.
+    // An ascent reads D-2 parents (shallower than the live D world), which are not resident and would
+    // key into a negative tier relative to the installed D-1 depth, so it is skipped entirely.
+    if (filled == 0 and isDescending()) seedAncestorsFromSim(parent_coord, parent_depth);
 
     var made: u32 = 0;
     while (made < count and filled < preview.len) : ({
@@ -538,19 +634,21 @@ pub fn previewChunk(coord: Coordinate) ?*const Chunk {
     return &preview[@intCast(idx)];
 }
 
-/// The D+1 transition the overlay renders against. Only valid while `isActive()`.
+/// The overlay's transition (the depth being entered). Only valid while `isActive()`.
 pub fn overlayTransition() world.LayerTransition {
     return transition;
 }
 
 /// Camera position for this frame, in subpixels relative to the player's chunk.
 ///
-/// Eased onto the anchor as the player is drawn in, so the zoom closes on the portal,
-/// rather than on wherever the camera was loitering. `camera_pos` itself is never written,
-/// which is what lets this be recomputed from the frame counter alone after a load.
+/// A descent eases the camera onto the portal as the player is drawn in, so the zoom closes on the
+/// portal rather than on wherever the camera was loitering. An ascent locks onto the anchor (the
+/// player's own point) from the first frame, so the pull-out is centred and nothing drifts.
+/// `camera_pos` itself is never written, which is what lets this be recomputed from the frame counter
+/// alone after a load.
 pub fn cameraOverride() [2]f64 {
     const g = &memory.game;
-    const t = smoothstep(pullProgress());
+    const t = if (isDescending()) smoothstep(pullProgress()) else 1.0;
     return .{
         @as(f64, @floatFromInt(g.camera_pos[0])) * (1.0 - t) + anchor[0] * t,
         @as(f64, @floatFromInt(g.camera_pos[1])) * (1.0 - t) + anchor[1] * t,
@@ -596,7 +694,7 @@ fn worldToScreen(sub: [2]f64) Vec2f32 {
 pub fn drawEffects() void {
     if (!isActive() or !ready) return;
     @setFloatMode(.optimized);
-    drawDebris(worldToScreen(anchor));
+    drawDebris(worldToScreen(effect_centre));
 }
 
 /// Fade factor for portal-related visual elements (shards, particles) near the end of the descent.
@@ -621,7 +719,8 @@ fn drawDebris(centre: Vec2f32) void {
         if (u >= 1.0) continue; // already swallowed
 
         const eased: f32 = @floatCast(u * u);
-        const distance = shard.radius * (1.0 - eased);
+        // Descent draws terrain inward to be swallowed; ascent throws it outward as the world opens up.
+        const distance = shard.radius * (if (isDescending()) 1.0 - eased else eased);
         const pos: Vec2f32 = .{
             centre[0] + @cos(shard.angle) * distance,
             centre[1] + @sin(shard.angle) * distance,
@@ -662,9 +761,9 @@ fn spawnIntake() void {
 
     const cap: u16 = @intFromFloat(@round(22.0 - 22.0 * progress()));
     if (cap > 2) {
-        dw.particles.spawnInwardRing(worldToScreen(anchor), &PORTAL_COLORS, .{
+        dw.particles.spawnInwardRing(worldToScreen(effect_centre), &PORTAL_COLORS, .{
             .count = count,
-            // Held in world scale so the ring hugs the portal as the view zooms in.
+            // Held in world scale so the ring hugs the portal as the view zooms.
             .radius_min = 10.0 * zoom,
             .radius_max = 26.0 * zoom,
             .size_min = 0.8 * zoom,
@@ -672,6 +771,8 @@ fn spawnIntake() void {
             .travel_min = @min(cap, 8),
             .travel_max = cap,
             .swirl = @floatCast(0.25 + 0.5 * intensity),
+            // A descent draws them in; an ascent pushes them out through the same ring.
+            .outward = !isDescending(),
         });
     }
 }
@@ -707,11 +808,36 @@ const PreviewSource = struct {
     }
 };
 
+/// Adopts nothing, so `refreshAdopting()` regenerates every slot from scratch.
+///
+/// An ascent generated its D-1 preview BEFORE `applyAscent()` set the descendant markers, so those
+/// chunks carry no markers. Regenerating them once the world is spectating rebakes the markers through
+/// `materializeChunk()`. A descent never needs this: a chunk's `descendants` bitmap already encodes
+/// exactly whether it has deeper edits, so adopting the preview is always correct there.
+const EmptySource = struct {
+    pub fn get(_: @This(), _: Coordinate) ?*const Chunk {
+        return null;
+    }
+};
+
 fn finish() void {
     const g = &memory.game;
     ensureReady();
-    // The preview left the ancestor cache holding this depth's parents, already tiered for it.
-    world.commitLayer(transition, true);
+
+    if (isDescending()) {
+        // A descent while spectating is a retrace of the last ascent, so it pops that step.
+        const retracing = world.isSpectating();
+        // The preview left the ancestor cache holding this depth's parents, already tiered for it.
+        world.commitLayer(transition, true);
+        if (retracing) world.popAscentStep(
+            g.getPlayerCoord(),
+            @intCast(@divTrunc(transition.new_pos[0], dw.CHUNK_SIZE_SQ)),
+            @intCast(@divTrunc(transition.new_pos[1], dw.CHUNK_SIZE_SQ)),
+        );
+    } else {
+        // Records the retrace step and rolls the deeper depth's edits up into markers, then commits.
+        world.applyAscent(transition);
+    }
 
     // Hand the generated chunks to the SimBuffer before dropping them.
     // Skipping it does not avoid the work, only defers it: the next `player.move()` rebuilds all 256 slots in one frame,

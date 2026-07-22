@@ -383,6 +383,7 @@ pub const Sprite = enum(u16) {
         else if (self.isLiquid())
             id + 1
         else
+            // default to the original!
             id;
     }
 };
@@ -808,7 +809,8 @@ pub const Category = enum(u3) {
     /// World decoration (non-solid placeable: plants, furniture, interactables).
     /// Assumed to be instantly mineable.
     decor,
-    /// Fixed interactive installation (furnace, core, chest, portal). Unmineable by normal pickaxe and waterloggable like decor.
+    /// Fixed installation (furnace, core, chest, portal).
+    /// Unmineable by normal pickaxe and waterloggable like decor (doesn't look like a full block).
     interactive,
 };
 

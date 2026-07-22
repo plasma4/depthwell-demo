@@ -358,8 +358,14 @@ pub const Block = packed struct(u128) {
     ///   - bits 3-6: left adjacent liquid volume (0-15; 0 means no liquid to the left)
     ///   - bits 7-10: right adjacent liquid volume (0-15; 0 means no liquid to the right)
     waterlogged: u12 = 0,
+    /// Set when this block's descendant region holds a modification made at a deeper depth.
+    ///
+    /// Display-only, and written by `materializeChunk()` only while `world.isSpectating()`:
+    /// `variation.resolveVariant()` draws it as `.inventory_selected_orange` while leaving `id` alone,
+    /// so the ancestor chain never inherits the marker as if it were terrain.
+    descendant_mods: bool = false,
     /// Unused portion of block data.
-    _pad: u20 = 0,
+    _pad: u19 = 0,
 
     /// Makes a simple block of a certain type, with max light and no edge flags and mine level.
     /// Uses the BOTTOM 32 bits from `seed_bits` to place into `seed`.
