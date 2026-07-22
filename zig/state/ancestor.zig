@@ -369,9 +369,12 @@ fn erosionMask(noise_seed: dw.utils.Vec2u, wx: u32, wy: u32) f32 {
 /// the result seamless across block, chunk, and quadrant borders alike.
 /// Neighbors are row-major from the top left (see `Block.edge_flags`), skipping the center.
 fn cornerDensities(parent_block: Block, n: [8]Block) @Vector(4, f32) {
+    // `isSolid()` rather than `isFoundation()`, so bedrock counts as the material it is. The two
+    // differ only for edge stone, and reading the world border as open air would have the terrain
+    // erode toward it exactly as if there were a cave out there.
     var solid: [8]f32 = undefined;
-    for (n, 0..) |b, i| solid[i] = @floatFromInt(@intFromBool(b.isFoundation()));
-    const self_solid: f32 = @floatFromInt(@intFromBool(parent_block.isFoundation()));
+    for (n, 0..) |b, i| solid[i] = @floatFromInt(@intFromBool(b.isSolid()));
+    const self_solid: f32 = @floatFromInt(@intFromBool(parent_block.isSolid()));
 
     return @as(@Vector(4, f32), .{
         self_solid + solid[0] + solid[1] + solid[3],
@@ -400,8 +403,10 @@ fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx:
     // The shell. Positional and unconditional, so no combination of fields can cost a parent its block.
     if (lx -% 1 < 2 and ly -% 1 < 2) return false;
 
+    // Same `isSolid()` test `cornerDensities()` uses; the two must agree on what counts as material
+    // or this shortcut stops matching the field it is meant to be shortcutting.
     var buried = true;
-    for (n) |b| buried = buried and b.isFoundation();
+    for (n) |b| buried = buried and b.isSolid();
     if (buried) return false;
 
     const corners = cornerDensities(parent_block, n);
@@ -459,6 +464,12 @@ fn warpedMaterial(parent_block: Block, n: [8]Block, warp: dw.utils.Vec2f32, lx: 
 
 /// Applies deterministic logic to a child block based on its parent and 8 parent neighbors.
 /// Returns a `memory.BlockSpec` (temp procedural information) that can be compiled to `Block` later.
+///
+/// An empty neighbor means genuinely absent material, and callers must not pass one to stand in for
+/// "outside my buffer": erosion reads empty neighbors as exposure and carves toward them, and an
+/// empty result can only ever produce further empty results at the depths below it. A caller working
+/// from a fixed window (the 4x4 in `computeLayer()`) has to edge-extend past its border instead,
+/// or it will eat its own edges a little further on every layer with no way back.
 /// Correctly determines the child's `seed` property when returning it if the block is not empty.
 /// Decorations are applied afterward in `procedural.applyAncestorDecorations()`. TODO: actually add this!
 /// TODO: also add culling system for invalid decor block configurations in ancestor, determine how to deal with spiral plant
@@ -586,12 +597,13 @@ pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
             const chunk_off_x = @divFloor(lx, dw.CHUNK_SIZE);
             const chunk_off_y = @divFloor(ly, dw.CHUNK_SIZE);
 
+            // `moveAtDepth()` returns null only at the world border, where bedrock is the truthful
+            // answer; see `world.world_edge_block` for why air here would be corrosive.
             const target_nc = p.coord.moveAtDepth(
                 .{ chunk_off_x, chunk_off_y },
                 target_depth - 1,
             ) orelse {
-                // neighbors[n_idx] = if (target_depth - 1 == STARTING_ZOOM_TIMES) .edge_stone else .none;
-                neighbors[n_idx] = .empty;
+                neighbors[n_idx] = world.world_edge_block;
                 n_idx += 1;
                 continue;
             };
@@ -627,11 +639,12 @@ pub fn getAncestorNeighborhood(key: DepthCoordinate) [6][6]Block {
             const chunk_off_x = @divFloor(lx, 16);
             const chunk_off_y = @divFloor(ly, 16);
 
+            // Only the world border can fail here; bedrock, never air (`world.world_edge_block`).
             const target_nc = p_info_origin.coord.moveAtDepth(
                 .{ chunk_off_x, chunk_off_y },
                 parent_depth,
             ) orelse {
-                result[y_idx][x_idx] = .empty;
+                result[y_idx][x_idx] = world.world_edge_block;
                 continue;
             };
 
@@ -754,6 +767,25 @@ test "erosion mask: centered on break-even, and spread wide enough to commit" {
     const deviation = @sqrt(sum_sq / count - mean * mean);
     try testing.expect(@abs(mean - 0.5) < 0.06);
     try testing.expect(deviation > 0.15);
+}
+
+test "slope carve: terrain never erodes toward the world border" {
+    // The border is bedrock, not open air. The moment it reads as air again, a block sitting against
+    // the edge of the world erodes into it, and since an empty ancestor can only ever produce empty
+    // descendants, that emptiness spreads inward one step at every depth with no way back.
+    const parent: Block = .makeBasicBlock(.stone, 7);
+    const border: [8]Block = @splat(world.world_edge_block);
+    for (0..4) |ly| {
+        for (0..4) |lx| {
+            try testing.expect(!carvesAnywhere(parent, border, @intCast(lx), @intCast(ly)));
+        }
+    }
+
+    // And a face that meets the border on one side keeps the cells along it.
+    var half = border;
+    for (half[0..3]) |*b| b.* = .empty;
+    const corners = cornerDensities(parent, half);
+    try testing.expect(@reduce(.Min, corners) > 0);
 }
 
 test "slope carve: every parent keeps its 2x2 shell" {

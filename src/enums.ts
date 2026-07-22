@@ -52,6 +52,9 @@ export interface EngineExports extends WebAssembly.Exports {
     readonly tick: (arg0: number, arg1: number) => void;
     readonly mixSeed: (arg0: bigint) => bigint;
     readonly mixSeedF64: (arg0: bigint) => number;
+    readonly setSeedString: (arg0: bigint, arg1: bigint) => void;
+    readonly getSeedStringLen: () => bigint;
+    readonly getSeedStringPtr: () => bigint;
     readonly getMemoryLayoutPtr: () => bigint;
     readonly scratchAlloc: (arg0: number) => bigint;
     readonly isDebug: () => boolean;

@@ -2313,6 +2313,34 @@ pub fn modifyBlockHp(coord: Coordinate, bx: u4, by: u4, block: Block, hp_to_add:
     return false;
 }
 
+/// What a neighbor lookup yields once it leaves the world entirely, past the first or last chunk.
+///
+/// Bedrock rather than air, and the distinction is load-bearing. `applyAncestorLogic()` reads an
+/// empty neighbor as exposure and erodes toward it, and an empty ancestor can only ever produce
+/// empty descendants, so answering `.empty` at the border makes the world eat inward from its own
+/// edge a little further at every depth with no way back. Bedrock is what is actually out there.
+///
+/// This is ONLY for coordinates that genuinely have no chunk. A lookup that fails for any other
+/// reason is a bug and must reach `panicUnresolvedAncestor()` instead of quietly becoming terrain.
+pub const world_edge_block: Block = .makeBasicBlock(.edge_stone, 0);
+
+/// Fails loudly for an ancestor block that exists in the world but that the caller could not resolve.
+///
+/// Answering these with `.empty` is how a world silently deletes itself: the void spreads down every
+/// depth at once, so the symptom shows up as several depths going empty together with no single
+/// culprit, long after and far from wherever the lookup actually went wrong. A crash names the
+/// coordinate at the moment it happens instead.
+pub fn panicUnresolvedAncestor(coord: Coordinate, lx: u4, ly: u4, depth: u64) noreturn {
+    dw.logger.quick(.{
+        "{h}Unresolved ancestor block",
+        coord.asDepthCoordinate(depth),
+        lx,
+        ly,
+        memory.game.depth,
+    });
+    @panic("Ancestor lookup fell outside every quadrant; see the logged coordinate.");
+}
+
 /// Basic lookup to find a block's `Sprite` type for flag calculation.
 /// Checks caches, then modifications, then falls back to procedural logic.
 /// Ensures that we do not accidentally read `SimBuffer` data if checking an ancestor depth!
@@ -2363,10 +2391,13 @@ pub fn getBlockAt(coord: Coordinate, lx: u4, ly: u4, depth: u64) Block {
             const x_idx = diff_block_x + 1 + @as(i64, memory.game.player_quadrant % 2);
             const y_idx = diff_block_y + 1 + @as(i64, memory.game.player_quadrant / 2);
 
-            if (x_idx >= 0 and x_idx < 4 and y_idx >= 0 and y_idx < 4) {
-                return quad_cache.ancestor_materials[@intCast(y_idx)][@intCast(x_idx)];
+            // The window is the ONLY record of material at H, so a query it cannot represent has no
+            // answer at all. It used to be given air, which is the worst possible guess: the caller
+            // is generating terrain from this, and air here erases every depth that descends from it.
+            if (x_idx < 0 or x_idx >= 4 or y_idx < 0 or y_idx >= 4) {
+                panicUnresolvedAncestor(coord, lx, ly, depth);
             }
-            return .empty;
+            return quad_cache.ancestor_materials[@intCast(y_idx)][@intCast(x_idx)];
         }
     }
 
@@ -2841,32 +2872,35 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
                         const abs_chunk_y_old: i128 = (old_qy << shift_amt) | @as(i128, old_trace_coord.suffix[1]);
                         const diff_chunk_y: i64 = @intCast(std.math.clamp(abs_chunk_y_p - abs_chunk_y_old, -2, 2));
 
-                        var parent_block: Block = .empty;
                         var p_neighbors: [8]Block align(8) = @splat(.empty);
 
                         const px_idx = diff_chunk_x * 16 + @as(i64, p.bx) - @as(i64, old_t_bx) + 1 + @as(i64, coord.quadrant % 2);
                         const py_idx = diff_chunk_y * 16 + @as(i64, p.by) - @as(i64, old_t_by) + 1 + @as(i64, coord.quadrant / 2);
 
-                        if (px_idx >= 0 and px_idx < 4 and py_idx >= 0 and py_idx < 4) {
-                            parent_block = quad_cache.ancestor_materials[@intCast(py_idx)][@intCast(px_idx)];
+                        // The 4x4 is a WINDOW onto a larger world, not an island in a void, so anything
+                        // off its edge is edge-extended rather than read as air.
+                        //
+                        // Substituting air here is a one-way door. Every border cell would read as
+                        // exposed, `applyAncestorLogic()` erodes exposed cells, and an empty parent can
+                        // only ever produce empty children on the next descent. The grid loses a little
+                        // more of its border every layer and never recovers any of it, so past enough
+                        // descents the entire world below the horizon is air.
+                        const grid_max = quad_cache.ancestor_materials.len - 1;
+                        const gx = std.math.clamp(px_idx, 0, @as(i64, @intCast(grid_max)));
+                        const gy = std.math.clamp(py_idx, 0, @as(i64, @intCast(grid_max)));
+                        const parent_block = quad_cache.ancestor_materials[@intCast(gy)][@intCast(gx)];
 
-                            // Populate neighbors for applyAncestorLogic from the current 4x4 ancestor grid
-                            var n_idx: usize = 0;
-                            var ndy: i32 = -1;
-                            while (ndy <= 1) : (ndy += 1) {
-                                var ndx: i32 = -1;
-                                while (ndx <= 1) : (ndx += 1) {
-                                    if (ndx == 0 and ndy == 0) continue;
-                                    const nx = px_idx + ndx;
-                                    const ny = py_idx + ndy;
-
-                                    if (nx >= 0 and nx < 4 and ny >= 0 and ny < 4) {
-                                        p_neighbors[n_idx] = quad_cache.ancestor_materials[@intCast(ny)][@intCast(nx)];
-                                    } else {
-                                        p_neighbors[n_idx] = .empty;
-                                    }
-                                    n_idx += 1;
-                                }
+                        // Populate neighbors for applyAncestorLogic from the current 4x4 ancestor grid
+                        var n_idx: usize = 0;
+                        var ndy: i32 = -1;
+                        while (ndy <= 1) : (ndy += 1) {
+                            var ndx: i32 = -1;
+                            while (ndx <= 1) : (ndx += 1) {
+                                if (ndx == 0 and ndy == 0) continue;
+                                const nx = std.math.clamp(px_idx + ndx, 0, @as(i64, @intCast(grid_max)));
+                                const ny = std.math.clamp(py_idx + ndy, 0, @as(i64, @intCast(grid_max)));
+                                p_neighbors[n_idx] = quad_cache.ancestor_materials[@intCast(ny)][@intCast(nx)];
+                                n_idx += 1;
                             }
                         }
 
@@ -2885,7 +2919,10 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
                     if (mod_store.getCell(child_key, block_idx)) |cell| {
                         cell.applyTo(&next_materials[y_idx][x_idx]);
                     }
-                } else next_materials[y_idx][x_idx] = .empty;
+                    // Only the world border reaches here, and it is bedrock, never air: this grid is
+                    // the sole record of material at H and feeds itself on every later descent, so a
+                    // cell seeded with air stays air and spreads (`world_edge_block`).
+                } else next_materials[y_idx][x_idx] = world_edge_block;
             }
         }
 
