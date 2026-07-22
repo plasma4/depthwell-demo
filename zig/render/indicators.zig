@@ -60,6 +60,7 @@ const IndicatorKind = enum {
     corecraft,
     loot,
     portal,
+    invportal,
 
     /// Classifies a stored block type into the indicator it displays, or null for non-indicator blocks.
     /// Block IDs are stored as the base sprite (variation is render-only), so exact matching is valid here.
@@ -69,6 +70,7 @@ const IndicatorKind = enum {
             .basic_core, .core1, .core2, .core3, .core4 => .corecraft,
             .chest => .loot,
             .portal => .portal,
+            .invportal => .invportal,
             // .moss_shrub1, .moss_shrub2 => .tree,
             else => null,
         };
@@ -80,7 +82,8 @@ const IndicatorKind = enum {
             .furnace => .gold_bar,
             .corecraft => .craft,
             .loot => .chest,
-            .portal => .portal_visual,
+            // A dedicated inverted-portal icon is a future Aseprite request; reuse the portal one for now.
+            .portal, .invportal => .portal_visual,
         };
     }
 
@@ -88,23 +91,37 @@ const IndicatorKind = enum {
     /// A menu-backed kind's `MenusList` field name must match the tag name!
     fn menuFlag(self: IndicatorKind) ?*bool {
         return switch (self) {
-            // Starts a depth descent rather than opening anything, so it owns no flag.
-            .portal => null,
+            // Change the depth rather than opening anything, so they own no flag.
+            .portal, .invportal => null,
             inline else => |k| &@field(menus, @tagName(k)),
         };
     }
 
-    /// Whether clicking this indicator does anything. Display-only kinds never claim the click focus.
-    fn isClickable(self: IndicatorKind) bool {
-        return self == .portal or self.menuFlag() != null;
+    /// Whether clicking this indicator does anything, for the block it sits on this frame.
+    ///
+    /// Spectating is read-only, so every mutating (menu-backed) indicator goes dead and the only
+    /// descent allowed is a retrace: the portal is live solely on the block last ascended through.
+    /// Ascending back up (`.invportal`) stays available.
+    fn clickableAt(self: IndicatorKind, ref: BlockRef) bool {
+        if (dw.world.isSpectating()) {
+            return switch (self) {
+                .invportal => true,
+                .portal => if (dw.world.retraceStep()) |step|
+                    step.coord().eql(ref.coord) and step.bx == ref.bx and step.by == ref.by
+                else
+                    false,
+                else => false,
+            };
+        }
+        return self == .portal or self == .invportal or self.menuFlag() != null;
     }
 
     /// How far away (in blocks) this indicator starts showing, and so how far it can be used from.
-    /// A portal is deliberately tighter than the rest: descending is irreversible, so it should take
-    /// standing at the portal rather than merely being in the same room as one.
+    /// A portal is deliberately tighter than the rest: changing depth is a commitment, so it should
+    /// take standing at the portal rather than merely being in the same room as one.
     fn maxBlockDistance(self: IndicatorKind) f32 {
         return switch (self) {
-            .portal => 3.5,
+            .portal, .invportal => 3.5,
             else => 5.0,
         };
     }
@@ -113,6 +130,7 @@ const IndicatorKind = enum {
     fn activate(self: IndicatorKind, ref: BlockRef) void {
         switch (self) {
             .portal => dw.portal.trigger(ref.coord, ref.bx, ref.by),
+            .invportal => dw.portal.triggerAscend(ref.coord, ref.bx, ref.by),
             else => {},
         }
     }
@@ -278,7 +296,7 @@ const DrawVisitor = struct {
         const rel_size: f32 = @floatCast(geom.slot_size / @as(f32, @floatCast(memory.game.camera_scale)));
 
         // Only clickable indicators react; display-only ones (tree) just draw.
-        if (kind.isClickable() and geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
+        if (kind.clickableAt(ref) and geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
             // Down-capture for .indicator is claimed centrally in mouse.processDownCaptures()
             // (via isHoveringIndicator), so this frame's click_focus is already settled.
 
@@ -302,10 +320,10 @@ const DrawVisitor = struct {
         // Background inventory slot (color shifts while its menu is open)
         dw.entity.addEntity(.{
             // this creates an interesting style, just go with it
-            .sprite = if (kind == .furnace or kind == .portal) .wood_frame else .wood,
+            .sprite = if (kind == .furnace or kind == .portal or kind == .invportal) .wood_frame else .wood,
             .position = .{ geom.screen_x, geom.screen_y },
             .size = geom.slot_size,
-            .lcha = if (kind == .portal)
+            .lcha = if (kind == .portal or kind == .invportal)
                 // violet, and brightening as the player closes in, to read as "this takes you somewhere"
                 .{ 0.85 + 0.15 * geom.opacity, 0.06 + rel_size * 0.006, -1.9, geom.opacity }
             else if (kind == .furnace)
@@ -383,9 +401,8 @@ const HoverVisitor = struct {
 
     fn visit(self: *HoverVisitor, id: Sprite, kind: IndicatorKind, geom: IndicatorGeom, ref: BlockRef) bool {
         _ = id;
-        _ = ref;
         // Display-only indicators are not clickable, so they never claim indicator focus.
-        if (!kind.isClickable()) return false;
+        if (!kind.clickableAt(ref)) return false;
         if (geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
             self.found = true;
             return true; // stop scanning at the first hit
