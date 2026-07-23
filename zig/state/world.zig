@@ -574,9 +574,14 @@ pub var mod_store: ModificationStore = .{};
 pub const AscentStep = struct {
     suffix: Vec2u,
     quadrant: u2,
-    /// Block within the chunk that the descent lands in, in the DEEPER depth's coordinates.
+    /// Block within the parent chunk the retracing descent must zoom into.
     bx: u4,
     by: u4,
+    /// Where the player stood at the deeper depth, in that depth's chunk-relative subpixels.
+    ///
+    /// A retrace puts them back on this exact spot rather than on the target block's floor: going
+    /// back should return you where you were, not stand you somewhere new.
+    origin_pos: Vec2i,
 
     pub inline fn coord(self: @This()) Coordinate {
         return .{ .suffix = self.suffix, .quadrant = self.quadrant };
@@ -604,18 +609,29 @@ pub inline fn deepestDepth() u64 {
     return memory.game.depth + ascent_stack.items.len;
 }
 
+/// Whether there is a depth above the current one to ascend into.
+///
+/// `STARTING_ZOOM_TIMES` is the base layer: it is generated outright rather than inherited from a
+/// parent, so nothing above it exists to look at. Gates the `.invportal` indicator (which is not even
+/// drawn at the floor) and the ascent hotkey, so `computeParentLayer()`'s assert is never reached.
+pub inline fn canAscend() bool {
+    return memory.game.depth > STARTING_ZOOM_TIMES;
+}
+
 /// The step a descent must retrace, or null when the player is already at their deepest depth.
 pub inline fn retraceStep() ?AscentStep {
     return if (isSpectating()) ascent_stack.items[ascent_stack.items.len - 1] else null;
 }
 
 /// Drops the top ascent step, called once a descent that retraced it has committed.
-/// Asserts it lands back on exactly the block that was ascended through: a descent anywhere else
-/// would reframe the depth and orphan every `mod_store` key below it.
-pub fn popAscentStep(landed: Coordinate, bx: u4, by: u4) void {
+///
+/// `descended_from` is the block the descent zoomed INTO, in the shallower (parent) depth's
+/// coordinates. It must equal the recorded step: a descent through any other block would reframe the
+/// depth and orphan every `mod_store` key below it.
+pub fn popAscentStep(descended_from: Coordinate, bx: u4, by: u4) void {
     std.debug.assert(isSpectating());
     const step = ascent_stack.items[ascent_stack.items.len - 1];
-    std.debug.assert(step.coord().eql(landed) and step.bx == bx and step.by == by);
+    std.debug.assert(step.coord().eql(descended_from) and step.bx == bx and step.by == by);
     _ = ascent_stack.pop();
 }
 
@@ -1551,9 +1567,13 @@ pub const QuadCache = struct {
     /// The grid is refined DOWNWARD from its parent and that refinement is lossy, so it cannot be
     /// run backwards: an ascent has to read back the grid that was recorded on the way down.
     /// `left_path`/`top_path` are the same idea for the rebase origins, which is why this sits beside them.
-    // ponytail: one grid per depth (~256 B), linear in the deepest depth ever reached. Fine to
-    // thousands of depths; if that ever stops being true, record only every Nth depth and re-derive
-    // the ones between by descending from the nearest recorded one.
+    // ponytail: 4 KiB per depth (ANCESTOR_GRID^2 * @sizeOf(Block)), linear and unbounded in the
+    // deepest depth ever reached, and it lands in the save verbatim. That is ~250 KiB at depth 100
+    // but ~38 GiB at depth 10M, so this is the one thing standing between the fractal and arbitrary
+    // depth. It dwarfs every other per-depth cost: the rebase origins next to it are 6 BITS a depth.
+    // Fix when depth budgets are decided, whichever suits: (a) keep only the last N grids in a ring
+    // and cap how far an ascent may climb, making this O(1); (b) record every Nth depth and re-derive
+    // the ones between by refining forward from the nearest recorded one, trading time for space.
     materials_path: SegmentedList([ANCESTOR_GRID][ANCESTOR_GRID]Block, 1),
 
     // These 4 properties are used to determine if a QuadCache is at the very edge of the world for chunk gen/zooming in.
@@ -2909,52 +2929,50 @@ fn replayRebaseState(depth: u64) RebaseState {
     return state;
 }
 
-/// Works out the D to D-1 transition, the exact inverse of `computeLayer()`'s `.player` anchor.
+/// Where a player stands inside block (`bx`, `by`) of a chunk: horizontally centred, feet on its floor.
+/// Shares `LANDING_CLEARANCE` with `computeLayer()`'s `.block_floor`, for the same reason: feet exactly
+/// on a block boundary belong to the block below and read as a permanent collision.
+pub fn blockStandPos(bx: u4, by: u4) Vec2i {
+    return .{
+        @as(i64, bx) * CHUNK_SIZE_SQ + @divExact(CHUNK_SIZE_SQ, 2),
+        (@as(i64, by) + 1) * CHUNK_SIZE_SQ - PLAYER_FEET_OFFSET - LANDING_CLEARANCE,
+    };
+}
+
+/// Works out the D to D-1 transition that carries the point `pos` inside chunk `coord` up a layer.
 ///
-/// The player keeps the world point they are standing on, so the zoom out is seamless and the commit
-/// has nothing to snap. Everything the new depth needs is read back rather than derived: the origins
-/// from `left_path`/`top_path`, the seeds and edge flags by replaying them (`replayRebaseState()`),
-/// and the horizon window from `materials_path`. None of the three can be inverted a step at a time.
+/// The straight scale-down: a child chunk covers `SUBPIXELS_IN_CHUNK / ZOOM_FACTOR` of its parent, and
+/// the point keeps its place inside that. No pivot compensation, unlike `computeLayer()`, and none is
+/// wanted: an ascent's camera holds on this very point for the whole animation, so anything added here
+/// and not there would show up as a jump on the committing frame.
 ///
-/// Leaves no lasting change behind, exactly like `computeLayer()`; apply it with `commitLayer()`.
-pub fn computeParentLayer() LayerTransition {
+/// Everything else the new depth needs is read back rather than derived: the origins from
+/// `left_path`/`top_path`, the seeds and edge flags by replaying them (`replayRebaseState()`), and the
+/// horizon window from `materials_path`. None of the three can be inverted a step at a time.
+///
+/// Leaves no lasting change behind, exactly like `computeLayer()`; apply it with `applyAscent()`.
+pub fn computeParentLayer(coord: Coordinate, pos: Vec2i) LayerTransition {
     const g = &memory.game;
     const depth = g.depth - 1;
     // The base layer is generated rather than inherited, so it has no parent to ascend into.
     std.debug.assert(depth >= STARTING_ZOOM_TIMES);
+    std.debug.assert(pos[0] >= 0 and pos[0] < dw.SUBPIXELS_IN_CHUNK);
+    std.debug.assert(pos[1] >= 0 and pos[1] < dw.SUBPIXELS_IN_CHUNK);
 
-    const child_key = g.getPlayerCoord().asDepthCoordinate(g.depth);
-    const parent = child_key.getParent();
+    const child_key = coord.asDepthCoordinate(g.depth);
+    const parent_coord = child_key.getParent().asCoord();
 
-    // Which of the parent's `ZOOM_FACTOR` by `ZOOM_FACTOR` child chunks the player is standing in.
+    // Which of the parent's `ZOOM_FACTOR` by `ZOOM_FACTOR` child chunks this one is.
     const cell_x: i64 = @intCast(child_key.suffix[0] & (ZOOM_FACTOR - 1));
-    var cell_y: i64 = @intCast(child_key.suffix[1] & (ZOOM_FACTOR - 1));
+    const cell_y: i64 = @intCast(child_key.suffix[1] & (ZOOM_FACTOR - 1));
 
-    // Subpixels one child chunk covers inside its parent.
+    // Subpixels one child chunk covers inside its parent. The scaled point cannot leave the parent
+    // chunk: `cell` is at most `ZOOM_FACTOR - 1` and `pos / ZOOM_FACTOR` stays under one span.
     const child_span: i64 = @divExact(@as(i64, dw.SUBPIXELS_IN_CHUNK), ZOOM_FACTOR);
-    const pivot_y: i64 = (ZOOM_FACTOR - 1) * dw.CHUNK_SIZE_SQ / 2; // the same compensation `computeLayer()` adds
-
-    // Undo the vertical pivot before scaling back down. A position below it came from the child chunk
-    // row above, which is the descent's chunk carry running backwards.
-    var local_y = g.player_pos[1] - pivot_y;
-    if (local_y < 0) {
-        local_y += dw.SUBPIXELS_IN_CHUNK;
-        cell_y -= 1;
-    }
-
-    var new_pos: Vec2i = .{
-        cell_x * child_span + @divFloor(g.player_pos[0], ZOOM_FACTOR),
-        cell_y * child_span + @divFloor(local_y, ZOOM_FACTOR),
+    const new_pos: Vec2i = .{
+        cell_x * child_span + @divFloor(pos[0], ZOOM_FACTOR),
+        cell_y * child_span + @divFloor(pos[1], ZOOM_FACTOR),
     };
-
-    // A borrow off the top of the parent moves into the parent above it.
-    var parent_coord = parent.asCoord();
-    if (new_pos[1] < 0) {
-        new_pos[1] += dw.SUBPIXELS_IN_CHUNK;
-        // The world edge has nowhere above it; staying put keeps the player inside the world, and the
-        // pivot is under a block so the visual slip is smaller than one.
-        parent_coord = parent_coord.moveAtDepth(.{ 0, -1 }, depth) orelse parent_coord;
-    }
 
     var t: LayerTransition = .{
         .depth = depth,
@@ -2990,24 +3008,32 @@ pub fn computeParentLayer() LayerTransition {
 /// and pins the block a later descent has to retrace. The descendant markers are propagated first,
 /// while the deeper depth is still the current one and its parents are still one hop away.
 pub fn popLayer() void {
-    applyAscent(computeParentLayer());
+    const g = &memory.game;
+    // The hotkey has no portal to rise through, so the player's own spot is the point carried up.
+    applyAscent(computeParentLayer(g.getPlayerCoord(), g.player_pos), g.player_pos);
 }
 
 /// Commits an already-computed ascent transition: rolls the deeper depth's modifications up into
 /// markers, records the retrace step, and installs D-1. Shared by the instant `popLayer()` and the
 /// portal animation's commit, so both leave the exact same state behind.
 ///
+/// `origin_pos` is the point at the DEEPER depth that was carried up (the invportal block, or the
+/// player's own spot for the hotkey); a return puts the player back exactly there. Its chunk needs no
+/// recording: the parent block below reproduces it, which is what `popAscentStep()` leans on.
+///
 /// Precondition: `t.depth == game.depth - 1`, i.e. the world is still at the depth being left.
-pub fn applyAscent(t: LayerTransition) void {
+pub fn applyAscent(t: LayerTransition, origin_pos: Vec2i) void {
     std.debug.assert(t.depth == memory.game.depth - 1);
     markDescendantsFromChild(memory.game.depth);
 
-    // The block the retracing descent must aim at, in the parent's coordinates.
+    // The parent block a retracing descent must zoom into, which is what reproduces `origin_coord`'s
+    // chunk and with it the depth's whole coordinate frame. `origin_pos` then places the player.
     ascent_stack.append(memory.main_allocator, .{
         .suffix = t.player_chunk,
         .quadrant = t.player_quadrant,
         .bx = @intCast(@divTrunc(t.new_pos[0], dw.CHUNK_SIZE_SQ)),
         .by = @intCast(@divTrunc(t.new_pos[1], dw.CHUNK_SIZE_SQ)),
+        .origin_pos = origin_pos,
     }) catch memory.oom();
 
     commitLayer(t, false);
@@ -3015,17 +3041,24 @@ pub fn applyAscent(t: LayerTransition) void {
 
 /// Instantly descends back through the block the player last ascended past, popping the ascent stack.
 /// The only descent allowed while spectating (see `isSpectating()`).
+///
+/// The block only picks the depth's coordinate frame; the player is put back on the exact spot they
+/// left from, so a return lands where they were rather than on the target block's floor.
+/// Still spectating afterwards if more steps remain, since the depth reached is still above the deepest.
 pub fn retraceInstant() void {
     const step = retraceStep().?;
-    const t = computeLayer(step.coord(), step.bx, step.by, .block_floor);
+    var t = computeLayer(step.coord(), step.bx, step.by, .block_floor);
+    t.new_pos = step.origin_pos;
     // No preview warmed the ancestor cache here (unlike the animated descent), and its entries are
     // tiered relative to the old depth, so they must be dropped rather than kept.
     commitLayer(t, false);
-    popAscentStep(
-        .{ .suffix = t.player_chunk, .quadrant = t.player_quadrant },
-        @intCast(@divTrunc(t.new_pos[0], dw.CHUNK_SIZE_SQ)),
-        @intCast(@divTrunc(t.new_pos[1], dw.CHUNK_SIZE_SQ)),
-    );
+    popAscentStep(step.coord(), step.bx, step.by);
+
+    // `commitLayer()` empties the `SimBuffer`, and a return fade holds the simulation still for the
+    // rest of its length, so nothing else would refill it: every render frame until the fade ends
+    // would regenerate the visible window instead. Must follow the pop, so the markers baked in match
+    // whether the depth landed on is still a spectating one.
+    SimBuffer.sync(memory.game.getPlayerCoord(), .{ 0, 0 });
 }
 
 /// Rolls every modification at `child_depth` up into a descendant marker on its parent block.
@@ -3437,9 +3470,10 @@ test "computeLayer: a block_floor landing leaves the feet clear of the floor" {
     }
 }
 
-test "computeParentLayer: inverts a descent back to the block it came from" {
-    // Ascend is the spy-glass inverse of descend: descending into a block and then ascending must land
-    // on the very chunk, quadrant and depth left behind, and within a rounding of the same subpixel.
+test "computeParentLayer: scales a point into its parent chunk with no pivot" {
+    // The transform an ascent is built on. It must be the plain scale-down and nothing else: the
+    // camera holds on this exact point for the whole animation, so any extra term here (a pivot, a
+    // rounding bias) shows up as a jump on the frame the layer commits.
     const saved_game = memory.game;
     const saved_suffix = max_possible_suffix;
     defer {
@@ -3448,35 +3482,75 @@ test "computeParentLayer: inverts a descent back to the block it came from" {
     }
 
     memory.game = .{};
-    memory.game.depth = 10; // below HORIZON_DEPTH and above STARTING_ZOOM_TIMES, so no rebase
-    memory.game.player_chunk = .{ 3, 5 };
-    memory.game.player_pos = .{ 1000, 500 };
+    memory.game.depth = 11; // below HORIZON_DEPTH, so no rebase; parent 10 clears STARTING_ZOOM_TIMES
+    memory.game.player_chunk = .{ 13, 21 };
     max_possible_suffix = getMaxSuffixAtDepth(memory.game.depth);
     quad_cache.path_hashes.value[0] = memory.game.seed;
 
-    const origin_depth = memory.game.depth;
-    const origin_chunk = memory.game.player_chunk;
-    const origin_quadrant: u2 = @intCast(memory.game.player_quadrant);
-    const origin_pos = memory.game.player_pos;
-    const bx = memory.game.getBlockXInChunk();
-    const by = memory.game.getBlockYInChunk();
+    const up = computeParentLayer(memory.game.getPlayerCoord(), .{ 1000, 500 });
 
-    // Descend, then move the live world onto the child so the ascent has something to invert.
-    const down = computeLayer(memory.game.getPlayerCoord(), bx, by, .player);
-    memory.game.depth = down.depth;
-    memory.game.player_chunk = down.player_chunk;
-    memory.game.player_quadrant = down.player_quadrant;
-    memory.game.player_pos = down.new_pos;
-    max_possible_suffix = down.max_possible_suffix;
+    try testing.expectEqual(@as(u64, 10), up.depth);
+    // Zooming out shifts the suffix right by one cell.
+    try testing.expectEqual(@as(Vec2u, .{ 3, 5 }), up.player_chunk);
 
-    const up = computeParentLayer();
+    // The chunk keeps its place inside the parent: cell * span + pos / ZOOM_FACTOR.
+    const span = @divExact(@as(i64, dw.SUBPIXELS_IN_CHUNK), ZOOM_FACTOR);
+    try testing.expectEqual(@as(i64, 13 % ZOOM_FACTOR) * span + @divFloor(@as(i64, 1000), ZOOM_FACTOR), up.new_pos[0]);
+    try testing.expectEqual(@as(i64, 21 % ZOOM_FACTOR) * span + @divFloor(@as(i64, 500), ZOOM_FACTOR), up.new_pos[1]);
 
-    try testing.expectEqual(origin_depth, up.depth);
-    try testing.expectEqual(origin_chunk, up.player_chunk);
-    try testing.expectEqual(origin_quadrant, up.player_quadrant);
-    // The only loss is the quarter-subpixel from the `/ ZOOM_FACTOR` truncation.
-    try testing.expect(@abs(up.new_pos[0] - origin_pos[0]) < ZOOM_FACTOR);
-    try testing.expect(@abs(up.new_pos[1] - origin_pos[1]) < ZOOM_FACTOR);
+    // The landing must stay inside the parent chunk, since `player_pos` is chunk-relative.
+    try testing.expect(up.new_pos[0] >= 0 and up.new_pos[0] < dw.SUBPIXELS_IN_CHUNK);
+    try testing.expect(up.new_pos[1] >= 0 and up.new_pos[1] < dw.SUBPIXELS_IN_CHUNK);
+}
+
+test "AscentStep: retracing the recorded block returns to the chunk and spot that were left" {
+    // The contract `popAscentStep()` asserts, and the whole basis of the read-only spy-glass: the
+    // block an ascent records must be the one a descent zooms into to land back on the same frame.
+    // Descending anywhere else renumbers the depth's suffixes and orphans its `mod_store` keys.
+    const saved_game = memory.game;
+    const saved_suffix = max_possible_suffix;
+    defer {
+        memory.game = saved_game;
+        max_possible_suffix = saved_suffix;
+    }
+
+    memory.game = .{};
+    memory.game.depth = 11; // below HORIZON_DEPTH, so no rebase; parent 10 clears STARTING_ZOOM_TIMES
+    memory.game.player_chunk = .{ 13, 21 };
+    max_possible_suffix = getMaxSuffixAtDepth(memory.game.depth);
+    quad_cache.path_hashes.value[0] = memory.game.seed;
+
+    const child_chunk = memory.game.player_chunk;
+    const child_depth = memory.game.depth;
+
+    // An inverted portal partway across the chunk, exactly as `ensureReady()` aims an ascent.
+    const origin = blockStandPos(6, 9);
+    const up = computeParentLayer(memory.game.getPlayerCoord(), origin);
+
+    // Exactly what `applyAscent()` records.
+    const step: AscentStep = .{
+        .suffix = up.player_chunk,
+        .quadrant = up.player_quadrant,
+        .bx = @intCast(@divTrunc(up.new_pos[0], CHUNK_SIZE_SQ)),
+        .by = @intCast(@divTrunc(up.new_pos[1], CHUNK_SIZE_SQ)),
+        .origin_pos = origin,
+    };
+
+    // Stand at the parent, then retrace exactly as `retraceInstant()` does.
+    memory.game.depth = up.depth;
+    memory.game.player_chunk = up.player_chunk;
+    memory.game.player_quadrant = up.player_quadrant;
+    memory.game.player_pos = up.new_pos;
+    max_possible_suffix = up.max_possible_suffix;
+
+    var down = computeLayer(step.coord(), step.bx, step.by, .block_floor);
+    down.new_pos = step.origin_pos;
+
+    try testing.expectEqual(child_depth, down.depth);
+    try testing.expectEqual(child_chunk, down.player_chunk);
+    try testing.expectEqual(@as(u2, 0), down.player_quadrant);
+    // Returning puts the player back on the block they rose through, not on the target block's floor.
+    try testing.expectEqual(origin, down.new_pos);
 }
 
 test "markDescendantsFromChild: rolls a deep edit into a parent marker, idempotently" {
