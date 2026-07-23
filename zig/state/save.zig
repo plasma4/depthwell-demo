@@ -313,8 +313,14 @@ fn readHeaderCore(r: *Reader, section_len: usize) !void {
 
 /// Section version for the quad cache. Bumped when `QuadCache.ANCESTOR_GRID` changed the size of
 /// `ancestor_materials`, since the payload is written as raw bytes and carries no shape of its own.
-/// v3 appends `materials_path` (the per-depth horizon windows an ascent reads back).
+/// v3 appends `materials_path` (what each depth's horizon window is recovered from).
 const QUADCACHE_VERSION = 3;
+
+/// Tag for the `materials_mode` the save was written under, so a blob from a build with the other
+/// strategy is refused rather than read as garbage: the two store different types in the same slot.
+fn materialsModeTag() u8 {
+    return @intFromEnum(world.materials_mode);
+}
 
 /// Exports quad cache (fractal descent state; raw internal fields + the path lists)
 fn writeQuadCache(w: *Writer) !void {
@@ -336,6 +342,7 @@ fn writeQuadCache(w: *Writer) !void {
     for (0..len) |i| try w.int(u64, qc.left_path.at(i).*);
     for (0..len) |i| try w.int(u64, qc.top_path.at(i).*);
 
+    try w.int(u8, materialsModeTag());
     const materials_len = qc.materials_path.len;
     try w.varint(materials_len);
     for (0..materials_len) |i| try w.bytes(std.mem.asBytes(qc.materials_path.at(i)));
@@ -381,6 +388,10 @@ fn readQuadCache(r: *Reader, section_version: u16) !void {
         qc.top_path.at(i).* = try r.int(u64);
     }
 
+    // Refuse a save written by a build using the other materials strategy: the slots below are a
+    // different type entirely, and reading them blind would fill the descent state with noise.
+    if (try r.int(u8) != materialsModeTag()) return SaveError.BadData;
+
     const materials_len: usize = @intCast(try r.varint());
     if (materials_len > qc.materials_path.prealloc_segment.len) {
         try qc.materials_path.growCapacity(world.alloc, materials_len);
@@ -404,6 +415,8 @@ fn writeAscentStack(w: *Writer) !void {
         try w.int(u8, step.quadrant);
         try w.int(u8, step.bx);
         try w.int(u8, step.by);
+        try w.int(i64, step.origin_pos[0]);
+        try w.int(i64, step.origin_pos[1]);
     }
     w.endSection(at);
 }
@@ -418,6 +431,7 @@ fn readAscentStack(r: *Reader) !void {
             .quadrant = @intCast(try r.int(u8) & 3),
             .bx = @intCast(try r.int(u8) & 15),
             .by = @intCast(try r.int(u8) & 15),
+            .origin_pos = .{ try r.int(i64), try r.int(i64) },
         });
     }
 }
