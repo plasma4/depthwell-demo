@@ -83,11 +83,60 @@ pub const Phase = enum(u8) {
     descending,
     /// A D -> D-1 ascent through an inverted portal, the same animation run in reverse.
     ascending,
+    /// A D -> D+1 return: dives back through a portal to walk an ascent back one step, running the
+    /// zoom past `ZOOM_FACTOR` into a fadeout rather than meeting a preview (see `triggerReturn()`).
+    returning,
 };
 
-/// Whether the running transition is a descent (rather than an ascent). Only meaningful while active.
+/// Frames the outgoing dive of a return takes. The world commits on the frame this ends, under a
+/// screen that has already faded out, so the depth change itself is never seen.
+pub const RETURN_DIVE_FRAMES: u32 = 34;
+/// Frames the arrival takes, fading the depth landed on back in.
+pub const RETURN_ARRIVE_FRAMES: u32 = 18;
+/// A return end to end.
+pub const RETURN_FRAMES: u32 = RETURN_DIVE_FRAMES + RETURN_ARRIVE_FRAMES;
+
+/// How far the dive keeps zooming, as a multiple of the committed scale.
+///
+/// Deliberately well past `ZOOM_FACTOR`: a descent stops there because that is where its preview lines
+/// up, but a return has no preview to meet, so the world simply runs away into the fade. Being a plain
+/// multiple of the current view (rather than anything derived from the depth) is what makes the effect
+/// identical at depth 40 and at depth 10,000,000.
+pub const RETURN_ZOOM: f64 = 24.0;
+
+/// Fraction of the dive that passes before the fade to black starts, so the zoom is read as a dive
+/// rather than as a plain fade with some motion behind it.
+const RETURN_FADE_START: f64 = 0.45;
+
+comptime {
+    if (RETURN_ZOOM <= dw.ZOOM_FACTOR) @compileError("A return must overshoot ZOOM_FACTOR; stopping there is the descent's job.");
+    if (PULL_FRAMES >= RETURN_DIVE_FRAMES) @compileError("The player must finish being drawn in before a return commits.");
+    if (RETURN_FADE_START <= 0.0 or RETURN_FADE_START >= 1.0) @compileError("RETURN_FADE_START is a fraction of the dive.");
+}
+
+/// Whether the running transition is a descent (rather than an ascent). Only meaningful while zooming.
 inline fn isDescending() bool {
     return memory.game.portal_phase == @intFromEnum(Phase.descending);
+}
+
+/// Whether an ascent is currently playing. Unlike `isDescending()`, this is safe to ask at any time.
+pub inline fn isAscending() bool {
+    return memory.game.portal_phase == @intFromEnum(Phase.ascending);
+}
+
+/// Whether a return fade is currently playing.
+pub inline fn isReturning() bool {
+    return memory.game.portal_phase == @intFromEnum(Phase.returning);
+}
+
+/// Whether the running transition is one of the two that build a PREVIEW layer (descent or ascent).
+///
+/// A return zooms as well, but it has no preview to meet: it lands on a depth already visited, at a
+/// spot already recorded. So everything about the second layer (`overlayOpacity()`, `ensureReady()`'s
+/// generation, `fillPreview()`) asks this, while the motion the player actually sees asks
+/// `isActive()` or `hasMotionOverride()`.
+pub inline fn isZooming() bool {
+    return isDescending() or isAscending();
 }
 
 /// One block being swallowed: a purely visual echo of terrain near the player.
@@ -146,6 +195,15 @@ var anchor: [2]f64 = .{ 0.0, 0.0 };
 /// descent, but sits apart from it for an ascent, where the camera holds on the player instead.
 var effect_centre: [2]f64 = .{ 0.0, 0.0 };
 
+/// The spot inside the inverted portal's own chunk that an ascent carries up: what the dive is aimed
+/// at and what the landing one depth higher is derived from. Only meaningful while an ascent runs.
+var ascend_origin: dw.utils.Vec2i = .{ 0, 0 };
+
+/// Where the player was standing when the ascent began, which is where a later return brings them
+/// back to. Captured at trigger time, before the pull moves them.
+var ascend_from_coord: Coordinate = undefined;
+var ascend_from_pos: dw.utils.Vec2i = .{ 0, 0 };
+
 /// The descent's shards. Held in a fixed-sized array rather than a dynamic allocation.
 var debris: [SHARD_COUNT]Shard = undefined;
 /// How many shards are currently active in the array.
@@ -197,7 +255,12 @@ inline fn zoomSign() f64 {
 /// A descent runs 1x -> `ZOOM_FACTOR` (zoom in); an ascent runs 1x -> `1 / ZOOM_FACTOR` (zoom out).
 /// `overlayScale()` cancels the factor out, which is why reaching the last frame lands on the committed view.
 pub fn zoomFactor() f64 {
-    if (!isActive()) return 1.0;
+    if (isReturning()) {
+        // Nothing left to zoom once it has committed: the arrival is the landed world fading in.
+        if (memory.game.portal_frame >= RETURN_DIVE_FRAMES) return 1.0;
+        return std.math.pow(f64, RETURN_ZOOM, zoomCurve(returnDiveProgress()));
+    }
+    if (!isZooming()) return 1.0;
     return std.math.pow(f64, @as(f64, dw.ZOOM_FACTOR), zoomSign() * zoomCurve(progress()));
 }
 
@@ -241,7 +304,7 @@ inline fn pastReveal(zoom: f64) bool {
 /// D is never faded: it stays at full strength for the whole descent and this is the only knob moved,
 /// so D+1 arrives *over* a solid image rather than the two meeting in the middle as a dissolve.
 pub fn overlayOpacity() f64 {
-    if (!isActive()) return 0.0;
+    if (!isZooming()) return 0.0;
     const start = zoomCurve(@as(f64, @floatFromInt(fill_deadline)) / @as(f64, @floatFromInt(TOTAL_FRAMES)));
     const now = zoomCurve(progress());
     if (now <= start) return 0.0;
@@ -251,10 +314,11 @@ pub fn overlayOpacity() f64 {
 }
 
 /// How far the player has been drawn into the portal, 0 to 1.
-/// Always 0 for an ascent: the player is not pulled anywhere, they zoom out from where they stand,
-/// so the pull, squeeze and camera-ease terms that read this all fall out to identity.
+/// Both directions pull: a descent is swallowed by the portal below, an ascent is drawn up through the
+/// inverted one above. Either way the player ends on the very point the layer lands them at, which is
+/// what keeps the committing frame from snapping.
 inline fn pullProgress() f64 {
-    if (!isDescending()) return 0.0;
+    if (!hasMotionOverride()) return 0.0;
     const frame: f64 = @floatFromInt(@min(memory.game.portal_frame, PULL_FRAMES));
     return frame / @as(f64, @floatFromInt(PULL_FRAMES));
 }
@@ -263,8 +327,10 @@ inline fn pullProgress() f64 {
 /// Builds with the zoom so the tremor peaks as the descent commits (see `chunks.updateShake()`).
 pub fn shakeIntensity() f32 {
     if (!isActive()) return 0.0;
+    // The arrival is a still, landed world; shaking it would undo the calm the fade-in buys.
+    if (isReturning() and memory.game.portal_frame >= RETURN_DIVE_FRAMES) return 0.0;
     // A floor keeps a tremor present from the first frame, since the zoom curve starts flat.
-    return @floatCast(0.25 + 0.75 * zoomCurve(progress()));
+    return @floatCast(0.25 + 0.75 * zoomCurve(curveProgress()));
 }
 
 /// Rate the background clock advances at, eased to a standstill as the player is drawn in.
@@ -282,7 +348,63 @@ pub fn trigger(coord: Coordinate, bx: u4, by: u4) void {
 /// The block is recorded only so the effects can emanate from it; the transition itself derives
 /// entirely from the player's position (see `world.computeParentLayer()`). Ignored if one is running.
 pub fn triggerAscend(coord: Coordinate, bx: u4, by: u4) void {
+    // The base layer has no parent to rise into; the indicator is already hidden there, so this is
+    // only the backstop for any other caller.
+    if (!world.canAscend()) return;
     beginTransition(.ascending, coord, bx, by);
+}
+
+/// Starts a return: dives back through the portal at `coord`, landing on the spot the last ascent was
+/// taken from. The player is drawn into the portal exactly as a descent draws them in, so nothing
+/// about the move reads as a teleport.
+///
+/// Shaped like the descent but not the same: with no preview to line up against, the zoom is free to
+/// overshoot `ZOOM_FACTOR` and run away into a fadeout, which is what keeps a return looking identical
+/// at any depth. Which portal was clicked only decides where the dive is aimed; the route back is the
+/// recorded `AscentStep`, so any portal serves as the way down.
+/// No-op unless the player is actually above their deepest depth.
+pub fn triggerReturn(coord: Coordinate, bx: u4, by: u4) void {
+    if (isActive() or !world.isSpectating()) return;
+    beginTransition(.returning, coord, bx, by);
+}
+
+/// How far through the DIVE a return is, 0 to 1, holding at 1 for the arrival.
+/// Everything visible about a return is over by the time it commits, so this is what the visual
+/// curves run on rather than the whole length.
+inline fn returnDiveProgress() f64 {
+    const f: f64 = @floatFromInt(@min(memory.game.portal_frame, RETURN_DIVE_FRAMES));
+    return f / @as(f64, @floatFromInt(RETURN_DIVE_FRAMES));
+}
+
+/// Whether the transition is currently driving the camera and player itself.
+/// False through a return's arrival: the world has already committed by then and the player is at
+/// their landing spot, so the ordinary interpolation takes back over.
+pub inline fn hasMotionOverride() bool {
+    if (!isActive()) return false;
+    return !isReturning() or memory.game.portal_frame < RETURN_DIVE_FRAMES;
+}
+
+/// How far through whichever part of the transition drives the visuals, 0 to 1.
+inline fn curveProgress() f64 {
+    return if (isReturning()) returnDiveProgress() else progress();
+}
+
+/// Opacity the whole world (background and tiles alike) is drawn at.
+///
+/// 1 except during a return, which fades out over the back of its dive and back in on arrival. The
+/// commit lands between the two, on a screen that is already empty, so the depth change is never seen.
+pub fn worldOpacity() f64 {
+    if (!isReturning()) return 1.0;
+    const frame = memory.game.portal_frame;
+    if (frame < RETURN_DIVE_FRAMES) {
+        // Holds at full through the early dive, so the zoom is what reads, then drops to nothing by
+        // the frame the world commits.
+        const t = returnDiveProgress();
+        if (t <= RETURN_FADE_START) return 1.0;
+        return 1.0 - smoothstep((t - RETURN_FADE_START) / (1.0 - RETURN_FADE_START));
+    }
+    const t = @as(f64, @floatFromInt(frame - RETURN_DIVE_FRAMES)) / @as(f64, @floatFromInt(RETURN_ARRIVE_FRAMES));
+    return smoothstep(t);
 }
 
 fn beginTransition(phase: Phase, coord: Coordinate, bx: u4, by: u4) void {
@@ -316,6 +438,17 @@ fn ensureReady() void {
     const bx: u4 = @intCast(memory.game.portal_bx & 15);
     const by: u4 = @intCast(memory.game.portal_by & 15);
 
+    if (isReturning()) {
+        // A return has no preview to build: the depth it lands on was already visited, and where the
+        // player lands there is already recorded (see `world.retraceInstant()`). All it needs is the
+        // point to dive at and some rubble to swallow on the way.
+        computeEffectCentre(bx, by);
+        anchor = effect_centre;
+        collectDebris();
+        ready = true;
+        return;
+    }
+
     if (isDescending()) {
         // `.block_floor` pins the landing to the portal block itself. Deriving it from the player
         // instead would place them wherever they happened to be standing scaled up, which need not
@@ -323,13 +456,15 @@ fn ensureReady() void {
         transition = world.computeLayer(portalCoord(), bx, by, .block_floor);
         computeAnchor(bx, by);
     } else {
-        // An ascent keeps the player's own world point (see `world.computeParentLayer()`), so the
-        // camera holds on the player and simply pulls out; the anchor is the player's own position.
-        transition = world.computeParentLayer();
-        anchor = .{
-            @floatFromInt(memory.game.player_pos[0]),
-            @floatFromInt(memory.game.player_pos[1]),
-        };
+        // The inverted portal is what the player rises through, exactly as the portal is what they
+        // fall into, so the landing is pinned to that block rather than to wherever they stood.
+        // Deriving it from the player instead would drop them at an unrelated spot on arrival, which
+        // is the whole reason the descent uses the block too.
+        ascend_origin = world.blockStandPos(bx, by);
+        ascend_from_coord = memory.game.getPlayerCoord();
+        ascend_from_pos = memory.game.player_pos;
+        transition = world.computeParentLayer(portalCoord(), ascend_origin);
+        anchor = chunkRelative(ascend_origin);
     }
     // The effects always radiate from the (inverted) portal block, wherever the camera settles.
     computeEffectCentre(bx, by);
@@ -343,19 +478,28 @@ fn ensureReady() void {
     ready = true;
 }
 
-/// Places `effect_centre` on the portal block, in subpixels relative to the player's chunk.
-/// This is where shards and intake particles emanate from, for both directions.
-fn computeEffectCentre(bx: u4, by: u4) void {
-    const g = &memory.game;
+/// Re-expresses a position inside the portal's chunk as subpixels relative to the PLAYER's chunk,
+/// which is the space the camera, the player and `worldToScreen()` all work in.
+fn chunkRelative(pos: dw.utils.Vec2i) [2]f64 {
+    const player_coord = memory.game.getPlayerCoord();
     const portal = portalCoord();
-    const player_coord = g.getPlayerCoord();
+    // Wrapping subtraction gives the signed chunk delta, matching how `moveAtDepth()` steps.
     const chunk_dx: i64 = @bitCast(portal.suffix[0] -% player_coord.suffix[0]);
     const chunk_dy: i64 = @bitCast(portal.suffix[1] -% player_coord.suffix[1]);
-    const block: f64 = @floatFromInt(dw.CHUNK_SIZE_SQ);
-    effect_centre = .{
-        @as(f64, @floatFromInt(chunk_dx * dw.SUBPIXELS_IN_CHUNK)) + (@as(f64, @floatFromInt(bx)) + 0.5) * block,
-        @as(f64, @floatFromInt(chunk_dy * dw.SUBPIXELS_IN_CHUNK)) + (@as(f64, @floatFromInt(by)) + 0.5) * block,
+    return .{
+        @floatFromInt(chunk_dx * dw.SUBPIXELS_IN_CHUNK + pos[0]),
+        @floatFromInt(chunk_dy * dw.SUBPIXELS_IN_CHUNK + pos[1]),
     };
+}
+
+/// Places `effect_centre` on the portal block's centre, in subpixels relative to the player's chunk.
+/// This is where shards and intake particles emanate from, for both directions.
+fn computeEffectCentre(bx: u4, by: u4) void {
+    const half = @divExact(dw.CHUNK_SIZE_SQ, 2);
+    effect_centre = chunkRelative(.{
+        @as(i64, bx) * dw.CHUNK_SIZE_SQ + half,
+        @as(i64, by) * dw.CHUNK_SIZE_SQ + half,
+    });
 }
 
 /// Locates the D-space point matching where the player lands at D+1.
@@ -501,7 +645,8 @@ fn collectDebris() void {
     debris_count = SHARD_COUNT;
 
     var rng = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .portal_debris));
-    const span = SHARD_SPAWN_SPAN * @as(f64, @floatFromInt(TOTAL_FRAMES));
+    const total: f64 = @floatFromInt(if (isReturning()) RETURN_DIVE_FRAMES else TOTAL_FRAMES);
+    const span = SHARD_SPAWN_SPAN * total;
 
     for (&debris) |*shard| {
         // Square-rooting a uniform value biases the start times later, so the intake visibly builds
@@ -641,14 +786,12 @@ pub fn overlayTransition() world.LayerTransition {
 
 /// Camera position for this frame, in subpixels relative to the player's chunk.
 ///
-/// A descent eases the camera onto the portal as the player is drawn in, so the zoom closes on the
-/// portal rather than on wherever the camera was loitering. An ascent locks onto the anchor (the
-/// player's own point) from the first frame, so the pull-out is centred and nothing drifts.
-/// `camera_pos` itself is never written, which is what lets this be recomputed from the frame counter
-/// alone after a load.
+/// Eased onto the anchor as the player is drawn in, so the zoom closes on the portal they are passing
+/// through rather than on wherever the camera was loitering. `camera_pos` itself is never written,
+/// which is what lets this be recomputed from the frame counter alone after a load.
 pub fn cameraOverride() [2]f64 {
     const g = &memory.game;
-    const t = if (isDescending()) smoothstep(pullProgress()) else 1.0;
+    const t = smoothstep(pullProgress());
     return .{
         @as(f64, @floatFromInt(g.camera_pos[0])) * (1.0 - t) + anchor[0] * t,
         @as(f64, @floatFromInt(g.camera_pos[1])) * (1.0 - t) + anchor[1] * t,
@@ -674,7 +817,7 @@ pub fn playerScale() f32 {
     if (!isActive()) return 1.0;
     const SQUEEZE = 0.55;
     // Undone in step with the zoom, so both arrive at their committed values on the same frame.
-    return @floatCast(1.0 - SQUEEZE * smoothstep(pullProgress()) * (1.0 - zoomCurve(progress())));
+    return @floatCast(1.0 - SQUEEZE * smoothstep(pullProgress()) * (1.0 - zoomCurve(curveProgress())));
 }
 
 /// Converts a world position (subpixels relative to the player's chunk) into viewport pixels,
@@ -700,7 +843,7 @@ pub fn drawEffects() void {
 /// Fade factor for portal-related visual elements (shards, particles) near the end of the descent.
 pub fn getDescentFade() f32 {
     if (!isActive()) return 1.0;
-    const t = progress();
+    const t = curveProgress();
     if (t < 0.8) return 1.0;
     return @floatCast((1.0 - t) / 0.2);
 }
@@ -719,8 +862,9 @@ fn drawDebris(centre: Vec2f32) void {
         if (u >= 1.0) continue; // already swallowed
 
         const eased: f32 = @floatCast(u * u);
-        // Descent draws terrain inward to be swallowed; ascent throws it outward as the world opens up.
-        const distance = shard.radius * (if (isDescending()) 1.0 - eased else eased);
+        // Descent and return both draw terrain inward to be swallowed; only an ascent throws it
+        // outward, as the world opens up around the player.
+        const distance = shard.radius * (if (isAscending()) eased else 1.0 - eased);
         const pos: Vec2f32 = .{
             centre[0] + @cos(shard.angle) * distance,
             centre[1] + @sin(shard.angle) * distance,
@@ -777,27 +921,84 @@ fn spawnIntake() void {
     }
 }
 
-/// Advances the descent by one logical frame. Called once per tick iteration from `handleTick()`.
+/// Advances the running transition by one logical frame. Called once per tick iteration from `handleTick()`.
 pub fn tick() void {
     if (!isActive()) return;
-    ensureReady();
 
     const g = &memory.game;
-    g.portal_frame +|= 1;
+    if (isReturning()) {
+        tickReturn();
+    } else {
+        ensureReady();
+        g.portal_frame +|= 1;
 
-    if (g.portal_frame >= TOTAL_FRAMES) {
-        finish();
-        return;
+        if (g.portal_frame >= TOTAL_FRAMES) {
+            finish();
+            return;
+        }
+
+        fillPreview(chunksPerFrame());
+        spawnIntake();
     }
 
-    fillPreview(chunksPerFrame());
-    spawnIntake();
-
     // The world is frozen, so pinning the previous-frame values keeps render interpolation from drifting with nothing moving.
-    // The descent's own motion is an override.
+    // The transition's own motion is an override.
     g.camera_scale_change = 1.0;
     g.last_camera_pos = g.camera_pos;
     g.last_player_pos = g.player_pos;
+}
+
+/// Advances the return fade, committing the retrace on the frame the screen is fully dark.
+///
+/// Keyed to the exact midpoint frame rather than a range, so resuming a save taken after it cannot
+/// commit a second time (the counter is already past it and never equals it again).
+fn tickReturn() void {
+    const g = &memory.game;
+    ensureReady();
+    g.portal_frame +|= 1;
+
+    if (g.portal_frame < RETURN_DIVE_FRAMES) {
+        spawnReturnIntake();
+    } else if (g.portal_frame == RETURN_DIVE_FRAMES) {
+        world.retraceInstant();
+        // The rubble was sampled from the depth just left; none of it belongs to where we landed.
+        clearDebris();
+    }
+
+    if (g.portal_frame >= RETURN_FRAMES) {
+        g.portal_phase = @intFromEnum(Phase.idle);
+        g.portal_frame = 0;
+        ready = false;
+        dw.mining.selected_hp = 255;
+        dw.mouse.mouse_chunk_coord = null;
+    }
+}
+
+/// Emits a return's intake particles: the same inward ring a descent uses, ramped over the dive.
+fn spawnReturnIntake() void {
+    @setFloatMode(.optimized);
+    const t = returnDiveProgress();
+    const intensity = smoothstep(t);
+
+    // Held in world scale so the ring hugs the portal as the view dives, but capped at `ZOOM_FACTOR`:
+    // past that the dive is running away into the fade and an honestly-scaled ring would spend its
+    // particles far off screen.
+    const zoom: f32 = @floatCast(memory.game.camera_scale * @min(zoomFactor(), @as(f64, dw.ZOOM_FACTOR)));
+    const count: usize = @intFromFloat(5.0 + 55.0 * intensity);
+
+    const cap: u16 = @intFromFloat(@round(22.0 - 16.0 * t));
+    if (cap <= 2) return;
+
+    dw.particles.spawnInwardRing(worldToScreen(effect_centre), &PORTAL_COLORS, .{
+        .count = count,
+        .radius_min = 10.0 * zoom,
+        .radius_max = 26.0 * zoom,
+        .size_min = 0.8 * zoom,
+        .size_max = 2.6 * zoom,
+        .travel_min = @min(cap, 8),
+        .travel_max = cap,
+        .swirl = @floatCast(0.25 + 0.5 * intensity),
+    });
 }
 
 /// Commits the descent so D+1 stops being a preview and becomes the world!
@@ -824,25 +1025,30 @@ fn finish() void {
     const g = &memory.game;
     ensureReady();
 
-    if (isDescending()) {
-        // A descent while spectating is a retrace of the last ascent, so it pops that step.
-        const retracing = world.isSpectating();
+    const ascended = !isDescending();
+
+    if (ascended) {
+        // Records the retrace step and rolls the deeper depth's edits up into markers, then commits.
+        // The invportal is only the way up: a later return puts the player back where they were
+        // STANDING when they used it, not inside the block they rose through.
+        world.applyAscent(transition, ascend_from_coord, ascend_from_pos);
+    } else {
+        // Always a fresh descent: going back down from a spectating layer is the return fade
+        // (`triggerReturn()`), never this zoom, so the ascent stack is untouched here.
+        std.debug.assert(!world.isSpectating());
         // The preview left the ancestor cache holding this depth's parents, already tiered for it.
         world.commitLayer(transition, true);
-        if (retracing) world.popAscentStep(
-            g.getPlayerCoord(),
-            @intCast(@divTrunc(transition.new_pos[0], dw.CHUNK_SIZE_SQ)),
-            @intCast(@divTrunc(transition.new_pos[1], dw.CHUNK_SIZE_SQ)),
-        );
-    } else {
-        // Records the retrace step and rolls the deeper depth's edits up into markers, then commits.
-        world.applyAscent(transition);
     }
 
     // Hand the generated chunks to the SimBuffer before dropping them.
     // Skipping it does not avoid the work, only defers it: the next `player.move()` rebuilds all 256 slots in one frame,
     // and every render frame until then regenerates the visible window on top.
-    world.SimBuffer.refreshAdopting(g.getPlayerCoord(), PreviewSource{});
+    // An ascent regenerates instead, so the markers `applyAscent()` just set are baked in (see `EmptySource`).
+    if (ascended) {
+        world.SimBuffer.refreshAdopting(g.getPlayerCoord(), EmptySource{});
+    } else {
+        world.SimBuffer.refreshAdopting(g.getPlayerCoord(), PreviewSource{});
+    }
 
     g.portal_phase = @intFromEnum(Phase.idle);
     g.portal_frame = 0;
@@ -865,8 +1071,11 @@ fn releasePreview() void {
     ready = false;
 }
 
-/// Rebuilds everything a descent needs that a save does not carry, then brings the preview fully up to date in one go.
+/// Rebuilds everything a transition needs that a save does not carry, then brings the preview fully up to date in one go.
 /// Called after a load; the frame counter alone decides what the player sees next.
+///
+/// A return carries no derived state at all (no preview, no transition, no anchor): the frame counter
+/// is the whole animation, and its commit already either has or has not happened.
 pub fn restore() void {
     ready = false;
     if (!isActive()) {
@@ -875,7 +1084,7 @@ pub fn restore() void {
     }
     ensureReady();
     // Loads can be slow!
-    fillPreview(@intCast(preview.len));
+    if (isZooming()) fillPreview(@intCast(preview.len));
 }
 
 /// Abandons any running descent and releases its memory. Used when a world is torn down.
