@@ -60,8 +60,10 @@ pub fn prepareVisibleData(dt: f64, time_diff: f64, canvas_w: f64, canvas_h: f64)
     dw.chunks.updateVisibleChunks(dt, canvas_w, canvas_h);
     // D's background stays fully opaque: the D+1 background is what dissolves over it, which keeps the
     // pair summing to full coverage the whole way through instead of dimming toward the clear colour.
-    drawBackground(1.0);
-    handleVisibleChunks(1.0, WIREFRAME_OPACITY);
+    // A return fade is the one case that WANTS that dimming, and drives it through `worldOpacity()`.
+    const world_opacity = dw.portal.worldOpacity();
+    drawBackground(world_opacity);
+    handleVisibleChunks(world_opacity, WIREFRAME_OPACITY);
 
     if (dw.portal.isActive()) {
         const opacity = dw.portal.overlayOpacity();
