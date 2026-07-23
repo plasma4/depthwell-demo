@@ -90,6 +90,11 @@ inline fn isDescending() bool {
     return memory.game.portal_phase == @intFromEnum(Phase.descending);
 }
 
+/// Whether an ascent is currently playing. Unlike `isDescending()`, this is safe to ask at any time.
+pub inline fn isAscending() bool {
+    return memory.game.portal_phase == @intFromEnum(Phase.ascending);
+}
+
 /// One block being swallowed: a purely visual echo of terrain near the player.
 /// The world itself is never touched, so no modification is ever written for this.
 ///
@@ -282,6 +287,9 @@ pub fn trigger(coord: Coordinate, bx: u4, by: u4) void {
 /// The block is recorded only so the effects can emanate from it; the transition itself derives
 /// entirely from the player's position (see `world.computeParentLayer()`). Ignored if one is running.
 pub fn triggerAscend(coord: Coordinate, bx: u4, by: u4) void {
+    // The base layer has no parent to rise into; the indicator is already hidden there, so this is
+    // only the backstop for any other caller.
+    if (!world.canAscend()) return;
     beginTransition(.ascending, coord, bx, by);
 }
 
@@ -824,25 +832,32 @@ fn finish() void {
     const g = &memory.game;
     ensureReady();
 
-    if (isDescending()) {
+    // Captured before the commit, while these still describe the block being descended into.
+    const source_coord = portalCoord();
+    const source_bx: u4 = @intCast(g.portal_bx & 15);
+    const source_by: u4 = @intCast(g.portal_by & 15);
+    const ascended = !isDescending();
+
+    if (ascended) {
+        // Records the retrace step and rolls the deeper depth's edits up into markers, then commits.
+        world.applyAscent(transition);
+    } else {
         // A descent while spectating is a retrace of the last ascent, so it pops that step.
         const retracing = world.isSpectating();
         // The preview left the ancestor cache holding this depth's parents, already tiered for it.
         world.commitLayer(transition, true);
-        if (retracing) world.popAscentStep(
-            g.getPlayerCoord(),
-            @intCast(@divTrunc(transition.new_pos[0], dw.CHUNK_SIZE_SQ)),
-            @intCast(@divTrunc(transition.new_pos[1], dw.CHUNK_SIZE_SQ)),
-        );
-    } else {
-        // Records the retrace step and rolls the deeper depth's edits up into markers, then commits.
-        world.applyAscent(transition);
+        if (retracing) world.popAscentStep(source_coord, source_bx, source_by);
     }
 
     // Hand the generated chunks to the SimBuffer before dropping them.
     // Skipping it does not avoid the work, only defers it: the next `player.move()` rebuilds all 256 slots in one frame,
     // and every render frame until then regenerates the visible window on top.
-    world.SimBuffer.refreshAdopting(g.getPlayerCoord(), PreviewSource{});
+    // An ascent regenerates instead, so the markers `applyAscent()` just set are baked in (see `EmptySource`).
+    if (ascended) {
+        world.SimBuffer.refreshAdopting(g.getPlayerCoord(), EmptySource{});
+    } else {
+        world.SimBuffer.refreshAdopting(g.getPlayerCoord(), PreviewSource{});
+    }
 
     g.portal_phase = @intFromEnum(Phase.idle);
     g.portal_frame = 0;

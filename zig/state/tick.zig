@@ -96,7 +96,7 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
     // read-only spectating mode (see `world.isSpectating()`).
     const just_decreased_depth = can_hotkey_depth and
         !just_increased_depth and
-        memory.game.depth > dw.startup.STARTING_ZOOM_TIMES and
+        dw.world.canAscend() and
         KeyBits.isSet(KeyBits.decrease_depth, memory.game.keys_pressed_mask);
     if (just_decreased_depth) {
         dw.world.popLayer();

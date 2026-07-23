@@ -54,6 +54,14 @@ pub const NearbyCores = packed struct {
 /// Core tiers near the player, valid for the current frame only. See NearbyCores.
 pub var nearby_cores: NearbyCores = .{};
 
+/// Hue shifts, in radians, for the two depth-changing indicators.
+///
+/// The slot sprite is white, so hue is ADDED onto it rather than replacing anything
+/// (see `DEFAULT_ENTITY_LCHA`). These are tuning knobs, not derived values: the only requirement is
+/// that the two stay far enough apart that going down is never mistaken for going up at a glance.
+const PORTAL_SLOT_HUE: f32 = -1.9;
+const INVPORTAL_SLOT_HUE: f32 = 1.1;
+
 /// Which menu (if any) an in-world block's indicator opens. Extend by adding a variant plus its rows below.
 const IndicatorKind = enum {
     furnace,
@@ -70,7 +78,9 @@ const IndicatorKind = enum {
             .basic_core, .core1, .core2, .core3, .core4 => .corecraft,
             .chest => .loot,
             .portal => .portal,
-            .invportal => .invportal,
+            // At the base depth there is nothing above to ascend into, so the indicator is not drawn
+            // at all rather than drawn dead (see `world.canAscend()`).
+            .invportal => if (dw.world.canAscend()) .invportal else null,
             // .moss_shrub1, .moss_shrub2 => .tree,
             else => null,
         };
@@ -82,8 +92,8 @@ const IndicatorKind = enum {
             .furnace => .gold_bar,
             .corecraft => .craft,
             .loot => .chest,
-            // A dedicated inverted-portal icon is a future Aseprite request; reuse the portal one for now.
-            .portal, .invportal => .portal_visual,
+            .portal => .portal_visual,
+            .invportal => .invportal,
         };
     }
 
@@ -324,8 +334,14 @@ const DrawVisitor = struct {
             .position = .{ geom.screen_x, geom.screen_y },
             .size = geom.slot_size,
             .lcha = if (kind == .portal or kind == .invportal)
-                // violet, and brightening as the player closes in, to read as "this takes you somewhere"
-                .{ 0.85 + 0.15 * geom.opacity, 0.06 + rel_size * 0.006, -1.9, geom.opacity }
+                // Brightens as the player closes in, to read as "this takes you somewhere";
+                // the hue is what separates going down from going up.
+                .{
+                    0.85 + 0.15 * geom.opacity,
+                    0.06 + rel_size * 0.006,
+                    if (kind == .portal) PORTAL_SLOT_HUE else INVPORTAL_SLOT_HUE,
+                    geom.opacity,
+                }
             else if (kind == .furnace)
                 // wood style if furnace
                 if (is_open)
@@ -367,11 +383,14 @@ pub fn drawIndicators() void {
     var drawer: DrawVisitor = .{};
     scanIndicators(view, &drawer);
 
-    // A menu whose indicator drifted out of range (or vanished) autocloses.
+    // A menu whose indicator drifted out of range (or vanished) autocloses. Ascending closes every
+    // one of them outright: they all mutate the world, and `mod_store.beginWrite()` asserts against
+    // that while spectating, so a menu left open from before the ascent would trip it.
+    const spectating = dw.world.isSpectating();
     inline for (@typeInfo(IndicatorKind).@"enum".fields) |field| {
         const kind: IndicatorKind = @enumFromInt(field.value);
         if (kind.menuFlag()) |flag| {
-            if (flag.* and !drawer.seen.contains(kind)) {
+            if (flag.* and (spectating or !drawer.seen.contains(kind))) {
                 flag.* = false;
                 if (kind == .loot) @import("../menus/loot.zig").close();
             }
@@ -419,4 +438,21 @@ pub fn isHoveringIndicator() bool {
     var hover: HoverVisitor = .{};
     scanIndicators(cameraView(), &hover);
     return hover.found;
+}
+
+const testing = std.testing;
+
+test "the inverted portal indicator appears exactly when there is a depth to ascend into" {
+    const saved_depth = memory.game.depth;
+    defer memory.game.depth = saved_depth;
+
+    // A world opens at exactly `STARTING_ZOOM_TIMES` (see `startup.init()`), which IS the floor, so a
+    // freshly spawned player sees no indicator until they have descended at least once.
+    memory.game.depth = dw.startup.STARTING_ZOOM_TIMES;
+    try testing.expectEqual(@as(?IndicatorKind, null), IndicatorKind.fromBlock(.invportal));
+
+    memory.game.depth = dw.startup.STARTING_ZOOM_TIMES + 1;
+    try testing.expectEqual(@as(?IndicatorKind, .invportal), IndicatorKind.fromBlock(.invportal));
+    // The portal is unaffected by the floor: descending is always available.
+    try testing.expectEqual(@as(?IndicatorKind, .portal), IndicatorKind.fromBlock(.portal));
 }
