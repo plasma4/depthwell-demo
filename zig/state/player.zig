@@ -149,13 +149,21 @@ pub fn currentSprite() Sprite {
 
 /// Adds the player as a render entity at the grid-aligned screen position computed in `render/chunk.zig`.
 /// Mirrored horizontally to match `facing_right`. Should only be called from `entity.updateEntities`.
+/// Alpha the player is drawn at while spectating, so flying through solid rock reads as intended
+/// rather than as a collision bug.
+const GHOST_ALPHA: f32 = 0.8;
+
 pub fn drawPlayerEntity() void {
+    // Turns ghostly the moment the ascent starts rather than when it commits, so the fade belongs to
+    // the animation instead of popping at the end of it.
+    const ghost = world.isSpectating() or dw.portal.isAscending();
     dw.entity.addEntity(.{
         .sprite = currentSprite(),
         .position = dw.chunks.player_screen_pos,
         // A portal descent squeezes this down and back up again (see `portal.playerScale()`); the
         // player stays fully opaque throughout, so nothing blinks out and returns.
         .size = if (facing_right) dw.chunks.player_screen_size else -dw.chunks.player_screen_size,
+        .lcha = .{ 1.0, 0.0, 0.0, if (ghost) GHOST_ALPHA else 1.0 },
     });
 }
 
