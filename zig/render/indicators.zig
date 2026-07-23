@@ -70,7 +70,9 @@ const IndicatorKind = enum {
             .basic_core, .core1, .core2, .core3, .core4 => .corecraft,
             .chest => .loot,
             .portal => .portal,
-            .invportal => .invportal,
+            // At the base depth there is nothing above to ascend into, so the indicator is not drawn
+            // at all rather than drawn dead (see `world.canAscend()`).
+            .invportal => if (dw.world.canAscend()) .invportal else null,
             // .moss_shrub1, .moss_shrub2 => .tree,
             else => null,
         };
@@ -82,8 +84,8 @@ const IndicatorKind = enum {
             .furnace => .gold_bar,
             .corecraft => .craft,
             .loot => .chest,
-            // A dedicated inverted-portal icon is a future Aseprite request; reuse the portal one for now.
-            .portal, .invportal => .portal_visual,
+            .portal => .portal_visual,
+            .invportal => .invportal,
         };
     }
 
@@ -367,11 +369,14 @@ pub fn drawIndicators() void {
     var drawer: DrawVisitor = .{};
     scanIndicators(view, &drawer);
 
-    // A menu whose indicator drifted out of range (or vanished) autocloses.
+    // A menu whose indicator drifted out of range (or vanished) autocloses. Ascending closes every
+    // one of them outright: they all mutate the world, and `mod_store.beginWrite()` asserts against
+    // that while spectating, so a menu left open from before the ascent would trip it.
+    const spectating = dw.world.isSpectating();
     inline for (@typeInfo(IndicatorKind).@"enum".fields) |field| {
         const kind: IndicatorKind = @enumFromInt(field.value);
         if (kind.menuFlag()) |flag| {
-            if (flag.* and !drawer.seen.contains(kind)) {
+            if (flag.* and (spectating or !drawer.seen.contains(kind))) {
                 flag.* = false;
                 if (kind == .loot) @import("../menus/loot.zig").close();
             }
