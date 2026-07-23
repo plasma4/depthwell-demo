@@ -133,9 +133,10 @@ fn liveLayer(dt: f64) LayerPass {
     const player_vel_x = game.player_pos[0] - game.last_player_pos[0];
     const player_vel_y = game.player_pos[1] - game.last_player_pos[1];
 
-    // A descent draws the camera and player onto the portal without ever writing their real positions
-    // (see `portal.cameraOverride()`), so the override replaces the interpolation rather than adding to it.
-    const descending = dw.portal.isActive();
+    // A zoom transition draws the camera and player onto the portal without ever writing their real
+    // positions (see `portal.cameraOverride()`), so the override replaces the interpolation rather
+    // than adding to it. A return fade has no such motion and keeps the ordinary interpolation.
+    const descending = dw.portal.hasMotionOverride();
 
     return .{
         .origin = game.getPlayerCoord(),
@@ -187,9 +188,9 @@ pub fn updateVisibleChunks(dt: f64, canvas_w: f64, canvas_h: f64) void {
 }
 
 /// Adds the portal descent's D+1 preview to the scratch buffer, ready for a second tile draw call.
-/// Precondition: a descent is running (`portal.isActive()`).
+/// Precondition: a zoom transition is running (`portal.isZooming()`).
 pub fn updateOverlayChunks(canvas_w: f64, canvas_h: f64) void {
-    std.debug.assert(dw.portal.isActive());
+    std.debug.assert(dw.portal.isZooming());
     rasterizeLayer(overlayLayer(), canvas_w, canvas_h);
 }
 
@@ -364,7 +365,7 @@ inline fn updateRenderProperties(
         // A descent zooms the world in by exactly the factor that the next depth shrinks the player by,
         // so the two cancel: holding the sprite at the committed scale keeps it from popping at either
         // end. It shrinks further only as the portal swallows it.
-        player_screen_size = @floatCast(CHUNK_SIZE_FLOAT * if (dw.portal.isActive())
+        player_screen_size = @floatCast(CHUNK_SIZE_FLOAT * if (dw.portal.hasMotionOverride())
             memory.game.camera_scale * dw.portal.playerScale()
         else
             interpolated_zoom);
