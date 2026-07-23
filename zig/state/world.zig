@@ -604,18 +604,29 @@ pub inline fn deepestDepth() u64 {
     return memory.game.depth + ascent_stack.items.len;
 }
 
+/// Whether there is a depth above the current one to ascend into.
+///
+/// `STARTING_ZOOM_TIMES` is the base layer: it is generated outright rather than inherited from a
+/// parent, so nothing above it exists to look at. Gates the `.invportal` indicator (which is not even
+/// drawn at the floor) and the ascent hotkey, so `computeParentLayer()`'s assert is never reached.
+pub inline fn canAscend() bool {
+    return memory.game.depth > STARTING_ZOOM_TIMES;
+}
+
 /// The step a descent must retrace, or null when the player is already at their deepest depth.
 pub inline fn retraceStep() ?AscentStep {
     return if (isSpectating()) ascent_stack.items[ascent_stack.items.len - 1] else null;
 }
 
 /// Drops the top ascent step, called once a descent that retraced it has committed.
-/// Asserts it lands back on exactly the block that was ascended through: a descent anywhere else
-/// would reframe the depth and orphan every `mod_store` key below it.
-pub fn popAscentStep(landed: Coordinate, bx: u4, by: u4) void {
+///
+/// `descended_from` is the block the descent zoomed INTO, in the shallower (parent) depth's
+/// coordinates. It must equal the recorded step: a descent through any other block would reframe the
+/// depth and orphan every `mod_store` key below it.
+pub fn popAscentStep(descended_from: Coordinate, bx: u4, by: u4) void {
     std.debug.assert(isSpectating());
     const step = ascent_stack.items[ascent_stack.items.len - 1];
-    std.debug.assert(step.coord().eql(landed) and step.bx == bx and step.by == by);
+    std.debug.assert(step.coord().eql(descended_from) and step.bx == bx and step.by == by);
     _ = ascent_stack.pop();
 }
 
@@ -3021,11 +3032,7 @@ pub fn retraceInstant() void {
     // No preview warmed the ancestor cache here (unlike the animated descent), and its entries are
     // tiered relative to the old depth, so they must be dropped rather than kept.
     commitLayer(t, false);
-    popAscentStep(
-        .{ .suffix = t.player_chunk, .quadrant = t.player_quadrant },
-        @intCast(@divTrunc(t.new_pos[0], dw.CHUNK_SIZE_SQ)),
-        @intCast(@divTrunc(t.new_pos[1], dw.CHUNK_SIZE_SQ)),
-    );
+    popAscentStep(step.coord(), step.bx, step.by);
 }
 
 /// Rolls every modification at `child_depth` up into a descendant marker on its parent block.
@@ -3477,6 +3484,49 @@ test "computeParentLayer: inverts a descent back to the block it came from" {
     // The only loss is the quarter-subpixel from the `/ ZOOM_FACTOR` truncation.
     try testing.expect(@abs(up.new_pos[0] - origin_pos[0]) < ZOOM_FACTOR);
     try testing.expect(@abs(up.new_pos[1] - origin_pos[1]) < ZOOM_FACTOR);
+}
+
+test "AscentStep: retracing the recorded block returns to the chunk that was left" {
+    // The contract `popAscentStep()` asserts, and the whole basis of the read-only spy-glass: the
+    // block an ascent records must be the one a descent zooms into to land back on the same frame.
+    // Descending anywhere else renumbers the depth's suffixes and orphans its `mod_store` keys.
+    const saved_game = memory.game;
+    const saved_suffix = max_possible_suffix;
+    defer {
+        memory.game = saved_game;
+        max_possible_suffix = saved_suffix;
+    }
+
+    memory.game = .{};
+    memory.game.depth = 11; // below HORIZON_DEPTH, so no rebase; parent 10 clears STARTING_ZOOM_TIMES
+    memory.game.player_chunk = .{ 13, 21 };
+    memory.game.player_pos = .{ 1000, 500 };
+    max_possible_suffix = getMaxSuffixAtDepth(memory.game.depth);
+    quad_cache.path_hashes.value[0] = memory.game.seed;
+
+    const child_chunk = memory.game.player_chunk;
+    const child_depth = memory.game.depth;
+
+    const up = computeParentLayer();
+    // Exactly what `applyAscent()` records.
+    const step: AscentStep = .{
+        .suffix = up.player_chunk,
+        .quadrant = up.player_quadrant,
+        .bx = @intCast(@divTrunc(up.new_pos[0], CHUNK_SIZE_SQ)),
+        .by = @intCast(@divTrunc(up.new_pos[1], CHUNK_SIZE_SQ)),
+    };
+
+    // Stand at the parent, then retrace exactly as `retraceInstant()` does.
+    memory.game.depth = up.depth;
+    memory.game.player_chunk = up.player_chunk;
+    memory.game.player_quadrant = up.player_quadrant;
+    memory.game.player_pos = up.new_pos;
+    max_possible_suffix = up.max_possible_suffix;
+
+    const down = computeLayer(step.coord(), step.bx, step.by, .block_floor);
+    try testing.expectEqual(child_depth, down.depth);
+    try testing.expectEqual(child_chunk, down.player_chunk);
+    try testing.expectEqual(@as(u2, 0), down.player_quadrant);
 }
 
 test "markDescendantsFromChild: rolls a deep edit into a parent marker, idempotently" {
