@@ -404,6 +404,8 @@ fn writeAscentStack(w: *Writer) !void {
         try w.int(u8, step.quadrant);
         try w.int(u8, step.bx);
         try w.int(u8, step.by);
+        try w.int(i64, step.origin_pos[0]);
+        try w.int(i64, step.origin_pos[1]);
     }
     w.endSection(at);
 }
@@ -418,6 +420,7 @@ fn readAscentStack(r: *Reader) !void {
             .quadrant = @intCast(try r.int(u8) & 3),
             .bx = @intCast(try r.int(u8) & 15),
             .by = @intCast(try r.int(u8) & 15),
+            .origin_pos = .{ try r.int(i64), try r.int(i64) },
         });
     }
 }

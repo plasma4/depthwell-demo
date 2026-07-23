@@ -83,11 +83,40 @@ pub const Phase = enum(u8) {
     descending,
     /// A D -> D-1 ascent through an inverted portal, the same animation run in reverse.
     ascending,
+    /// A D -> D+1 return: the plain fade that walks an ascent back one step (see `triggerReturn()`).
+    returning,
 };
 
-/// Whether the running transition is a descent (rather than an ascent). Only meaningful while active.
+/// Frames a return fade takes end to end; the world commits at the halfway point, under a black screen.
+/// Even, so the commit lands on an exact frame rather than between two.
+pub const RETURN_FRAMES: u32 = 40;
+
+comptime {
+    if (RETURN_FRAMES % 2 != 0) @compileError("RETURN_FRAMES must be even so the commit lands on a whole frame.");
+}
+
+/// Whether the running transition is a descent (rather than an ascent). Only meaningful while zooming.
 inline fn isDescending() bool {
     return memory.game.portal_phase == @intFromEnum(Phase.descending);
+}
+
+/// Whether an ascent is currently playing. Unlike `isDescending()`, this is safe to ask at any time.
+pub inline fn isAscending() bool {
+    return memory.game.portal_phase == @intFromEnum(Phase.ascending);
+}
+
+/// Whether a return fade is currently playing.
+pub inline fn isReturning() bool {
+    return memory.game.portal_phase == @intFromEnum(Phase.returning);
+}
+
+/// Whether the running transition is one of the two ZOOMING ones (descent or ascent).
+///
+/// A return is deliberately not: it moves a whole depth with no zoom, no preview and no overrides, so
+/// everything keyed to the zoom (the camera override, the overlay layer, the shake, the debris) must
+/// ask this rather than `isActive()`, or a return would drag them along with nothing driving them.
+pub inline fn isZooming() bool {
+    return isDescending() or isAscending();
 }
 
 /// One block being swallowed: a purely visual echo of terrain near the player.
@@ -197,7 +226,7 @@ inline fn zoomSign() f64 {
 /// A descent runs 1x -> `ZOOM_FACTOR` (zoom in); an ascent runs 1x -> `1 / ZOOM_FACTOR` (zoom out).
 /// `overlayScale()` cancels the factor out, which is why reaching the last frame lands on the committed view.
 pub fn zoomFactor() f64 {
-    if (!isActive()) return 1.0;
+    if (!isZooming()) return 1.0;
     return std.math.pow(f64, @as(f64, dw.ZOOM_FACTOR), zoomSign() * zoomCurve(progress()));
 }
 
@@ -241,7 +270,7 @@ inline fn pastReveal(zoom: f64) bool {
 /// D is never faded: it stays at full strength for the whole descent and this is the only knob moved,
 /// so D+1 arrives *over* a solid image rather than the two meeting in the middle as a dissolve.
 pub fn overlayOpacity() f64 {
-    if (!isActive()) return 0.0;
+    if (!isZooming()) return 0.0;
     const start = zoomCurve(@as(f64, @floatFromInt(fill_deadline)) / @as(f64, @floatFromInt(TOTAL_FRAMES)));
     const now = zoomCurve(progress());
     if (now <= start) return 0.0;
@@ -262,14 +291,14 @@ inline fn pullProgress() f64 {
 /// How hard the world is shaking this frame, 0 (still) to 1 (full tremor).
 /// Builds with the zoom so the tremor peaks as the descent commits (see `chunks.updateShake()`).
 pub fn shakeIntensity() f32 {
-    if (!isActive()) return 0.0;
+    if (!isZooming()) return 0.0;
     // A floor keeps a tremor present from the first frame, since the zoom curve starts flat.
     return @floatCast(0.25 + 0.75 * zoomCurve(progress()));
 }
 
 /// Rate the background clock advances at, eased to a standstill as the player is drawn in.
 pub fn backgroundRate() f64 {
-    if (!isActive()) return 1.0;
+    if (!isZooming()) return 1.0;
     return 1.0 - smoothstep(pullProgress());
 }
 
@@ -282,7 +311,35 @@ pub fn trigger(coord: Coordinate, bx: u4, by: u4) void {
 /// The block is recorded only so the effects can emanate from it; the transition itself derives
 /// entirely from the player's position (see `world.computeParentLayer()`). Ignored if one is running.
 pub fn triggerAscend(coord: Coordinate, bx: u4, by: u4) void {
+    // The base layer has no parent to rise into; the indicator is already hidden there, so this is
+    // only the backstop for any other caller.
+    if (!world.canAscend()) return;
     beginTransition(.ascending, coord, bx, by);
+}
+
+/// Starts the return fade: walks the last ascent back, landing on the spot it was taken from.
+///
+/// Deliberately NOT the descent animation. That one zooms into a specific portal to enter a depth for
+/// the first time; a return re-enters a depth already visited, at a position already decided, so there
+/// is nothing to zoom towards. Which portal was clicked does not matter either: the route back is the
+/// recorded `AscentStep`, so any portal serves as the way down.
+/// No-op unless the player is actually above their deepest depth.
+pub fn triggerReturn() void {
+    if (isActive() or !world.isSpectating()) return;
+    const g = &memory.game;
+    g.portal_frame = 0;
+    g.portal_phase = @intFromEnum(Phase.returning);
+    ready = false;
+}
+
+/// Opacity the whole world (background and tiles alike) is drawn at.
+///
+/// 1 except during a return, where it dips to 0 at the midpoint and back. The commit happens at that
+/// midpoint, so the depth change is never seen: the screen is already empty when it lands.
+pub fn worldOpacity() f64 {
+    if (!isReturning()) return 1.0;
+    const t = @as(f64, @floatFromInt(memory.game.portal_frame)) / @as(f64, @floatFromInt(RETURN_FRAMES));
+    return smoothstep(@abs(2.0 * t - 1.0));
 }
 
 fn beginTransition(phase: Phase, coord: Coordinate, bx: u4, by: u4) void {
@@ -311,7 +368,7 @@ inline fn portalCoord() Coordinate {
 /// Works out everything a descent needs that a save does not carry.
 /// Safe to call repeatedly; only the first call after a trigger (or a load) does any work.
 fn ensureReady() void {
-    if (ready or !isActive()) return;
+    if (ready or !isZooming()) return;
 
     const bx: u4 = @intCast(memory.game.portal_bx & 15);
     const by: u4 = @intCast(memory.game.portal_by & 15);
@@ -671,7 +728,7 @@ pub fn playerOverride() [2]f64 {
 ///
 /// Recovers to 1 by the last frame rather than staying small, so the commit has nothing to pop back from.
 pub fn playerScale() f32 {
-    if (!isActive()) return 1.0;
+    if (!isZooming()) return 1.0;
     const SQUEEZE = 0.55;
     // Undone in step with the zoom, so both arrive at their committed values on the same frame.
     return @floatCast(1.0 - SQUEEZE * smoothstep(pullProgress()) * (1.0 - zoomCurve(progress())));
@@ -692,14 +749,14 @@ fn worldToScreen(sub: [2]f64) Vec2f32 {
 /// Called once per render frame from `entity.updateEntities()`.
 /// The intake particles are spawned from `tick()` instead, so their density does not ride the frame rate.
 pub fn drawEffects() void {
-    if (!isActive() or !ready) return;
+    if (!isZooming() or !ready) return;
     @setFloatMode(.optimized);
     drawDebris(worldToScreen(effect_centre));
 }
 
 /// Fade factor for portal-related visual elements (shards, particles) near the end of the descent.
 pub fn getDescentFade() f32 {
-    if (!isActive()) return 1.0;
+    if (!isZooming()) return 1.0;
     const t = progress();
     if (t < 0.8) return 1.0;
     return @floatCast((1.0 - t) / 0.2);
@@ -777,27 +834,49 @@ fn spawnIntake() void {
     }
 }
 
-/// Advances the descent by one logical frame. Called once per tick iteration from `handleTick()`.
+/// Advances the running transition by one logical frame. Called once per tick iteration from `handleTick()`.
 pub fn tick() void {
     if (!isActive()) return;
-    ensureReady();
 
     const g = &memory.game;
-    g.portal_frame +|= 1;
+    if (isReturning()) {
+        tickReturn();
+    } else {
+        ensureReady();
+        g.portal_frame +|= 1;
 
-    if (g.portal_frame >= TOTAL_FRAMES) {
-        finish();
-        return;
+        if (g.portal_frame >= TOTAL_FRAMES) {
+            finish();
+            return;
+        }
+
+        fillPreview(chunksPerFrame());
+        spawnIntake();
     }
 
-    fillPreview(chunksPerFrame());
-    spawnIntake();
-
     // The world is frozen, so pinning the previous-frame values keeps render interpolation from drifting with nothing moving.
-    // The descent's own motion is an override.
+    // The transition's own motion is an override.
     g.camera_scale_change = 1.0;
     g.last_camera_pos = g.camera_pos;
     g.last_player_pos = g.player_pos;
+}
+
+/// Advances the return fade, committing the retrace on the frame the screen is fully dark.
+///
+/// Keyed to the exact midpoint frame rather than a range, so resuming a save taken after it cannot
+/// commit a second time (the counter is already past it and never equals it again).
+fn tickReturn() void {
+    const g = &memory.game;
+    g.portal_frame +|= 1;
+
+    if (g.portal_frame == RETURN_FRAMES / 2) world.retraceInstant();
+
+    if (g.portal_frame >= RETURN_FRAMES) {
+        g.portal_phase = @intFromEnum(Phase.idle);
+        g.portal_frame = 0;
+        dw.mining.selected_hp = 255;
+        dw.mouse.mouse_chunk_coord = null;
+    }
 }
 
 /// Commits the descent so D+1 stops being a preview and becomes the world!
@@ -824,25 +903,28 @@ fn finish() void {
     const g = &memory.game;
     ensureReady();
 
-    if (isDescending()) {
-        // A descent while spectating is a retrace of the last ascent, so it pops that step.
-        const retracing = world.isSpectating();
-        // The preview left the ancestor cache holding this depth's parents, already tiered for it.
-        world.commitLayer(transition, true);
-        if (retracing) world.popAscentStep(
-            g.getPlayerCoord(),
-            @intCast(@divTrunc(transition.new_pos[0], dw.CHUNK_SIZE_SQ)),
-            @intCast(@divTrunc(transition.new_pos[1], dw.CHUNK_SIZE_SQ)),
-        );
-    } else {
+    const ascended = !isDescending();
+
+    if (ascended) {
         // Records the retrace step and rolls the deeper depth's edits up into markers, then commits.
         world.applyAscent(transition);
+    } else {
+        // Always a fresh descent: going back down from a spectating layer is the return fade
+        // (`triggerReturn()`), never this zoom, so the ascent stack is untouched here.
+        std.debug.assert(!world.isSpectating());
+        // The preview left the ancestor cache holding this depth's parents, already tiered for it.
+        world.commitLayer(transition, true);
     }
 
     // Hand the generated chunks to the SimBuffer before dropping them.
     // Skipping it does not avoid the work, only defers it: the next `player.move()` rebuilds all 256 slots in one frame,
     // and every render frame until then regenerates the visible window on top.
-    world.SimBuffer.refreshAdopting(g.getPlayerCoord(), PreviewSource{});
+    // An ascent regenerates instead, so the markers `applyAscent()` just set are baked in (see `EmptySource`).
+    if (ascended) {
+        world.SimBuffer.refreshAdopting(g.getPlayerCoord(), EmptySource{});
+    } else {
+        world.SimBuffer.refreshAdopting(g.getPlayerCoord(), PreviewSource{});
+    }
 
     g.portal_phase = @intFromEnum(Phase.idle);
     g.portal_frame = 0;
@@ -865,11 +947,14 @@ fn releasePreview() void {
     ready = false;
 }
 
-/// Rebuilds everything a descent needs that a save does not carry, then brings the preview fully up to date in one go.
+/// Rebuilds everything a transition needs that a save does not carry, then brings the preview fully up to date in one go.
 /// Called after a load; the frame counter alone decides what the player sees next.
+///
+/// A return carries no derived state at all (no preview, no transition, no anchor): the frame counter
+/// is the whole animation, and its commit already either has or has not happened.
 pub fn restore() void {
     ready = false;
-    if (!isActive()) {
+    if (!isZooming()) {
         releasePreview();
         return;
     }
