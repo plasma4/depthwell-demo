@@ -34,27 +34,30 @@ pub const KeyBits = struct {
     }
 
     /// Z key (increases depth, for testing)
-    pub const zoom = mask(17);
+    pub const increase_depth = mask(21);
+    /// X key (decreases depth, for testing)
+    pub const decrease_depth = mask(20);
+
     /// Backquote key
-    pub const mine = mask(18);
+    pub const mine = mask(19);
     /// Q key
-    pub const inventory_up = mask(19);
+    pub const inventory_up = mask(18);
     /// E key
-    pub const inventory_down = mask(20);
+    pub const inventory_down = mask(17);
 
     /// Minus (or underscore) key
-    pub const minus = mask(15);
+    pub const minus = mask(16);
     /// Plus (or equals) key
-    pub const plus = mask(16);
+    pub const plus = mask(15);
 
     /// W, ArrowUp, Space keys
-    pub const up = mask(11);
+    pub const up = mask(14);
     /// A, ArrowLeft keys
-    pub const left = mask(12);
+    pub const left = mask(13);
     /// S, ArrowDown keys
-    pub const down = mask(13);
+    pub const down = mask(12);
     /// D, ArrowRight keys
-    pub const right = mask(14);
+    pub const right = mask(11);
 
     /// 0 key
     pub const k0 = mask(0);

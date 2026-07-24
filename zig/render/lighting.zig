@@ -35,6 +35,7 @@ pub const CAMPFIRE_LIGHT: u16 = 240;
 pub const FURNACE_LIGHT: u16 = AMBIENT_LIGHT;
 pub const LAVA_LIGHT: u16 = 60;
 // ---
+pub const PORTAL_LIGHT: u16 = 200;
 pub const PLATE_LIGHT: u16 = 160;
 pub const TWINKLEVINE_LIGHT: u16 = 80;
 
@@ -44,13 +45,22 @@ pub const SOLID_FALLOFF: u16 = 28;
 pub const LIQUID_FALLOFF: u16 = SOLID_FALLOFF - 12;
 
 /// Brightest possible seed value; bounds the number of Dial buckets.
-const MAX_SOURCE: u16 = @max(MAX_PLAYER_LIGHT, CAMPFIRE_LIGHT, FURNACE_LIGHT, TWINKLEVINE_LIGHT, PLATE_LIGHT);
+const MAX_SOURCE: u16 = @max(
+    MAX_PLAYER_LIGHT,
+    CAMPFIRE_LIGHT,
+    FURNACE_LIGHT,
+    PORTAL_LIGHT,
+    PLATE_LIGHT,
+    TWINKLEVINE_LIGHT,
+    LAVA_LIGHT,
+);
 const NUM_BUCKETS: usize = MAX_SOURCE + 1;
 
 inline fn blockEmission(id: Sprite) u16 {
     return switch (id) {
         .campfire => CAMPFIRE_LIGHT,
         .forest_furnace, .lava_furnace => FURNACE_LIGHT,
+        .portal, .invportal => PORTAL_LIGHT,
         .white_plate => PLATE_LIGHT,
         .twinklemoss => TWINKLEVINE_LIGHT,
         .lava_stone => LAVA_LIGHT,

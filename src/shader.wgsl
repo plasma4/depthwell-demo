@@ -10,12 +10,12 @@
 // Auto-generated from zig/types/sprite.zig by zig/generate_shader.zig (runs during `zig build`).
 // Do NOT edit values between the markers by hand; edit the Sprite enum instead.
 const TILES_PER_ROW: f32 = 16.0;
-const TILES_PER_COLUMN: f32 = 18.0;
+const TILES_PER_COLUMN: f32 = 19.0;
 const STONE_START: u32 = 12u;
-const ORE_START: u32 = 36u;
-const GEM_START: u32 = 42u;
-const GEM_MASK_START: u32 = 56u;
-const WATER_START: u32 = 281u;
+const ORE_START: u32 = 38u;
+const GEM_START: u32 = 44u;
+const GEM_MASK_START: u32 = 58u;
+const WATER_START: u32 = 289u;
 // #CONSTANT REGION END#
 
 const PI = radians(180.0);
@@ -55,7 +55,12 @@ struct SceneUniforms {
     map_size: vec2u,
     flags: vec4u, // .a: is_p3; .b: is_8bit (.b is unused)
     grid_origin: vec4f, // absolute position of min_cx/min_cy in tiles (.xy used)
-    _extra_padding: array<vec4u, 11>, // pad to 256 bytes for dynamic offsets
+    // Per-frame warp of the tile layers: .xy screen offset in canvas pixels, .z rotation in radians,
+    // .w uniform scale. Identity is (0, 0, 0, 1).
+    // Both layers of a portal descent are handed the same value
+    // (so they shake as one image rather than sliding apart).
+    warp: vec4f,
+    _extra_padding: array<vec4u, 10>, // pad to 256 bytes for dynamic offsets
 };
 
 @group(0) @binding(0) var<uniform> scene: SceneUniforms;
@@ -143,6 +148,17 @@ fn unpack_tile(data: TileData) -> UnpackedTile {
 }
 
 // Main vertex shader for tiles.
+// Rotates and scales a screen position about the middle of the viewport, then shifts it.
+// (Identity warp leaves the position untouched.)
+fn apply_warp(p: vec2f) -> vec2f {
+    let center = scene.viewport_size * 0.5;
+    let d = p - center;
+    let c = cos(scene.warp.z);
+    let s = sin(scene.warp.z);
+    let spun = vec2f(d.x * c - d.y * s, d.x * s + d.y * c);
+    return center + spun * scene.warp.w + scene.warp.xy;
+}
+
 @vertex
 fn vs_tile(
     @builtin(vertex_index) vertex_index: u32,
@@ -163,7 +179,7 @@ fn vs_tile(
     var id = tile.sprite_id;
 
     let world_pixel_pos = (vec2f(tile_coords) + local_pos) * TILE_SIZE;
-    let screen_pos = ((world_pixel_pos - scene.camera) * scene.zoom) + (scene.viewport_size * 0.5);
+    let screen_pos = apply_warp(((world_pixel_pos - scene.camera) * scene.zoom) + (scene.viewport_size * 0.5));
 
     // normalize coordinates
     // first, make sure spiral plant and ceiling flower move up (visually) by 2 pixels
@@ -221,9 +237,9 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
             let t = scene.time;
             let world_pos = wrap_water_coords((vec2f(in.tile_coords) + scene.grid_origin.xy) * TILE_SIZE + in.local_uv * TILE_SIZE);
 
-            // Smooth the surface across neighbors (adjacent volumes in bits 3-6 / 7-10). Each tile
-            // edge sits at the midpoint between this cell and its neighbor, so adjacent tiles agree
-            // on the shared edge height and the surface reads as continuous instead of stepped.
+            // Smooth the surface across neighbors (adjacent volumes in bits 3-6 / 7-10).
+            // Each tile edge sits at the midpoint between this cell and its neighbor,
+            // so adjacent tiles agree on the shared edge height and the surface reads as continuous instead of stepped.
             // A dry side keeps the block's own level so the surface doesn't dip at the water's edge.
             let left_vol = extractBits(in.waterlogged, 3u, 4u);
             let right_vol = extractBits(in.waterlogged, 7u, 4u);

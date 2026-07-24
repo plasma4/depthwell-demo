@@ -19,7 +19,7 @@ pub const UNMINEABLE_STRENGTH: u64 = std.math.maxInt(u64);
 /// Index where stone-like sprites begin.
 pub const STONE_START = 12;
 /// Index where stone-like sprites end.
-const STONE_END = STONE_START + 14;
+const STONE_END = STONE_START + 16;
 
 /// Index where smelted bar sprites begin.
 const BAR_START = STONE_END + 4;
@@ -43,12 +43,12 @@ const FRUIT_COUNT = 10;
 /// ID for `Sprite.gear`, which is after a list of fruit.
 const GEAR_ID = DECOR_START + 5 + FRUIT_COUNT;
 /// ID for `Sprite.bush`, which is after cornflower.
-const BUSH_ID = GEAR_ID + 17;
+const BUSH_ID = GEAR_ID + 22;
 /// ID for `Sprite.basic_core`, which is after furnaces.
 const CORE_ID = BUSH_ID + 14;
 
 /// Index where inventory slot sprites start.
-pub const INVENTORY_START = CORE_ID + 21;
+pub const INVENTORY_START = CORE_ID + 22;
 /// Index where numbers (0-9) start.
 pub const NUMBER_START = INVENTORY_START + 4;
 /// ID for `Sprite.particle`, which is after a bunch of character glyphs.
@@ -56,7 +56,7 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 282) {
+    if (max_sprite_value != 290) {
         var buf: [64]u8 = undefined;
         @compileError("Max sprite value of " ++
             (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
@@ -98,6 +98,8 @@ pub const Sprite = enum(u16) {
     green_stone,
     ancient_stone,
     sulfuric_stone,
+    basalt,
+    diorite,
     /// "Plain" stone type, with 2x2 variations to prevent an overly tiling look.
     stone = STONE_END,
 
@@ -152,19 +154,24 @@ pub const Sprite = enum(u16) {
     bacon,
     gear = GEAR_ID,
     gear2,
+    digging_stick,
     lathe,
     rock_visual,
     rock, // 2 variations
-    purple_rock = GEAR_ID + 6,
+    purple_rock = GEAR_ID + 7,
     flint,
-    charcoal,
+    flint_visual,
+    fiberstone,
     clay,
     cordage,
+    plant_haft,
+    stone_haft,
     flint_hatchet,
+    greenstone_hatchet,
     twinklemoss,
     spiralvine,
     plant_stem,
-    cornflower = GEAR_ID + 15, // 2 variations
+    cornflower = GEAR_ID + 20, // 2 variations
     bush = BUSH_ID, // 2 variations
     ceiling_flower = BUSH_ID + 2, // 4 variations
     mushroom = BUSH_ID + 6, // 3 variations
@@ -179,8 +186,9 @@ pub const Sprite = enum(u16) {
     campfire = CORE_ID + 10, // 4 variations + 4 water variations, 8 total
     campfire_water = CORE_ID + 10 + 4,
     chest = CORE_ID + 10 + 8,
+    invportal,
     portal,
-    portal_visual = CORE_ID + 10 + 10, // indicator visual variant
+    portal_visual = CORE_ID + 10 + 11, // indicator visual variant
 
     /// Unselected inventory sprite. Looks like a blue rounded rectangle.
     inventory = INVENTORY_START,
@@ -226,7 +234,7 @@ pub const Sprite = enum(u16) {
 
     /// Gets the readable name of the sprite (pre-computed at compile-time).
     /// Precondition: sprite must be valid with an explicit name in the enum.
-    pub inline fn getName(self: @This()) []const u8 {
+    pub inline fn getName(self: Sprite) []const u8 {
         const val = @intFromEnum(self);
         if (val < MAX_SPRITE_ID) return dense_names_table[val];
         if (self == .unselected) return unselected_name;
@@ -234,7 +242,7 @@ pub const Sprite = enum(u16) {
     }
 
     /// Retrieves the fully compile-time property data for this sprite.
-    pub inline fn props(self: @This()) SpriteFlags {
+    pub inline fn props(self: Sprite) SpriteFlags {
         const val = @intFromEnum(self);
         if (val < MAX_SPRITE_ID) return dense_flags_table[val];
         if (self == .unselected) return unselected_flags;
@@ -243,7 +251,7 @@ pub const Sprite = enum(u16) {
 
     /// Determines if the sprite's type is one that should interact with the edge flags and procedural generation.
     /// This returns false for edge stone, unlike `isSolid()`. Assumes invalid block types are impossible.
-    pub inline fn isFoundation(self: @This()) bool {
+    pub inline fn isFoundation(self: Sprite) bool {
         return self.props().foundation;
     }
 
@@ -251,89 +259,89 @@ pub const Sprite = enum(u16) {
     /// Separate from `isItem()`. Includes the empty block, and excludes entities.
     ///
     /// If properties are wrong here, invalid (or unnamed) enums may appear and wreak havoc.
-    pub inline fn isInWorld(self: @This()) bool {
+    pub inline fn isInWorld(self: Sprite) bool {
         return self.props().in_world;
     }
 
     /// Determines if the sprite's type is something that could be in the player's inventory.
-    pub inline fn isItem(self: @This()) bool {
+    pub inline fn isItem(self: Sprite) bool {
         return self.props().item;
     }
 
     /// Determines if the sprite's type is considered solid, and should interact with the physics, player, and edge flags.
     /// This returns true for edge stone, unlike `isSolid()`.
-    pub inline fn isSolid(self: @This()) bool {
+    pub inline fn isSolid(self: Sprite) bool {
         return self.props().solid;
     }
 
     /// Determines if the sprite's type is a liquid (such as water).
-    pub inline fn isLiquid(self: @This()) bool {
+    pub inline fn isLiquid(self: Sprite) bool {
         return self.props().liquid;
     }
 
     /// Determines if the sprite's type is `none` (air/void).
-    pub inline fn isEmpty(self: @This()) bool {
+    pub inline fn isEmpty(self: Sprite) bool {
         return self == .none;
     }
 
     /// Determines if the sprite is stone (or a variation). Excludes edge stone.
-    pub inline fn isStone(self: @This()) bool {
+    pub inline fn isStone(self: Sprite) bool {
         return self.props().stone;
     }
 
     /// Determines if the sprite is an ore.
-    pub inline fn isOre(self: @This()) bool {
+    pub inline fn isOre(self: Sprite) bool {
         return self.props().ore;
     }
 
     /// Maps an ore sprite to its smelted bar form.
     /// The bar range is parallel to and sits directly before the ore range,
     /// so the mapping is a constant offset. Precondition: `self.isOre()`.
-    pub inline fn oreToBar(self: @This()) Sprite {
+    pub inline fn oreToBar(self: Sprite) Sprite {
         return @enumFromInt(@intFromEnum(self) - (ORE_START - BAR_START));
     }
 
     /// Determines if the sprite is a gem.
-    pub inline fn isGem(self: @This()) bool {
+    pub inline fn isGem(self: Sprite) bool {
         return self.props().gem;
     }
 
     /// True for ore/gem overlay sprites since those composited over a `base_id` stone underlay.
     /// Ores and gems form one contiguous ID range, so this is a single bounds test rather than two `props()` lookups
     /// (`isOre() or isGem()`); a comptime check tries to keep the ranges in sync.
-    pub inline fn isOverlay(self: @This()) bool {
+    pub inline fn isOverlay(self: Sprite) bool {
         const id = @intFromEnum(self);
         return id >= ORE_START and id < GEM_START + GEM_COUNT;
     }
 
     /// Returns the cascade anchoring rules for this sprite.
-    pub inline fn anchor(self: @This()) AnchorKind {
+    pub inline fn anchor(self: Sprite) AnchorKind {
         return self.props().anchor;
     }
 
     /// Returns every neighbor cell this sprite requires to stay in the world: its `anchor` constraint
     /// followed by any extra `SpriteProps.requires` entries, flattened into one list at compile-time.
     /// The cascade in `state/world.zig` clears the block as soon as one entry fails.
-    pub inline fn supports(self: @This()) []const Support {
+    pub inline fn supports(self: Sprite) []const Support {
         const val = @intFromEnum(self);
         if (val < MAX_SPRITE_ID) return dense_supports_table[val];
         return &.{};
     }
 
     /// Returns the broad `Category` classification for this sprite.
-    pub inline fn category(self: @This()) Category {
+    pub inline fn category(self: Sprite) Category {
         return self.props().category;
     }
 
     /// Determines if the sprite is a heatmap (between types 65000-65256).
-    pub inline fn isHeatmap(self: @This()) bool {
+    pub inline fn isHeatmap(self: Sprite) bool {
         const id = @intFromEnum(self);
         return is_debug and id >= 65000 and id <= 65256;
     }
 
     /// Extracts the evolved form of this sprite at compile-time.
     /// If it doesn't evolve, returns itself!
-    pub inline fn evolvesTo(self: @This()) Sprite {
+    pub inline fn evolvesTo(self: Sprite) Sprite {
         const val = @intFromEnum(self);
         if (val < MAX_SPRITE_ID) {
             if (dense_props_table[val].evolves_to) |evolution| {
@@ -345,43 +353,46 @@ pub const Sprite = enum(u16) {
 
     /// Returns whether a block is empty (air), a liquid, or a waterloggable block (decor/crafter).
     /// Precondition: the sprite is valid.
-    pub inline fn isFlowable(self: @This()) bool {
+    pub inline fn isFlowable(self: Sprite) bool {
         return self.isEmpty() or self.isLiquid() or self.isWaterloggable();
     }
 
     /// Returns whether a sprite is a decoration block.
     /// Precondition: the sprite is valid.
-    pub inline fn isDecor(self: @This()) bool {
+    pub inline fn isDecor(self: Sprite) bool {
         return self.props().category == .decor;
     }
 
     /// Returns whether a sprite lets water flow through/around it and stores directional waterlogging
     /// (both decor and crafter installations); non-solid placeables that never block liquid.
     /// Precondition: the sprite is valid.
-    pub inline fn isWaterloggable(self: @This()) bool {
+    pub inline fn isWaterloggable(self: Sprite) bool {
         const c = self.props().category;
-        return c == .decor or c == .crafter;
+        return c == .decor or c == .interactive;
     }
 
     /// Returns whether a sprite is mined instantly like decor despite being solid (such as leaves).
     /// Reads the off-hot-path `SpriteProps` since `instant_mine` is absent from `SpriteFlags`.
     /// Precondition: the sprite is valid.
-    pub inline fn isInstantMine(self: @This()) bool {
+    pub inline fn isInstantMine(self: Sprite) bool {
         return getSpriteProps(self).instant_mine;
     }
 
     /// Converts a sprite into an entity ID, handling atlas ID remaps.
-    pub inline fn asEntity(self: @This()) u16 {
+    pub inline fn asEntity(self: Sprite) u16 {
         const id = @intFromEnum(self);
         return if (id >= GEM_START and id < GEM_START + GEM_COUNT)
             id + GEM_COUNT
         else if (self == .rock)
-            @intFromEnum(@This().rock_visual)
+            @intFromEnum(Sprite.rock_visual)
+        else if (self == .flint)
+            @intFromEnum(Sprite.flint_visual)
         else if (self == .portal)
-            @intFromEnum(@This().portal_visual)
+            @intFromEnum(Sprite.portal_visual)
         else if (self.isLiquid())
             id + 1
         else
+            // default to the original!
             id;
     }
 };
@@ -659,6 +670,18 @@ const rules = [_]SpriteRule{
         },
     },
 
+    // Ceiling-anchored items!
+    .{
+        .{ .list = &[_]Sprite{
+            .ceiling_flower,
+            .invportal,
+        } },
+        .{
+            .anchor = .ceiling,
+            .in_world = true,
+        },
+    },
+
     // Unmineable-by-default items. Unmineable by a normal pickaxe and waterloggable
     // Floor anchor rule requirement above
     .{
@@ -673,10 +696,11 @@ const rules = [_]SpriteRule{
             .core4,
             .chest,
             .lathe,
+            .invportal,
             .portal,
         } },
         .{
-            .category = .crafter,
+            .category = .interactive,
             .strength = UNMINEABLE_STRENGTH,
         },
     },
@@ -715,12 +739,6 @@ const rules = [_]SpriteRule{
             .in_world = true,
             .category = .decor,
         },
-    },
-
-    // Ceiling-anchored decorations
-    .{
-        .{ .single = .ceiling_flower },
-        .{ .anchor = .ceiling },
     },
 
     // Suspended anchor (like ceiling, but can be directly below itself too)
@@ -800,8 +818,9 @@ pub const Category = enum(u3) {
     /// World decoration (non-solid placeable: plants, furniture, interactables).
     /// Assumed to be instantly mineable.
     decor,
-    /// Fixed interactive installation (furnace, core, chest, portal). Unmineable by normal pickaxe and waterloggable like decor.
-    crafter,
+    /// Fixed installation (furnace, core, chest, portal).
+    /// Unmineable by normal pickaxe and waterloggable like decor (doesn't look like a full block).
+    interactive,
 };
 
 /// Consolidated properties of each sprite.

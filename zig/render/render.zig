@@ -22,6 +22,15 @@ pub inline fn handleVisibleChunks(opacity: f64, wireframeOpacity: f64) void {
     }
 }
 
+/// Makes a call to `engine.drawBackground()` in JS, using whatever scene the last chunk pass published.
+pub inline fn drawBackground(opacity: f64) void {
+    if (dw.is_wasm) {
+        return dw.jsDrawBackground(opacity);
+    } else {
+        return; // no native impl yet
+    }
+}
+
 /// Makes a call to `engine.handleVisibleChunks()` in JS.
 pub inline fn handleVisibleEntities() void {
     if (dw.is_wasm) {
@@ -41,9 +50,28 @@ pub inline fn dispatchMouseType() void {
 }
 
 /// Processes data for renderFrame() in TypeScript to upload to WebGPU.
+///
+/// Draw order is painter's order, and JS consumes the scratch buffer synchronously on each call back,
+/// so one scratch fill can serve both the background and the tiles of a layer before the next fill.
+/// A portal descent adds a second layer on top: the D+1 preview, faded in over D
+/// (see `state/portal.zig`), which is why the background is drawn from here rather than by the host.
 pub fn prepareVisibleData(dt: f64, time_diff: f64, canvas_w: f64, canvas_h: f64) void {
     dw.chunks.updateVisibleChunks(dt, canvas_w, canvas_h);
-    handleVisibleChunks(1.0, WIREFRAME_OPACITY);
+    // D's background stays fully opaque: the D+1 background is what dissolves over it, which keeps the
+    // pair summing to full coverage the whole way through instead of dimming toward the clear colour.
+    // A return fade is the one case that WANTS that dimming, and drives it through `worldOpacity()`.
+    const world_opacity = dw.portal.worldOpacity();
+    drawBackground(world_opacity);
+    handleVisibleChunks(world_opacity, WIREFRAME_OPACITY);
+
+    if (dw.portal.isActive()) {
+        const opacity = dw.portal.overlayOpacity();
+        if (opacity > 0.0) {
+            dw.chunks.updateOverlayChunks(canvas_w, canvas_h);
+            drawBackground(opacity);
+            handleVisibleChunks(opacity, WIREFRAME_OPACITY);
+        }
+    }
 
     entity.updateEntities(time_diff);
 
