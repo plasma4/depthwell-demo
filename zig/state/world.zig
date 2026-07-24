@@ -1225,7 +1225,7 @@ pub const SimBuffer = struct {
     /// Mutates the ring buffer offsets to avoid expensive memory copying,
     /// and replaces ONLY the rows or columns that have newly entered the 16x16 boundary window.
     ///
-    /// PRECONDITION: `origin.move(.{dx, dy})` must not clamp (caller `sync()` guarantees this). ring_x/ring_y
+    /// Precondition: `origin.move(.{dx, dy})` must not clamp (caller `sync()` guarantees this). ring_x/ring_y
     /// advance by the full `dx`/`dy` here, so a clamped origin move would desync them from the origin.
     fn incrementalRefresh(dx: i64, dy: i64) void {
         const old_origin = origin.?;

@@ -85,9 +85,8 @@ const Parsed = struct {
 };
 
 /// Validates `art` against `legend` and normalizes it into a rectangular grid.
-/// Every failure here is a `@compileError` naming exactly what is wrong and where.
 fn parse(comptime art: []const u8, comptime legend: []const Entry) Parsed {
-    @setEvalBranchQuota(100000);
+    @setEvalBranchQuota(1e6);
 
     // Reject a duplicate legend character up front: an ambiguous legend is never intended.
     for (legend, 0..) |a, i| {
