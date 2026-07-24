@@ -25,7 +25,7 @@
 //! it's also sadly not possible to guess the odds of terrain rules throwing odds...only approximate with auditing.
 //!
 //! Small things that need no priority collision belong in `decorations.zig` instead, which is far cheaper:
-//! every kind here costs every LOWER kind a collision scan, so this tuple wants to stay short.
+//! every structure here costs structure below a collision scan so it's not great to stuff too much here.
 //! A placement is anchored uniformly ANYWHERE in its `spawn_area` cell and may overhang into the neighboring cells.
 //!
 //! A rule that has to MOVE the box rather than merely judge it cannot be a `Constraint`,
@@ -309,7 +309,12 @@ fn checkConstraint(comptime probe: anytype, comptime c: Constraint, bounds: Rect
             var lowest: i32 = std.math.minInt(i32);
             var x = x0;
             while (x < x1) : (x += 1) {
-                const surface = surfaceYWith(probe, x, row - lv.max_rise, row + lv.max_drop) orelse return false;
+                const surface = surfaceYWith(
+                    probe,
+                    x,
+                    row - lv.max_rise,
+                    row + lv.max_drop,
+                ) orelse return false;
                 highest = @min(highest, surface);
                 lowest = @max(lowest, surface);
                 if (lowest - highest > lv.max_slope) return false;
@@ -358,7 +363,8 @@ fn constraintCost(comptime c: Constraint, comptime w: i32, comptime h: i32) usiz
         .level => |lv| @intCast(spanOf(lv.x0, lv.x1, w) * (lv.max_rise + lv.max_drop + 2)),
         // Walks the full region calling covers() up to 5x per block, so it is pricey for filled shapes:
         // the interior is rescanned to find the boundary. Weight it well above a plain span scan.
-        .encase => |en| @intCast(spanOf(en.region.x0, en.region.x1, w) * spanOf(en.region.y0, en.region.y1, h) * 5),
+        .encase => |en| @intCast(spanOf(en.region.x0, en.region.x1, w) *
+            spanOf(en.region.y0, en.region.y1, h) * 5),
         .custom => std.math.maxInt(usize), // opaque, so assume the worst and run it last
     };
 }
@@ -497,7 +503,7 @@ const StructCacheEntry = struct {
 };
 
 /// Direct-mapped bounds/blocked cache, one bank per structure kind (slots must be a power of two).
-/// A structure's bounds and verdicts are identical for every footprint cell and are also re-derived by lower kinds' priority scans,
+/// A structure's bounds and verdicts are identical for every footprint cell and re-derived by later structures' priority scans,
 /// so memoizing per grid cell collapses that repeated hashing (and all terrain sampling) to O(1).
 /// Pure function of (cell, seed): the per-entry seed check self-invalidates on reseed, so no explicit clear.
 const STRUCT_CACHE_SLOTS = 1024;
@@ -548,7 +554,13 @@ pub const CellResolution = struct { bounds: ?Rect, reached: Stage };
 inline fn resolveCell(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) CellResolution {
     @setEvalBranchQuota(20000); // `getChance()` comptime-searches for a rational approximation of the odds
     const S = structures[kind];
-    var state = makeStructureHash(struct_seed, cellOriginX(kind, cx), cellOriginY(kind, cy), S.spawn_area, kind);
+    var state = makeStructureHash(
+        struct_seed,
+        cellOriginX(kind, cx),
+        cellOriginY(kind, cy),
+        S.spawn_area,
+        kind,
+    );
     if (!state.getChance(S.target_chance)) return .{ .bounds = null, .reached = .rejected };
 
     var reached: Stage = .anchored; // passing the roll guarantees at least one anchor below
@@ -600,7 +612,8 @@ inline fn cellOriginY(comptime kind: usize, cy: i32) u32 {
     return @bitCast(cy * @as(i32, @intCast(structures[kind].spawn_area)));
 }
 
-/// Creates a `HashState` given a seed, (base depth) coordinates, and power-of-two area where a structure may appear within.
+/// Creates a `HashState` given a seed, (base depth) coordinates,
+/// and power-of-two area where a structure may appear within.
 pub inline fn makeStructureHash(
     struct_seed: Vec2u,
     wx: u32,
@@ -668,8 +681,18 @@ fn isBeaten(comptime kind: usize, cx: i32, cy: i32, bounds: Rect, struct_seed: V
 
     inline for (0..kind + 1) |other| {
         const area = @as(i32, @intCast(Configs[other].spawn_area));
-        const xs = cellRange(area, @intCast(Configs[other].max_w), bounds.x_start, bounds.x_end - 1);
-        const ys = cellRange(area, @intCast(Configs[other].max_h), bounds.y_start, bounds.y_end - 1);
+        const xs = cellRange(
+            area,
+            @intCast(Configs[other].max_w),
+            bounds.x_start,
+            bounds.x_end - 1,
+        );
+        const ys = cellRange(
+            area,
+            @intCast(Configs[other].max_h),
+            bounds.y_start,
+            bounds.y_end - 1,
+        );
 
         var ncy = ys.lo;
         while (ncy <= ys.hi) : (ncy += 1) {

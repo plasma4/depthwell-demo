@@ -487,6 +487,9 @@ pub const ModificationStore = struct {
     /// This preserves the entry's pre-edit contents for an in-flight budgeted save before handing back a writer.
     pub fn beginWrite(self: *@This(), key: DepthCoordinate) ModWriter {
         std.debug.assert(!isSpectating()); // of course, you can't modify if spectating the world!
+        // A transition froze the layer its preview was generated from; editing it now would leave the
+        // depth we land on disagreeing with the one we left (see `portal.beginTransition()`).
+        std.debug.assert(!dw.portal.isActive());
         return .{ .entry = self.entries.at(self.reserve(key)) };
     }
 
@@ -869,7 +872,7 @@ pub const SIM_GRID_SIZE_SQ = SIM_GRID_SIZE * SIM_GRID_SIZE;
 /// Represents the integer type needed to represent indexes inside the simulation buffer.
 pub const SimIndexType = std.meta.Int(.unsigned, SIM_WIDTH_LOG2);
 
-/// A combined pool of SimBuffer and chunk cache data.
+/// A combined pool of `SimBuffer` and `ChunkCache` data.
 var chunk_pool: [SIM_BUFFER_SIZE + CHUNK_CACHE_SIZE]Chunk = undefined;
 
 comptime {
@@ -1186,7 +1189,7 @@ pub const SimBuffer = struct {
     }
 
     /// Rebuilds the window around `center`, adopting every chunk `source` can supply and generating only the rest.
-    /// `source` needs one method: `get(Coordinate) ?*const Chunk`.
+    /// `source` should be a struct and simply have a `get(c: Coordinate) ?*const Chunk` method.
     pub fn refreshAdopting(center: Coordinate, source: anytype) void {
         const half_width = @as(i64, SIM_BUFFER_WIDTH) / 2;
         openWindowAt(getClampedMove(center, -half_width, -half_width));
