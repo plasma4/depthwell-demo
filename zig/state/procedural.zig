@@ -24,7 +24,6 @@ const Vec4u = dw.utils.Vec4u;
 
 // Lots of values controllable by debug sliders here!
 pub const dual_value_scale = TuningFloat(21.0);
-pub const base_gem_odds = TuningFloat(0.25);
 pub const procedural_cell_size = TuningFloat(1.0);
 pub const fbm_scale = TuningFloat(1.0);
 pub const density_min = TuningFloat(0.36);
@@ -247,172 +246,89 @@ fn computeBaseSpriteType(
     };
 }
 
-/// Generates ores over certain types of blocks, returning a sprite type (possibly changed to an ore type).
-/// Continues from step 4 in `getStructureBlock()`.
-///
-/// 5. Disperses ores using Worley noise. Assumes that `isStone()` was checked before calling.
-pub fn addOresAndGems(
-    base_data: BaseTerrainData,
-    x: u32,
-    y: u32,
-) Sprite {
-    var s = base_data.sprite;
-    const game = &memory.game;
+/// A comptime row in the ore palette. The same rows are evaluated at base depth and at every
+/// recursive refinement, so new deposits do not stop when the player descends.
+const OreDispersal = struct {
+    sprite: Sprite,
+    min_depth_offset: u8,
+    scale: f32,
+    octaves: u3,
+    hybrid_weight: f32,
+    threshold: f32,
+    min_density: f32,
+    max_density: f32,
+    seed_lane: u3,
+};
 
-    // Generate new density for ores with a DIFFERENT set of 4 seed vectors (sent as args!)
-    const v1 = getFbmValue( // smaller cells, less FBM variation
-        game.getHashSeed(.ores1),
-        x,
-        y,
-        .{
-            .cell_size = 21.0,
-            .fbm_shift_size = 8.0,
-            .use_f2_f1 = true,
-        },
-    );
-    const v2 = getFbmValue( // larger cells, much more FBM variation
-        game.getHashSeed(.ores2),
-        x,
-        y,
-        .{
-            .cell_size = 36.0,
-            .fbm_shift_size = 60.0,
-            .use_f2_f1 = true,
-        },
-    );
+/// The first matching row wins. Narrow thresholds make deposits sparse, while the octave mix and
+/// ridged (hybrid) term turn them into branching patches rather than isolated random blocks.
+const ORE_DISPERSALS = [_]OreDispersal{
+    .{ .sprite = .copper, .min_depth_offset = 0, .scale = 24, .octaves = 3, .hybrid_weight = 0.20, .threshold = 0.91, .min_density = 0.42, .max_density = 0.70, .seed_lane = 0 },
+    .{ .sprite = .iron, .min_depth_offset = 0, .scale = 31, .octaves = 3, .hybrid_weight = 0.35, .threshold = 0.93, .min_density = 0.40, .max_density = 0.68, .seed_lane = 1 },
+    .{ .sprite = .silver, .min_depth_offset = 0, .scale = 39, .octaves = 4, .hybrid_weight = 0.25, .threshold = 0.945, .min_density = 0.30, .max_density = 0.56, .seed_lane = 2 },
+    .{ .sprite = .quartz, .min_depth_offset = 0, .scale = 28, .octaves = 3, .hybrid_weight = 0.45, .threshold = 0.955, .min_density = 0.30, .max_density = 0.58, .seed_lane = 3 },
+    .{ .sprite = .gold, .min_depth_offset = 1, .scale = 43, .octaves = 4, .hybrid_weight = 0.30, .threshold = 0.955, .min_density = 0.48, .max_density = 0.82, .seed_lane = 0 },
+    .{ .sprite = .nickel, .min_depth_offset = 1, .scale = 22, .octaves = 3, .hybrid_weight = 0.55, .threshold = 0.96, .min_density = 0.40, .max_density = 0.72, .seed_lane = 1 },
+    .{ .sprite = .sapphire, .min_depth_offset = 1, .scale = 51, .octaves = 4, .hybrid_weight = 0.40, .threshold = 0.965, .min_density = 0.30, .max_density = 0.56, .seed_lane = 4 },
+    .{ .sprite = .emerald, .min_depth_offset = 1, .scale = 34, .octaves = 3, .hybrid_weight = 0.50, .threshold = 0.97, .min_density = 0.34, .max_density = 0.62, .seed_lane = 3 },
+    .{ .sprite = .cobalt, .min_depth_offset = 2, .scale = 57, .octaves = 4, .hybrid_weight = 0.30, .threshold = 0.97, .min_density = 0.52, .max_density = 0.90, .seed_lane = 2 },
+    .{ .sprite = .ruby, .min_depth_offset = 2, .scale = 46, .octaves = 4, .hybrid_weight = 0.60, .threshold = 0.975, .min_density = 0.26, .max_density = 0.54, .seed_lane = 4 },
+    .{ .sprite = .aquashard, .min_depth_offset = 2, .scale = 63, .octaves = 4, .hybrid_weight = 0.45, .threshold = 0.98, .min_density = 0.20, .max_density = 0.48, .seed_lane = 2 },
+    .{ .sprite = .amethyst, .min_depth_offset = 0, .scale = 36, .octaves = 4, .hybrid_weight = 0.65, .threshold = 0.98, .min_density = 0.28, .max_density = 0.55, .seed_lane = 3 },
+    .{ .sprite = .electrit, .min_depth_offset = 3, .scale = 72, .octaves = 4, .hybrid_weight = 0.70, .threshold = 0.985, .min_density = 0.24, .max_density = 0.52, .seed_lane = 4 },
+};
 
-    // sprite IDs in this range use a neat heatmap (using only the first variation value), overriding normal ore logic
-    if (dw.is_debug and USE_ORE_HEATMAP) return @enumFromInt(65000 + @as(u20, @intFromFloat(v1 * 256.0)));
+comptime {
+    for (ORE_DISPERSALS) |rule| {
+        if (rule.octaves == 0) @compileError("Every ore dispersal needs at least one octave.");
+        if (rule.min_density > rule.max_density) @compileError("Ore density bounds must be ordered.");
+        if (rule.threshold < 0 or rule.threshold > 1) @compileError("Ore thresholds must be normalized.");
+        if (rule.hybrid_weight < 0 or rule.hybrid_weight > 1) @compileError("Ore hybrid weights must be normalized.");
+    }
+}
 
-    if (base_data.density >= 0.45 and base_data.density <= 0.65) {
-        // Generate various ore types
-        s = selectSprite(
-            .{ s, .copper },
-            true,
-            .{ v2, 0.0, 0.04 },
-        );
-        s = selectSprite(
-            .{ s, .copper },
-            true,
-            .{ v2, 0.9, 0.93 },
-        );
-        if (s == .copper) return s;
+fn oreSeed(seed: Vec2u, lane: u3, depth: u64) Vec2u {
+    const lane_mix = (@as(u64, lane) + 1) *% 0x9E3779B97F4A7C15;
+    return .{ seed[0] ^ lane_mix ^ depth, seed[1] ^ (lane_mix *% 0xD1B54A32D192ED03) ^ (depth *% 0x94D049BB133111EB) };
+}
 
-        s = selectSprite(
-            .{ s, .iron },
-            base_data.sprite != .blue_strange_stone,
-            .{ v1, 0.55, 0.595 },
-        );
-        if (s == .iron) return s;
+fn oreField(seed: Vec2u, x: u64, y: u64, rule: OreDispersal) f32 {
+    var value: f32 = 0;
+    var weight: f32 = 0;
+    inline for (0..4) |octave| {
+        if (octave >= rule.octaves) break;
+        const frequency: u64 = @as(u64, 1) << @intCast(octave);
+        const n = getDualValueNoise(seed, x *% frequency +% octave *% 7919, y *% frequency +% octave *% 104729, 1.0 / rule.scale)[octave & 1];
+        const ridged = 1.0 - @abs(2.0 * n - 1.0);
+        const amplitude = std.math.pow(f32, 0.55, @floatFromInt(octave));
+        value += amplitude * (n * (1.0 - rule.hybrid_weight) + ridged * rule.hybrid_weight);
+        weight += amplitude;
+    }
+    return value / weight;
+}
 
-        s = selectSprite(
-            .{ s, .silver },
-            base_data.density <= 0.48,
-            .{ v1, 0.2, 0.25 },
-        );
-        s = selectSprite(
-            .{ s, .silver },
-            base_data.sprite == .blue_strange_stone,
-            .{ v1, 0.18, 0.2 },
-        );
-        if (s == .silver) return s;
-
-        s = selectSprite(
-            .{ s, .gold },
-            base_data.density >= 0.60 or (base_data.density >= 0.52 and base_data.sprite == .lava_stone),
-            .{ v2, 0.3, 0.36 },
-        );
-        if (s == .gold) return s;
-
-        s = selectSprite(
-            .{ s, .nickel },
-            true,
-            .{ v2, 0.58, 0.595 },
-        );
-        if (s == .nickel) return s;
-
-        s = selectSprite(
-            .{ s, .cobalt },
-            v2 > 0.7,
-            .{ v1, 0.94, 0.98 },
-        );
-        if (s == .cobalt) return s;
-    } else {
-        // Logic for generating gems
-        const gem_v2_bound: f32 = if (s == .purple_strange_stone) 0.4 else 0.3;
-        if (base_data.density >= 0.3 and base_data.density <= 0.5 and v2 >= 0.1 and v2 <= gem_v2_bound) {
-            const random_value = FastHash.float2d(game.getHashSeed(.ores3), @intCast(x), @intCast(y));
-
-            if (random_value <= base_gem_odds.value) {
-                const v3 = getFbmValue(
-                    game.getHashSeed(.ores4),
-                    y,
-                    x,
-                    .{
-                        .cell_size = 35.0,
-                        .fbm_shift_size = 0.0,
-                        .use_f2_f1 = false,
-                    },
-                );
-                const v4 = getFbmValue(
-                    game.getHashSeed(.ores5),
-                    y,
-                    x,
-                    .{
-                        .cell_size = 45.0,
-                        .fbm_shift_size = 0.0,
-                        .use_f2_f1 = false,
-                    },
-                );
-
-                s = selectSprite(
-                    .{ s, .quartz },
-                    v4 <= 0.24 and random_value <= 0.34 * base_gem_odds.value,
-                    null,
-                );
-                if (s == .quartz) return s;
-
-                if (s != .deep_blue_stone) { // this stone type has too much visual similarity
-                    s = selectSprite(
-                        .{ s, .amethyst },
-                        v3 <= 0.4 and random_value <= 0.7 * base_gem_odds.value,
-                        null,
-                    );
-                    if (s == .amethyst) return s;
-
-                    s = selectSprite(
-                        .{ s, .sapphire },
-                        v3 >= 0.75 and random_value <= 0.65 * base_gem_odds.value,
-                        null,
-                    );
-                    if (s == .sapphire) return s;
-                }
-
-                s = selectSprite(
-                    .{ s, .emerald },
-                    v4 >= 0.45 and v4 <= 0.48 and random_value <= 0.86 * base_gem_odds.value,
-                    null,
-                );
-                if (s == .emerald) return s;
-
-                s = selectSprite(
-                    .{ s, .ruby },
-                    v3 >= 0.22 and v3 <= 0.24,
-                    null,
-                );
-                if (s == .ruby) return s;
-
-                s = selectSprite(
-                    .{ s, .electrit },
-                    v3 >= 0.84 and v3 <= 0.85,
-                    null,
-                );
-                if (s == .electrit) return s;
-            }
+/// Returns a newly formed ore, if the host and depth gate permit one. Existing overlays are not
+/// considered here: recursive callers preserve those before asking for a new deposit.
+pub fn disperseOre(host: Sprite, density: f32, x: u64, y: u64, depth: u64, seed: Vec2u) ?Sprite {
+    if (!host.isStone()) return null;
+    inline for (ORE_DISPERSALS) |rule| {
+        if (depth >= dw.startup.STARTING_ZOOM_TIMES + rule.min_depth_offset and
+            density >= rule.min_density and density <= rule.max_density and
+            oreField(oreSeed(seed, rule.seed_lane, depth), x, y, rule) >= rule.threshold)
+        {
+            return rule.sprite;
         }
     }
+    return null;
+}
 
-    return s;
+/// Applies the comptime ore palette to a base-depth stone block.
+pub fn addOresAndGems(base_data: BaseTerrainData, x: u32, y: u32) Sprite {
+    if (dw.is_debug and USE_ORE_HEATMAP) {
+        const field = oreField(memory.game.getHashSeed(.ores1), x, y, ORE_DISPERSALS[0]);
+        return @enumFromInt(65000 + @as(u20, @intFromFloat(field * 256.0)));
+    }
+    return disperseOre(base_data.sprite, base_data.density, x, y, dw.startup.STARTING_ZOOM_TIMES, memory.game.getHashSeed(.ores1)) orelse base_data.sprite;
 }
 
 /// Represents 3 values: `v`, `min`, and `max`.
