@@ -87,8 +87,8 @@ pub fn addParticle(particle: Particle) void {
 }
 
 /// Spawns `config.count` particles radiating from `origin` (viewport pixels) in random directions.
-/// Each picks a uniformly random color from `colors` (white if empty), a random size within the
-/// configured range, and a random starting rotation that keeps spinning until it fades out.
+/// Each picks a uniformly random color from `colors` (white if empty), a random size within the configured range,
+/// and a random starting rotation that keeps spinning until it fades out.
 pub fn spawnBurst(origin: Vec2f32, colors: []const [4]f32, config: BurstConfig) void {
     for (0..config.count) |_| {
         const angle = randRange(0.0, std.math.tau);
@@ -111,6 +111,72 @@ pub fn spawnBurst(origin: Vec2f32, colors: []const [4]f32, config: BurstConfig) 
                 colors[@intCast(seed.next() % colors.len)] + Vec4f32{ -0.08 + 0.24 * seed.float(f32), 0.01, 0.0, 0.0 },
             .frames_left = lifetime,
             .lifetime = lifetime,
+        });
+    }
+}
+
+/// Tunable knobs for `spawnInwardRing()`.
+pub const InwardConfig = struct {
+    /// How many particles to spawn.
+    count: usize = 6,
+    /// Distance from `origin` particles appear at, in viewport pixels.
+    radius_min: f32 = 24.0,
+    radius_max: f32 = 44.0,
+    /// Square edge length range in viewport pixels.
+    size_min: f32 = 0.8,
+    size_max: f32 = 2.4,
+    /// Spin magnitude range (radians per render frame); direction is randomized.
+    spin_min: f32 = 0.02,
+    spin_max: f32 = 0.10,
+    /// Frames a particle takes to travel its whole radius, so it lands on `origin` as it dies.
+    travel_min: u16 = 14,
+    travel_max: u16 = 26,
+    /// Sideways drift as a fraction of inward speed, which curves the paths into a swirl.
+    swirl: f32 = 0.35,
+    /// Reverses the ring: particles start at the center and fly out to `radius`, expiring as they land
+    /// on it. Used by the portal ascent, whose world opens outward rather than being drawn in.
+    outward: bool = false,
+};
+
+/// Spawns particles on a ring around `origin` that fall inward and expire as they reach it.
+///
+/// The inverse of `spawnBurst()`: speed is derived from each particle's distance and lifetime,
+///  so itre converges on the center rather than radiating away. Used for the portal descent's intake effect.
+pub fn spawnInwardRing(origin: Vec2f32, colors: []const [4]f32, config: InwardConfig) void {
+    for (0..config.count) |_| {
+        const angle = randRange(0.0, std.math.tau);
+        const radius = randRange(config.radius_min, config.radius_max);
+        const travel: u16 = @intFromFloat(randRange(
+            @floatFromInt(config.travel_min),
+            @floatFromInt(config.travel_max + 1),
+        ));
+        const spin_magnitude = randRange(config.spin_min, config.spin_max);
+
+        const dir: Vec2f32 = .{ @cos(angle), @sin(angle) };
+        // Covering exactly `radius` over `travel` frames puts the particle on `origin` (inward) or on
+        // the ring (outward) as it dies.
+        const speed = radius / @as(f32, @floatFromInt(travel));
+        // A perpendicular component bends the straight path into a spiral.
+        const swirl = if (seed.float(f32) < 0.5) config.swirl else -config.swirl;
+
+        // Inward starts on the ring moving toward the center; outward is the exact reverse.
+        const radial: f32 = if (config.outward) -1.0 else 1.0;
+
+        addParticle(.{
+            .position = origin + dir * @as(Vec2f32, @splat(if (config.outward) 0.0 else radius)),
+            .velocity = .{
+                (-dir[0] + -dir[1] * swirl) * speed * radial,
+                (-dir[1] + dir[0] * swirl) * speed * radial,
+            },
+            .rotation = randRange(0.0, std.math.tau),
+            .spin = if (seed.float(f32) < 0.5) spin_magnitude else -spin_magnitude,
+            .size = randRange(config.size_min, config.size_max),
+            .lcha = if (colors.len == 0)
+                .{ 1.0, 0.0, 0.0, 1.0 } // white fallback
+            else
+                colors[@intCast(seed.next() % colors.len)] + Vec4f32{ -0.08 + 0.24 * seed.float(f32), 0.01, 0.0, 0.0 },
+            .frames_left = travel,
+            .lifetime = travel,
         });
     }
 }
@@ -140,6 +206,8 @@ pub fn tick(ticks: u32) void {
 /// Draws every live particle. Called once per render frame from `updateEntities()`.
 pub fn draw() void {
     @setFloatMode(.optimized);
+    const portal_fade = dw.portal.getDescentFade();
+
     for (&pool) |*p| {
         if (p.frames_left <= 0) continue;
 
@@ -154,7 +222,12 @@ pub fn draw() void {
             ),
             .size = p.size + p.spin * (@as(f32, @floatCast(dw.chunks.current_dt)) + 1.0),
             .rotation = p.rotation,
-            .lcha = .{ p.lcha[0], p.lcha[1], p.lcha[2], p.lcha[3] * fade * MAX_OPACITY },
+            .lcha = .{
+                p.lcha[0],
+                p.lcha[1],
+                p.lcha[2],
+                p.lcha[3] * fade * MAX_OPACITY * portal_fade,
+            },
         });
     }
 }

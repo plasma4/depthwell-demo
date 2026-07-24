@@ -39,6 +39,7 @@ export interface EngineExports extends WebAssembly.Exports {
     readonly jsGetTime: () => number;
     readonly jsHandleVisibleChunks: (arg0: number, arg1: number) => void;
     readonly jsHandleVisibleEntities: () => void;
+    readonly jsDrawBackground: (arg0: number) => void;
     readonly jsSetMouseType: (arg0: number) => void;
     readonly jsPlaySound: (arg0: number, arg1: number, arg2: number) => void;
     readonly main: () => void;
@@ -51,6 +52,9 @@ export interface EngineExports extends WebAssembly.Exports {
     readonly tick: (arg0: number, arg1: number) => void;
     readonly mixSeed: (arg0: bigint) => bigint;
     readonly mixSeedF64: (arg0: bigint) => number;
+    readonly setSeedString: (arg0: bigint, arg1: bigint) => void;
+    readonly getSeedStringLen: () => bigint;
+    readonly getSeedStringPtr: () => bigint;
     readonly getMemoryLayoutPtr: () => bigint;
     readonly scratchAlloc: (arg0: number) => bigint;
     readonly isDebug: () => boolean;
@@ -67,16 +71,17 @@ export interface EngineExports extends WebAssembly.Exports {
 
 // Generated enum and struct data from types.zig:
 export const KeyBits = {
-    zoom: 131072,
-    mine: 262144,
-    inventory_up: 524288,
-    inventory_down: 1048576,
-    minus: 32768,
-    plus: 65536,
-    up: 2048,
-    left: 4096,
-    down: 8192,
-    right: 16384,
+    increase_depth: 2097152,
+    decrease_depth: 1048576,
+    mine: 524288,
+    inventory_up: 262144,
+    inventory_down: 131072,
+    minus: 65536,
+    plus: 32768,
+    up: 16384,
+    left: 8192,
+    down: 4096,
+    right: 2048,
     k0: 1,
     k1: 2,
     k2: 4,
@@ -117,4 +122,13 @@ export const game_state_offsets = {
     keys_held_mask: 140,
     seed: 144,
     seed2: 208,
+    portal_chunk: 416,
+    bg_time: 432,
+    portal_frame: 440,
+    portal_phase: 444,
+    portal_quadrant: 445,
+    portal_bx: 446,
+    portal_by: 447,
+    seed_string: 448,
+    seed_string_len: 548,
 } as const;

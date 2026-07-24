@@ -324,10 +324,12 @@ pub fn drawChunkPreview() void {
         bg.lcha = .{ 0.8, 0.2, 0.4, 1.0 };
         addEntity(bg);
 
+        // The window is much wider than this now; show the active quadrants and their immediate ring.
+        const first = dw.world.QuadCache.ANCESTOR_CENTER - 1;
         for (0..4) |y| {
             for (0..4) |x| {
                 addEntity(.{
-                    .sprite = dw.world.quad_cache.ancestor_materials[y][x].id,
+                    .sprite = dw.world.quad_cache.ancestor_materials[first + y][first + x].id,
                     .position = .{
                         deeper_preview_x + @as(f32, @floatFromInt(x)) * tile_size,
                         preview_y_ancestor + @as(f32, @floatFromInt(y)) * tile_size,

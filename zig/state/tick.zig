@@ -8,6 +8,10 @@ const KeyBits = dw.KeyBits;
 var DEBUG_RECURSIVELY_INCREASE_DEPTH = false;
 const MAX_AUTO_DEPTH = 32;
 
+/// Nominal logical ticks per second, which `logic_speed` is scaled against
+/// (see `logicLoop()` in `src/main.ts`). Used to convert ticks into real seconds.
+const TICK_RATE: f64 = 60.0;
+
 /// The root of ALL actions that need to be handled every logical tick.
 pub fn handleTick(logic_speed: f64, iterations: u32) void {
     var buffer: inventory.SlotBuffer = undefined;
@@ -63,46 +67,79 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
         }
     }
 
-    // of course, we must TODO: also make this switch when we implement portal logic
-    const just_increased_depth = dw.is_debug and KeyBits.isSet(KeyBits.zoom, memory.game.keys_pressed_mask);
-    // increase the depth (testing hotkey)
-    if (just_increased_depth) {
-        dw.world.pushLayer(
-            .none,
-            memory.game.getPlayerCoord(),
-            memory.game.getBlockXInChunk(), // convert a subpixel (0-4095) in a chunk to a block in a chunk (0-15)
-            memory.game.getBlockYInChunk(),
-        );
+    // The (inverted) portal indicators are the real way to change depth (see `state/portal.zig`);
+    // these hotkeys stay as a way to skip straight there, and are ignored mid-animation so they
+    // cannot push a second transition during one.
+    const can_hotkey_depth = dw.is_debug and !dw.portal.isActive();
 
-        if (memory.game.depth >= dw.HORIZON_DEPTH) {
-            var key = memory.game.getPlayerCoord().asDepthCoordinate(memory.game.depth);
-            const target_depth = @max(memory.game.depth - dw.HORIZON_DEPTH, dw.startup.STARTING_ZOOM_TIMES);
-            while (key.depth > target_depth) {
-                key = key.getParent();
-            }
-            dw.logger.quick(.{ "{h}Resulting key/current depth", memory.game.depth, key });
+    // Z: increase depth. While spectating it retraces the ascent (the only descent allowed); at the
+    // deepest depth it pushes a fresh layer.
+    const just_increased_depth = can_hotkey_depth and
+        KeyBits.isSet(KeyBits.increase_depth, memory.game.keys_pressed_mask);
+    if (just_increased_depth) {
+        if (dw.world.isSpectating()) {
+            dw.world.retraceInstant();
+        } else {
+            dw.world.pushLayer(
+                .none,
+                memory.game.getPlayerCoord(),
+                memory.game.getBlockXInChunk(), // convert a subpixel (0-4095) in a chunk to a block in a chunk (0-15)
+                memory.game.getBlockYInChunk(),
+            );
         }
 
         dw.mining.selected_hp = 255;
         dw.mouse.mouse_chunk_coord = null;
     }
 
+    // X: decrease depth (ascend), instantly, above the deepest depth this puts the world into the
+    // read-only spectating mode (see `world.isSpectating()`).
+    const just_decreased_depth = can_hotkey_depth and
+        !just_increased_depth and
+        dw.world.canAscend() and
+        KeyBits.isSet(KeyBits.decrease_depth, memory.game.keys_pressed_mask);
+    if (just_decreased_depth) {
+        dw.world.popLayer();
+        dw.mining.selected_hp = 255;
+        dw.mouse.mouse_chunk_coord = null;
+    }
+    const changed_depth = just_increased_depth or just_decreased_depth;
+
     // update particles
     dw.particles.tick(iterations);
 
     // Iterations may be > 1 if FPS is low as a correction factor.
     for (0..iterations) |_| {
-        // Smelting only advances while the furnace menu is open (paused otherwise).
-        if (dw.indicators.menus.furnace) @import("../menus/furnace.zig").updateSmelting();
+        // A portal descent takes the world over completely: the player is locked in place and the
+        // simulation is held still so the frozen D layer the overlay dissolves against cannot change
+        // underneath it (the D+1 preview was generated from that exact state).
+        const descending = dw.portal.isActive();
 
-        // mouse block and mining/placing logic all updated in this function
-        if (!just_increased_depth) dw.mining.handleMiningAndPlacing(logic_speed);
+        // The background clock is eased to a standstill over a descent, and simply tracks elapsed
+        // seconds otherwise. Advancing it here (rather than from the host's wall clock) is what lets it
+        // stop, and what lets a save record exactly where it stopped.
+        // `logic_speed` is scaled by the frame rate, so one tick always covers `logic_speed / TICK_RATE`
+        // seconds no matter how often ticks run, keeping the background at real-time speed.
+        memory.game.bg_time += (logic_speed / TICK_RATE) * dw.portal.backgroundRate();
 
-        dw.player.move(logic_speed); // logic that moves the player/camera based on keys
-        dw.player.tickAnimation(); // advance player sprite animation + facing on the logic tick
-        dw.water.tickWater(); // fluid sim
+        if (descending) {
+            dw.portal.tick();
+        } else {
+            // Smelting only advances while the furnace menu is open (paused otherwise).
+            if (dw.indicators.menus.furnace) @import("../menus/furnace.zig").updateSmelting();
 
-        inventory.tickDroppedItems(); // process item animation ticks and inventory collection!
+            // mouse block and mining/placing logic all updated in this function.
+            // Spectating is read-only, so mining and the water sim (both of which write `mod_store`)
+            // are held; only movement (free flight) and animation run.
+            const spectating = dw.world.isSpectating();
+            if (!changed_depth and !spectating) dw.mining.handleMiningAndPlacing(logic_speed);
+
+            dw.player.move(logic_speed); // logic that moves the player/camera based on keys
+            dw.player.tickAnimation(); // advance player sprite animation + facing on the logic tick
+            if (!spectating) dw.water.tickWater(); // fluid sim
+
+            inventory.tickDroppedItems(); // process item animation ticks and inventory collection!
+        }
 
         memory.game.frame +%= 1;
     }
