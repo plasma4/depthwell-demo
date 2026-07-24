@@ -15,9 +15,10 @@ const Chunk = memory.Chunk;
 const Sprite = dw.Sprite;
 const Coordinate = world.Coordinate;
 const Vec2f32 = dw.utils.Vec2f32;
+const Vec4f32 = dw.utils.Vec4f32;
 
 /// Length of a descent; at 60fps this is a bit over one second.
-pub const TOTAL_FRAMES: u32 = 120;
+pub const TOTAL_FRAMES: u32 = 150;
 /// Frames the player takes to be drawn from where they stand into the portal's mouth.
 pub const PULL_FRAMES: u32 = 24;
 
@@ -57,21 +58,98 @@ const SHARD_TRAVEL_MAX: u32 = 28;
 /// Kept in screen space on purpose: it makes them immune to the zoom,
 /// so they can keep being "swallowed" the whole way to `ZOOM_FACTOR`,
 /// without anything having to be rescaled per frame.
-const SHARD_RADIUS_MIN: f32 = 15.0;
+const SHARD_RADIUS_MIN: f32 = 3.0;
 const SHARD_RADIUS_MAX: f32 = 80.0;
 
 /// Edge length of a shard in viewport pixels, before its per-shard jitter.
 /// About half a block, so the debris reads as rubble rather than as loose terrain.
 const SHARD_SIZE: f32 = @as(f32, dw.CHUNK_SIZE) / 2.0;
 
-/// Blue-cyan tints for the intake particles. `.particle` is a white sprite,
-/// so chroma and hue here are added straight onto it (see `DEFAULT_ENTITY_LCHA`); hue is in radians.
-const PORTAL_COLORS = [_][4]f32{
-    .{ 0.85, 0.16, 4.55, 1.0 },
-    .{ 0.95, 0.13, 4.75, 1.0 },
-    .{ 0.75, 0.19, 4.35, 1.0 },
-    .{ 1.00, 0.10, 4.95, 1.0 },
+/// Radians a shard sweeps around the portal over its travel, and how much that sweep tightens (see `drawDebris()`).
+/// The tightening is bounded by construction:
+/// the divisor bottoms out at `1 - SHARD_SWIRL_TIGHTEN`, so the total sweep cannot run away.
+const SHARD_SWIRL: f32 = 0.35;
+const SHARD_SWIRL_TIGHTEN: f32 = 0.75;
+
+comptime {
+    // At 1.0 the divisor reaches zero and a shard whips through infinite rotation on its last frame.
+    if (SHARD_SWIRL_TIGHTEN < 0.0 or SHARD_SWIRL_TIGHTEN >= 1.0)
+        @compileError("SHARD_SWIRL_TIGHTEN must stay below 1 to keep the sweep finite.");
+}
+
+/// How far a shard is pushed toward the portal's own light as it is swallowed (see `drawDebris()`).
+/// `L` multiplies and `C`/`H` shift, so this brightens the sprite and rotates whatever hue it had toward the mouth's,
+/// without flattening every material to one color.
+const SHARD_GLOW_LIGHT: f32 = 0.55;
+const SHARD_GLOW_CHROMA: f32 = 0.16;
+const SHARD_GLOW_HUE: f32 = 0.9;
+
+/// Share of the intake ring thrown back out of the portal,
+const DESCENT_OUTWARD_RATIO: f32 = 0.58;
+const ASCENT_OUTWARD_RATIO: f32 = 1.0 - 0.58;
+
+/// Streams the intake is gathered into, and how far the pattern turns per frame.
+/// Chosen together: over a whole descent the arms sweep a bit under two full turns,
+/// slow enough to be followed and fast enough never to sit still.
+const INTAKE_ARMS: u32 = 5;
+const INTAKE_ARM_SPIN: f32 = 0.09;
+const INTAKE_ARM_SPREAD: f32 = 0.2;
+
+comptime {
+    // Arms that overlap are just a ring again, which is the thing the streams exist to avoid.
+    if (INTAKE_ARM_SPREAD * 2.0 >= std.math.tau / @as(f32, INTAKE_ARMS))
+        @compileError("Intake arms must stay narrower than the gap between them.");
+}
+
+/// Radians per frame of the wave the intake's spawn rate is beaten against, and the share of the
+/// rate that survives a trough. The rate works out to a gust roughly every 15 frames,
+/// which is slow enough to be felt as a pulse and quick enough to land several before the commit.
+const INTAKE_PULSE_RATE: f64 = 0.42;
+const INTAKE_PULSE_FLOOR: f64 = 0.35;
+
+comptime {
+    // A zero floor empties the mouth on every trough, which reads as the effect stuttering.
+    if (INTAKE_PULSE_FLOOR <= 0.0 or INTAKE_PULSE_FLOOR >= 1.0)
+        @compileError("INTAKE_PULSE_FLOOR is the share of the rate a trough keeps.");
+}
+
+/// Ring extent in world scale (viewport pixels at 1x zoom), multiplied by the live zoom at spawn.
+/// The inner edge sits INSIDE the portal's mouth (a block is `CHUNK_SIZE` px at 1x),
+/// so the swirl crosses the spot the player is drawn into rather than ringing politely around it.
+const INTAKE_RADIUS_MIN: f32 = 1.5;
+const INTAKE_RADIUS_MAX: f32 = 30.0;
+
+/// Particle size in world scale. Scaled by the square root of the zoom rather than the zoom itself:
+/// tracking it exactly turns fine dust into chunky blocks by the time the descent lands,
+/// and the mouth is where detail is wanted most.
+const INTAKE_SIZE_MIN: f32 = 0.7;
+const INTAKE_SIZE_MAX: f32 = 2.2;
+
+/// LCHA colors for a descent's intake particles (violet, magenta, and gold here)!
+/// Ordered dimmest first, as `spawnOrbitRing()` requires: it picks by spawn radius,
+/// so the last entry is what the mouth itself is lit with and the first is what the rim fades into.
+const PORTAL_COLORS = [_]Vec4f32{
+    .{ 0.62, 0.21, 5.67, 1.0 },
+    .{ 0.72, 0.17, 5.55, 1.0 },
+    .{ 0.80, 0.13, 5.50, 1.0 },
+    .{ 0.82, 0.14, 1.48, 1.0 },
+    .{ 0.50, 0.20, 5.41, 1.0 },
 };
+
+/// Copied from `.invportal` colors lazily: green hues.
+const INVPORTAL_COLORS = [_]Vec4f32{
+    .{ 0.585, 0.113, 2.175, 1.0 },
+    .{ 0.675, 0.135, 2.198, 1.0 },
+    .{ 0.772, 0.144, 2.060, 1.0 },
+    .{ 0.828, 0.181, 2.300, 1.0 },
+    .{ 0.592, 0.125, 1.893, 1.0 },
+};
+
+/// The palette the running transition's effects draw from.
+/// A return dives back down through an ordinary portal, so only an ascent is the odd one out.
+inline fn effectColors() []const Vec4f32 {
+    return if (isAscending()) &INVPORTAL_COLORS else &PORTAL_COLORS;
+}
 
 comptime {
     if (PULL_FRAMES >= TOTAL_FRAMES) @compileError("The player must finish being drawn in before the descent lands.");
@@ -85,13 +163,13 @@ pub const Phase = enum(u8) {
     descending,
     /// A D -> D-1 ascent through an inverted portal, the same animation run in reverse.
     ascending,
-    /// A D -> D+1 return: dives back through a portal to walk an ascent back one step, running the
-    /// zoom past `ZOOM_FACTOR` into a fadeout rather than meeting a preview (see `triggerReturn()`).
+    /// A D -> D+1 return: dives back through a portal to walk an ascent back one step,
+    /// running the zoom past `ZOOM_FACTOR` into a fadeout rather than meeting a preview (see `triggerReturn()`).
     returning,
 };
 
-/// Frames the outgoing dive of a return takes. The world commits on the frame this ends, under a
-/// screen that has already faded out, so the depth change itself is never seen.
+/// Frames the outgoing dive of a return takes. The world commits on the frame this ends,
+/// under a screen that has already faded out, so the depth change itself is never seen.
 pub const RETURN_DIVE_FRAMES: u32 = 34;
 /// Frames the arrival takes, fading the depth landed on back in.
 pub const RETURN_ARRIVE_FRAMES: u32 = 18;
@@ -102,8 +180,8 @@ pub const RETURN_FRAMES: u32 = RETURN_DIVE_FRAMES + RETURN_ARRIVE_FRAMES;
 /// Helps on some level with visual clarity that "we're in preview stage".
 pub const RETURN_ZOOM: f64 = 12.0;
 
-/// Fraction of the dive that passes before the fade to black starts, so the zoom is read as a dive
-/// rather than as a plain fade with some motion behind it.
+/// Fraction of the dive that passes before the fade to black starts,
+/// so the zoom actually looks like a dive visually!
 const RETURN_FADE_START: f64 = 0.45;
 
 comptime {
@@ -424,6 +502,11 @@ pub fn worldOpacity() f64 {
 fn beginTransition(phase: Phase, coord: Coordinate, bx: u4, by: u4) void {
     if (isActive()) return;
 
+    // Every menu is bound to a block at the depth being left, and the world is frozen from here until
+    // the commit, so none of them may act. `mod_store.beginWrite()` asserts the same thing from the
+    // other side, since the menus are the only writers that outlive the tick gate in `handleTick()`.
+    dw.indicators.closeAllMenus();
+
     const g = &memory.game;
     g.portal_chunk = coord.suffix;
     g.portal_quadrant = coord.quadrant;
@@ -667,7 +750,9 @@ fn collectDebris() void {
             .sprite = palette[@intCast(rng.next() % palette_len)],
             .angle = @floatCast(rng.float(f64) * std.math.tau),
             .radius = SHARD_RADIUS_MIN + (SHARD_RADIUS_MAX - SHARD_RADIUS_MIN) * rng.float(f32),
-            .size = SHARD_SIZE * (0.55 + 0.85 * rng.float(f32)),
+            // Biased small: the same count of finer rubble reads as a flow into the mouth,
+            // where a field of half-block slabs just reads as clutter over the terrain.
+            .size = SHARD_SIZE * (0.35 + 0.75 * rng.float(f32) * rng.float(f32)),
             .spin = (rng.float(f32) - 0.5) * 6.0,
             .start_frame = @intFromFloat(when * span),
             .travel = SHARD_TRAVEL_MIN + @as(u32, @intCast(rng.next() % (SHARD_TRAVEL_MAX - SHARD_TRAVEL_MIN + 1))),
@@ -848,16 +933,34 @@ fn worldToScreen(sub: [2]f64) Vec2f32 {
     };
 }
 
+/// Where the effects converge this frame, in viewport pixels.
+///
+/// Not simply the portal block: for the whole pull the player is still out where they were standing,
+/// and a swirl centered on the mouth from frame zero reads as an effect playing next to them rather
+/// than one acting on them. So it starts on the player and is carried onto the mouth as they are
+/// drawn in, arriving exactly when they do.
+///
+/// Both ends converge anyway (`playerOverride()` eases onto `anchor`, which is the same block
+/// `effect_center` measures), so this only shapes the pull; afterwards it is `effect_center` outright.
+fn effectOrigin() Vec2f32 {
+    const t = smoothstep(pullProgress());
+    const player = playerOverride();
+    return worldToScreen(.{
+        player[0] * (1.0 - t) + effect_center[0] * t,
+        player[1] * (1.0 - t) + effect_center[1] * t,
+    });
+}
+
 /// Draws the descent's effects: the terrain being swallowed.
 /// Called once per render frame from `entity.updateEntities()`.
 /// The intake particles are spawned from `tick()` instead, so their density does not ride the frame rate.
 pub fn drawEffects() void {
     @setFloatMode(.optimized);
     if (!isActive() or !ready) return;
-    drawDebris(worldToScreen(effect_center));
+    drawDebris(effectOrigin());
 }
 
-/// Fade factor for portal-related visual elements (shards, particles) near the end of the descent.
+/// Fade factor for portal-related visual elements (shards n' particles) near the end of the descent.
 pub fn getDescentFade() f32 {
     @setFloatMode(.optimized);
     if (!isActive()) return 1.0;
@@ -883,23 +986,71 @@ fn drawDebris(center: Vec2f32) void {
         // Descent and return both draw terrain inward to be swallowed; only an ascent throws it
         // outward, as the world opens up around the player.
         const distance = shard.radius * (if (isAscending()) eased else 1.0 - eased);
+
+        // Terrain rides the same vortex the intake particles orbit on, rather than falling down a
+        // spoke of its own: two motion fields over one portal is what makes the effect read as
+        // unrelated systems sharing a screen. The sweep tightens as the travel runs on, so a shard
+        // being swallowed accelerates into the mouth; an ascent throws the same curve back outward.
+        const swept = shard.angle + SHARD_SWIRL * eased / (1.0 - SHARD_SWIRL_TIGHTEN * eased);
         const pos: Vec2f32 = .{
-            center[0] + @cos(shard.angle) * distance,
-            center[1] + @sin(shard.angle) * distance,
+            center[0] + @cos(swept) * distance,
+            center[1] + @sin(swept) * distance,
         };
 
         // Fades up out of nothing, then fades out right as it enters the center.
         const appear = @min(eased * 6.0, 1.0);
         const alpha = appear * (1.0 - eased) * getDescentFade();
 
+        const glow = eased * eased;
         dw.entity.addEntity(.{
             .sprite = shard.sprite,
             .position = pos,
             .size = shard.size * (1.0 - 0.75 * eased),
             .rotation = shard.spin * eased,
-            .lcha = .{ 1.0, 0.0, 0.0, alpha },
+            .lcha = .{
+                1.0 + SHARD_GLOW_LIGHT * glow,
+                SHARD_GLOW_CHROMA * glow,
+                SHARD_GLOW_HUE * glow,
+                alpha,
+            },
         });
     }
+}
+
+/// Particles thrown by the swallow. Big enough to punctuate, since it fires exactly once.
+const SWALLOW_SPARKS: usize = 120;
+
+/// The kick the mouth gives on the frame the player finishes being drawn in.
+///
+/// Keyed to that exact frame rather than a range, so a save resumed past it cannot fire a second time.
+/// Half of it is thrown clear and half is a tight counter-swirl straight back down,
+/// so the moment still reads as the portal taking something rather than as an explosion.
+fn spawnSwallow() void {
+    @setFloatMode(.optimized);
+    const zoom: f32 = @floatCast(memory.game.camera_scale * @min(zoomFactor(), @as(f64, dw.ZOOM_FACTOR)));
+    const center = effectOrigin();
+    const size_scale = @sqrt(zoom);
+
+    dw.particles.spawnBurst(center, effectColors(), .{
+        .count = SWALLOW_SPARKS,
+        .speed_min = 0.7 * zoom,
+        .speed_max = 3.0 * zoom,
+        .size_min = INTAKE_SIZE_MIN * size_scale,
+        .size_max = INTAKE_SIZE_MAX * 1.6 * size_scale,
+        .lifetime_min = 10,
+        .lifetime_max = 26,
+    });
+
+    dw.particles.spawnOrbitRing(center, effectColors(), .{
+        .count = SWALLOW_SPARKS / 2,
+        .radius_min = INTAKE_RADIUS_MIN * zoom,
+        .radius_max = INTAKE_RADIUS_MAX * 0.6 * zoom,
+        .size_min = INTAKE_SIZE_MIN * size_scale,
+        .size_max = INTAKE_SIZE_MAX * size_scale,
+        .travel_min = 6,
+        .travel_max = 14,
+        .swirl = 1.6,
+    });
 }
 
 /// Emits the portal's inward-falling particles, growing more insistent as the descent builds.
@@ -918,23 +1069,31 @@ fn spawnIntake() void {
     if (intensity <= 0.0) return;
 
     const zoom: f32 = @floatCast(memory.game.camera_scale * zoomFactor());
-    // The pool holds thousands, so a descent this short can afford to be genuinely dense.
-    const count: usize = @intFromFloat(5.0 + 55.0 * intensity);
 
-    const cap: u16 = @intFromFloat(@round(22.0 - 22.0 * progress()));
+    // create a rhythm effect to sell an interesting effect here!
+    const wave = 0.5 - 0.5 * @cos(@as(f64, @floatFromInt(memory.game.portal_frame)) * INTAKE_PULSE_RATE);
+    const surge = intensity * intensity * (INTAKE_PULSE_FLOOR + (1.0 - INTAKE_PULSE_FLOOR) * wave);
+    const count: usize = @intFromFloat(3.0 + 46.0 * surge);
+
+    const cap: u16 = @intFromFloat(@round(24.0 - 14.0 * progress()));
     if (cap > 2) {
-        dw.particles.spawnInwardRing(worldToScreen(effect_center), &PORTAL_COLORS, .{
+        dw.particles.spawnOrbitRing(effectOrigin(), effectColors(), .{
             .count = count,
-            // Held in world scale so the ring hugs the portal as the view zooms.
-            .radius_min = 10.0 * zoom,
-            .radius_max = 26.0 * zoom,
-            .size_min = 0.8 * zoom,
-            .size_max = 2.6 * zoom,
+            // Held in world scale so the ring keeps hugging the mouth as the view zooms.
+            .radius_min = INTAKE_RADIUS_MIN * zoom,
+            .radius_max = INTAKE_RADIUS_MAX * zoom,
+            .size_min = INTAKE_SIZE_MIN * @sqrt(zoom),
+            .size_max = INTAKE_SIZE_MAX * @sqrt(zoom),
             .travel_min = @min(cap, 8),
             .travel_max = cap,
-            .swirl = @floatCast(0.25 + 0.5 * intensity),
-            // A descent draws them in; an ascent pushes them out through the same ring.
-            .outward = !isDescending(),
+            // Tightens as the transition builds, so the swirl visibly winds up.
+            .swirl = @floatCast(0.85 + 0.75 * intensity),
+            // Which way this leans is what reads as the portal swallowing the world (descent)
+            // or opening it back up (ascent)!
+            .outward_ratio = if (isDescending()) DESCENT_OUTWARD_RATIO else ASCENT_OUTWARD_RATIO,
+            .arms = INTAKE_ARMS,
+            .arm_phase = @as(f32, @floatFromInt(memory.game.portal_frame)) * INTAKE_ARM_SPIN,
+            .arm_spread = INTAKE_ARM_SPREAD,
         });
     }
 }
@@ -958,6 +1117,10 @@ pub fn tick() void {
         fillPreview(chunksPerFrame());
         spawnIntake();
     }
+
+    // Both a transition and a return pull the player in over the same PULL_FRAMES,
+    // so the moment they are taken is punctuated the same way either way.
+    if (isActive() and ready and g.portal_frame == PULL_FRAMES) spawnSwallow();
 
     // The world is frozen, so pinning the previous-frame values keeps render interpolation from drifting with nothing moving.
     // The transition's own motion is an override.
@@ -1015,20 +1178,24 @@ fn spawnReturnIntake() void {
 
     // Held in world scale so the ring hugs the portal as the view dives, but capped at ZOOM_FACTOR:
     const zoom: f32 = @floatCast(memory.game.camera_scale * @min(zoomFactor(), @as(f64, dw.ZOOM_FACTOR)));
-    const count: usize = @intFromFloat(5.0 + 55.0 * intensity);
+    const count: usize = @intFromFloat(4.0 + 34.0 * intensity);
 
-    const cap: u16 = @intFromFloat(@round(22.0 - 16.0 * t));
+    const cap: u16 = @intFromFloat(@round(22.0 - 12.0 * t));
     if (cap <= 2) return;
 
-    dw.particles.spawnInwardRing(worldToScreen(effect_center), &PORTAL_COLORS, .{
+    dw.particles.spawnOrbitRing(effectOrigin(), effectColors(), .{
         .count = count,
-        .radius_min = 10.0 * zoom,
-        .radius_max = 26.0 * zoom,
-        .size_min = 0.8 * zoom,
-        .size_max = 2.6 * zoom,
+        .radius_min = INTAKE_RADIUS_MIN * zoom,
+        .radius_max = INTAKE_RADIUS_MAX * zoom,
+        .size_min = INTAKE_SIZE_MIN * @sqrt(zoom),
+        .size_max = INTAKE_SIZE_MAX * @sqrt(zoom),
         .travel_min = @min(cap, 8),
         .travel_max = cap,
-        .swirl = @floatCast(0.25 + 0.5 * intensity),
+        .swirl = @floatCast(0.85 + 0.75 * intensity),
+        .outward_ratio = DESCENT_OUTWARD_RATIO,
+        .arms = INTAKE_ARMS,
+        .arm_phase = @as(f32, @floatFromInt(memory.game.portal_frame)) * INTAKE_ARM_SPIN,
+        .arm_spread = INTAKE_ARM_SPREAD,
     });
 }
 
@@ -1048,7 +1215,7 @@ fn finish() void {
 
     if (ascended) {
         // Records the retrace step and rolls the deeper depth's edits up into markers, then commits.
-        // The invportal is only the way up: a later return puts the player back where they were STANDING when they used it,
+        // Returning back to a greater depth value puts the player back where they were STANDING when they used it,
         // not inside the block they rose through.
         world.applyAscent(transition, ascend_from_coord, ascend_from_pos);
     } else {
@@ -1059,8 +1226,7 @@ fn finish() void {
         world.commitLayer(transition, true);
     }
 
-    // Hand the generated chunks to the SimBuffer before dropping them, both directions:
-    // skipping it does not avoid the work, it'd only defer a full SimBuffer rebuild to next logical tick player movement.
+    // Hand the generated chunks to the SimBuffer so we don't instantly regenerate 256 chunks.
     world.SimBuffer.refreshAdopting(g.getPlayerCoord(), PreviewSource{});
 
     // An ascent's preview was generated before applyAscent(), so re-apply them onto the adopted chunks.
@@ -1087,7 +1253,8 @@ fn releasePreview() void {
     ready = false;
 }
 
-/// Rebuilds everything a transition needs that a save does not carry, then brings the preview fully up to date in one go.
+/// Rebuilds everything from a save (non-incremental)
+/// then brings the preview fully up to date in one go.
 /// Called after a load; the frame counter alone decides what the player sees next.
 ///
 /// A return saved AFTER its commit has no preview to rebuild (`ensureReady()` no-ops there):
@@ -1099,7 +1266,7 @@ pub fn restore() void {
         return;
     }
     ensureReady();
-    // Preview can build at once here (since we're doing load and it's okay if that logically takes a while).
+    // preview can build at once here as we're doing load and it's okay if that logically takes a while
     if (preview.len != 0) fillPreview(@intCast(preview.len));
 }
 

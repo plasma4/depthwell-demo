@@ -106,6 +106,9 @@ pub var USE_ORE_HEATMAP = false;
 /// Configuration options passed to the FBM (Fractal Brownian Motion) and Worley
 /// noise generation algorithm (`getFbmValue()`).
 const TerrainOptions = struct {
+    /// Unique ID for terrain in order to vary seeds.
+    id: comptime_int,
+
     /// Controls the scale of the primary noise grid cells.
     /// Larger values stretch out the noise patterns.
     cell_size: comptime_float,
@@ -222,7 +225,8 @@ fn computeBaseSpriteType(
         wx,
         wy,
         .{
-            .cell_size = 425.0, // very LARGE cells for biome generation
+            .id = 1,
+            .cell_size = 375.0, // very LARGE cells for biome generation
             .fbm_shift_size = 0.0,
             .use_f2_f1 = false,
         },
@@ -232,6 +236,7 @@ fn computeBaseSpriteType(
         wx,
         wy,
         .{
+            .id = 2,
             .cell_size = 80.0, // smaller cells for cave terrain
             .fbm_shift_size = 24.0,
             .use_f2_f1 = true,
@@ -719,9 +724,10 @@ fn getBilinearValueNoise(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) f32
 /// Use for: terraced blocks, cellular clusters, and erosion basins.
 /// TODO: Make options less confusing, esp. with f2_f1 toggle
 fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 {
+    // comptime gate here ONLY, not in options so we don't explode FBM value calls
     if (comptime !options.use_f2_f1) {
         // Excellent for sharp branching networks and rich ore veins
-        return fbm(getPerlinNoise, seed_vector, x, y, options.cell_size, 3);
+        return fbm(getPerlinNoise, seed_vector, x + (@as(u64, y) << 32), options.id, options.cell_size, 3);
     }
 
     const fx: f32 = @floatFromInt(x);
@@ -741,7 +747,12 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
 
     if (amp > 0) {
         inline for (0..fbm_octaves) |_| {
-            const n = getDualValueNoise(seed_vector, x * freq, y * freq, inv_dual_value_scale);
+            const n = getDualValueNoise(
+                seed_vector,
+                x * freq,
+                y * freq,
+                inv_dual_value_scale,
+            );
             warp_x += n[0] * amp;
             warp_y += n[1] * amp;
             amp *= 0.55; // 55%, not 50%!

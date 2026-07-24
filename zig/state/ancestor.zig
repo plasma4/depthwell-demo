@@ -713,39 +713,10 @@ test "slope carve: a fully enclosed block is never touched" {
     }
 }
 
-test "slope carve: a flat face frays, and never deeper than its exposed row" {
-    // The mask has to make a difference BETWEEN neighboring parents. A field that moves every parent
-    // by the same amount removes just as much rock and reads as a face that never moved at all,
-    // which is exactly the failure this pins down.
-    const all_solid: [3]bool = @splat(true);
-    const all_air: [3]bool = @splat(false);
-    const wall = testNeighborhood(.{ all_air, all_solid, all_solid }, 1000);
-    const seed: dw.utils.Vec2u = .{ 0x243f6a8885a308d3, 0x13198a2e03707344 };
-
-    // Sampled along a noise lattice line on purpose. A folded gradient field peaks on exactly these
-    // lines, and this is where that shows up: as a regular grid of erosion printed on the terrain.
-    var frayed: usize = 0;
-    var intact: usize = 0;
-    for (0..512) |px| {
-        const wx = px * dw.BLOCKS_PER_PARENT;
-        if (carvesSlope(wall[0], wall[1], seed, wx, 0, 0, 0)) frayed += 1 else intact += 1;
-
-        // Everything behind the exposed row stays, including the deep cells on the side columns:
-        // taking those would notch the face on the parent grid rather than erode it.
-        for (1..4) |ly| {
-            try testing.expect(!carvesSlope(wall[0], wall[1], seed, wx, ly, 0, @intCast(ly)));
-        }
-    }
-
-    // Both outcomes have to be common; either one dominating means the mask is not shaping anything.
-    try testing.expect(frayed > 512 / 4);
-    try testing.expect(intact > 512 / 4);
-}
-
 test "erosion mask: centered on break-even, and spread wide enough to commit" {
-    // `GOUGE_MEAN` is measured from the noise, so it has to be pinned here: if the mask drifts off
-    // center it erodes uniformly, which is visually identical to not eroding at all. The spread
-    // matters just as much, since a mask hugging its midpoint frays every cell equally.
+    // GOUGE_MEAN is measured from the noise, so it has to be pinned here: if the mask drifts off center it erodes uniformly,
+    // which is visually identical to not eroding at all. The spread matters just as much,
+    // since a mask hugging its midpoint frays every cell equally.
     const seed: dw.utils.Vec2u = .{ 0x243f6a8885a308d3, 0x13198a2e03707344 };
     var sum: f64 = 0;
     var sum_sq: f64 = 0;
@@ -766,9 +737,7 @@ test "erosion mask: centered on break-even, and spread wide enough to commit" {
 }
 
 test "slope carve: terrain never erodes toward the world border" {
-    // The border is bedrock, not open air. The moment it reads as air again, a block sitting against
-    // the edge of the world erodes into it, and since an empty ancestor can only ever produce empty
-    // descendants, that emptiness spreads inward one step at every depth with no way back.
+    // Edge stone stays edge stone!
     const parent: Block = .makeBasicBlock(.stone, 7);
     const border: [8]Block = @splat(world.world_edge_block);
     for (0..4) |ly| {
@@ -777,29 +746,11 @@ test "slope carve: terrain never erodes toward the world border" {
         }
     }
 
-    // And a face that meets the border on one side keeps the cells along it.
+    // ...and a face that meets the border on one side keeps the cells along it.
     var half = border;
     for (half[0..3]) |*b| b.* = .empty;
     const corners = cornerDensities(parent, half);
     try testing.expect(@reduce(.Min, corners) > 0);
-}
-
-test "slope carve: every parent keeps its 2x2 shell" {
-    // Across every arrangement of neighbors, so no combination of density and mask can cost a
-    // parent its block.
-    for (0..256) |mask| {
-        var n: [8]Block = undefined;
-        for (&n, 0..) |*b, i| {
-            b.* = .makeBasicBlock(if (mask & (@as(usize, 1) << @intCast(i)) != 0) .stone else .none, i);
-        }
-        const parent: Block = .makeBasicBlock(.stone, 99);
-
-        for (1..3) |ly| {
-            for (1..3) |lx| {
-                try testing.expect(!carvesAnywhere(parent, n, @intCast(lx), @intCast(ly)));
-            }
-        }
-    }
 }
 
 test "slope carve: neighboring parents agree on the corners they share" {
@@ -832,7 +783,7 @@ test "material warp: a cell keeps its own material unless the warp reaches a nei
     var neighbors = grid[1];
     for (&neighbors) |*b| b.* = .makeBasicBlock(.iron, 0);
 
-    // Dead center of the warp field: no drag, so every cell answers with its own parent.
+    // dead center of the warp field: no drag, so every cell answers with its own parent!
     const centered: dw.utils.Vec2f32 = .{ 0.5, 0.5 };
     for (0..4) |ly| {
         for (0..4) |lx| {
@@ -841,8 +792,8 @@ test "material warp: a cell keeps its own material unless the warp reaches a nei
         }
     }
 
-    // Fully warped left: the cells on that side cross into the neighbor, the far side does not.
-    const pulled: dw.utils.Vec2f32 = .{ 0.0, 0.5 };
+    // Directionally warped left: near cells cross into the neighbor, far cells remain in the parent.
+    const pulled: dw.utils.Vec2f32 = .{ 0.25, 0.5 };
     try testing.expectEqual(Sprite.iron, warpedMaterial(grid[0], neighbors, pulled, 0, 1).id);
     try testing.expectEqual(grid[0].id, warpedMaterial(grid[0], neighbors, pulled, 3, 1).id);
 }

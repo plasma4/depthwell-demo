@@ -141,6 +141,21 @@ const IndicatorKind = enum {
     }
 };
 
+/// Clears one kind's open flag along with whatever state that menu hangs off it.
+/// A no-op for the kinds that back no menu.
+fn closeMenu(comptime kind: IndicatorKind) void {
+    const flag = kind.menuFlag() orelse return;
+    flag.* = false;
+    if (kind == .loot) @import("../menus/loot.zig").close();
+}
+
+/// Shuts every menu at once. Needed when a depth transition begins (see `portal.beginTransition()`).
+pub fn closeAllMenus() void {
+    inline for (@typeInfo(IndicatorKind).@"enum".fields) |field| {
+        closeMenu(@enumFromInt(field.value));
+    }
+}
+
 /// A specific block cell in the world: its chunk plus the block position within it.
 /// Handed to indicator visitors (and menus like loot) so a menu can act on the exact block that opened it.
 pub const BlockRef = struct { coord: dw.world.Coordinate, bx: u4, by: u4 };
@@ -169,7 +184,8 @@ fn cameraView() CameraView {
     const game = &memory.game;
 
     // Zoom uses the raw fraction; position uses the +1.0-shifted fraction. See dw.chunks.current_dt.
-    const interpolated_zoom = game.camera_scale * std.math.pow(f64, game.camera_scale_change, dw.chunks.current_dt);
+    const interpolated_zoom = game.camera_scale *
+        std.math.pow(f64, game.camera_scale_change, dw.chunks.current_dt);
     const cam_dt = dw.chunks.current_dt + 1.0;
 
     // Interpolate last_camera_pos toward camera_pos, matching the world's position curve
@@ -378,15 +394,12 @@ pub fn drawIndicators() void {
     scanIndicators(view, &drawer);
 
     // A menu whose indicator drifted out of range (or vanished) autocloses.
-    // On depth increase we close all of these!
+    // A depth change closes every one of them up front instead (see `closeAllMenus()`).
     const spectating = dw.world.isSpectating();
     inline for (@typeInfo(IndicatorKind).@"enum".fields) |field| {
         const kind: IndicatorKind = @enumFromInt(field.value);
         if (kind.menuFlag()) |flag| {
-            if (flag.* and (spectating or !drawer.seen.contains(kind))) {
-                flag.* = false;
-                if (kind == .loot) @import("../menus/loot.zig").close();
-            }
+            if (flag.* and (spectating or !drawer.seen.contains(kind))) closeMenu(kind);
         }
     }
 }

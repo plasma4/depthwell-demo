@@ -132,6 +132,7 @@ pub fn main(init: std.process.Init) !void {
         \\//! (translucent-only tiles fall back to their most-opaque texels; see the generator).
         \\//! Each color represents (L, C, H, A) and can be used directly as an entity `lcha` tint.
         \\const dw = @import("../root.zig");
+        \\const Vec4f32 = dw.utils.Vec4f32;
         \\
         \\/// Number of 16x16 tiles in the sprite atlas (row-major, {d} per row).
         \\pub const TILE_COUNT: usize = {d};
@@ -158,7 +159,7 @@ pub fn main(init: std.process.Init) !void {
         \\}};
         \\
         \\/// Unique tile colors as OKLCH+alpha (see file docs). {d} colors total.
-        \\pub const colors = [_][4]f32{{
+        \\pub const colors = [_]Vec4f32{{
         \\
     , .{all_colors.items.len});
 
@@ -177,7 +178,7 @@ pub fn main(init: std.process.Init) !void {
         \\
         \\/// Single most common opaque color of each tile as OKLCH+alpha (see file docs); opaque white for blank tiles.
         \\/// Indexed by tile (entity id), so a UI element can tint text/icons with a sprite's signature color.
-        \\pub const primary = [TILE_COUNT][4]f32{
+        \\pub const primary = [TILE_COUNT]Vec4f32{
         \\
     );
 
@@ -194,7 +195,7 @@ pub fn main(init: std.process.Init) !void {
         \\
         \\/// Second most common opaque color of each tile as OKLCH+alpha (see file docs); opaque white for blank/single-color tiles.
         \\/// Indexed by tile (entity id), and falls back to the primary (only) color if a secondary color doesn't exist.
-        \\pub const secondary = [TILE_COUNT][4]f32{
+        \\pub const secondary = [TILE_COUNT]Vec4f32{
         \\
     );
 
@@ -211,7 +212,7 @@ pub fn main(init: std.process.Init) !void {
         \\
         \\const Sprite = dw.Sprite;
         \\/// The unique atlas colors of a sprite's tile as OKLCH+alpha tints (empty for unknown/blank tiles).
-        \\pub fn colorsOf(s: Sprite) []const [4]f32 {
+        \\pub fn colorsOf(s: Sprite) []const Vec4f32 {
         \\    const tile = s.asEntity();
         \\    if (tile >= TILE_COUNT) return &.{};
         \\    return colors[tile_offsets[tile]..tile_offsets[tile + 1]];
