@@ -189,7 +189,7 @@ pub fn updateVisibleChunks(dt: f64, canvas_w: f64, canvas_h: f64) void {
 }
 
 /// Adds the portal descent's D+1 preview to the scratch buffer, ready for a second tile draw call.
-/// Precondition: a zoom transition is running (`portal.isZooming()`).
+/// Asserts that a zoom transition is running (`portal.isZooming()`).
 pub fn updateOverlayChunks(canvas_w: f64, canvas_h: f64) void {
     std.debug.assert(dw.portal.isZooming());
     rasterizeLayer(overlayLayer(), canvas_w, canvas_h);

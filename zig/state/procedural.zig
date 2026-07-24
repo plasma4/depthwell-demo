@@ -247,172 +247,386 @@ fn computeBaseSpriteType(
     };
 }
 
-/// Generates ores over certain types of blocks, returning a sprite type (possibly changed to an ore type).
-/// Continues from step 4 in `getStructureBlock()`.
-///
-/// 5. Disperses ores using Worley noise. Assumes that `isStone()` was checked before calling.
-pub fn addOresAndGems(
-    base_data: BaseTerrainData,
-    x: u32,
-    y: u32,
-) Sprite {
-    var s = base_data.sprite;
-    const game = &memory.game;
+/// A comptime row in the ore palette. Evaluated at base depth and recursive refinement layers.
+/// Called "ore dispersal", but really works for both gems and ores.
+const OreDispersal = struct {
+    sprite: Sprite,
+    min_depth_offset: u8,
+    scale: f32,
+    octaves: u2 = 2,
+    hybrid_weight: f32,
+    warp_strength: f32,
+    val_min: f32,
+    val_max: f32,
+    min_density: f32,
+    max_density: f32,
+    seed_lane: u3,
 
-    // Generate new density for ores with a DIFFERENT set of 4 seed vectors (sent as args!)
-    const v1 = getFbmValue( // smaller cells, less FBM variation
-        game.getHashSeed(.ores1),
-        x,
-        y,
-        .{
-            .cell_size = 21.0,
-            .fbm_shift_size = 8.0,
-            .use_f2_f1 = true,
-        },
-    );
-    const v2 = getFbmValue( // larger cells, much more FBM variation
-        game.getHashSeed(.ores2),
-        x,
-        y,
-        .{
-            .cell_size = 36.0,
-            .fbm_shift_size = 60.0,
-            .use_f2_f1 = true,
-        },
-    );
+    // contextual visual filters
+    forbidden_stone: Sprite = .none,
+    required_stone: Sprite = .none,
+    is_gem: bool = false,
+    gem_chance_scale: f32 = 1.0,
+};
 
-    // sprite IDs in this range use a neat heatmap (using only the first variation value), overriding normal ore logic
-    if (dw.is_debug and USE_ORE_HEATMAP) return @enumFromInt(65000 + @as(u20, @intFromFloat(v1 * 256.0)));
+/// List of rules for ore and gem dispersals.
+/// Window widths (val_max - val_min) directly control ore rarity to match audit counts.
+const ORE_DISPERSALS = [_]OreDispersal{
+    .{
+        .sprite = .copper,
+        .min_depth_offset = 0,
+        .scale = 6,
+        .octaves = 2,
+        .hybrid_weight = 0.20,
+        .warp_strength = 0.80,
+        .val_min = 0.46,
+        .val_max = 0.54, // Window width 0.08 (~1.1% share)
+        .min_density = 0.42,
+        .max_density = 0.70,
+        .seed_lane = 0,
+    },
+    .{
+        .sprite = .iron,
+        .min_depth_offset = 0,
+        .scale = 10,
+        .octaves = 2,
+        .hybrid_weight = 0.35,
+        .warp_strength = 0.75,
+        .val_min = 0.55,
+        .val_max = 0.595, // Window width 0.045 (~0.63% share)
+        .min_density = 0.40,
+        .max_density = 0.68,
+        .seed_lane = 1,
+        .forbidden_stone = .blue_strange_stone,
+    },
+    .{
+        .sprite = .silver,
+        .min_depth_offset = 0,
+        .scale = 12,
+        .octaves = 2,
+        .hybrid_weight = 0.25,
+        .warp_strength = 0.65,
+        .val_min = 0.20,
+        .val_max = 0.25, // Window width 0.05 (~0.15% share)
+        .min_density = 0.30,
+        .max_density = 0.48,
+        .seed_lane = 2,
+    },
+    .{
+        .sprite = .gold,
+        .min_depth_offset = 1,
+        .scale = 11,
+        .octaves = 2,
+        .hybrid_weight = 0.30,
+        .warp_strength = 0.65,
+        .val_min = 0.30,
+        .val_max = 0.36, // Window width 0.06 (~0.24% share)
+        .min_density = 0.60,
+        .max_density = 0.82,
+        .seed_lane = 0,
+    },
+    .{
+        .sprite = .nickel,
+        .min_depth_offset = 2,
+        .scale = 6,
+        .octaves = 2,
+        .hybrid_weight = 0.55,
+        .warp_strength = 0.80,
+        .val_min = 0.58,
+        .val_max = 0.595, // Narrow window width 0.015 (~0.21% share)
+        .min_density = 0.40,
+        .max_density = 0.65,
+        .seed_lane = 1,
+    },
+    .{
+        .sprite = .quartz,
+        .min_depth_offset = 0,
+        .scale = 9,
+        .octaves = 2,
+        .hybrid_weight = 0.45,
+        .warp_strength = 0.70,
+        .val_min = 0.15,
+        .val_max = 0.24,
+        .min_density = 0.30,
+        .max_density = 0.58,
+        .seed_lane = 3,
+        .is_gem = true,
+        .gem_chance_scale = 0.34,
+    },
+    .{
+        .sprite = .sapphire,
+        .min_depth_offset = 1,
+        .scale = 13,
+        .octaves = 2,
+        .hybrid_weight = 0.40,
+        .warp_strength = 0.60,
+        .val_min = 0.75,
+        .val_max = 0.85,
+        .min_density = 0.30,
+        .max_density = 0.56,
+        .seed_lane = 4,
+        .forbidden_stone = .deep_blue_stone,
+        .is_gem = true,
+        .gem_chance_scale = 0.65,
+    },
+    .{
+        .sprite = .emerald,
+        .min_depth_offset = 1,
+        .scale = 10,
+        .octaves = 2,
+        .hybrid_weight = 0.50,
+        .warp_strength = 0.70,
+        .val_min = 0.45,
+        .val_max = 0.48,
+        .min_density = 0.34,
+        .max_density = 0.62,
+        .seed_lane = 3,
+        .is_gem = true,
+        .gem_chance_scale = 0.86,
+    },
+    .{
+        .sprite = .cobalt,
+        .min_depth_offset = 2,
+        .scale = 14,
+        .octaves = 2,
+        .hybrid_weight = 0.30,
+        .warp_strength = 0.55,
+        .val_min = 0.94,
+        .val_max = 0.98, // Window width 0.04 (~0.08% share)
+        .min_density = 0.52,
+        .max_density = 0.90,
+        .seed_lane = 2,
+    },
+    .{
+        .sprite = .ruby,
+        .min_depth_offset = 2,
+        .scale = 11,
+        .octaves = 2,
+        .hybrid_weight = 0.60,
+        .warp_strength = 0.65,
+        .val_min = 0.22,
+        .val_max = 0.24,
+        .min_density = 0.26,
+        .max_density = 0.54,
+        .seed_lane = 4,
+        .is_gem = true,
+        .gem_chance_scale = 1.0,
+    },
+    .{
+        .sprite = .aquashard,
+        .min_depth_offset = 2,
+        .scale = 16,
+        .octaves = 2,
+        .hybrid_weight = 0.45,
+        .warp_strength = 0.50,
+        .val_min = 0.40,
+        .val_max = 0.45,
+        .min_density = 0.20,
+        .max_density = 0.48,
+        .seed_lane = 2,
+        .is_gem = true,
+        .gem_chance_scale = 0.50,
+    },
+    .{
+        .sprite = .amethyst,
+        .min_depth_offset = 0,
+        .scale = 10,
+        .octaves = 2,
+        .hybrid_weight = 0.65,
+        .warp_strength = 0.60,
+        .val_min = 0.10,
+        .val_max = 0.40,
+        .min_density = 0.28,
+        .max_density = 0.55,
+        .seed_lane = 3,
+        .forbidden_stone = .deep_blue_stone,
+        .is_gem = true,
+        .gem_chance_scale = 0.70,
+    },
+    .{
+        .sprite = .electrit,
+        .min_depth_offset = 3,
+        .scale = 18,
+        .octaves = 2,
+        .hybrid_weight = 0.70,
+        .warp_strength = 0.45,
+        .val_min = 0.84,
+        .val_max = 0.85,
+        .min_density = 0.24,
+        .max_density = 0.52,
+        .seed_lane = 4,
+        .is_gem = true,
+        .gem_chance_scale = 1.0,
+    },
+};
 
-    if (base_data.density >= 0.45 and base_data.density <= 0.65) {
-        // Generate various ore types
-        s = selectSprite(
-            .{ s, .copper },
-            true,
-            .{ v2, 0.0, 0.04 },
-        );
-        s = selectSprite(
-            .{ s, .copper },
-            true,
-            .{ v2, 0.9, 0.93 },
-        );
-        if (s == .copper) return s;
+comptime {
+    @setEvalBranchQuota(1e6);
+    for (ORE_DISPERSALS, 0..) |rule, i| {
+        // basic bound and range sanity checks
+        if (rule.octaves == 0) @compileError("Every ore dispersal needs at least one octave.");
+        if (rule.scale <= 0) @compileError("Ore scale must be strictly positive.");
+        if (rule.val_min >= rule.val_max) @compileError("Ore value window bounds must be strictly ordered (val_min < val_max).");
+        if (rule.val_min < 0 or rule.val_max > 1) @compileError("Ore value window bounds must be normalized in [0, 1].");
+        if (rule.min_density >= rule.max_density) @compileError("Ore density bounds must be strictly ordered (min_density < max_density).");
+        if (rule.min_density < 0 or rule.max_density > 1) @compileError("Ore density bounds must be normalized in [0, 1].");
+        if (rule.hybrid_weight < 0 or rule.hybrid_weight > 1) @compileError("Ore hybrid weights must be normalized in [0, 1].");
+        if (rule.warp_strength < 0 or rule.warp_strength > 1) @compileError("Ore warp strengths must be normalized in [0, 1].");
+        if (rule.gem_chance_scale <= 0) @compileError("Gem chance scale must be strictly positive.");
 
-        s = selectSprite(
-            .{ s, .iron },
-            base_data.sprite != .blue_strange_stone,
-            .{ v1, 0.55, 0.595 },
-        );
-        if (s == .iron) return s;
+        // stone filter logical contradictions
+        if (rule.required_stone != .none and rule.forbidden_stone != .none and rule.required_stone == rule.forbidden_stone) {
+            @compileError("Ore rule cannot have identical required_stone and forbidden_stone.");
+        }
 
-        s = selectSprite(
-            .{ s, .silver },
-            base_data.density <= 0.48,
-            .{ v1, 0.2, 0.25 },
-        );
-        s = selectSprite(
-            .{ s, .silver },
-            base_data.sprite == .blue_strange_stone,
-            .{ v1, 0.18, 0.2 },
-        );
-        if (s == .silver) return s;
+        // complete priority shadowing checks against earlier rules
+        for (ORE_DISPERSALS[0..i]) |earlier| {
+            const same_lane = (earlier.seed_lane == rule.seed_lane);
+            const same_noise_config = (earlier.scale == rule.scale and earlier.octaves == rule.octaves and
+                earlier.hybrid_weight == rule.hybrid_weight and earlier.warp_strength == rule.warp_strength);
+            const depth_subsumed = (earlier.min_depth_offset <= rule.min_depth_offset);
+            const density_subsumed = (earlier.min_density <= rule.min_density and earlier.max_density >= rule.max_density);
+            const val_subsumed = (earlier.val_min <= rule.val_min and earlier.val_max >= rule.val_max);
+            const gem_subsumed = (!earlier.is_gem or (rule.is_gem and earlier.gem_chance_scale >= rule.gem_chance_scale));
 
-        s = selectSprite(
-            .{ s, .gold },
-            base_data.density >= 0.60 or (base_data.density >= 0.52 and base_data.sprite == .lava_stone),
-            .{ v2, 0.3, 0.36 },
-        );
-        if (s == .gold) return s;
+            const stone_subsumed = b: {
+                if (earlier.required_stone != .none and earlier.required_stone != rule.required_stone) break :b false;
+                if (earlier.forbidden_stone != .none and earlier.forbidden_stone == rule.required_stone) break :b false;
+                break :b true;
+            };
 
-        s = selectSprite(
-            .{ s, .nickel },
-            true,
-            .{ v2, 0.58, 0.595 },
-        );
-        if (s == .nickel) return s;
-
-        s = selectSprite(
-            .{ s, .cobalt },
-            v2 > 0.7,
-            .{ v1, 0.94, 0.98 },
-        );
-        if (s == .cobalt) return s;
-    } else {
-        // Logic for generating gems
-        const gem_v2_bound: f32 = if (s == .purple_strange_stone) 0.4 else 0.3;
-        if (base_data.density >= 0.3 and base_data.density <= 0.5 and v2 >= 0.1 and v2 <= gem_v2_bound) {
-            const random_value = FastHash.float2d(game.getHashSeed(.ores3), @intCast(x), @intCast(y));
-
-            if (random_value <= base_gem_odds.value) {
-                const v3 = getFbmValue(
-                    game.getHashSeed(.ores4),
-                    y,
-                    x,
-                    .{
-                        .cell_size = 35.0,
-                        .fbm_shift_size = 0.0,
-                        .use_f2_f1 = false,
-                    },
-                );
-                const v4 = getFbmValue(
-                    game.getHashSeed(.ores5),
-                    y,
-                    x,
-                    .{
-                        .cell_size = 45.0,
-                        .fbm_shift_size = 0.0,
-                        .use_f2_f1 = false,
-                    },
-                );
-
-                s = selectSprite(
-                    .{ s, .quartz },
-                    v4 <= 0.24 and random_value <= 0.34 * base_gem_odds.value,
-                    null,
-                );
-                if (s == .quartz) return s;
-
-                if (s != .deep_blue_stone) { // this stone type has too much visual similarity
-                    s = selectSprite(
-                        .{ s, .amethyst },
-                        v3 <= 0.4 and random_value <= 0.7 * base_gem_odds.value,
-                        null,
-                    );
-                    if (s == .amethyst) return s;
-
-                    s = selectSprite(
-                        .{ s, .sapphire },
-                        v3 >= 0.75 and random_value <= 0.65 * base_gem_odds.value,
-                        null,
-                    );
-                    if (s == .sapphire) return s;
-                }
-
-                s = selectSprite(
-                    .{ s, .emerald },
-                    v4 >= 0.45 and v4 <= 0.48 and random_value <= 0.86 * base_gem_odds.value,
-                    null,
-                );
-                if (s == .emerald) return s;
-
-                s = selectSprite(
-                    .{ s, .ruby },
-                    v3 >= 0.22 and v3 <= 0.24,
-                    null,
-                );
-                if (s == .ruby) return s;
-
-                s = selectSprite(
-                    .{ s, .electrit },
-                    v3 >= 0.84 and v3 <= 0.85,
-                    null,
-                );
-                if (s == .electrit) return s;
+            if (same_lane and same_noise_config and depth_subsumed and density_subsumed and val_subsumed and gem_subsumed and stone_subsumed) {
+                @compileError("An ore dispersal rule is completely shadowed by an earlier rule on the same seed lane and can never trigger.");
             }
         }
     }
+}
 
-    return s;
+inline fn oreField(seed: Vec2u, x: u64, y: u64, lane: u3, rule: OreDispersal) f32 {
+    const inv_scale = 1.0 / rule.scale;
+    // fast domain warping
+    const warp = getDualValueNoise(
+        seed,
+        x +% 0xa39dd8f53 * @as(u64, lane),
+        y -% 0xa39dd8f53 * @as(u64, lane),
+        inv_scale * 0.4,
+    );
+    const warp_amt = rule.scale * rule.warp_strength;
+    const warp_x: i64 = @intFromFloat((warp[0] - 0.5) * warp_amt);
+    const warp_y: i64 = @intFromFloat((warp[1] - 0.5) * warp_amt);
+    const sample_x = x +% @as(u64, @bitCast(warp_x));
+    const sample_y = y +% @as(u64, @bitCast(warp_y));
+
+    var value: f32 = 0;
+    var weight: f32 = 0;
+    var amp: f32 = 1.0;
+    var freq: u64 = 1;
+
+    inline for (0..3) |octave| {
+        if (octave >= rule.octaves) break;
+        const n = getDualValueNoise(
+            seed,
+            sample_x *% freq +% octave *% 7919,
+            sample_y *% freq +% octave *% 104729,
+            inv_scale * @as(f32, @floatFromInt(freq)),
+        )[octave & 1];
+
+        const ridged = 1.0 - @abs(2.0 * n - 1.0);
+        value += amp * (n * (1.0 - rule.hybrid_weight) + ridged * rule.hybrid_weight);
+        weight += amp;
+        amp *= 0.5;
+        freq *%= 2;
+    }
+    return value / weight;
+}
+
+/// Returns a newly formed ore, if the host and depth gate permit one.
+pub fn disperseOre(host: Sprite, density: f32, x: u64, y: u64, depth: u64, seed: Vec2u) ?Sprite {
+    if (!host.isStone()) return null;
+
+    // fast global exit: no ore/gem rule exists outside density range [0.20, 0.90]
+    if (density < 0.20 or density > 0.90) return null;
+
+    // stack-allocated lazy caches: lane noise fields (0..4) and gem rolls are computed AT MOST ONCE!
+    var rule_cache: [ORE_DISPERSALS.len]?f32 = @splat(null);
+    var gem_roll_cache: ?f32 = null;
+
+    for (ORE_DISPERSALS, 0..) |rule, i| {
+        // first, do depth+host stone filters
+        if (depth < dw.startup.STARTING_ZOOM_TIMES + rule.min_depth_offset) continue;
+        if (rule.forbidden_stone != .none and host == rule.forbidden_stone) continue;
+        if (rule.required_stone != .none and host != rule.required_stone) continue;
+
+        // now add contextural density overrides (example extra "biome" rules)
+        var min_d = rule.min_density;
+        var max_d = rule.max_density;
+        if (rule.sprite == .gold and host == .lava_stone) min_d = 0.52;
+        if (rule.sprite == .silver and host == .blue_strange_stone) {
+            min_d = 0.18;
+            max_d = 0.20;
+        }
+
+        if (density < min_d or density > max_d) continue;
+
+        // gem roll check (this gate also improves perf; less seed evaluations!)
+        if (rule.is_gem) {
+            const gem_roll = gem_roll_cache orelse b: {
+                const roll = FastHash.float2d_32(seed, x, y);
+                gem_roll_cache = roll;
+                break :b roll;
+            };
+
+            const purple_boost: f32 = if (host == .purple_strange_stone) 1.33 else 1.0;
+            const target_odds = base_gem_odds.getF32() * rule.gem_chance_scale * purple_boost;
+            if (gem_roll > target_odds) continue;
+        }
+
+        // memoized field evaluation (computed AT MOST ONCE per seed_lane across all zoom levels)
+        const val = rule_cache[i] orelse b: {
+            const computed = oreField(seed, x, y, rule.seed_lane, rule);
+            rule_cache[i] = computed;
+            break :b computed;
+        };
+
+        if (val >= rule.val_min and val <= rule.val_max) return rule.sprite;
+    }
+
+    return null;
+}
+
+/// Applies the comptime ore palette to a base-depth stone block.
+pub fn addOresAndGems(base_data: BaseTerrainData, x: u32, y: u32) Sprite {
+    if (dw.is_debug and USE_ORE_HEATMAP) {
+        const field = oreField(memory.game.getHashSeed(.ores1), x, y, 0, ORE_DISPERSALS[0]);
+        return @enumFromInt(65000 + @as(u20, @intFromFloat(field * 256.0)));
+    }
+    return disperseOre(
+        base_data.sprite,
+        base_data.density,
+        x,
+        y,
+        dw.startup.STARTING_ZOOM_TIMES,
+        memory.game.getHashSeed(.ores1),
+    ) orelse base_data.sprite;
+}
+
+test "ore dispersal produces deposits at base and recursive depths" {
+    const seed: Vec2u = .{ 0x123456789ABCDEF0, 0x0FEDCBA987654321 };
+    var base_count: usize = 0;
+    var deep_count: usize = 0;
+
+    for (0..256) |y| {
+        for (0..256) |x| {
+            if (disperseOre(.stone, 0.5, x, y, dw.startup.STARTING_ZOOM_TIMES, seed)) |ore| {
+                base_count += 1;
+                _ = ore;
+            }
+            if (disperseOre(.stone, 0.5, x, y, dw.startup.STARTING_ZOOM_TIMES + 3, seed) != null) deep_count += 1;
+        }
+    }
+
+    try std.testing.expect(base_count > 0);
+    try std.testing.expect(deep_count > 0);
 }
 
 /// Represents 3 values: `v`, `min`, and `max`.
@@ -463,17 +677,17 @@ inline fn fade(t: f32) f32 {
 /// Bypasses domain warping and multi-tap cellular distance lookups entirely.
 ///
 /// Use for: basic, boring but fast noise.
-fn getBilinearValueNoise(seed_vector: Vec2u, x: u32, y: u32, cell_size: f32) f32 {
-    const fx = @as(f32, @floatFromInt(x)) / cell_size;
-    const fy = @as(f32, @floatFromInt(y)) / cell_size;
+fn getBilinearValueNoise(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) f32 {
+    const fx = @as(f64, @floatFromInt(x)) / @as(f64, cell_size);
+    const fy = @as(f64, @floatFromInt(y)) / @as(f64, cell_size);
 
-    const x0 = @floor(fx);
-    const y0 = @floor(fy);
-    const tx = fx - x0;
-    const ty = fy - y0;
+    const x0_f = @floor(fx);
+    const y0_f = @floor(fy);
+    const tx: f32 = @floatCast(fx - x0_f);
+    const ty: f32 = @floatCast(fy - y0_f);
 
-    const ix0: u64 = @intFromFloat(x0);
-    const iy0: u64 = @intFromFloat(y0);
+    const ix0: u64 = @intFromFloat(x0_f);
+    const iy0: u64 = @intFromFloat(y0_f);
 
     const u = fade(tx);
     const v = fade(ty);
@@ -603,16 +817,16 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
 ///
 /// Use for: distorting other noise functions.
 pub fn getDualValueNoise(seed: Vec2u, x: u64, y: u64, inv_scale: f32) dw.utils.Vec2f32 {
-    const fx_raw = @as(f32, @floatFromInt(x)) * inv_scale;
-    const fy_raw = @as(f32, @floatFromInt(y)) * inv_scale;
+    const fx_raw = @as(f64, @floatFromInt(x)) * @as(f64, inv_scale);
+    const fy_raw = @as(f64, @floatFromInt(y)) * @as(f64, inv_scale);
 
     const x0_f = @floor(fx_raw);
     const y0_f = @floor(fy_raw);
     const x0: u64 = @intFromFloat(x0_f);
     const y0: u64 = @intFromFloat(y0_f);
 
-    const tx = fx_raw - x0_f;
-    const ty = fy_raw - y0_f;
+    const tx: f32 = @floatCast(fx_raw - x0_f);
+    const ty: f32 = @floatCast(fy_raw - y0_f);
 
     // Use fade curves
     const u = fade(tx);
@@ -680,15 +894,15 @@ const Lattice = struct {
     h: Vec4u,
 };
 
-inline fn lattice(seed_vector: Vec2u, x: u32, y: u32, cell_size: f32) Lattice {
-    const fx = @as(f32, @floatFromInt(x)) / cell_size;
-    const fy = @as(f32, @floatFromInt(y)) / cell_size;
+inline fn lattice(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) Lattice {
+    const fx = @as(f64, @floatFromInt(x)) / @as(f64, cell_size);
+    const fy = @as(f64, @floatFromInt(y)) / @as(f64, cell_size);
     const x0_f = @floor(fx);
     const y0_f = @floor(fy);
     const x0: u64 = @intFromFloat(x0_f);
     const y0: u64 = @intFromFloat(y0_f);
-    const tx = fx - x0_f;
-    const ty = fy - y0_f;
+    const tx: f32 = @floatCast(fx - x0_f);
+    const ty: f32 = @floatCast(fy - y0_f);
     const vx: Vec4u = .{ x0, x0 +% 1, x0, x0 +% 1 };
     const vy: Vec4u = .{ y0, y0, y0 +% 1, y0 +% 1 };
     return .{
@@ -706,7 +920,7 @@ inline fn lattice(seed_vector: Vec2u, x: u32, y: u32, cell_size: f32) Lattice {
 /// removing value-noise plateaus for smooth, continuous slopes.
 ///
 /// Use for: organic, flowing hills/valleys.
-pub fn getPerlinNoise(seed_vector: Vec2u, x: u32, y: u32, cell_size: f32) f32 {
+pub fn getPerlinNoise(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) f32 {
     const l = lattice(seed_vector, x, y, cell_size);
     const n00 = grad2(l.h[0], l.tx, l.ty);
     const n10 = grad2(l.h[1], l.tx - 1.0, l.ty);
@@ -772,16 +986,18 @@ const G2: f32 = (3.0 - @sqrt(3.0)) / 6.0;
 /// to eliminate axis-aligned directional bias.
 ///
 /// Use for: organic, isotropic flow.
-pub fn getSimplexNoise(seed_vector: Vec2u, x: u32, y: u32, cell_size: f32) f32 {
-    const xin = @as(f32, @floatFromInt(x)) / cell_size;
-    const yin = @as(f32, @floatFromInt(y)) / cell_size;
+pub fn getSimplexNoise(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) f32 {
+    const xin = @as(f64, @floatFromInt(x)) / @as(f64, cell_size);
+    const yin = @as(f64, @floatFromInt(y)) / @as(f64, cell_size);
 
-    const s = (xin + yin) * F2;
+    const s = (xin + yin) * @as(f64, F2);
     const i_f = @floor(xin + s);
     const j_f = @floor(yin + s);
-    const t = (i_f + j_f) * G2;
-    const x0 = xin - (i_f - t);
-    const y0 = yin - (j_f - t);
+    const t = (i_f + j_f) * @as(f64, G2);
+    const x0_64 = xin - (i_f - t);
+    const y0_64 = yin - (j_f - t);
+    const x0: f32 = @floatCast(x0_64);
+    const y0: f32 = @floatCast(y0_64);
 
     // Coordinate check to evaluate which triangular region is sampled
     const off_x: f32 = if (x0 > y0) 1.0 else 0.0;
@@ -819,10 +1035,10 @@ pub fn getSimplexNoise(seed_vector: Vec2u, x: u32, y: u32, cell_size: f32) f32 {
 /// Generic fractal Brownian motion: stack `octaves` of any candidate noise at halving amplitude and
 /// cell size.
 pub inline fn fbm(
-    comptime noiseFn: fn (Vec2u, u32, u32, f32) f32,
+    comptime noiseFn: fn (Vec2u, u64, u64, f32) f32,
     seed_vector: Vec2u,
-    x: u32,
-    y: u32,
+    x: u64,
+    y: u64,
     cell_size: f32,
     comptime octaves: u32,
 ) f32 {
