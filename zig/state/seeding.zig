@@ -167,7 +167,10 @@ pub const HashState = struct {
     pub inline fn get(self: *HashState, T: type, modulo: comptime_int) T {
         comptime {
             if (!std.math.isPowerOfTwo(modulo)) {
-                @compileError("Modulo must be a power of two for mask bitwise and to be correct.");
+                @compileError("Modulo must be a power of two for mask bitwise AND to be correct.");
+            }
+            if (modulo > (1 << 63)) {
+                @compileError("HashState.get() supports up to 63 bits (modulo <= 1 << 63); use getRaw() for 64-bit extractions.");
             }
         }
         const bits_needed: u8 = std.math.log2(modulo);
@@ -334,12 +337,20 @@ pub const FastHash = struct {
         return combined;
     }
 
-    /// Returns a float value from [0, 1], assuming `seed_vector` is securely generated from BLAKE3 already.
+    /// Returns a 64-bit float value from [0, 1], assuming `seed_vector` is securely generated from BLAKE3 already.
     pub inline fn float2d(seed_vector: Vec2u, x: u64, y: u64) f64 {
         @setFloatMode(.strict); // just in case ig
 
         const h = hash2d(seed_vector, x, y);
         return @as(f64, @floatFromInt(h)) / POW_2_64;
+    }
+
+    /// Returns a 32-bit float value from [0, 1], assuming `seed_vector` is securely generated from BLAKE3 already.
+    pub inline fn float2d_32(seed_vector: Vec2u, x: u64, y: u64) f32 {
+        @setFloatMode(.strict); // just in case ig
+
+        const h = hash2d(seed_vector, x, y);
+        return @as(f32, @floatFromInt(h)) / POW_2_64;
     }
 
     const Vec4u = @Vector(4, u64);
@@ -809,8 +820,10 @@ pub inline fn staffordMix13(value: u64) u64 {
 
 /// DO NOT USE FOR WASM, AS JS LOGIC EXISTS ALREADY. (Can be used for native in the future.)
 /// Converts a base-26 [a-z]-only string to 64 bytes.
-/// Precondition: input is no longer than 100 characters
+///
+/// Asserts that the input is no longer than 100 characters.
 pub fn seedFromBase26(noalias input: []const u8, noalias out_seed: *Seed) void {
+    std.debug.assert(input.len <= 100);
     // Initialize out_seed to 0
     // @memset(out_seed, 0);
     out_seed.*.value = @splat(0); // NOTE: performance thing: @memset is slower

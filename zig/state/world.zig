@@ -1225,8 +1225,8 @@ pub const SimBuffer = struct {
     /// Mutates the ring buffer offsets to avoid expensive memory copying,
     /// and replaces ONLY the rows or columns that have newly entered the 16x16 boundary window.
     ///
-    /// PRECONDITION: `origin.move(.{dx, dy})` must not clamp (caller `sync()` guarantees this). ring_x/ring_y
-    /// advance by the full `dx`/`dy` here, so a clamped origin move would desync them from the origin.
+    /// Precondition: `origin.move(.{dx, dy})` must not clamp (caller `sync()` guarantees this).
+    /// Ring X/Y advance by the full `dx`/`dy` here, so a clamped origin move would desync them from the origin.
     fn incrementalRefresh(dx: i64, dy: i64) void {
         const old_origin = origin.?;
         const new_origin = getClampedMove(old_origin, dx, dy);
@@ -1600,7 +1600,7 @@ pub const QuadCache = struct {
     seed_hand: [SEED_CACHE_SETS]u2 = @splat(0),
 
     /// Resets the `SimBuffer` completely, clearing tracking, ring buffer offsets, and background scanners.
-    /// Precondition: the world arena MUST be reset to prevent memory leaks!
+    /// Precondition: the world arena MUST be reset to prevent memory leaks/odd issues!
     pub fn reset(self: *@This()) void {
         self.left_path = .{};
         self.top_path = .{};
@@ -2754,6 +2754,7 @@ pub fn snapshotLayer(next_depth: u64) LayerSnapshot {
     const ring: usize = @intCast(next_depth % QuadCache.HISTORY_LEN);
     std.debug.assert(quad_cache.left_path.len == quad_cache.top_path.len);
 
+    // we save a LOT of things!
     var snapshot: LayerSnapshot = .{
         .depth = memory.game.depth,
         .player_chunk = memory.game.player_chunk,
@@ -3017,7 +3018,7 @@ pub fn popLayer() void {
 /// `origin_coord`/`origin_pos` are where at the DEEPER depth a later return should put the player:
 /// where they were standing, not the block they rose through.
 ///
-/// Precondition: `t.depth == game.depth - 1`, i.e. the world is still at the depth being left.
+/// Asserts `t.depth == game.depth - 1` (the world is still at the depth being left).
 pub fn applyAscent(t: LayerTransition, origin_coord: Coordinate, origin_pos: Vec2i) void {
     std.debug.assert(t.depth == memory.game.depth - 1);
     markDescendantsFromChild(memory.game.depth);
@@ -3297,7 +3298,7 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
 
 /// Walks a transition's landing up to the horizon, producing the trace its window is centered on.
 ///
-/// Precondition: `memory.game.depth == depth` already, since `getParent()` resolves quadrants against it.
+/// Asserts `memory.game.depth == depth` already, since `getParent()` resolves quadrants against it.
 fn traceHorizon(target_coord: Coordinate, new_pos: Vec2i, depth: u64, source_quadrant: u2) HorizonTrace {
     std.debug.assert(memory.game.depth == depth);
 

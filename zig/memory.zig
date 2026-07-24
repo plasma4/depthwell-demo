@@ -722,8 +722,8 @@ fn growScratchBuffer(len: usize, new_scratch_len: usize) [*]u8 {
 /// The scratch base is 64-aligned and 48 is a multiple of 16, so every entity stays 16-byte aligned (matching `WGSLEntity`'s alignment)
 /// without any per-call alignment bookkeeping.
 ///
-/// Precondition: called from an aligned start (such as right after `scratchReset()`), as the tight packing relies on the
-/// running `scratch_len` being a multiple of `@sizeOf(WGSLEntity)`.
+/// Precondition: called from an aligned start (such as right after `scratchReset()`),
+/// as the tight packing relies on the running `scratch_len` being a multiple of `@sizeOf(WGSLEntity)`.
 pub inline fn scratchPushEntity() *WGSLEntity {
     const off: usize = @intCast(mem.scratch_len);
     // Ensures capacity (and grows/relocates the buffer if needed); its aligned bump is overwritten below.

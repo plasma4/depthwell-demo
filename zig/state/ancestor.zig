@@ -1,4 +1,14 @@
 //! Handles fractal ancestry and lookup logic.
+//! Contains the core procedural logic for infinite-depth zooming and recursive terrain logic, using various functions:
+//! - `getInheritedMaterial()` traces the "block lineage" up to parent depths,
+//!   preserving `mod_store` changes; caches results in `AncestorCache`.
+//! - `applyAncestorLogic()` and slope logic create continuous sloped surfaces,
+//!   based on parent blocks using bilinear 4-corner density
+//! - Ancestor logic also uses noise masks, displaces blocks (`warpField()`),
+//! and both inherits and produces new ores (`keepsInheritedOverlay()`) while thinning out older ones!
+//!
+//! Note that "ore" and "gem" are used interchangeably at times within this file.
+
 const std = @import("std");
 const dw = @import("../root.zig");
 const memory = dw.memory;
@@ -15,8 +25,8 @@ const DepthCoordinate = world.DepthCoordinate;
 const HORIZON_DEPTH = dw.HORIZON_DEPTH;
 const STARTING_ZOOM_TIMES = dw.startup.STARTING_ZOOM_TIMES;
 
-/// Returns whether the specified depth is far enough from the current player depth that discrete coordinates are no longer tracked.
-/// At this boundary, chunk-level detail is replaced by the global `quad_cache` 4x4 background grid.
+/// Returns true if discrete coordinates are no longer tracked at this depth,
+/// (if so, the background `quad_cache` begins to be used).
 pub inline fn isHorizonDepth(depth: u64) bool {
     // The floor is NEVER a horizon depth.
     if (depth <= STARTING_ZOOM_TIMES) return false;
@@ -170,11 +180,10 @@ pub const AncestorCache = struct {
         return slot;
     }
 
-    /// Clears the `AncestorCache` and resets clock data.
-    /// Resets per tier (small aggregate assignments) rather than one whole-array `@splat` to avoid
-    /// building a huge temporary on the 512 KiB shadow stack. Chunk payloads are left as-is; they are
-    /// overwritten on allocate.
+    /// Clears cache keys and clock reference data per tier without re-allocating chunk payloads.
     pub fn clear(self: *@This()) void {
+        // small @splat()s: prevents a crash due to stack being consumed
+        // keep in mind @splat() in Debug naively uses the stack frame here!
         for (0..HOT_TIERS) |i| {
             self.hot_keys[i] = @splat(@splat(DepthCoordinate.invalid));
             self.hot_clock[i] = @splat(0);
@@ -245,106 +254,100 @@ const CORNER_UNIT = 16;
 /// Density a child cell needs to stay solid before erosion is applied.
 /// A flat surface puts its corners at exactly two of four blocks solid, so the threshold sits there.
 const SLOPE_THRESHOLD = 2 * CORNER_UNIT;
-/// Density between one cell of a face and the next: the field climbs from a surface corner to a
-/// buried one across the parent's `BLOCKS_PER_PARENT` cells.
+/// Density between one cell of a face and the next:
+/// the field climbs from a surface corner to a buried one across the parent's `BLOCKS_PER_PARENT` cells.
 const CELL_DENSITY_STEP = (4 * CORNER_UNIT - SLOPE_THRESHOLD) / dw.BLOCKS_PER_PARENT;
-/// How much density the erosion mask can subtract at full strength: one cell of travel, no more.
-///
-/// Set so a mask of one half breaks even against a face's exposed cell row, which is what puts
-/// eroded and intact stretches in balance. Even a full mask falls short of the row behind it, and of
-/// the deep cells along a parent's side columns, which matters as much: taking those would notch a
-/// flat face on the parent grid instead of eroding it.
-const EROSION_DEPTH = CELL_DENSITY_STEP;
+/// How much density the erosion mask can subtract at full strength: spans 1.65 cell rows to break single-row horizontal plateau lock.
+const EROSION_DEPTH = 1.65 * CELL_DENSITY_STEP;
 /// Cell size of the coarsest erosion octave, in child blocks (a parent block is `BLOCKS_PER_PARENT` wide).
-///
-/// This is the knob that decides whether erosion is visible at all. It has to be small enough that
-/// the mask differs between neighboring PARENT blocks: a field smooth over many parents moves a
-/// whole face together, and a face that moves as one is indistinguishable from a face that never
-/// moved. Detail comes from the difference between neighbors, never from the offset itself.
 const EROSION_SCALE = 16.0;
-/// Octaves of gouging. Each halves both cell size and weight, so this reaches down to
-/// `EROSION_SCALE / 4` child blocks: fine enough to fray an edge cell by cell.
+/// Octaves of gouging. Each halves both cell size and weight, so this reaches down to `EROSION_SCALE / 4` child blocks:
 const EROSION_OCTAVES = 3;
-/// Coordinate shift between erosion octaves, so their lattices do not share an origin and stack
-/// their seams into one visible grid. Any value unrelated to the octave scales does the job.
-const OCTAVE_OFFSET = 7919;
-/// Weight of the ridged term, which concentrates its high values into narrow branching bands.
-/// This is what gouges channels into a face rather than shaving it evenly, and shaving is the
-/// failure mode to avoid: it removes just as much material while looking like nothing happened.
-///
-/// Both weights are deliberately large enough to drive the mask past its own limits some of the
-/// time. Saturating reads as a stretch of face fully taken or fully spared, which is the bold
-/// result wanted here; a mask that only ever hovers near its midpoint frays every cell a little and
-/// reads as noise.
-const GOUGE_WEIGHT = 1.2;
-/// Weight of the smooth term, which supplies the broad swell a face rides on under the gouges.
+/// How strongly sharp, channel-carving noise affects erosion.
+const GOUGE_WEIGHT = 1.24;
+/// The mathematical average value of the sharp gouge noise.
+const GOUGE_MEAN = GOUGE_WEIGHT / 2.0;
+/// How strongly smooth, rolling noise affects erosion.
 const UNDULATION_WEIGHT = 0.6;
-/// Average of the ridged term. Its fold leaves it above the midpoint rather than on it, so it is
-/// subtracted to keep the mask centered on the break-even point that `EROSION_DEPTH` sets.
-/// An off-center mask spends its time on one side of that line and erodes uniformly, which looks
-/// identical to no erosion at all. Empirical, and pinned by a test.
-const GOUGE_MEAN = 0.63;
+
 /// Cell size of the coarse material warp octave, in child blocks.
-const MATERIAL_WARP_SCALE = 11.0;
-/// Ratio between the warp's two octaves. The fine one is folded rather than smooth, which is what
-/// turns a rounded lobe of one material pushing into another into an angular, interlocking finger.
-const MATERIAL_WARP_LACUNARITY = 3.0;
-/// Share of the warp coming from the folded fine octave. The rest is the smooth coarse octave that
-/// decides which direction a vein leans overall.
-const MATERIAL_CREASE_WEIGHT = 0.35;
-/// How far the warp may drag a material border, in parent blocks.
-///
-/// A cell center already sits up to 0.375 parent blocks off center, so anything under 1.125 rounds
-/// no further than the immediate 3x3 of parents that the lookup has on hand.
-/// Under 0.125 the warp can never reach a neighbor at all and material simply stops crossing.
-/// High in that range on purpose: at 0.7 even a cell in the middle of its parent can be claimed by a
-/// neighbor, so two materials genuinely interpenetrate instead of one nibbling the other's border.
-const MATERIAL_WARP_STRENGTH = 0.7;
-/// Period of every noise field here, in child blocks.
-///
-/// Global child coordinates run to 2^64 at depth, far past the 2^24 where an `f32` still resolves
-/// single blocks, so they are masked into range first. The cost is one seam per million blocks,
-/// which is much cheaper than losing all sub-cell precision everywhere.
-/// Must stay a whole number of chunks so the seam falls on a chunk border rather than through one,
-/// and within `u32` since the noise functions take their coordinates that wide.
-const NOISE_PERIOD_MASK = (1 << 20) - 1;
+const MATERIAL_WARP_SCALE = 11.2;
+/// Scale multiplier for the second, finer layer of material noise.
+const MATERIAL_WARP_LACUNARITY = 3.49;
+/// The mix ratio between smooth curves and sharp creases for material borders.
+const MATERIAL_CREASE_WEIGHT = 0.32;
+/// Maximum distance (in parent block units) material can be dragged.
+const MATERIAL_WARP_STRENGTH = 1.2;
+
+/// Scale of coherent ore/gem thinning noise, in child block units.
+const ORE_THINNING_SCALE = 3.0; // 0.75 parent blocks
+/// Chance of an ore/gem still remaining from the previous depth after all warping/erosion interactions.
+/// Not a hash; instead passed through a noise function.
+const INHERITED_ORE_KEEP_CHANCE = 0.73;
+
+/// Total block width of the world across one dimension.
+const WORLD_BLOCKS_WIDE = @as(u32, dw.CHUNK_SIZE) << (STARTING_ZOOM_TIMES * dw.ZOOM_LOG2);
+
+/// Mask for noise coordinates to stay within floating-point precision.
+pub const NOISE_COORD_MASK: u64 = std.math.maxInt(u32);
 
 comptime {
-    if ((NOISE_PERIOD_MASK + 1) % dw.CHUNK_SIZE != 0)
-        @compileError("The noise period must be a whole number of chunks so its seam falls on a chunk border.");
-    if (NOISE_PERIOD_MASK > std.math.maxInt(u32))
-        @compileError("Masked coordinates are passed to the noise functions as u32.");
+    if ((NOISE_COORD_MASK +% 1) % dw.CHUNK_SIZE != 0)
+        @compileError("The noise period must be a power-of-two minus one.");
     // The mask must be able to take the exposed row of a face...
     if (EROSION_DEPTH <= 0.5 * CELL_DENSITY_STEP)
         @compileError("A full erosion mask cannot even reach a face's exposed cell row.");
     // ...and must not be able to take the row behind it, which is what holds erosion to one cell.
-    if (EROSION_DEPTH > 1.5 * CELL_DENSITY_STEP)
-        @compileError("A full erosion mask must not reach a face's second cell row: erosion is capped at one cell.");
+    if (INHERITED_ORE_KEEP_CHANCE <= 0 or INHERITED_ORE_KEEP_CHANCE >= 1)
+        @compileError("Inherited ore keep chance must be strictly between zero and one.");
 }
 
-/// How much terrain the erosion takes at this cell, from 0 (untouched) to 1 (down to bedrock).
-///
-/// Two fields, doing different jobs. The ridged term folds its gradient field at zero, which puts
-/// its high values in narrow branching bands rather than broad blobs, so it cuts channels and
-/// leaves the rock between them standing. The smooth term is the swell those channels are cut into.
-/// Both read global child coordinates, so the mask is a property of the world rather than of any
-/// chunk, and every border samples the same field from either side.
-///
-/// One mask octave is added per depth, and because the world quadruples in scale the octave added
-/// here becomes a coarse one for the children. Descending therefore accumulates a full spectrum of
-/// erosion, self-similar by construction, without any depth reading past its own parent.
-fn erosionMask(noise_seed: dw.utils.Vec2u, wx: u32, wy: u32) f32 {
-    // Value noise, NOT a folded gradient field. Perlin is exactly zero at every lattice point, so
-    // folding it puts a ridge on all of them and prints the noise grid onto the terrain as evenly
-    // spaced erosion. Value noise crosses its midpoint at unrelated places, so the ridges land where
-    // nothing else lines up. Octaves are offset for the same reason: their lattices would otherwise
-    // share an origin and stack their seams.
+/// Determines whether a specified ore/gem deposit should remain.
+inline fn keepsInheritedOverlay(
+    noise_seed: dw.utils.Vec2u,
+    wx: u64,
+    wy: u64,
+    lx: u4,
+    ly: u4,
+) bool {
+    _ = lx;
+    _ = ly;
+    // if (INHERITED_ORE_KEEP_CHANCE < 1.0) {
+    //     // guarantee at least 1 of the ore/gem survives
+    //     const parent_hash = seeding.FastHash.hash2d(
+    //         noise_seed,
+    //         wx / dw.BLOCKS_PER_PARENT,
+    //         wy / dw.BLOCKS_PER_PARENT,
+    //     );
+    //     const anchor_x: u4 = @intCast(parent_hash & (dw.BLOCKS_PER_PARENT - 1));
+    //     const anchor_y: u4 = @intCast((parent_hash >> 2) & (dw.BLOCKS_PER_PARENT - 1));
+    //     if (lx == anchor_x and ly == anchor_y) return true;
+    // }
+
+    const coherent_roll = procedural.getDualValueNoise(
+        noise_seed,
+        wx,
+        wy,
+        1.0 / ORE_THINNING_SCALE,
+    )[0];
+
+    return coherent_roll < INHERITED_ORE_KEEP_CHANCE;
+}
+
+/// Computes a continuous terrain erosion factor in [0, 1] using multi-octave ridged and undulating noise.
+fn erosionMask(noise_seed: dw.utils.Vec2u, wx: u64, wy: u64) f32 {
+    // Value noise, NOT a folded gradient field.
     var gouges: f32 = 0;
     var weight: f32 = 0;
     inline for (0..EROSION_OCTAVES) |octave| {
         const step: f32 = @floatFromInt(@as(u32, 1) << octave);
-        const shift = octave * OCTAVE_OFFSET;
-        const v = procedural.getDualValueNoise(noise_seed, wx +% shift, wy +% shift, step / EROSION_SCALE)[0];
+        const shift = @as(u64, octave) * 0x40383698ed; // large prime-y num
+        const v = procedural.getDualValueNoise(
+            noise_seed,
+            wx +% shift,
+            wy +% shift,
+            step / EROSION_SCALE,
+        )[0];
 
         // Folding at the midpoint turns a smooth field into narrow bands along its midpoint contour.
         const amplitude = 1.0 / step;
@@ -353,21 +356,19 @@ fn erosionMask(noise_seed: dw.utils.Vec2u, wx: u32, wy: u32) f32 {
     }
 
     // The coarse octave's second lane is the broad swell, and comes free with the call above.
-    const undulation = procedural.getDualValueNoise(noise_seed, wx, wy, 1.0 / (EROSION_SCALE * 2))[1];
+    const undulation = procedural.getDualValueNoise(
+        noise_seed,
+        wx,
+        wy,
+        1.0 / (EROSION_SCALE * 2),
+    )[1];
 
-    // Both terms enter centered, so their weights set spread without dragging the average off the
-    // break-even point.
+    // Both terms enter centered, so their weights set spread without dragging the average off the break-even point.
     const mask = 0.5 + GOUGE_WEIGHT * (gouges / weight - GOUGE_MEAN) + UNDULATION_WEIGHT * (undulation - 0.5);
     return std.math.clamp(mask, 0.0, 1.0);
 }
 
-/// Densities at the parent block's four corners, ordered top left, top right, bottom left, bottom right.
-///
-/// A corner counts how many of the four parent blocks touching it are foundations. Any block sharing
-/// that corner counts the same four, so neighboring parents always agree on the surface running
-/// between them: no seed, no coordinate, and no chunk identity enters the count, which is what keeps
-/// the result seamless across block, chunk, and quadrant borders alike.
-/// Neighbors are row-major from the top left (see `Block.edge_flags`), skipping the center.
+/// Calculates density at parent block corners based on solid neighbors (ordered row-major, top-left to bottom-right).
 fn cornerDensities(parent_block: Block, n: [8]Block) @Vector(4, f32) {
     // `isSolid()` rather than `isFoundation()`, so bedrock counts as the material it is. The two
     // differ only for edge stone, and reading the world border as open air would have the terrain
@@ -384,48 +385,34 @@ fn cornerDensities(parent_block: Block, n: [8]Block) @Vector(4, f32) {
     }) * @as(@Vector(4, f32), @splat(CORNER_UNIT));
 }
 
-/// Returns whether the slope carve removes this cell of a solid parent's 4x4 child grid.
-///
-/// The parent's terrain is described by its four corners rather than by the block itself, and a cell
-/// survives when the bilinear sample of those corners clears `SLOPE_THRESHOLD`. Shared corners make
-/// a run of blocks resolve into one continuous surface: flat where the neighbors are flat, and
-/// sloped at whatever angle the corner counts imply where the terrain turns.
-///
-/// The density then reads as an exposure depth and is handed to `erosionMask()`, which decides
-/// whether to take this cell. Where the mask runs deep a face loses its exposed cells and where it
-/// runs shallow it keeps them, and that difference between neighbors IS the ruggedness.
-///
-/// Erosion is bounded twice over, and both bounds are absolute rather than statistical:
-/// only the outer ring of a parent's 4x4 is eligible, so a 2x2 shell always remains and a parent can
-/// never be erased; and `EROSION_DEPTH` stops a full mask short of a face's second cell row, so the
-/// bite is one cell deep whatever the field does.
+/// Determines whether terrain erosion carves away a child cell based on bilinear corner density and erosion noise.
 fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx: u64, wy: u64, lx: u4, ly: u4) bool {
-    // The shell. Positional and unconditional, so no combination of fields can cost a parent its block.
-    if (lx -% 1 < 2 and ly -% 1 < 2) return false;
-
-    // Same `isSolid()` test `cornerDensities()` uses; the two must agree on what counts as material
-    // or this shortcut stops matching the field it is meant to be shortcutting.
     var buried = true;
     for (n) |b| buried = buried and b.isSolid();
     if (buried) return false;
 
     const corners = cornerDensities(parent_block, n);
 
-    // Cell centers land on eighths of the parent block: 1, 3, 5, 7.
-    const u = (2 * @as(f32, @floatFromInt(lx)) + 1) / 8;
-    const v = (2 * @as(f32, @floatFromInt(ly)) + 1) / 8;
-    const weights: @Vector(4, f32) = .{ (1 - u) * (1 - v), u * (1 - v), (1 - u) * v, u * v };
-    const density = @reduce(.Add, corners * weights);
+    // Domain-warp bilinear coordinates to perturb surface contours and eliminate axis-aligned rectangular steps
+    const warp = warpField(noise_seed, wx, wy);
+    const warp_offset_x = (warp[0] - 0.5) * 1.8;
+    const warp_offset_y = (warp[1] - 0.5) * 1.8;
 
-    return density < SLOPE_THRESHOLD + erosionMask(noise_seed, @intCast(wx), @intCast(wy)) * EROSION_DEPTH;
+    const u = std.math.clamp((2.0 * @as(f32, @floatFromInt(lx)) + 1.0 + warp_offset_x) / 8.0, 0.0, 1.0);
+    const v = std.math.clamp((2.0 * @as(f32, @floatFromInt(ly)) + 1.0 + warp_offset_y) / 8.0, 0.0, 1.0);
+    const weights: @Vector(4, f32) = .{ (1 - u) * (1 - v), u * (1 - v), (1 - u) * v, u * v };
+
+    // Continuous noise jitter breaks discrete corner density steps (16, 32, 48)
+    const jitter = (procedural.getDualValueNoise(noise_seed, wx, wy, 1.0 / 7.0)[0] - 0.5) * (0.8 * CORNER_UNIT);
+    const density = @reduce(.Add, corners * weights) + jitter;
+
+    // Protect deep parent interiors based on continuous density field
+    if (density >= 3.5 * CORNER_UNIT) return false;
+
+    return density < SLOPE_THRESHOLD + erosionMask(noise_seed, wx, wy) * EROSION_DEPTH;
 }
 
-/// Displacement field for material borders, both lanes in 0..1 and centered on 0.5.
-///
-/// The coarse octave leans a vein one way over a long stretch. The fine octave is folded at its
-/// midpoint, which replaces its smooth peaks with creases: where a smooth field would push a rounded
-/// lobe of one material into another, a folded one drives in a wedge. That is the difference between
-/// two materials sharing a wavy border and two materials interlocking along a jagged one.
+/// Generates a 2D material displacement vector combining coarse directional drift and fine creased noise.
 fn warpField(noise_seed: dw.utils.Vec2u, wx: u64, wy: u64) dw.utils.Vec2f32 {
     const half: dw.utils.Vec2f32 = @splat(0.5);
     const coarse = procedural.getDualValueNoise(noise_seed, wx, wy, 1.0 / MATERIAL_WARP_SCALE);
@@ -436,14 +423,7 @@ fn warpField(noise_seed: dw.utils.Vec2u, wx: u64, wy: u64) dw.utils.Vec2f32 {
         creased * @as(dw.utils.Vec2f32, @splat(MATERIAL_CREASE_WEIGHT));
 }
 
-/// Picks which of the 3x3 parent blocks hands this child cell its material.
-///
-/// The cell's offset from its parent's center is dragged around by a smooth 2D warp and then rounded
-/// back onto the parent grid: cells near the middle of a parent always keep their own material,
-/// while cells near a border can cross into a neighbor. A smooth warp is what makes an ore vein's
-/// border come out as a coherent wiggle instead of the per-cell dither an independent random roll
-/// gives, and keying it to global coordinates keeps both sides of a border warping identically.
-/// Falls back to the parent itself whenever the warp lands on air, decor, or the world edge.
+/// Selects material from a 3x3 parent neighborhood using continuous 2D domain warping.
 fn warpedMaterial(parent_block: Block, n: [8]Block, warp: dw.utils.Vec2f32, lx: u4, ly: u4) Block {
     const center = (dw.BLOCKS_PER_PARENT - 1.0) / 2.0;
 
@@ -462,17 +442,8 @@ fn warpedMaterial(parent_block: Block, n: [8]Block, warp: dw.utils.Vec2f32, lx: 
     return if (source.isFoundation()) source else parent_block;
 }
 
-/// Applies deterministic logic to a child block based on its parent and 8 parent neighbors.
-/// Returns a `memory.BlockSpec` (temp procedural information) that can be compiled to `Block` later.
-///
-/// An empty neighbor means genuinely absent material, and callers must not pass one to stand in for
-/// "outside my buffer": erosion reads empty neighbors as exposure and carves toward them, and an
-/// empty result can only ever produce further empty results at the depths below it. A caller working
-/// from a fixed window (the 4x4 in `computeLayer()`) has to edge-extend past its border instead,
-/// or it will eat its own edges a little further on every layer with no way back.
-/// Correctly determines the child's `seed` property when returning it if the block is not empty.
-/// Decorations are applied afterward in `procedural.applyAncestorDecorations()`. TODO: actually add this!
-/// TODO: also add culling system for invalid decor block configurations in ancestor, determine how to deal with spiral plant
+/// Evaluates child block evolution from its parent block and 8 parent neighbors.
+/// Handles water volume propagation, slope carving, material warping, and ore dispersal.
 pub fn applyAncestorLogic(
     parent_block: Block,
     parent_neighbors: [8]Block,
@@ -521,41 +492,66 @@ pub fn applyAncestorLogic(
     const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
     const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
 
-    // Every noise field below reads global child coordinates under one quadrant-wide seed, so chunk
-    // identity never enters and the fields line up across chunk borders. The depth is folded in to
-    // stop a parent's field from repeating verbatim in the children drawn on top of it.
+    // Every noise field below reads global child coordinates under one quadrant-wide seed,
+    // so chunk identity never enters and the fields line up across chunk borders.
+    // The depth is folded in to stop a parent's field from repeating verbatim in the children drawn on top of it.
     const quadrant_seed = world.quad_cache.getQuadrantSeed(@intCast(key.quadrant), key.depth);
     const noise_seed: dw.utils.Vec2u = .{ quadrant_seed.value[0] ^ key.depth, quadrant_seed.value[1] };
-    const wx = ((key.suffix[0] *% dw.CHUNK_SIZE) +% bx) & NOISE_PERIOD_MASK;
-    const wy = ((key.suffix[1] *% dw.CHUNK_SIZE) +% by) & NOISE_PERIOD_MASK;
+    const wx = ((@as(u64, key.suffix[0]) *% dw.CHUNK_SIZE) +% bx) & NOISE_COORD_MASK;
+    const wy = ((@as(u64, key.suffix[1]) *% dw.CHUNK_SIZE) +% by) & NOISE_COORD_MASK;
 
+    // Geometry FIRST!
     if (carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
 
-    // Shape and material are decided separately: the carve above says whether the cell is terrain at
-    // all, and the warp below says which neighboring vein it belongs to.
+    // Now, resolve material domain warping for solid cells.
     const warp = warpField(noise_seed, wx, wy);
     const source = warpedMaterial(parent_block, parent_neighbors, warp, lx, ly);
+
+    // Evaluate overlay retention on confirmed solid terrain
+    const is_overlay = source.id.isOverlay() or parent_sprite.isOverlay();
+    if (is_overlay) {
+        const overlay_id = if (source.id.isOverlay()) source.id else parent_sprite;
+        const base_id = if (source.id.isOverlay()) source.base_id else parent_block.base_id;
+
+        if (!keepsInheritedOverlay(noise_seed, wx, wy, lx, ly)) {
+            return .{ .id = base_id, .seed = noise_hash_2, .water_volume = inherited_water };
+        }
+        return .{
+            .id = overlay_id,
+            .base_id = base_id,
+            .seed = noise_hash_2,
+            .water_volume = inherited_water,
+        };
+    }
+
     var evolved_sprite: Sprite = source.id.evolvesTo();
 
-    // The warp field doubles as the patchiness of the strange stone, keeping its blue patches
-    // coherent instead of scattering single blocks through the vein.
+    if (source.id.isStone()) {
+        const ore_density = procedural.getDualValueNoise(
+            noise_seed,
+            wx,
+            wy,
+            1.0 / 23.0,
+        )[0];
+        if (procedural.disperseOre(source.id, ore_density, wx, wy, key.depth, noise_seed)) |ore| {
+            evolved_sprite = ore;
+        }
+    }
+
     if (evolved_sprite == .blue_strange_stone and warp[0] > 0.7) evolved_sprite = .blue_stone;
 
-    // Ores/gems keep the parent's underlay so veins stay visually consistent across zooms (plain stone fallback).
+    // preserve "underlay"
     const base_id: Sprite = if (evolved_sprite.isOverlay())
-        (if (source.base_id != .none) source.base_id else .stone)
+        (if (source.base_id != .none) source.base_id else source.id)
     else
         .none;
 
-    // Return the new spec, passing the hash down as the new seed for the next generation.
+    // done! pass down the noise hash as well.
     return .{ .id = evolved_sprite, .base_id = base_id, .seed = noise_hash_2 };
 }
 
-/// Traces the lineage of a single block type. Target depth is described in the `DepthCoordinate`.
-///
-/// A modified chunk does NOT force a full materialization here: the lineage trace stays procedural,
-/// and the player's edit is overlaid on the single cell that was asked for.
-/// Cached chunks are already materialized, so they need no overlay.
+/// Recursively traces the lineage of a single block type up to parent depths, overlaying player modifications.
+/// Accesses and potentially modifies `ancestor_cache`.
 pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
     const target_depth = key.depth;
     if (target_depth == STARTING_ZOOM_TIMES) {
@@ -623,7 +619,7 @@ pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
     return block;
 }
 
-/// Fetches a 6x6 neighborhood of parent IDs for the generator. Requires a specific depth and location.
+/// Fetches a 6x6 parent block neighborhood at parent depth (`key.depth - 1`) for generator evaluation.
 pub fn getAncestorNeighborhood(key: DepthCoordinate) [6][6]Block {
     var result: [6][6]Block = undefined;
     const parent_depth = key.depth - 1;
