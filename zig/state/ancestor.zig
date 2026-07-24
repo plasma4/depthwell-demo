@@ -521,6 +521,18 @@ pub fn applyAncestorLogic(
     const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
     const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
 
+    // An overlay is already a deposit made at an earlier depth. Keep every child of that deposit
+    // intact; erosion is allowed to shape stone, but must never make a previously found ore vanish
+    // merely because the player descended through another portal.
+    if (parent_sprite.isOverlay()) {
+        return .{
+            .id = parent_sprite,
+            .base_id = if (parent_block.base_id != .none) parent_block.base_id else .stone,
+            .seed = noise_hash_2,
+            .water_volume = inherited_water,
+        };
+    }
+
     // Every noise field below reads global child coordinates under one quadrant-wide seed, so chunk
     // identity never enters and the fields line up across chunk borders. The depth is folded in to
     // stop a parent's field from repeating verbatim in the children drawn on top of it.
@@ -529,13 +541,40 @@ pub fn applyAncestorLogic(
     const wx = ((key.suffix[0] *% dw.CHUNK_SIZE) +% bx) & NOISE_PERIOD_MASK;
     const wy = ((key.suffix[1] *% dw.CHUNK_SIZE) +% by) & NOISE_PERIOD_MASK;
 
-    if (carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
-
-    // Shape and material are decided separately: the carve above says whether the cell is terrain at
-    // all, and the warp below says which neighboring vein it belongs to.
+    // Shape and material are decided separately: the carve says whether the cell is terrain at all,
+    // and the warp says which neighboring vein it belongs to. Resolve the source first so an overlay
+    // pulled across a parent border is protected by the same no-deletion rule as a centered overlay.
     const warp = warpField(noise_seed, wx, wy);
     const source = warpedMaterial(parent_block, parent_neighbors, warp, lx, ly);
+
+    if (source.id.isOverlay()) {
+        return .{
+            .id = source.id,
+            .base_id = if (source.base_id != .none) source.base_id else .stone,
+            .seed = noise_hash_2,
+            .water_volume = inherited_water,
+        };
+    }
+
+    if (carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
+
     var evolved_sprite: Sprite = source.id.evolvesTo();
+
+    // Every refinement gets its own deposit roll. The field is keyed by depth, so a new ore cannot
+    // simply repeat the base layer's pattern, while the inherited overlay path above keeps older
+    // deposits permanent. The recursive density is an independent octave used only to bias host
+    // material; it is not the terrain solidity field used by `carvesSlope()`.
+    if (source.id.isStone()) {
+        const ore_density = procedural.getDualValueNoise(
+            noise_seed,
+            wx,
+            wy,
+            1.0 / 23.0,
+        )[0];
+        if (procedural.disperseOre(source.id, ore_density, wx, wy, key.depth, noise_seed)) |ore| {
+            evolved_sprite = ore;
+        }
+    }
 
     // The warp field doubles as the patchiness of the strange stone, keeping its blue patches
     // coherent instead of scattering single blocks through the vein.

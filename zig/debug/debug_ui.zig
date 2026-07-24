@@ -84,13 +84,6 @@ const procedural_sliders = [_]SliderDef{
         .val = &procedural.hybrid_weight.value,
         .regen = true,
     },
-    .{
-        .name = "Odds for gems to spawn",
-        .min = 0.0,
-        .max = 1.0,
-        .val = &procedural.base_gem_odds.value,
-        .regen = true,
-    },
 };
 
 const player_sliders = [_]SliderDef{
