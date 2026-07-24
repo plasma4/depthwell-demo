@@ -1023,7 +1023,7 @@ fn spawnReturnIntake() void {
     });
 }
 
-/// Commits the descent so D+1 stops being a preview and becomes the world!
+/// Finishes the active depth transition, adopting its generated preview as the new live window.
 /// Adapts the preview buffer to the one-method interface `SimBuffer.refreshAdopting()` asks for.
 const PreviewSource = struct {
     pub fn get(_: @This(), coord: Coordinate) ?*const Chunk {
@@ -1061,8 +1061,8 @@ fn finish() void {
     g.portal_frame = 0;
     releasePreview();
 
-    // The zoom multiplier drops back to 1 with the descent over,
-    // and D+1 at the committed scale shows exactly what D showed at a full ZOOM_FACTOR!
+    // The zoom multiplier drops back to 1 when the transition is over; the newly committed layer
+    // is now shown at its normal scale.
     g.camera_scale_change = 1.0;
     dw.mining.selected_hp = 255;
     dw.mouse.mouse_chunk_coord = null;

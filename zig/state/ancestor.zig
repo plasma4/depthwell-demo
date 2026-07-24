@@ -300,6 +300,9 @@ const MATERIAL_CREASE_WEIGHT = 0.35;
 /// High in that range on purpose: at 0.7 even a cell in the middle of its parent can be claimed by a
 /// neighbor, so two materials genuinely interpenetrate instead of one nibbling the other's border.
 const MATERIAL_WARP_STRENGTH = 0.7;
+/// Fraction of an inherited deposit normally retained in each child cell during refinement.
+/// The parent region's hashed anchor is always retained, so a 4x4 deposit cannot disappear whole.
+const INHERITED_ORE_KEEP_CHANCE = 0.72;
 /// Period of every noise field here, in child blocks.
 ///
 /// Global child coordinates run to 2^64 at depth, far past the 2^24 where an `f32` still resolves
@@ -320,6 +323,31 @@ comptime {
     // ...and must not be able to take the row behind it, which is what holds erosion to one cell.
     if (EROSION_DEPTH > 1.5 * CELL_DENSITY_STEP)
         @compileError("A full erosion mask must not reach a face's second cell row: erosion is capped at one cell.");
+    if (INHERITED_ORE_KEEP_CHANCE <= 0 or INHERITED_ORE_KEEP_CHANCE >= 1)
+        @compileError("Inherited ore keep chance must be strictly between zero and one.");
+}
+
+/// Thins an inherited ore/gem deposit as it enters a finer depth without making the result flicker.
+/// The anchor is chosen per parent block, not per chunk, and is always retained as the guarantee that
+/// a 4x4 main child region still exposes at least one cell of the deposit.
+fn keepsInheritedOverlay(
+    noise_seed: dw.utils.Vec2u,
+    wx: u64,
+    wy: u64,
+    lx: u4,
+    ly: u4,
+) bool {
+    const parent_hash = seeding.FastHash.hash2d(
+        noise_seed,
+        wx / dw.BLOCKS_PER_PARENT,
+        wy / dw.BLOCKS_PER_PARENT,
+    );
+    const anchor_x: u4 = @intCast(parent_hash & (dw.BLOCKS_PER_PARENT - 1));
+    const anchor_y: u4 = @intCast((parent_hash >> 2) & (dw.BLOCKS_PER_PARENT - 1));
+    if (lx == anchor_x and ly == anchor_y) return true;
+
+    const roll = seeding.FastHash.float2d(noise_seed, @intCast(wx), @intCast(wy));
+    return roll < INHERITED_ORE_KEEP_CHANCE;
 }
 
 /// How much terrain the erosion takes at this cell, from 0 (untouched) to 1 (down to bedrock).
@@ -529,13 +557,61 @@ pub fn applyAncestorLogic(
     const wx = ((key.suffix[0] *% dw.CHUNK_SIZE) +% bx) & NOISE_PERIOD_MASK;
     const wy = ((key.suffix[1] *% dw.CHUNK_SIZE) +% by) & NOISE_PERIOD_MASK;
 
-    if (carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
+    // An overlay is already a deposit made at an earlier depth. Keep every child of that deposit
+    // mostly intact, but let a deterministic fraction return to its original base material so a
+    // deep vein is not a smooth 4x enlargement of the parent. The anchor guarantees one retained
+    // overlay in this parent block's 4x4 main child region.
+    if (parent_sprite.isOverlay()) {
+        const base_id = parent_block.base_id;
+        if (!keepsInheritedOverlay(noise_seed, wx, wy, lx, ly)) {
+            return .{ .id = base_id, .seed = noise_hash_2, .water_volume = inherited_water };
+        }
+        return .{
+            .id = parent_sprite,
+            .base_id = base_id,
+            .seed = noise_hash_2,
+            .water_volume = inherited_water,
+        };
+    }
 
-    // Shape and material are decided separately: the carve above says whether the cell is terrain at
-    // all, and the warp below says which neighboring vein it belongs to.
+    // Shape and material are decided separately: the carve says whether the cell is terrain at all,
+    // and the warp says which neighboring vein it belongs to. Resolve the source first so an overlay
+    // pulled across a parent border is protected by the same no-deletion rule as a centered overlay.
     const warp = warpField(noise_seed, wx, wy);
     const source = warpedMaterial(parent_block, parent_neighbors, warp, lx, ly);
+
+    if (source.id.isOverlay()) {
+        const base_id = source.base_id;
+        if (!keepsInheritedOverlay(noise_seed, wx, wy, lx, ly)) {
+            return .{ .id = base_id, .seed = noise_hash_2, .water_volume = inherited_water };
+        }
+        return .{
+            .id = source.id,
+            .base_id = base_id,
+            .seed = noise_hash_2,
+            .water_volume = inherited_water,
+        };
+    }
+
+    if (carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
+
     var evolved_sprite: Sprite = source.id.evolvesTo();
+
+    // Every refinement gets its own deposit roll. The field is keyed by depth, so a new ore cannot
+    // simply repeat the base layer's pattern, while the inherited overlay path above keeps older
+    // deposits permanent. The recursive density is an independent octave used only to bias host
+    // material; it is not the terrain solidity field used by `carvesSlope()`.
+    if (source.id.isStone()) {
+        const ore_density = procedural.getDualValueNoise(
+            noise_seed,
+            wx,
+            wy,
+            1.0 / 23.0,
+        )[0];
+        if (procedural.disperseOre(source.id, ore_density, wx, wy, key.depth, noise_seed)) |ore| {
+            evolved_sprite = ore;
+        }
+    }
 
     // The warp field doubles as the patchiness of the strange stone, keeping its blue patches
     // coherent instead of scattering single blocks through the vein.
@@ -543,7 +619,7 @@ pub fn applyAncestorLogic(
 
     // Ores/gems keep the parent's underlay so veins stay visually consistent across zooms (plain stone fallback).
     const base_id: Sprite = if (evolved_sprite.isOverlay())
-        (if (source.base_id != .none) source.base_id else .stone)
+        (if (source.base_id != .none) source.base_id else source.id)
     else
         .none;
 
