@@ -1052,7 +1052,7 @@ const dense_supports_table: [MAX_SPRITE_ID][]const Support = blk: {
 
 /// Cleans a sprite tag name into a human-readable name at compile-time.
 fn cleanTagName(comptime raw: []const u8) []const u8 {
-    // 1. Calculate the final size first (skipping numbers and ' right' suffix)
+    // Calculate the final size first (skipping numbers and " right" suffix)
     var out_len: usize = 0;
     for (raw) |c| {
         if (c >= '0' and c <= '9') continue;
