@@ -59,6 +59,16 @@ pub var subpixel_accum: Vec2f = .{ 0.0, 0.0 }; // note that vectors are smartly 
 
 /// Determines if the player is on the ground.
 var is_grounded: bool = false;
+
+/// Drops the airborne/jump bookkeeping, for teleports that skip `move()` entirely.
+/// A portal descent freezes movement for its whole length,
+/// so without this the coyote window from before the descent survives it.
+pub fn resetMotionState() void {
+    is_grounded = false;
+    coyote_frames = 0;
+    subpixel_accum = .{ 0.0, 0.0 };
+}
+
 /// Frames remaining for coyote time jump.
 var coyote_frames: u8 = 0;
 
@@ -139,11 +149,21 @@ pub fn currentSprite() Sprite {
 
 /// Adds the player as a render entity at the grid-aligned screen position computed in `render/chunk.zig`.
 /// Mirrored horizontally to match `facing_right`. Should only be called from `entity.updateEntities`.
+/// Alpha the player is drawn at while spectating, so flying through solid rock reads as intended
+/// rather than as a collision bug.
+const GHOST_ALPHA: f32 = 0.8;
+
 pub fn drawPlayerEntity() void {
+    // Turns ghostly the moment the ascent starts rather than when it commits, so the fade belongs to
+    // the animation instead of popping at the end of it.
+    const ghost = world.isSpectating() or dw.portal.isAscending();
     dw.entity.addEntity(.{
         .sprite = currentSprite(),
         .position = dw.chunks.player_screen_pos,
+        // A portal descent squeezes this down and back up again (see `portal.playerScale()`); the
+        // player stays fully opaque throughout, so nothing blinks out and returns.
         .size = if (facing_right) dw.chunks.player_screen_size else -dw.chunks.player_screen_size,
+        .lcha = .{ 1.0, 0.0, 0.0, if (ghost) GHOST_ALPHA else 1.0 },
     });
 }
 
@@ -183,8 +203,22 @@ pub fn move(logic_speed: f64) void {
             (move_input * x_mult * (1.0 - pow_fx) / FRICTION_X);
     }
 
-    // Update y velocity with gravity
-    if (coyote_frames > 0 and KeyBits.isSet(KeyBits.up, game.keys_held_mask)) {
+    // Update y velocity with gravity.
+    //
+    // Spectating flies instead: a block the player stands in at D is a quarter of a block at D-1, so
+    // an ascent lands inside solid rock more often than not. Free flight (with `isColliding()` giving
+    // way below) is what makes looking around from above possible at all, and it costs nothing since
+    // the layer cannot be modified anyway.
+    if (world.isSpectating()) {
+        var lift: f64 = 0;
+        if (KeyBits.isSet(KeyBits.up, game.keys_held_mask)) lift -= PLAYER_BASE_SPEED;
+        if (KeyBits.isSet(KeyBits.down, game.keys_held_mask)) lift += PLAYER_BASE_SPEED;
+        game.player_velocity[1] = game.player_velocity[1] * pow_fx;
+        game.player_velocity[1] += if (FRICTION_X < 1e-4)
+            lift * x_mult
+        else
+            (lift * x_mult * (1.0 - pow_fx) / FRICTION_X);
+    } else if (coyote_frames > 0 and KeyBits.isSet(KeyBits.up, game.keys_held_mask)) {
         game.player_velocity[1] = -JUMP_FORCE;
         is_grounded = false;
         coyote_frames = 0;
@@ -297,6 +331,10 @@ fn handleLocalWrap(comptime axis: u1) i64 {
 
 /// Performs an AABB check (for the player's position) against the world grid.
 pub fn isColliding(px: i64, py: i64) bool {
+    // Spectating flies through everything (see the lift branch in `move()`): the layer is read-only,
+    // so terrain is scenery rather than a surface, and an ascent frequently lands inside solid rock.
+    if (world.isSpectating()) return false;
+
     const game = &memory.game;
     const corners = [4][2]i64{
         .{ px - PLAYER_HITBOX_WIDTH / 2, py + CHUNK_SIZE_SQ / 2 - PLAYER_HITBOX_HEIGHT },
