@@ -36,8 +36,10 @@ pub fn sampleWorldAroundPlayer() void {
     if (!dw.is_debug) return;
 
     const coord = memory.game.getPlayerCoord();
-    if (coord.suffix[0] < DEFAULT_SPAN or coord.suffix[1] < DEFAULT_SPAN or
-        coord.suffix[0] > dw.world.max_possible_suffix - DEFAULT_SPAN or coord.suffix[0] > dw.world.max_possible_suffix - DEFAULT_SPAN)
+    const edge_margin_chunks: u64 = @intCast(std.math.divCeil(i32, DEFAULT_SPAN, dw.CHUNK_SIZE) catch unreachable);
+    const max_suffix = dw.world.max_possible_suffix;
+    if (coord.suffix[0] < edge_margin_chunks or coord.suffix[1] < edge_margin_chunks or
+        coord.suffix[0] > max_suffix -| edge_margin_chunks or coord.suffix[1] > max_suffix -| edge_margin_chunks)
     {
         logger.quick("This test touches the world boundaries and WILL have skewed values.");
     }

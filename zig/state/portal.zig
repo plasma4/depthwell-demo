@@ -244,10 +244,10 @@ inline fn progress() f64 {
 }
 
 /// Exponent of the zoom at progress `t`, where the zoom is `ZOOM_FACTOR` raised to it.
-///
-/// Driving an exponent (rather than the zoom itself) makes each frame scale the view by a visually consistent ratio
+/// Using this for an exponent makes each frame scale the view by a visually consistent ratio
 /// (similar to how actual fractal zoom videos work)!
-/// Squaring the smoothstep() keeps the slope at zero on both ends (so it eases in and out),
+///
+/// Squaring the `smoothstep()` keeps the slope at zero on both ends (so it eases in and out),
 /// while holding the early frames low enough for the preview to finish generating before the overlay appears.
 inline fn zoomCurve(t: f64) f64 {
     const s = smoothstep(t);
@@ -263,6 +263,7 @@ inline fn zoomSign() f64 {
 /// A descent runs 1x -> `ZOOM_FACTOR` (zoom in); an ascent runs 1x -> `1 / ZOOM_FACTOR` (zoom out).
 /// `overlayScale()` cancels the factor out, which is why reaching the last frame lands on the committed view.
 pub fn zoomFactor() f64 {
+    @setFloatMode(.optimized);
     if (isReturning()) {
         // Nothing left to zoom once it has committed: the arrival is the landed world fading in.
         if (memory.game.portal_frame >= RETURN_DIVE_FRAMES) return 1.0;
@@ -287,6 +288,7 @@ fn zoomFactorAt(frame: u32) f64 {
 /// Either way the factor cancels `zoomFactor()` on the last frame,
 /// so the overlay arrives at exactly `camera_scale` and the hand-off to the new depth is invisible.
 pub fn overlayScale() f64 {
+    @setFloatMode(.optimized);
     const factor: f64 = if (isDescending()) 1.0 / @as(f64, dw.ZOOM_FACTOR) else dw.ZOOM_FACTOR;
     return zoomFactor() * factor;
 }
@@ -314,6 +316,7 @@ inline fn pastReveal(zoom: f64) bool {
 /// D is never faded: it stays at full strength for the whole descent and this is the only knob moved,
 /// so D+1 arrives *over* a solid image rather than the two meeting in the middle as a dissolve.
 pub fn overlayOpacity() f64 {
+    @setFloatMode(.optimized);
     if (!isZooming()) return 0.0;
     const start = zoomCurve(@as(f64, @floatFromInt(fill_deadline)) / @as(f64, @floatFromInt(TOTAL_FRAMES)));
     const now = zoomCurve(progress());
@@ -334,6 +337,7 @@ inline fn pullProgress() f64 {
 /// How hard the world is shaking this frame, 0 (still) to 1 (full tremor).
 /// Builds with the zoom so the tremor peaks as the descent commits (see `chunks.updateShake()`).
 pub fn shakeIntensity() f32 {
+    @setFloatMode(.optimized);
     if (!isActive()) return 0.0;
     // The arrival is a still, landed world; shaking it would undo the calm the fade-in buys.
     if (isReturning() and memory.game.portal_frame >= RETURN_DIVE_FRAMES) return 0.0;
@@ -343,6 +347,7 @@ pub fn shakeIntensity() f32 {
 
 /// Rate the background clock advances at, eased to a standstill as the player is drawn in.
 pub fn backgroundRate() f64 {
+    @setFloatMode(.optimized);
     if (!isActive()) return 1.0;
     return 1.0 - smoothstep(pullProgress());
 }
@@ -400,7 +405,7 @@ inline fn curveProgress() f64 {
 
 /// Opacity the whole world (background and tiles alike) is drawn at.
 ///
-/// 1 except during a return, which fades out over the back of its dive and back in on arrival.
+/// Always 1.0 except during a "dive return", which fades out over the back of its dive and back in on arrival.
 /// The commit lands between the two, on a screen that is already empty, so the depth change is never seen.
 pub fn worldOpacity() f64 {
     if (!isReturning()) return 1.0;
@@ -791,8 +796,10 @@ pub fn previewChunk(coord: Coordinate) ?*const Chunk {
     return &preview[@intCast(idx)];
 }
 
-/// The overlay's transition (the depth being entered). Only valid while `isActive()`.
+/// The overlay's transition (the depth being entered).
+/// Asserts that `isActive()` is true for validity.
 pub fn overlayTransition() world.LayerTransition {
+    std.debug.assert(isActive());
     return transition;
 }
 
@@ -823,6 +830,7 @@ pub fn playerOverride() [2]f64 {
 ///
 /// Recovers to 1 by the last frame rather than staying small, so the commit has nothing to pop back from.
 pub fn playerScale() f32 {
+    @setFloatMode(.optimized);
     if (!isActive()) return 1.0;
     const SQUEEZE = 0.55;
     // Undone in step with the zoom, so both arrive at their committed values on the same frame.
@@ -844,13 +852,14 @@ fn worldToScreen(sub: [2]f64) Vec2f32 {
 /// Called once per render frame from `entity.updateEntities()`.
 /// The intake particles are spawned from `tick()` instead, so their density does not ride the frame rate.
 pub fn drawEffects() void {
-    if (!isActive() or !ready) return;
     @setFloatMode(.optimized);
+    if (!isActive() or !ready) return;
     drawDebris(worldToScreen(effect_center));
 }
 
 /// Fade factor for portal-related visual elements (shards, particles) near the end of the descent.
 pub fn getDescentFade() f32 {
+    @setFloatMode(.optimized);
     if (!isActive()) return 1.0;
     const t = curveProgress();
     if (t < 0.8) return 1.0;
@@ -1023,7 +1032,7 @@ fn spawnReturnIntake() void {
     });
 }
 
-/// Commits the descent so D+1 stops being a preview and becomes the world!
+/// Finishes the active depth transition, adopting its generated preview as the new live window.
 /// Adapts the preview buffer to the one-method interface `SimBuffer.refreshAdopting()` asks for.
 const PreviewSource = struct {
     pub fn get(_: @This(), coord: Coordinate) ?*const Chunk {
@@ -1061,8 +1070,8 @@ fn finish() void {
     g.portal_frame = 0;
     releasePreview();
 
-    // The zoom multiplier drops back to 1 with the descent over,
-    // and D+1 at the committed scale shows exactly what D showed at a full ZOOM_FACTOR!
+    // The zoom multiplier drops back to 1 when the transition is over;
+    // the newly committed layer is now shown at its normal scale.
     g.camera_scale_change = 1.0;
     dw.mining.selected_hp = 255;
     dw.mouse.mouse_chunk_coord = null;
