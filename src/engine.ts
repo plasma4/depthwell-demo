@@ -6,6 +6,9 @@ import * as InputManager from "./inputManager";
 import * as EngineMaker from "./engineMaker";
 import { SaveManager } from "./saveManager";
 
+/** Forces a 1:1 logical-to-real visual resolution. Useful for pixel-perfect testing. */
+const FORCE_RESOLUTION_TEST = false;
+
 /** Typed array types mapped to integers. */
 export enum WasmTypeCode {
     Uint8 = 8,
@@ -51,11 +54,6 @@ export const MAX_DRAW_CALLS = 4;
 // Note: constants where most of the game logic resides are in Zig. These are currently unused in JS.
 // /* The main number (as an integer) representing the number of blocks in a chunk, number of pixels in a block, and number of subpixels in a pixel. */
 // const CHUNK_SIZE = 16;
-
-// /** The logical internal width (scaled with WebGPU). */
-// const INTERNAL_WIDTH = 480;
-// /** The logical internal height (scaled with WebGPU). */
-// const INTERNAL_HEIGHT = 270;
 
 export class GameEngine {
     /** The engine module automatically generated from Zig source. */
@@ -738,8 +736,7 @@ export class GameEngine {
     public getScratchProperty(
         index: number,
         asType:
-            | WasmTypeCode.Uint64
-            | WasmTypeCode.Float64 = WasmTypeCode.Uint64,
+            WasmTypeCode.Uint64 | WasmTypeCode.Float64 = WasmTypeCode.Uint64,
     ): number {
         if (
             this._tempScratchViewU64 === null ||
@@ -835,7 +832,8 @@ export class GameEngine {
         // cannot be turned back into the string, so without this a world is reproducible only by
         // whoever still has the save file.
         const ptr = this.writeStr(seed);
-        if (ptr !== null) this.exports.setSeedString(BigInt(ptr), BigInt(seed.length));
+        if (ptr !== null)
+            this.exports.setSeedString(BigInt(ptr), BigInt(seed.length));
     }
 
     /** The seed string a loaded world was created from, or "" if it predates the field. */
@@ -887,6 +885,15 @@ export class GameEngine {
 
             w = Math.round(cssW * devicePixelRatio);
             h = Math.round(cssH * devicePixelRatio);
+        }
+
+        // w/h force-resolution testing:
+        if (FORCE_RESOLUTION_TEST) {
+            const scale = 1.0;
+            this.canvas.style.width = (scale * 480) / devicePixelRatio + "px";
+            this.canvas.style.height = (scale * 270) / devicePixelRatio + "px";
+            w = scale * 480;
+            h = scale * 270;
         }
 
         // Apply new size only if it has actually changed
