@@ -185,9 +185,7 @@ pub fn getBaseSpriteType(
     block_x: u4,
     block_y: u4,
 ) BaseTerrainData {
-    // Debug drags terrain sliders live, so caching would serve stale samples; always recompute there.
-    // TODO: sliders are rare, we can do better here actually
-    // TODO: also benchmark perf
+    // Debug drags terrain sliders live, so caching would serve stale samples; just recompute for simplicity.
     if (dw.is_debug) return computeBaseSpriteType(chunk_x, chunk_y, block_x, block_y);
 
     const wx = chunk_x * 16 + block_x;
@@ -604,7 +602,7 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
 /// Returns two independent noise values (32-bit float) using vectorized 4-corner value noise.
 ///
 /// Use for: distorting other noise functions.
-fn getDualValueNoise(seed: Vec2u, x: u64, y: u64, inv_scale: f32) dw.utils.Vec2f32 {
+pub fn getDualValueNoise(seed: Vec2u, x: u64, y: u64, inv_scale: f32) dw.utils.Vec2f32 {
     const fx_raw = @as(f32, @floatFromInt(x)) * inv_scale;
     const fy_raw = @as(f32, @floatFromInt(y)) * inv_scale;
 

@@ -91,6 +91,7 @@ const SectionTag = enum(u16) {
     tools,
     misc,
     mod_store,
+    ascent_stack,
 };
 
 fn sectionTagFromInt(raw: u16) ?SectionTag {
@@ -310,9 +311,20 @@ fn readHeaderCore(r: *Reader, section_len: usize) !void {
     g.keys_held_mask = 0;
 }
 
-/// Exports quad cache (fractal descent state; raw internal fields + the two path lists)
+/// Section version for the quad cache. Bumped when `QuadCache.ANCESTOR_GRID` changed the size of
+/// `ancestor_materials`, since the payload is written as raw bytes and carries no shape of its own.
+/// v3 appends `materials_path` (what each depth's horizon window is recovered from).
+const QUADCACHE_VERSION = 3;
+
+/// Tag for the `materials_mode` the save was written under, so a blob from a build with the other
+/// strategy is refused rather than read as garbage: the two store different types in the same slot.
+fn materialsModeTag() u8 {
+    return @intFromEnum(world.materials_mode);
+}
+
+/// Exports quad cache (fractal descent state; raw internal fields + the path lists)
 fn writeQuadCache(w: *Writer) !void {
-    const at = try w.beginSection(.quadcache, 1);
+    const at = try w.beginSection(.quadcache, QUADCACHE_VERSION);
     const qc = &world.quad_cache;
     try w.bytes(std.mem.asBytes(&qc.path_hashes));
     try w.bytes(std.mem.asBytes(&qc.origins_x));
@@ -330,10 +342,20 @@ fn writeQuadCache(w: *Writer) !void {
     for (0..len) |i| try w.int(u64, qc.left_path.at(i).*);
     for (0..len) |i| try w.int(u64, qc.top_path.at(i).*);
 
+    try w.int(u8, materialsModeTag());
+    const materials_len = qc.materials_path.len;
+    try w.varint(materials_len);
+    for (0..materials_len) |i| try w.bytes(std.mem.asBytes(qc.materials_path.at(i)));
+
     w.endSection(at);
 }
 
-fn readQuadCache(r: *Reader) !void {
+fn readQuadCache(r: *Reader, section_version: u16) !void {
+    // v1 stored a 4x4 `ancestor_materials`; v2 stores `QuadCache.ANCESTOR_GRID` square. The framing
+    // length keeps the stream aligned either way, so a blind read would not fail, it would just fill
+    // the descent state with whatever followed. Refuse instead.
+    if (section_version != QUADCACHE_VERSION) return SaveError.BadData;
+
     const qc = &world.quad_cache;
     try r.readInto(std.mem.asBytes(&qc.path_hashes));
     try r.readInto(std.mem.asBytes(&qc.origins_x));
@@ -364,6 +386,49 @@ fn readQuadCache(r: *Reader) !void {
     qc.top_path.len = path_len;
     for (0..path_len) |i| {
         qc.top_path.at(i).* = try r.int(u64);
+    }
+
+    // Refuse a save written by a build using the other materials strategy: the slots below are a
+    // different type entirely, and reading them blind would fill the descent state with noise.
+    if (try r.int(u8) != materialsModeTag()) return SaveError.BadData;
+
+    const materials_len: usize = @intCast(try r.varint());
+    if (materials_len > qc.materials_path.prealloc_segment.len) {
+        try qc.materials_path.growCapacity(world.alloc, materials_len);
+    }
+    qc.materials_path.len = materials_len;
+    for (0..materials_len) |i| {
+        try r.readInto(std.mem.asBytes(qc.materials_path.at(i)));
+    }
+}
+
+/// Writes the ascent stack (the blocks the player has ascended past, deepest last).
+/// Present but empty when the player is at their deepest depth; its length is what puts the game into
+/// read-only spectating mode on load (see `world.isSpectating()`).
+fn writeAscentStack(w: *Writer) !void {
+    const at = try w.beginSection(.ascent_stack, 1);
+    const stack = world.ascent_stack.items;
+    try w.varint(stack.len);
+    for (stack) |step| {
+        try w.int(u64, step.suffix[0]);
+        try w.int(u64, step.suffix[1]);
+        try w.int(u8, step.quadrant);
+        try w.int(i64, step.origin_pos[0]);
+        try w.int(i64, step.origin_pos[1]);
+    }
+    w.endSection(at);
+}
+
+fn readAscentStack(r: *Reader) !void {
+    world.ascent_stack.clearRetainingCapacity();
+    const n = try r.varint();
+    var i: u64 = 0;
+    while (i < n) : (i += 1) {
+        try world.ascent_stack.append(memory.main_allocator, .{
+            .suffix = .{ try r.int(u64), try r.int(u64) },
+            .quadrant = @intCast(try r.int(u8) & 3),
+            .origin_pos = .{ try r.int(i64), try r.int(i64) },
+        });
     }
 }
 
@@ -488,23 +553,38 @@ fn readMisc(r: *Reader) !void {
     dw.player.facing_right = try r.boolean();
 }
 
-// MOD_STORE record (section version 2), per modified chunk:
-//   key      : suffix[0] u64 | suffix[1] u64 | depth u64 | quadrant u32   (28 bytes)
-//   modified : [CHUNK_SIZE_SQ / 64]u64                                    (32 bytes; which cells the player owns)
-//   cells    : PackedCell (u32), once per set bit, ascending              (4 bytes each)
-// The cell count is the population count of `modified`, so it is never stored twice.
+// MOD_STORE record (section version 3), per modified chunk:
+//   key         : suffix[0] u64 | suffix[1] u64 | depth u64 | quadrant u32 (28 bytes)
+//   flags       : u8 (bit 0: a `descendants` bitmap follows)
+//   descendants : [CHUNK_SIZE_SQ / 64]u64  (32 bytes; only present when the flag bit is set)
+//   modified    : [CHUNK_SIZE_SQ / 64]u64  (32 bytes; which cells the player owns)
+//   cells       : PackedCell (u32), once per set bit, ascending            (4 bytes each)
+// The cell count is the population count of `modified`, so it is never stored twice. Most entries
+// carry no descendant markers, so they pay one flag byte rather than a whole empty bitmap.
 // Sprite IDs are remapped through SPRITE_TABLE on load based on enum names!
+
+/// `flags` bit marking that a 32-byte `descendants` bitmap follows the flag byte.
+const MOD_FLAG_DESCENDANTS: u8 = 1;
 
 /// Bytes one modified cell occupies on disk.
 const MOD_CELL_BYTES: u64 = @sizeOf(PackedCell);
 /// Bytes of a record's fixed key prefix.
 const MOD_KEY_BYTES: u64 = 8 + 8 + 8 + 4;
-/// Bytes of a record's `modified` bitmap.
+/// Bytes of a record's `modified` (or `descendants`) bitmap.
 const MOD_MODIFIED_BYTES: u64 = @sizeOf(@FieldType(world.ModEntry, "modified"));
+
+/// Whether an entry carries any descendant markers (and so serializes the extra bitmap).
+fn hasDescendants(entry: *const world.ModEntry) bool {
+    for (entry.descendants) |w| {
+        if (w != 0) return true;
+    }
+    return false;
+}
 
 /// Bytes the payload (everything after the key) of one entry serializes to.
 fn entryPayloadBytes(entry: *const world.ModEntry) u64 {
-    return MOD_MODIFIED_BYTES + @as(u64, entry.count) * MOD_CELL_BYTES;
+    const desc: u64 = if (hasDescendants(entry)) MOD_MODIFIED_BYTES else 0;
+    return 1 + desc + MOD_MODIFIED_BYTES + @as(u64, entry.count) * MOD_CELL_BYTES;
 }
 
 fn writeEntryKey(w: *Writer, key: DepthCoordinate) !void {
@@ -514,8 +594,13 @@ fn writeEntryKey(w: *Writer, key: DepthCoordinate) !void {
     try w.int(u32, key.quadrant);
 }
 
-/// Writes an entry's payload: the modified bitmap, then each modified cell in ascending block-index order.
+/// Writes an entry's payload: a flag byte, the optional descendants bitmap, the modified bitmap,
+/// then each modified cell in ascending block-index order.
 fn writeEntryPayload(w: *Writer, entry: *const world.ModEntry) !void {
+    const has_desc = hasDescendants(entry);
+    try w.int(u8, if (has_desc) MOD_FLAG_DESCENDANTS else 0);
+    if (has_desc) try w.bytes(std.mem.asBytes(&entry.descendants));
+
     try w.bytes(std.mem.asBytes(&entry.modified));
 
     var packed_cells: [dw.CHUNK_SIZE_SQ]u32 = undefined;
@@ -533,7 +618,7 @@ fn writeEntryPayload(w: *Writer, entry: *const world.ModEntry) !void {
 /// Serializes every chunk the player has modified, keyed by its `DepthCoordinate`.
 /// Reads the index/entries live (non-budgeted).
 fn writeModStore(w: *Writer) !void {
-    const at = try w.beginSection(.mod_store, 2);
+    const at = try w.beginSection(.mod_store, 3);
     try w.varint(world.mod_store.index.count());
 
     var it = world.mod_store.index.iterator();
@@ -567,6 +652,12 @@ fn readModStore(r: *Reader) !void {
             .quadrant = try r.int(u32),
         };
 
+        const flags = try r.int(u8);
+        var descendants: @FieldType(world.ModEntry, "descendants") = @splat(0);
+        if (flags & MOD_FLAG_DESCENDANTS != 0) {
+            for (&descendants) |*word| word.* = try r.int(u64);
+        }
+
         var modified: @FieldType(world.ModEntry, "modified") = undefined;
         var count: usize = 0;
         for (&modified) |*word| {
@@ -583,7 +674,7 @@ fn readModStore(r: *Reader) !void {
             if (cell.hp > Block.MAX_HP) return SaveError.BadData;
         }
 
-        try world.mod_store.loadEntry(key, modified, cells[0..count]);
+        try world.mod_store.loadEntry(key, modified, descendants, cells[0..count]);
     }
 }
 
@@ -616,6 +707,7 @@ fn serialize(w: *Writer) !void {
     try writeMenus(w);
     try writeTools(w);
     try writeMisc(w);
+    try writeAscentStack(w);
 
     // Reserve the exact large section plus the end marker and checksum.
     // This avoids repeated ArrayList growth/copying while modified cells are added.
@@ -694,11 +786,17 @@ pub fn finalizeLoad() void {
     // inline for (&g.seed2) |*s| s.* = temp_seed.next();
     dw.sound.seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .sound));
     dw.particles.seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .particles));
+    dw.chunks.shake_seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .screen_shake));
 
     world.max_possible_suffix = world.getMaxSuffixAtDepth(g.depth);
 
     // repopulate the SimBuffer around the player using the newly loaded state
     world.SimBuffer.sync(g.getPlayerCoord(), .{ 0, 0 });
+
+    // A save taken mid-descent stores the world at D plus the frame counter; everything else the
+    // animation needs (the D+1 transition and its preview buffer) is derived, so rebuild it here.
+    // Must follow the SimBuffer sync: generating D+1 reads the D chunks it descends from.
+    dw.portal.restore();
 
     // A save can land between a water-adjacent block change and the next tick's batched flag recompute
     // (see queueWaterFlags()), baking stale/sentinel edge flags into the stored blocks.
@@ -763,7 +861,6 @@ fn deserialize(buf: []const u8) !void {
         const tag_raw = try r.int(u16);
         if (tag_raw == @intFromEnum(SectionTag.end)) break;
         const section_version = try r.int(u16);
-        _ = section_version; // unused for now
         const byte_len = try r.int(u64);
         const section_end = r.pos + @as(usize, @intCast(byte_len));
         if (section_end > buf.len) return SaveError.Truncated;
@@ -774,12 +871,13 @@ fn deserialize(buf: []const u8) !void {
         switch (tag) {
             .sprite_table => try readSpriteTable(&r),
             .header_core => try readHeaderCore(&r, @intCast(byte_len)),
-            .quadcache => try readQuadCache(&r),
+            .quadcache => try readQuadCache(&r, section_version),
             .inventory => try readInventory(&r),
             .menus => try readMenus(&r),
             .tools => try readTools(&r),
             .misc => try readMisc(&r),
             .mod_store => try readModStore(&r),
+            .ascent_stack => try readAscentStack(&r),
             .end => unreachable,
         }
         // trust the framing length even if a reader consumed a different amount
@@ -877,6 +975,7 @@ fn beginSnapshotInner() !void {
     try writeMenus(&w);
     try writeTools(&w);
     try writeMisc(&w);
+    try writeAscentStack(&w);
 
     snapshot_entries_len = world.mod_store.entries.len;
     var it = world.mod_store.index.iterator();
@@ -894,7 +993,7 @@ fn beginSnapshotInner() !void {
     try save_buf.ensureTotalCapacity(save_alloc, reserve_len);
 
     try w.int(u16, @intFromEnum(SectionTag.mod_store));
-    try w.int(u16, 2); // section version
+    try w.int(u16, 3); // section version
     mod_store_len_off = save_buf.items.len;
     try w.int(u64, payload_len);
     try w.varint(plan.items.len);
@@ -1032,6 +1131,12 @@ test "mod_store: encoding/decoding is correct" {
     world.mod_store.init(testing.allocator);
     var r: Reader = .{ .buf = buf.items };
 
+    const flags = try r.int(u8);
+    var descendants: @FieldType(world.ModEntry, "descendants") = @splat(0);
+    if (flags & MOD_FLAG_DESCENDANTS != 0) {
+        for (&descendants) |*word| word.* = try r.int(u64);
+    }
+
     var modified: @FieldType(world.ModEntry, "modified") = undefined;
     var count: usize = 0;
     for (&modified) |*word| {
@@ -1047,8 +1152,33 @@ test "mod_store: encoding/decoding is correct" {
         cell.base_id = remapSpriteId(@intCast(packed_cell.base_id));
         cell.hp = @intCast(packed_cell.hp);
     }
-    try world.mod_store.loadEntry(key, modified, decoded[0..count]);
+    try world.mod_store.loadEntry(key, modified, descendants, decoded[0..count]);
 
     for (cells) |c| try testing.expectEqual(c.cell, world.mod_store.getCell(key, c.i).?);
     try testing.expectEqual(@as(?world.ModCell, null), world.mod_store.getCell(key, 1));
+}
+
+test "mod_store: descendant markers survive an encode/decode round trip" {
+    world.mod_store.init(testing.allocator);
+    defer world.mod_store.deinit();
+
+    const key: DepthCoordinate = .{ .suffix = .{ 1, 2 }, .depth = 40, .quadrant = 1 };
+    world.mod_store.beginWrite(key).setCell(5, .{ .id = .stone, .base_id = .none, .hp = 0 });
+    world.mod_store.markDescendant(key, 5);
+    world.mod_store.markDescendant(key, 200);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(save_alloc);
+    var w: Writer = .{ .list = &buf };
+    const entry = world.mod_store.get(key).?;
+    try writeEntryPayload(&w, entry);
+    try testing.expectEqual(entryPayloadBytes(entry), buf.items.len);
+
+    var r: Reader = .{ .buf = buf.items };
+    const flags = try r.int(u8);
+    try testing.expect(flags & MOD_FLAG_DESCENDANTS != 0);
+    var descendants: @FieldType(world.ModEntry, "descendants") = @splat(0);
+    for (&descendants) |*word| word.* = try r.int(u64);
+    try testing.expect((descendants[5 >> 6] >> 5) & 1 != 0);
+    try testing.expect((descendants[200 >> 6] >> (200 & 63)) & 1 != 0);
 }

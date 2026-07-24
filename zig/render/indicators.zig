@@ -54,11 +54,20 @@ pub const NearbyCores = packed struct {
 /// Core tiers near the player, valid for the current frame only. See NearbyCores.
 pub var nearby_cores: NearbyCores = .{};
 
+/// Hue shifts, in radians, for the two depth-changing indicators.
+///
+/// The slot sprite is white, so hue is ADDED onto it rather than replacing anything
+/// (see `DEFAULT_ENTITY_LCHA`). These are tuning knobs!
+const PORTAL_SLOT_HUE: f32 = -1.9;
+const INVPORTAL_SLOT_HUE: f32 = 1.1;
+
 /// Which menu (if any) an in-world block's indicator opens. Extend by adding a variant plus its rows below.
 const IndicatorKind = enum {
     furnace,
     corecraft,
     loot,
+    portal,
+    invportal,
 
     /// Classifies a stored block type into the indicator it displays, or null for non-indicator blocks.
     /// Block IDs are stored as the base sprite (variation is render-only), so exact matching is valid here.
@@ -67,7 +76,9 @@ const IndicatorKind = enum {
             .forest_furnace, .lava_furnace => .furnace,
             .basic_core, .core1, .core2, .core3, .core4 => .corecraft,
             .chest => .loot,
-            // .moss_shrub1, .moss_shrub2 => .tree,
+            .portal => .portal,
+            // at the base depth there is nothing above to ascend into
+            .invportal => if (dw.world.canAscend()) .invportal else null,
             else => null,
         };
     }
@@ -78,15 +89,55 @@ const IndicatorKind = enum {
             .furnace => .gold_bar,
             .corecraft => .craft,
             .loot => .chest,
+            .portal => .portal_visual,
+            .invportal => .invportal,
         };
     }
 
-    /// Pointer to this indicator's open/close flag in `menus`, or null for display-only indicators.
+    /// Pointer to this indicator's open/close flag in `menus`, or null when it backs no menu.
     /// A menu-backed kind's `MenusList` field name must match the tag name!
     fn menuFlag(self: IndicatorKind) ?*bool {
         return switch (self) {
+            // change the depth rather than opening anything, so they own no flag
+            .portal, .invportal => null,
             inline else => |k| &@field(menus, @tagName(k)),
         };
+    }
+
+    /// Whether clicking this indicator does anything, for the block it sits on this frame.
+    ///
+    /// Spectating previous depths is read-only, so every mutating (menu-backed) indicator goes dead.
+    /// The two depth indicators stay live: `.invportal` keeps going further back, and ANY `.portal` acts as the way down.
+    /// The clicked portal is not entered (that would reframe the depth);
+    /// it only asks for the recorded route back, which is why every one of them serves equally.
+    ///
+    /// See `portal.triggerReturn()`.
+    fn clickableAt(self: IndicatorKind, ref: BlockRef) bool {
+        _ = ref;
+        if (dw.world.isSpectating()) return self == .invportal or self == .portal;
+        return self == .portal or self == .invportal or self.menuFlag() != null;
+    }
+
+    /// How far away (in blocks) this indicator starts showing, and so how far it can be used from.
+    fn maxBlockDistance(self: IndicatorKind) f32 {
+        return switch (self) {
+            .portal, .invportal => 3.25,
+            else => 5.0,
+        };
+    }
+
+    /// Runs what clicking this indicator does, for kinds that act instead of toggling a menu.
+    fn activate(self: IndicatorKind, ref: BlockRef) void {
+        switch (self) {
+            // Above the deepest depth a portal walks the last ascent back instead of entering itself,
+            // landing on the spot that ascent was taken from.
+            .portal => if (dw.world.isSpectating())
+                dw.portal.triggerReturn(ref.coord, ref.bx, ref.by)
+            else
+                dw.portal.trigger(ref.coord, ref.bx, ref.by),
+            .invportal => dw.portal.triggerAscend(ref.coord, ref.bx, ref.by),
+            else => {},
+        }
     }
 };
 
@@ -137,6 +188,7 @@ fn cameraView() CameraView {
 /// Returns null when the block is too far away (>= 5 blocks) to display an icon.
 fn indicatorGeom(
     view: CameraView,
+    kind: IndicatorKind,
     chunk_dx: i32,
     chunk_dy: i32,
     local_bx: u4,
@@ -153,8 +205,8 @@ fn indicatorGeom(
     const dist_sq = dx_sub * dx_sub + dy_sub * dy_sub;
     const distance = @sqrt(@as(f64, @floatFromInt(dist_sq)));
 
-    const max_dist = 5.0 * 256.0; // start showing 5 blocks away
-    const min_dist = 1.5 * 256.0; // fully scaled at 1.5 blocks
+    const max_dist = kind.maxBlockDistance() * 256.0; // start showing this many blocks away
+    const min_dist = @min(1.5 * 256.0, max_dist * 0.5); // fully scaled close up, never past the cutoff
     if (distance >= max_dist) return null;
 
     const t: f32 = @floatCast(if (distance <= min_dist) 1.0 else (max_dist - distance) / (max_dist - min_dist));
@@ -208,6 +260,7 @@ fn scanIndicators(view: CameraView, visitor: anytype) void {
             const kind = IndicatorKind.fromBlock(block.id) orelse continue;
             const geom = indicatorGeom(
                 view,
+                kind,
                 chunk_dx,
                 chunk_dy,
                 local_bx,
@@ -247,8 +300,8 @@ const DrawVisitor = struct {
         // undo camera scale mult (slot_size is scale-relative)
         const rel_size: f32 = @floatCast(geom.slot_size / @as(f32, @floatCast(memory.game.camera_scale)));
 
-        // Only menu-backed indicators are clickable; display-only ones (tree) just draw.
-        if (flag != null and geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
+        // Only clickable indicators react; display-only ones (tree) just draw.
+        if (kind.clickableAt(ref) and geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
             // Down-capture for .indicator is claimed centrally in mouse.processDownCaptures()
             // (via isHoveringIndicator), so this frame's click_focus is already settled.
 
@@ -257,23 +310,34 @@ const DrawVisitor = struct {
 
             // Toggle safely when a click both starts and ends on this indicator
             if (!self.click_used and mouse.isClicked(.indicator, true)) {
-                flag.?.* = !flag.?.*;
                 self.click_used = true;
-                // The loot menu is per-chest: tell it which block backs it (or that it lost one).
-                if (kind == .loot) {
-                    const loot = @import("../menus/loot.zig");
-                    if (flag.?.*) loot.open(ref) else loot.close();
-                }
+                if (flag) |f| {
+                    f.* = !f.*;
+                    // The loot menu is per-chest: tell it which block backs it (or that it lost one).
+                    if (kind == .loot) {
+                        const loot = @import("../menus/loot.zig");
+                        if (f.*) loot.open(ref) else loot.close();
+                    }
+                } else kind.activate(ref);
             }
         }
 
         // Background inventory slot (color shifts while its menu is open)
         dw.entity.addEntity(.{
             // this creates an interesting style, just go with it
-            .sprite = if (kind == .furnace) .wood_frame else .wood,
+            .sprite = if (kind == .furnace or kind == .portal or kind == .invportal) .wood_frame else .wood,
             .position = .{ geom.screen_x, geom.screen_y },
             .size = geom.slot_size,
-            .lcha = if (kind == .furnace)
+            .lcha = if (kind == .portal or kind == .invportal)
+                // Brightens as the player closes in, to read as "this takes you somewhere";
+                // the hue is what separates going down from going up.
+                .{
+                    0.85 + 0.15 * geom.opacity,
+                    0.06 + rel_size * 0.006,
+                    if (kind == .portal) PORTAL_SLOT_HUE else INVPORTAL_SLOT_HUE,
+                    geom.opacity,
+                }
+            else if (kind == .furnace)
                 // wood style if furnace
                 if (is_open)
                     .{ 1.0, rel_size * 0.007, 0.3, geom.opacity }
@@ -302,6 +366,11 @@ const DrawVisitor = struct {
 /// Iterates active chunks looking for icons to put above blocks and overlays contextual UI indicators.
 pub fn drawIndicators() void {
     @setFloatMode(.optimized);
+    // A portal anim owns the screen!
+    if (dw.portal.isActive()) {
+        nearby_cores = .{};
+        return;
+    }
     const view = cameraView();
 
     nearby_cores = .{};
@@ -309,10 +378,12 @@ pub fn drawIndicators() void {
     scanIndicators(view, &drawer);
 
     // A menu whose indicator drifted out of range (or vanished) autocloses.
+    // On depth increase we close all of these!
+    const spectating = dw.world.isSpectating();
     inline for (@typeInfo(IndicatorKind).@"enum".fields) |field| {
         const kind: IndicatorKind = @enumFromInt(field.value);
         if (kind.menuFlag()) |flag| {
-            if (flag.* and !drawer.seen.contains(kind)) {
+            if (flag.* and (spectating or !drawer.seen.contains(kind))) {
                 flag.* = false;
                 if (kind == .loot) @import("../menus/loot.zig").close();
             }
@@ -342,9 +413,8 @@ const HoverVisitor = struct {
 
     fn visit(self: *HoverVisitor, id: Sprite, kind: IndicatorKind, geom: IndicatorGeom, ref: BlockRef) bool {
         _ = id;
-        _ = ref;
-        // Display-only indicators (no menu) are not clickable, so they never claim indicator focus.
-        if (kind.menuFlag() == null) return false;
+        // Display-only indicators are not clickable, so they never claim indicator focus.
+        if (!kind.clickableAt(ref)) return false;
         if (geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
             self.found = true;
             return true; // stop scanning at the first hit
@@ -357,7 +427,24 @@ const HoverVisitor = struct {
 /// Used by `mouse.processDownCaptures()` to claim the `.indicator` click focus.
 pub fn isHoveringIndicator() bool {
     @setFloatMode(.optimized);
+    if (dw.portal.isActive()) return false;
     var hover: HoverVisitor = .{};
     scanIndicators(cameraView(), &hover);
     return hover.found;
+}
+
+const testing = std.testing;
+
+test "the inverted portal indicator appears exactly when there is a depth to ascend into" {
+    const saved_depth = memory.game.depth;
+    defer memory.game.depth = saved_depth;
+
+    // A freshly spawned player should see no (.invportal) indicator until they have descended at least once.
+    memory.game.depth = dw.startup.STARTING_ZOOM_TIMES;
+    try testing.expectEqual(@as(?IndicatorKind, null), IndicatorKind.fromBlock(.invportal));
+
+    memory.game.depth = dw.startup.STARTING_ZOOM_TIMES + 1;
+    try testing.expectEqual(@as(?IndicatorKind, .invportal), IndicatorKind.fromBlock(.invportal));
+    // The portal is unaffected by the floor: descending is always available.
+    try testing.expectEqual(@as(?IndicatorKind, .portal), IndicatorKind.fromBlock(.portal));
 }

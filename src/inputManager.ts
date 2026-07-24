@@ -18,7 +18,8 @@ export interface InputState {
 const KEY_MAP: Record<string, number> = {
     Minus: Zig.KeyBits.minus,
     Equal: Zig.KeyBits.plus,
-    KeyZ: Zig.KeyBits.zoom,
+    KeyZ: Zig.KeyBits.increase_depth,
+    KeyX: Zig.KeyBits.decrease_depth,
     Backquote: Zig.KeyBits.mine,
     KeyQ: Zig.KeyBits.inventory_up,
     KeyE: Zig.KeyBits.inventory_down,

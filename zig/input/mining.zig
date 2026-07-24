@@ -361,14 +361,23 @@ inline fn isToolBreakable(s: Sprite) bool {
     return sprite.getSpriteProps(s).strength == sprite.UNMINEABLE_STRENGTH;
 }
 
-/// Whether the cell at (bx, by) is the support directly beneath a protected installation:
-/// an unmineable, floor-anchored block resting on it. Such support cannot be dug out without the structure tool.
+/// Whether the cell at (bx, by) supports a protected installation and so cannot be dug out without the structure tool:
+/// an unmineable floor-anchored block resting on it from above,
+/// or an unmineable ceiling-anchored one hanging from it below.
+/// Either way, breaking the support would cascade the installation out
+/// (see `Sprite.supports()`), which the structure tool exists to gate.
 fn restsOnProtectedInstallation(coord: world.Coordinate, bx: u4, by: u4) bool {
     const above = if (by > 0)
         world.getBlockAt(coord, bx, by - 1, memory.game.depth)
     else
         world.getBlockAt(coord.moveY(-1) orelse return false, bx, dw.CHUNK_SIZE - 1, memory.game.depth);
-    return above.anchor() == .floor and isToolBreakable(above.id);
+    if (above.anchor() == .floor and isToolBreakable(above.id)) return true;
+
+    const below = if (by < dw.CHUNK_SIZE - 1)
+        world.getBlockAt(coord, bx, by + 1, memory.game.depth)
+    else
+        world.getBlockAt(coord.moveY(1) orelse return false, bx, 0, memory.game.depth);
+    return below.anchor() == .ceiling and isToolBreakable(below.id);
 }
 
 comptime {

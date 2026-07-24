@@ -119,10 +119,13 @@ fn seedPick(seed: u32, count: u8) u16 {
     return if (raw >= count) 0 else @intCast(raw);
 }
 
-/// Resolves the final atlas sprite ID for a block, applying positional, seed-based, or time-based
-/// (animation) variation. `tx`/`ty` are ABSOLUTE tile coordinates; `frame` is the current render frame.
+/// Resolves the final atlas sprite ID for a block, applying positional, seed-based, or time-based (animation) variation.
+/// `tx`/`ty` are ABSOLUTE tile coordinates; `frame` is the current render frame.
 /// Returns `block.id` unchanged when the sprite has no variation rule.
 pub fn resolveVariant(block: Block, tx: u64, ty: u64, frame: u32) Sprite {
+    // While spectating, a block flagged as holding a deeper modification is drawn as a solid marker!
+    if (block.descendant_mods) return .inventory_selected_orange;
+
     var id = block.id;
     // special hardcode for campfire:
     if (id == .campfire and dw.water.getVolume(block) > 0) {

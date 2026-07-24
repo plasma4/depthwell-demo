@@ -58,7 +58,7 @@ export const MAX_DRAW_CALLS = 4;
 // const INTERNAL_HEIGHT = 270;
 
 export class GameEngine {
-    /** The engine module automatically generated from Emscripten. */
+    /** The engine module automatically generated from Zig source. */
     public readonly engineModule: WebAssembly.WebAssemblyInstantiatedSource;
     /** The exported functions from the engineModule. */
     public readonly exports: Zig.EngineExports;
@@ -143,8 +143,6 @@ export class GameEngine {
 
     /** Specifies when the game started. */
     public startTime: number = performance.now();
-    /** A random integer between 0-120000 that gets added to `startTime` for animation. */
-    public startDelta!: number;
     /** A string representing the game seed (up to 100 characters). */
     public seed: string = "";
 
@@ -335,6 +333,37 @@ export class GameEngine {
         this.renderCallId++;
     }
 
+    /**
+     * Function called from Zig (using the `js_draw_background` function in `env`) that draws the background.
+     *
+     * Zig drives this rather than `renderFrame()` so the background can be interleaved with the tile
+     * layers in painter's order: a portal descent draws D's background and tiles, then D+1's over them.
+     * The scene (camera, zoom, absolute background coordinates) is whatever the preceding chunk pass
+     * published to the scratch properties, so each layer's background follows that layer's own scale.
+     */
+    public drawBackground(opacity: number) {
+        if (!this.renderPass) return;
+
+        // Slots past the first are only ever reached during a portal descent, so their bind group may
+        // not exist yet. Build it on demand rather than every frame, which would churn a buffer per draw.
+        if (!this.bindGroups[this.renderCallId])
+            this.recreateBufferAndBindGroup(0);
+
+        // Taken from the scratch properties the chunk pass just wrote rather than from the cached
+        // tile-map size, which the matching handleVisibleChunks() call has not set yet this frame.
+        this.setSceneData(
+            opacity,
+            Number(this.getScratchProperty(0)),
+            Number(this.getScratchProperty(1)),
+        );
+        this.renderPass.setPipeline(this.bgPipeline);
+        this.renderPass.setBindGroup(0, this.bindGroups[this.renderCallId], [
+            this.renderCallId * 256,
+        ]);
+        this.renderPass.draw(3); // Draws the background triangle (not a quad, neat little hack!)
+        this.renderCallId++;
+    }
+
     /** Function called from Zig (using the `js_handle_visible_entities` function in `env`) that renders entities. */
     public handleVisibleEntities() {
         // setting color space flags not needed, piggybacking off of previous calls for color space
@@ -407,24 +436,10 @@ export class GameEngine {
         this.sceneDataF32[2] = this.canvas.width; // canvas res
         this.sceneDataF32[3] = this.canvas.height;
 
-        // Some cycling logic for animations: 32-bit floating point can become imprecise otherwise
-        // const cycleLength = 120000;
-        // const elapsed = performance.now() - this.startTime + this.startDelta;
-        // const cyclePos = elapsed % (cycleLength * 2);
-
-        // let shaderTime;
-        // if (cyclePos < cycleLength) {
-        //     // Going forward
-        //     shaderTime = cyclePos / 1000.0;
-        // } else {
-        //     // Going backward (smoothly reverses "wind" direction)
-        //     shaderTime = (cycleLength - (cyclePos - cycleLength)) / 1000.0;
-        // }
-
+        // Animation clock, owned by the simulation rather than by wall time: a portal descent eases it
+        // to a standstill, and a save records exactly where it stopped. Cycles every hour, as before.
         this.sceneDataF32[4] =
-            ((performance.now() - this.startTime + this.startDelta) %
-                (3600 * 1000)) /
-            1000; // time value for animating (cycles every hour)
+            this.getScratchProperty(11, WasmTypeCode.Float64) % 3600;
 
         this.sceneDataF32[5] = effectiveZoom; // zoom to scale with
         this.sceneDataF32[6] = effectiveZoom < 0.25 ? 0 : this.wireframeOpacity; // wireframe opacity: hidden if zoom is too small
@@ -444,6 +459,25 @@ export class GameEngine {
         this.sceneDataF32[17] = gridOriginY; // grid origin y (water, modulo 256 chunks)
         this.sceneDataF32[18] = absCamX; // grid origin z (absolute camera x, modulo BG_WRAP_CHUNKS)
         this.sceneDataF32[19] = absCamY; // grid origin w (absolute camera y, modulo BG_WRAP_CHUNKS)
+
+        // Per-frame tile warp: xy screen offset (canvas px), z rotation (radians), w uniform scale.
+        // Identity is (0, 0, 0, 1); Zig publishes that whenever nothing is shaking.
+        this.sceneDataF32[20] = this.getScratchProperty(
+            12,
+            WasmTypeCode.Float64,
+        );
+        this.sceneDataF32[21] = this.getScratchProperty(
+            13,
+            WasmTypeCode.Float64,
+        );
+        this.sceneDataF32[22] = this.getScratchProperty(
+            14,
+            WasmTypeCode.Float64,
+        );
+        this.sceneDataF32[23] = this.getScratchProperty(
+            15,
+            WasmTypeCode.Float64,
+        );
 
         this.device.queue.writeBuffer(
             this.uniformBuffer,
@@ -796,12 +830,19 @@ export class GameEngine {
                 8,
             ),
         );
-        this.mixSeed();
+
+        // Kept in GameState too, so a save records which seed produced it. The derived value above
+        // cannot be turned back into the string, so without this a world is reproducible only by
+        // whoever still has the save file.
+        const ptr = this.writeStr(seed);
+        if (ptr !== null) this.exports.setSeedString(BigInt(ptr), BigInt(seed.length));
     }
 
-    public mixSeed() {
-        // use a random seed mixing value (60) here: mixSeed is ONLY dependent on memory.game.seed being valid
-        this.startDelta = Number(this.exports.mixSeed(60n) % 120000n);
+    /** The seed string a loaded world was created from, or "" if it predates the field. */
+    public getStoredSeed(): string {
+        const len = Number(this.exports.getSeedStringLen());
+        if (len === 0) return "";
+        return this.readStr(Number(this.exports.getSeedStringPtr()), len);
     }
 
     /*
@@ -878,25 +919,10 @@ export class GameEngine {
         });
         this.renderPass = renderPass;
 
-        // Draw background (same bind group as chunk drawing)
         this.recreateBufferAndBindGroup(256 * MAX_DRAW_CALLS); // start off with a minimum byte size
-        this.sceneDataF32[7] = 1.0; // set opacity of BG to 1.0
-        this.sceneDataU32[12] = this.isP3 ? 1 : 0; // color space properties
-        this.sceneDataU32[13] = this.is8Bit ? 1 : 0;
 
-        this.device.queue.writeBuffer(
-            this.uniformBuffer,
-            this.renderCallId * 256,
-            this.sceneDataF32,
-        );
-
-        this.renderPass.setPipeline(this.bgPipeline);
-        this.renderPass.setBindGroup(0, this.bindGroups[this.renderCallId], [
-            this.renderCallId++ * 256, // Critically, we increment here!
-        ]);
-        this.renderPass.draw(3); // Draws the background triangle (not a quad, neat little hack!)
-
-        // Trigger Zig logic, which will call handleVisibleChunks() (potentially multiple times)
+        // Trigger Zig logic, which draws the background and then calls handleVisibleChunks()
+        // (both potentially more than once; see drawBackground() for why Zig owns the ordering).
         this.uploadVisibleChunks(timeInterpolated);
 
         this.renderPass.end();

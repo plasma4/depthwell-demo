@@ -39,9 +39,14 @@ var alreadyStarted = false;
 /// (Restores the seed value though!)
 fn resetAfterStart() void {
     if (!world.arena.reset(.retain_capacity)) memory.oom();
+    // string must travel with seed produced!
     const saved_seed = memory.game.seed;
+    const saved_seed_string = memory.game.seed_string;
+    const saved_seed_string_len = memory.game.seed_string_len;
     memory.game = .{};
     memory.game.seed = saved_seed;
+    memory.game.seed_string = saved_seed_string;
+    memory.game.seed_string_len = saved_seed_string_len;
 
     @import("menus/furnace.zig").reset();
     @import("menus/corecraft.zig").reset();
@@ -49,6 +54,11 @@ fn resetAfterStart() void {
     dw.particles.reset();
     world.SimBuffer.reset();
     dw.water.reset();
+    // Seeded here (as well as from the loaded seed in `save.finalizeLoad()`) so it is never left undefined:
+    // this path runs for both a new world and an import, including one that fails.
+    dw.chunks.shake_seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, .screen_shake));
+    // Frees the descent's preview buffer; `memory.game` above already cleared its saved fields.
+    dw.portal.reset();
 
     // dropped item ring buffer lives in the world arena reset above; detach instead of freeing
     dw.inventory.dropped_items = .{};
@@ -85,6 +95,13 @@ pub fn init(new_game: bool) void {
     // Start off by determining where the player starts off exactly with layer pushing
     dw.sound.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .sound));
     dw.particles.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .particles));
+    dw.chunks.shake_seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .screen_shake));
+
+    // Offset the background's animation clock by up to two minutes so two worlds never open on the same frame of it!
+    const BG_PHASE_SPREAD_MS = 120_000;
+    memory.game.bg_time = @as(f64, @floatFromInt(
+        seeding.mixBaseSeed(seed, .background).value[0] % BG_PHASE_SPREAD_MS,
+    )) / 1000.0;
 
     var rng = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .startup_layers));
     for (0..STARTING_ZOOM_TIMES) |_| {
