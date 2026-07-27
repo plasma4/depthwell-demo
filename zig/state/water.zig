@@ -82,6 +82,18 @@ pub fn queueWaterFlags(cx: SimIndexType, cy: SimIndexType) void {
     if (cy < SIM_BUFFER_WIDTH - 1) pending_flag_chunks.set(idx + SIM_BUFFER_WIDTH);
 }
 
+/// Volume a settled cell of OPEN water comes to rest at.
+///
+/// The lateral rule only moves water when the pressure difference strictly exceeds 1, so a flat pool
+/// sits one unit below `MAX_HP` forever; only a cell pinned under a solid block gets topped off to full
+/// (see the `topup_ok` branch in `tickWater()`).
+///
+/// Refinement has to agree with this. `ancestor.inheritedLiquidVolume()` splits a parent's volume down
+/// its child region, so a parent resting here read as PARTIAL water would leave the region's top row
+/// empty; that row is then inherited as a partial parent in turn, and the ocean loses another row every
+/// depth increase. Contract asserted from both sides.
+pub const RESTING_VOLUME: u4 = MAX_HP - 1;
+
 /// Helper to get the volume of a block (0 to 15 for water/waterlogged blocks, 0 otherwise).
 /// (Integer casting automatically enforces HP being within `u4` range.)
 pub inline fn getVolume(ptr: Block) u4 {
