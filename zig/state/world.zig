@@ -490,14 +490,28 @@ pub const ModificationStore = struct {
         // A transition froze the layer its preview was generated from; editing it now would leave the
         // depth we land on disagreeing with the one we left (see `portal.beginTransition()`).
         std.debug.assert(!dw.portal.isActive());
-        return .{ .entry = self.entries.at(self.reserve(key)) };
+        return .{ .entry = self.entries.at(self.reserve(key, .edit)) };
     }
 
+    /// Why an entry is being opened, for `TRACE_NEW_ENTRIES`. The store itself does not care.
+    const WriteKind = enum { edit, marker };
+
+    /// Logs every chunk that becomes modified for the first time, and what opened it.
+    /// A modification the player did not make is the signature of a generator that produces terrain out
+    /// of equilibrium with the simulation, so this is the fastest way to catch one in the act.
+    /// Debug builds only, and off by default because a session's normal mining floods it.
+    const TRACE_NEW_ENTRIES = false;
+
     /// `entries` index for `key`, creating the entry if new, with any in-flight save's copy preserved.
-    fn reserve(self: *@This(), key: DepthCoordinate) usize {
+    fn reserve(self: *@This(), key: DepthCoordinate, comptime kind: WriteKind) usize {
         const idx = self.index.get(key) orelse blk: {
             const new_idx = self.allocEntry();
             self.index.put(self.allocator, key, new_idx) catch memory.oom();
+            if (dw.is_debug and TRACE_NEW_ENTRIES) dw.logger.info(
+                @src(),
+                "new ChunkMod ({s}) at depth {d}, quadrant {d}, suffix {d}/{d}",
+                .{ @tagName(kind), key.depth, key.quadrant, key.suffix[0], key.suffix[1] },
+            );
             break :blk new_idx;
         };
         dw.save.shadowEntryForSave(idx);
@@ -509,7 +523,7 @@ pub const ModificationStore = struct {
     /// Deliberately outside `beginWrite()`: a marker is not a modification of the layer it sits on,
     /// so it is the one write an ascent is allowed to make.
     pub fn markDescendant(self: *@This(), key: DepthCoordinate, block_idx: u8) void {
-        const entry = self.entries.at(self.reserve(key));
+        const entry = self.entries.at(self.reserve(key, .marker));
         entry.descendants[block_idx >> 6] |= @as(u64, 1) << @truncate(block_idx);
     }
 
@@ -680,7 +694,11 @@ pub const Coordinate = struct {
             const ov = if (is_pos) @addWithOverflow(res.suffix[0], delta) else @subWithOverflow(res.suffix[0], delta);
             if (ov[1] != 0) {
                 if (depth < HORIZON_DEPTH) return null;
-                // if (is_pos == ((res.quadrant & 1) != 0)) return null;
+                // Past the horizon the quadrant bit IS the world's top coordinate bit, so a suffix that
+                // runs off the OUTER quadrant has left the world: there is no quadrant to flip into.
+                // Flipping anyway wraps the world edge to edge and hands back a coordinate 2^64 chunks
+                // away, which `refineHorizonWindow()` reads as an enormous parent delta.
+                if (is_pos == ((res.quadrant & 1) != 0)) return null;
                 res.quadrant ^= 1;
             }
 
@@ -695,7 +713,8 @@ pub const Coordinate = struct {
             const ov = if (is_pos) @addWithOverflow(res.suffix[1], delta) else @subWithOverflow(res.suffix[1], delta);
             if (ov[1] != 0) {
                 if (depth < HORIZON_DEPTH) return null;
-                // if (is_pos == ((res.quadrant & 2) != 0)) return null;
+                // Same world-edge rule as the X axis above, on the quadrant's Y bit.
+                if (is_pos == ((res.quadrant & 2) != 0)) return null;
                 res.quadrant ^= 2;
             }
 
@@ -1031,6 +1050,52 @@ pub const SimBuffer = struct {
     /// Blocks whose 8 neighbors are not all resident in the loaded window are skipped, since their
     /// flags were derived from cache/procedural data this side-effect-free scan cannot reproduce.
     /// O(loaded_chunks * 256 * 8); performs no allocation. Intended for debug assertions/tests.
+    /// Mismatches `validateAgainstMaterialization()` reports before it gives up, so one badly diverged
+    /// chunk cannot flood the console with 256 lines.
+    const MAX_DIVERGENCE_REPORTS = 24;
+
+    /// Checks the invariant that makes eviction safe: a resident chunk must equal what
+    /// `materializeChunk()` would rebuild for the same coordinate.
+    ///
+    /// This is what lets a chunk leave the window and come back unchanged. Everything the simulation
+    /// does has to reach `mod_store`, because the live copy is discarded the moment the window scrolls
+    /// past it and `writeChunkSimless()` rebuilds it from generation plus modifications. A cell that
+    /// diverges here is one the sim moved without recording, and it will visibly revert (then be redone,
+    /// then revert) as the chunk cycles in and out of the buffer.
+    ///
+    /// Compares only the authoritative fields a `ModCell` carries; light and edge flags are derived per
+    /// frame and are expected to differ.
+    pub fn validateAgainstMaterialization() bool {
+        var scratch: Chunk = undefined;
+        var reports: usize = 0;
+
+        for (keys, 0..) |maybe_key, slot| {
+            const coord = maybe_key orelse continue;
+            materializeChunk(&scratch, coord.asDepthCoordinate(memory.game.depth));
+
+            for (0..CHUNK_SIZE_SQ) |i| {
+                const live = sim_buffer_ptr[slot].blocks[i];
+                const rebuilt = scratch.blocks[i];
+                if (live.id == rebuilt.id and live.hp == rebuilt.hp and live.base_id == rebuilt.base_id) continue;
+
+                if (reports >= MAX_DIVERGENCE_REPORTS) return false;
+                reports += 1;
+                dw.logger.err(
+                    @src(),
+                    "SimBuffer diverges from materialization at chunk ({d},{d}) q{d} block ({d},{d}): live {s} hp={d} / rebuilt {s} hp={d}",
+                    .{
+                        coord.suffix[0],       coord.suffix[1],
+                        coord.quadrant,        i & (CHUNK_SIZE - 1),
+                        i >> CHUNK_SIZE_LOG2,  @tagName(live.id),
+                        live.hp,               @tagName(rebuilt.id),
+                        rebuilt.hp,
+                    },
+                );
+            }
+        }
+        return reports == 0;
+    }
+
     pub fn validateSimBuffer() bool {
         var all_valid = true;
         for (keys, 0..) |maybe_key, slot| {
@@ -1039,11 +1104,13 @@ pub const SimBuffer = struct {
             for (0..CHUNK_SIZE) |by| {
                 for (0..CHUNK_SIZE) |bx| {
                     const block = chunk.blocks[(by << CHUNK_SIZE_LOG2) | bx];
-                    if (block.isInWorld()) {
+                    // Air is the one cell that legitimately carries no world sprite, so it is skipped
+                    // BEFORE the test rather than reported by it.
+                    if (block.isEmpty()) continue;
+                    if (!block.isInWorld()) {
                         dw.logger.err(@src(), "Not-in-world sprite type found: {s}", .{@tagName(block.id)});
                         all_valid = false;
                     }
-                    if (block.isEmpty()) continue;
 
                     const participates = block.isFoundation() or block.isLiquid();
                     if (!participates) {
@@ -1290,6 +1357,11 @@ pub const SimBuffer = struct {
     /// Background caching heuristic: scans the boundary immediately outside the 16x16 chunk in the
     /// direction of movement and creates it in `chunk_cache` before the player reaches it.
     ///
+    /// Fills slots with `materializeChunk()`, never bare `generateChunk()`:
+    /// every consumer of `chunk_cache` (`writeChunkSimless()`, `getCachedChunk()`, `getBlockAt()`)
+    /// treats a hit as post-modification data, so a purely procedural slot silently reverts
+    /// the player's edits for as long as it survives eviction.
+    ///
     /// Generates `default_amount` chunks when called (suggested value of 1-2).
     /// It is recommended to set a higher `max_amount` (suggested value of ~4, so more budget is available in high-velocity falling situations).
     pub fn precacheChunks(
@@ -1327,7 +1399,7 @@ pub const SimBuffer = struct {
             if (player_coord.move(off)) |c| {
                 if (get(c) == null and chunk_cache.findIndex(c) == null) {
                     const slot = chunk_cache.allocateIndex(c);
-                    generateChunk(&chunk_cache.chunks[slot], c.asDepthCoordinate(memory.game.depth));
+                    materializeChunk(&chunk_cache.chunks[slot], c.asDepthCoordinate(memory.game.depth));
                     generated_count += 1;
                 }
             }
@@ -1341,7 +1413,7 @@ pub const SimBuffer = struct {
             if (player_coord.move(off)) |c| {
                 if (get(c) == null and chunk_cache.findIndex(c) == null) {
                     const slot = chunk_cache.allocateIndex(c);
-                    generateChunk(&chunk_cache.chunks[slot], c.asDepthCoordinate(memory.game.depth));
+                    materializeChunk(&chunk_cache.chunks[slot], c.asDepthCoordinate(memory.game.depth));
                     generated_count += 1;
                 }
             }
@@ -1464,6 +1536,48 @@ pub const ChunkCache = struct {
         self.clock_bits = @splat(0);
         self.hands = @splat(0);
     }
+
+    /// The `SimBuffer.validateAgainstMaterialization()` invariant, for the cache one ring further out:
+    /// a cached chunk must equal what `materializeChunk()` rebuilds for the same coordinate.
+    ///
+    /// Anything that fills a slot without replaying `mod_store` diverges here,
+    /// and a diverged slot is authoritative for every reader until it happens to be evicted,
+    /// so the block flickers between its edited and its procedural form as the cache churns.
+    pub fn validateAgainstMaterialization(self: *@This()) bool {
+        var scratch: Chunk = undefined;
+        var reports: usize = 0;
+
+        for (&self.keys, 0..) |*set, set_idx| {
+            for (set, 0..) |maybe_key, way| {
+                const coord = maybe_key orelse continue;
+                // A resident chunk is the SimBuffer's to own; the cached copy is allowed to lag it.
+                if (SimBuffer.get(coord) != null) continue;
+                materializeChunk(&scratch, coord.asDepthCoordinate(memory.game.depth));
+
+                const cached = &self.chunks[set_idx * CHUNK_CACHE_WAYS + way];
+                for (0..CHUNK_SIZE_SQ) |i| {
+                    const live = cached.blocks[i];
+                    const rebuilt = scratch.blocks[i];
+                    if (live.id == rebuilt.id and live.hp == rebuilt.hp and live.base_id == rebuilt.base_id) continue;
+
+                    if (reports >= SimBuffer.MAX_DIVERGENCE_REPORTS) return false;
+                    reports += 1;
+                    dw.logger.err(
+                        @src(),
+                        "ChunkCache diverges from materialization at chunk ({d},{d}) q{d} block ({d},{d}): cached {s} hp={d} / rebuilt {s} hp={d}",
+                        .{
+                            coord.suffix[0],      coord.suffix[1],
+                            coord.quadrant,       i & (CHUNK_SIZE - 1),
+                            i >> CHUNK_SIZE_LOG2, @tagName(live.id),
+                            live.hp,              @tagName(rebuilt.id),
+                            rebuilt.hp,
+                        },
+                    );
+                }
+            }
+        }
+        return reports == 0;
+    }
 };
 
 pub var chunk_cache: ChunkCache = .{};
@@ -1480,10 +1594,12 @@ pub const HorizonWindow = [QuadCache.ANCESTOR_GRID][QuadCache.ANCESTOR_GRID]Bloc
 
 /// Everything `refineHorizonWindow()` needs about one depth transition besides the previous window.
 ///
-/// Recorded per depth under `materials_mode == .derived`, where it replaces the 4 KiB window with roughly 24 bytes.
-/// It cannot be derived from anything else that is kept:
-/// the window is centered on where the player happened to be standing when they descended,
-/// and only this records that.
+/// This is the AUTHORITATIVE per-depth record: roughly 24 bytes, against the window's 4 KiB.
+/// It cannot be derived from anything else that is kept,
+/// since the window is centered on where the player happened to be standing when they descended
+/// and only this records that. Everything else about a window is a pure function of the seed,
+/// the traces down to it, and `mod_store`, so a window is a CACHE and is never stored in a save
+/// (see `QuadCache.getMaterials()`).
 pub const HorizonTrace = struct {
     /// Chunk at H (`depth - HORIZON_DEPTH`) the window is centered on, and the block within it.
     suffix: Vec2u,
@@ -1494,38 +1610,6 @@ pub const HorizonTrace = struct {
     player_quadrant: u2,
     /// Quadrant of the chunk descended from, one depth up.
     source_quadrant: u2,
-};
-
-/// How the per-depth horizon windows are kept.
-/// Compile-time: the two modes trade memory for time and there is no reason to decide per world.
-///
-/// A few notes:
-/// - memory64 export is explicitly supported by this game for theoretical stunts
-/// - derived is likely not worth it in normal gameplay where the player writes to `ModStore` often
-/// - true deriving costs <1 byte per depth through top/left path but will be even slower
-/// - if ascent is changed to be debug-only then `derived` keeps the cost less than a `ModEntry`
-pub const MaterialsMode = enum {
-    /// Store every depth's window verbatim. O(1) ascent, but this costs
-    /// `@sizeOf(HorizonWindow)` (4 KiB) per depth in RAM and in the save, unbounded in depth.
-    stored,
-    /// Store only the trace each window was built around (32 B a depth) and rebuild the window on demand,
-    /// by replaying `refineHorizonWindow()` from the base.
-    ///
-    /// Uses 32 bytes, paid for in time: a rebuild is O(depth) refinements,
-    /// once per ascent and never per frame.
-    ///
-    /// In theory one could build a system that only stores left/top path but that would be even slower,
-    /// to the point of being paid for in blood!
-    derived,
-};
-
-/// Which materials strategy this build uses. See `MaterialsMode` for the trade.
-pub const materials_mode: MaterialsMode = .stored;
-
-/// What one `materials_path` slot holds under the active mode.
-pub const MaterialsEntry = switch (materials_mode) {
-    .stored => HorizonWindow,
-    .derived => HorizonTrace,
 };
 
 /// A static 2x2 grid of seeds only updated during when depth increase or game startup.
@@ -1547,6 +1631,13 @@ pub const QuadCache = struct {
     }
 
     pub const PATH_PREALLOC_SIZE = 256;
+
+    /// Traces held inline before `materials_path` reaches for the arena.
+    /// A trace is tiny, so covering a deep run outright costs under 2 KiB and spares the heap entirely.
+    pub const MATERIALS_PREALLOC = 64;
+    /// Checkpoints held inline. Each is a whole `HorizonWindow`, so this stays small on purpose;
+    /// it covers `MATERIALS_PREALLOC` depths at the current stride either way.
+    pub const MATERIALS_WINDOW_PREALLOC = 4;
     // NOTE: making this cache too large results in crashes due to naive copying in Debug.
     pub const SEED_CACHE_SIZE = 256;
     pub const SEED_CACHE_WAYS = 4;
@@ -1581,11 +1672,17 @@ pub const QuadCache = struct {
     /// NOT for use with ancestory logic.
     top_path: SegmentedList(u64, PATH_PREALLOC_SIZE),
 
-    /// What each rebased depth's horizon window is recovered from, indexed by `materialsSlot()`.
-    /// The window is refined DOWNWARD from its parent and that refinement is lossy.
+    /// What each rebased depth's horizon window is refined from, indexed by `materialsSlot()`.
+    /// The authoritative record: roughly 24 bytes a depth, and the only part of the horizon that is saved.
+    materials_path: SegmentedList(HorizonTrace, MATERIALS_PREALLOC),
+
+    /// Rebuilt horizon windows, one every `MATERIALS_CHECKPOINT_STRIDE` slots of `materials_path`.
     ///
-    /// `MaterialsMode` controls memory use.
-    materials_path: SegmentedList(MaterialsEntry, 1),
+    /// Purely a memo of `getMaterials()`, so it is never saved and truncating it can only cost time.
+    /// The refinement is a chain, and replaying it from the base is O(depth);
+    /// a checkpoint every stride bounds that at `MATERIALS_CHECKPOINT_STRIDE` refinements
+    /// for `4 KiB / MATERIALS_CHECKPOINT_STRIDE` bytes a depth.
+    materials_windows: SegmentedList(HorizonWindow, MATERIALS_WINDOW_PREALLOC),
 
     // These 4 properties are used to determine if a QuadCache is at the very edge of the world for chunk gen/zooming in.
     most_top: bool = true,
@@ -1608,6 +1705,7 @@ pub const QuadCache = struct {
         self.left_path = .{};
         self.top_path = .{};
         self.materials_path = .{};
+        self.materials_windows = .{};
         self.most_top = true;
         self.most_bottom = true;
         self.most_left = true;
@@ -1624,30 +1722,68 @@ pub const QuadCache = struct {
         return @intCast(depth - MATERIALS_START_DEPTH);
     }
 
+    /// Slots between rebuilt window checkpoints. A power of two only so the arithmetic stays cheap;
+    /// the value itself trades `4 KiB / stride` bytes a depth against that many refinements per rebuild.
+    pub const MATERIALS_CHECKPOINT_STRIDE = 16;
+
+    comptime {
+        if (!std.math.isPowerOfTwo(MATERIALS_CHECKPOINT_STRIDE))
+            @compileError("MATERIALS_CHECKPOINT_STRIDE must be a power of two.");
+    }
+
+    /// Number of checkpoints that stay valid once the trace at `slot` changes.
+    /// A checkpoint holds the window at its own base slot, so it survives exactly while that base was
+    /// refined BEFORE `slot`.
+    inline fn checkpointsBelow(slot: usize) usize {
+        if (slot == 0) return 0;
+        return (slot - 1) / MATERIALS_CHECKPOINT_STRIDE + 1;
+    }
+
     /// Writes the horizon window for `depth` into `out`, or returns false if that depth records none.
     ///
     /// The only way back to a window an ascent needs, since the refinement is not invertible.
-    /// Under `.stored` this is a copy; under `.derived` it REPLAYS every refinement from the base,
-    /// so it is O(depth) and belongs nowhere near a per-frame path.
+    /// Rebuilt by replaying `refineHorizonWindow()` from the nearest checkpoint,
+    /// so it costs at most `MATERIALS_CHECKPOINT_STRIDE` refinements and never appears on a per-frame path.
+    ///
+    /// Rebuilding rather than storing is what makes the horizon SELF-HEALING: a window is a pure function
+    /// of the seed, the traces above it and `mod_store`, so fixing a bug in the refinement repairs every
+    /// existing save, where a stored window would carry the bad terrain forever.
     pub fn getMaterials(self: *@This(), depth: u64, out: *HorizonWindow) bool {
         const slot = materialsSlot(depth) orelse return false;
         if (slot >= self.materials_path.len) return false;
 
-        switch (materials_mode) {
-            .stored => out.* = self.materials_path.at(slot).*,
-            .derived => {
-                // The base window is generated outright and ignores what it is handed,
-                // so starting from bedrock rather than undefined costs one memset and keeps this defined.
-                var grid: HorizonWindow = @splat(@splat(world_edge_block));
-                var i: usize = 0;
-                while (i <= slot) : (i += 1) {
-                    const d = MATERIALS_START_DEPTH + i;
-                    grid = refineHorizonWindow(&grid, self.materials_path.at(i).*, d - HORIZON_DEPTH);
-                }
-                out.* = grid;
-            },
+        // The base window is generated outright and ignores what it is handed,
+        // so starting from bedrock rather than undefined costs one memset and keeps this defined.
+        var grid: HorizonWindow = @splat(@splat(world_edge_block));
+        var i: usize = 0;
+
+        const checkpoint = slot / MATERIALS_CHECKPOINT_STRIDE;
+        if (checkpoint < self.materials_windows.len) {
+            grid = self.materials_windows.at(checkpoint).*;
+            i = checkpoint * MATERIALS_CHECKPOINT_STRIDE + 1; // the checkpoint IS its own base slot
         }
+
+        while (i <= slot) : (i += 1) {
+            const d = MATERIALS_START_DEPTH + i;
+            grid = refineHorizonWindow(&grid, self.materials_path.at(i).*, d - HORIZON_DEPTH);
+
+            // Every stride boundary this walk crosses is a checkpoint the next rebuild can start from.
+            // Only ever appended in order, so a slot's checkpoint is built from the traces below it.
+            if (i % MATERIALS_CHECKPOINT_STRIDE == 0 and
+                i / MATERIALS_CHECKPOINT_STRIDE == self.materials_windows.len)
+            {
+                self.materials_windows.append(alloc, grid) catch memory.oom();
+            }
+        }
+
+        out.* = grid;
         return true;
+    }
+
+    /// Drops every checkpoint that a change to `slot`'s trace would invalidate.
+    /// Free to be over-eager: a dropped checkpoint costs refinements, never correctness.
+    pub fn invalidateMaterialsFrom(self: *@This(), slot: usize) void {
+        self.materials_windows.len = @min(self.materials_windows.len, checkpointsBelow(slot));
     }
 
     /// Gets the rebase origin X for a given depth (which is asserted to be > `HORIZON_DEPTH`).
@@ -1756,6 +1892,7 @@ pub var quad_cache: QuadCache = .{
     .left_path = .{}, // easiest to do prealloc with larger stack size in case
     .top_path = .{},
     .materials_path = .{},
+    .materials_windows = .{},
     .ancestor_materials = undefined,
 };
 
@@ -2669,8 +2806,14 @@ pub const LayerTransition = struct {
     most_right: bool = true,
     /// Only rebuilt once the horizon has a real ancestor depth to summarize.
     ancestor_materials: HorizonWindow = undefined,
-    /// What that window was built from; recorded per depth under `materials_mode == .derived`.
-    horizon_trace: HorizonTrace = undefined,
+    /// What that window is refined from; the authoritative per-depth record (see `HorizonTrace`).
+    /// The trace this transition's window was built around, or null when it did not build one.
+    ///
+    /// Only a DESCENT into a depth for the first time derives a trace; an ascent and a retrace read the
+    /// depth's window back out of `materials_path` and must leave the recorded trace exactly as it is.
+    /// Optional rather than a sentinel because it is the authoritative record of the depth: writing an
+    /// unset one back corrupts the horizon for that depth and every depth refined from it.
+    horizon_trace: ?HorizonTrace = null,
     has_materials: bool = false,
 };
 
@@ -2706,7 +2849,7 @@ pub const LayerSnapshot = struct {
     materials_slot: usize,
     /// Whether `materials_slot` already existed (and so must be restored rather than truncated away).
     materials_slot_live: bool,
-    materials_prev: MaterialsEntry,
+    materials_prev: HorizonTrace,
 };
 
 /// Records the rebase origin cell for `depth` in the packed path lists (21 3-bit cells per u64).
@@ -2737,19 +2880,17 @@ fn writeRebasePath(depth: u64, left_cell: u64, top_cell: u64) void {
 ///
 /// Precondition: depths are recorded in order, so the slot is never more than one past the end.
 /// That holds because the only way to reach a depth is through the depth above it.
-fn writeMaterialsPath(depth: u64, t: LayerTransition) void {
+fn writeMaterialsPath(depth: u64, trace: HorizonTrace) void {
     const slot = QuadCache.materialsSlot(depth) orelse return;
     std.debug.assert(slot <= quad_cache.materials_path.len);
 
-    const entry: MaterialsEntry = switch (materials_mode) {
-        .stored => t.ancestor_materials,
-        .derived => t.horizon_trace,
-    };
     if (slot == quad_cache.materials_path.len) {
-        quad_cache.materials_path.append(alloc, entry) catch memory.oom();
+        quad_cache.materials_path.append(alloc, trace) catch memory.oom();
     } else {
-        quad_cache.materials_path.at(slot).* = entry;
+        quad_cache.materials_path.at(slot).* = trace;
     }
+    // Every window at or past this slot was refined through the trace just written.
+    quad_cache.invalidateMaterialsFrom(slot);
 }
 
 /// Captures the state a transition into `next_depth` would overwrite, for `restoreLayer()`.
@@ -2861,7 +3002,10 @@ pub fn installLayer(t: LayerTransition) void {
 
     if (t.has_materials) {
         quad_cache.ancestor_materials = t.ancestor_materials;
-        writeMaterialsPath(t.depth, t);
+        // Only a first descent into this depth derives a trace. An ascent and a retrace READ the depth's
+        // window back (`QuadCache.getMaterials()`), so the slot already holds the trace that produced it
+        // and rewriting it would replace the depth's authoritative record with one that was never built.
+        if (t.horizon_trace) |trace| writeMaterialsPath(t.depth, trace);
     }
 }
 
@@ -2872,6 +3016,13 @@ pub fn installLayer(t: LayerTransition) void {
 /// which filled that cache with the very D parents the new depth needs,
 /// and tiered them relative to D+1 already (the preview installs that depth while it generates).
 pub fn commitLayer(t: LayerTransition, keep_ancestors: bool) void {
+    // Every menu is bound to a block at the depth being left, and the loot menu WRITES to that block
+    // when it is emptied, so a menu that survives the change would edit an unrelated cell at the new
+    // depth. Closed here rather than at each caller: this is the one point every depth change routes
+    // through, hotkeys included (`portal.beginTransition()` closes them earlier still, because the
+    // animation has to hold them shut for its whole length).
+    dw.indicators.closeAllMenus();
+
     if (keep_ancestors) clearCaches(false) else clearCaches(true);
     dw.inventory.dropped_items.clear(null);
     memory.game.teleport(null, t.new_pos); // make sure to teleport!
@@ -2999,7 +3150,8 @@ pub fn computeParentLayer(coord: Coordinate, pos: Vec2i) LayerTransition {
     t.most_left = state.edges.most_left;
     t.most_right = state.edges.most_right;
 
-    // Under .derived, this fn is O(depth) rather than O(1)
+    // Rebuilt from the recorded traces rather than recomputed, so `horizon_trace` stays null:
+    // this depth's trace was fixed by the descent that first reached it (see `LayerTransition`).
     t.has_materials = quad_cache.getMaterials(depth, &t.ancestor_materials);
     return t;
 }
@@ -3012,6 +3164,11 @@ pub fn popLayer() void {
     const g = &memory.game;
     // apply instantly
     applyAscent(computeParentLayer(g.getPlayerCoord(), g.player_pos), g.getPlayerCoord(), g.player_pos);
+    // `commitLayer()` emptied the SimBuffer, so refill it around where the player landed before anything
+    // reads it. Matches `retraceInstant()`; without it the world is momentarily absent, and an absent
+    // chunk reads as solid to collision (see `getBlockPtr()`).
+    SimBuffer.sync(g.getPlayerCoord(), .{ 0, 0 });
+    applyDescendantMarkersToSim();
 }
 
 /// Commits an already-computed ascent transition: rolls the deeper depth's modifications up into markers,
@@ -3287,10 +3444,11 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
 
     const target_horizon_depth = depth - dw.HORIZON_DEPTH;
     if (target_horizon_depth >= STARTING_ZOOM_TIMES) {
-        t.horizon_trace = traceHorizon(target_coord, new_pos, depth, @intCast(coord.quadrant));
+        const trace = traceHorizon(target_coord, new_pos, depth, @intCast(coord.quadrant));
+        t.horizon_trace = trace;
         t.ancestor_materials = refineHorizonWindow(
             &quad_cache.ancestor_materials,
-            t.horizon_trace,
+            trace,
             target_horizon_depth,
         );
         t.has_materials = true;
@@ -3332,9 +3490,8 @@ fn traceHorizon(target_coord: Coordinate, new_pos: Vec2i, depth: u64, source_qua
 /// and the returned window is the one at `target_horizon_depth`.
 ///
 /// Reads only `prev`, `trace` and the procedural world, never `quad_cache.ancestor_materials`.
-/// That independence is the whole point: it is what lets `materials_mode == .derived` rebuild a window that was never stored,
-/// by feeding this its own previous output. Both modes therefore run the SAME refinement,
-/// so they cannot disagree about the terrain (pinned by a test).
+/// That independence is the whole point: it is what lets `QuadCache.getMaterials()` rebuild a window that was
+/// never stored, by feeding this its own previous output (pinned by a test).
 ///
 /// Installs `depth - 1` while it works and puts the game depth back before returning.
 fn refineHorizonWindow(prev: *const HorizonWindow, trace: HorizonTrace, target_horizon_depth: u64) HorizonWindow {
@@ -3406,8 +3563,18 @@ fn refineHorizonWindow(prev: *const HorizonWindow, trace: HorizonTrace, target_h
                     const px_idx = diff_chunk_x * 16 + @as(i64, p.bx) - @as(i64, old_t_bx) + QuadCache.ANCESTOR_CENTER + @as(i64, trace.source_quadrant % 2);
                     const py_idx = diff_chunk_y * 16 + @as(i64, p.by) - @as(i64, old_t_by) + QuadCache.ANCESTOR_CENTER + @as(i64, trace.source_quadrant / 2);
 
-                    // The 4x4 is a WINDOW onto a larger world, not an island in a void, so anything off its edge is edge-extended rather than read as air.
+                    // The window is a WINDOW onto a larger world, not an island in a void, so anything off its edge
+                    // is edge-extended rather than read as air.
                     const grid_max = prev.len - 1;
+
+                    // A cell's parent sits at most `ANCESTOR_GRID / 2 / BLOCKS_PER_PARENT` blocks from the window's
+                    // center, so every lookup here (and its 3x3 ring) lands well inside the window.
+                    // Leaving it means the lineage itself is wrong, and the clamp below would then quietly fill the
+                    // whole layer from one edge cell: a dead, uniform world with nothing to point at.
+                    // Asserted rather than trusted, because that failure has no other symptom.
+                    std.debug.assert(px_idx >= 1 and px_idx < @as(i64, @intCast(grid_max)));
+                    std.debug.assert(py_idx >= 1 and py_idx < @as(i64, @intCast(grid_max)));
+
                     const gx = std.math.clamp(px_idx, 0, @as(i64, @intCast(grid_max)));
                     const gy = std.math.clamp(py_idx, 0, @as(i64, @intCast(grid_max)));
                     const parent_block = prev[@intCast(gy)][@intCast(gx)];
@@ -3449,6 +3616,37 @@ fn refineHorizonWindow(prev: *const HorizonWindow, trace: HorizonTrace, target_h
 }
 
 const testing = std.testing;
+
+test "moveAtDepth: the world ends at the outer quadrants rather than wrapping" {
+    const depth = HORIZON_DEPTH + 1; // past the horizon, where the quadrant IS the top coordinate bit
+    const max = std.math.maxInt(u64);
+
+    // Crossing INWARD flips into the neighboring quadrant, which is the whole reason the bit exists.
+    const inward = (Coordinate{ .suffix = .{ max, 0 }, .quadrant = 0 }).moveAtDepth(.{ 1, 0 }, depth).?;
+    try testing.expectEqual(@as(u2, 1), inward.quadrant);
+    try testing.expectEqual(@as(u64, 0), inward.suffix[0]);
+
+    // Crossing OUTWARD leaves the world: flipping the bit anyway would wrap edge to edge and hand back
+    // a coordinate 2^64 chunks away, which `refineHorizonWindow()` reads as an enormous parent delta.
+    try testing.expectEqual(
+        @as(?Coordinate, null),
+        (Coordinate{ .suffix = .{ max, 0 }, .quadrant = 1 }).moveAtDepth(.{ 1, 0 }, depth),
+    );
+    try testing.expectEqual(
+        @as(?Coordinate, null),
+        (Coordinate{ .suffix = .{ 0, 0 }, .quadrant = 0 }).moveAtDepth(.{ -1, 0 }, depth),
+    );
+
+    // The Y axis answers on its own bit, so a bottom-right chunk cannot fall out of the world's floor.
+    try testing.expectEqual(
+        @as(?Coordinate, null),
+        (Coordinate{ .suffix = .{ 0, max }, .quadrant = 3 }).moveAtDepth(.{ 0, 1 }, depth),
+    );
+    try testing.expectEqual(
+        @as(?Coordinate, null),
+        (Coordinate{ .suffix = .{ 0, 0 }, .quadrant = 1 }).moveAtDepth(.{ 0, -1 }, depth),
+    );
+}
 
 test "the horizon window can hold every block a chunk's generation asks of it" {
     const per_chunk_window = 6;
@@ -3569,7 +3767,7 @@ test "horizon window: a replay from the base reproduces every stored window" {
         stepwise[i] = running;
     }
 
-    // Replay pass, exactly as `.derived` rebuilds it: from the base, every time, for each depth.
+    // Replay pass, exactly as `getMaterials()` rebuilds it: from the base, every time, for each depth.
     for (0..traces.len) |target| {
         var replayed: HorizonWindow = @splat(@splat(world_edge_block));
         for (0..target + 1) |i| {
@@ -3582,6 +3780,104 @@ test "horizon window: a replay from the base reproduces every stored window" {
             }
         }
     }
+}
+
+test "horizon trace: only a first descent records one" {
+    // `installLayer()` stamps `horizon_trace` into `materials_path`, which is the authoritative record
+    // of a depth. An ascent and a retrace REBUILD their window from that record, so if either of them
+    // reported a trace it would write one that was never derived, and every depth refined from it would
+    // regenerate as void or as fill. Nothing about that failure is visible until the world is entered.
+    const ascent: LayerTransition = .{
+        .depth = 40,
+        .new_pos = .{ 0, 0 },
+        .player_chunk = .{ 0, 0 },
+        .player_quadrant = 0,
+        .max_possible_suffix = 0,
+    };
+    try testing.expectEqual(@as(?HorizonTrace, null), ascent.horizon_trace);
+
+    // Writing an unset trace must be impossible to express rather than merely avoided by convention,
+    // so the field stays optional and `writeMaterialsPath()` keeps taking a plain `HorizonTrace`.
+    try testing.expectEqual(HorizonTrace, @typeInfo(@FieldType(LayerTransition, "horizon_trace")).optional.child);
+    try testing.expectEqual(HorizonTrace, @typeInfo(@TypeOf(writeMaterialsPath)).@"fn".params[1].type.?);
+}
+
+test "horizon window: a checkpointed rebuild matches replaying from the base" {
+    // The checkpoints are what keep `getMaterials()` off an O(depth) walk, so they have to be
+    // indistinguishable from one. Long enough to cross two stride boundaries, since the first
+    // checkpoint is the easy case.
+    const saved_game = memory.game;
+    const saved_suffix = max_possible_suffix;
+    const saved_len = quad_cache.materials_path.len;
+    const saved_windows = quad_cache.materials_windows.len;
+    const saved_path = quad_cache.left_path.len;
+    defer {
+        memory.game = saved_game;
+        max_possible_suffix = saved_suffix;
+        quad_cache.materials_path.len = saved_len;
+        quad_cache.materials_windows.len = saved_windows;
+        quad_cache.left_path.len = saved_path;
+        quad_cache.top_path.len = saved_path;
+    }
+
+    memory.game = .{};
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+
+    const count = 2 * QuadCache.MATERIALS_CHECKPOINT_STRIDE + 3;
+    quad_cache.materials_windows.len = 0;
+    quad_cache.materials_path.len = 0;
+
+    // The refinement resolves parent quadrants through the recorded rebase origins, so every depth it
+    // touches needs a path slot to read. All-zero origins are as valid a descent as any.
+    quad_cache.left_path.len = 0;
+    quad_cache.top_path.len = 0;
+    while (quad_cache.left_path.len * 21 < QuadCache.MATERIALS_START_DEPTH + count) {
+        quad_cache.left_path.append(alloc, 0) catch unreachable;
+        quad_cache.top_path.append(alloc, 0) catch unreachable;
+    }
+    for (0..count) |i| {
+        // Arbitrary but fixed, and varied enough that a wrong starting window cannot coincide.
+        quad_cache.materials_path.append(alloc, .{
+            .suffix = .{ i *% 37 + 4, i *% 61 + 9 },
+            .quadrant = @intCast(i % 4),
+            .bx = @intCast((i * 5) % 16),
+            .by = @intCast((i * 11) % 16),
+            .player_quadrant = @intCast((i / 2) % 4),
+            .source_quadrant = @intCast((i / 3) % 4),
+        }) catch unreachable;
+    }
+
+    // Walking depths in order is what actually fills the checkpoints, so later targets read one back
+    // rather than replaying, which is the case under test.
+    for (0..count) |target| {
+        var from_checkpoint: HorizonWindow = undefined;
+        try testing.expect(quad_cache.getMaterials(QuadCache.MATERIALS_START_DEPTH + target, &from_checkpoint));
+
+        var from_base: HorizonWindow = @splat(@splat(world_edge_block));
+        for (0..target + 1) |i| {
+            const d = QuadCache.MATERIALS_START_DEPTH + i;
+            from_base = refineHorizonWindow(&from_base, quad_cache.materials_path.at(i).*, d - HORIZON_DEPTH);
+        }
+
+        for (0..QuadCache.ANCESTOR_GRID) |y| {
+            for (0..QuadCache.ANCESTOR_GRID) |x| {
+                try testing.expectEqual(from_base[y][x], from_checkpoint[y][x]);
+            }
+        }
+    }
+
+    // Every stride boundary the walk crossed left a checkpoint behind.
+    try testing.expectEqual(
+        (count - 1) / QuadCache.MATERIALS_CHECKPOINT_STRIDE + 1,
+        quad_cache.materials_windows.len,
+    );
+
+    // Rewriting a trace must drop the checkpoints refined through it, and keep the ones below.
+    quad_cache.invalidateMaterialsFrom(QuadCache.MATERIALS_CHECKPOINT_STRIDE + 1);
+    try testing.expectEqual(@as(usize, 2), quad_cache.materials_windows.len);
+    quad_cache.invalidateMaterialsFrom(0);
+    try testing.expectEqual(@as(usize, 0), quad_cache.materials_windows.len);
 }
 
 test "refineHorizonWindow: leaves the game depth exactly as it found it" {
