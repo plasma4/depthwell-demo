@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <title>Depthwell</title>
+    <!-- Copyright (c) 2026 Leo Zhang. All rights reserved. Distribution of any portions of code without permission is strictly prohibited. -->
+    <style>
+        html {
+            background-color: black;
+            font-family: monospace;
+            color: white;
+            user-select: none;
+        }
+
+        canvas {
+            display: block;
+            position: fixed;
+            image-rendering: crisp-edges;
+            image-rendering: pixelated;
+            margin: auto;
+            padding: 0;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        button {
+            transition: background-color 200ms;
+            font-family: monospace;
+            cursor: pointer;
+            padding: 4px;
+            margin: 2px;
+            border: 2px solid #333;
+            border-radius: 5px;
+            background-color: #ead598;
+        }
+
+        button:hover {
+            background-color: #f3cf84;
+        }
+
+        button:active {
+            background-color: #f0a15b;
+        }
+
+        input[type="range"] {
+            accent-color: #2be77c;
+        }
+
+        #debugContainer {
+            display: inline;
+            position: fixed;
+            font-family: monospace;
+            background-color: #0003;
+            color: white;
+            bottom: 40px;
+            left: 10px;
+            z-index: 9999;
+            padding: 8px;
+            font-size: 12px;
+            border-radius: 10px;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        ::selection {
+            background-color: white;
+        }
+
+        #textContainer {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 9999;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 8px;
+            pointer-events: none;
+        }
+
+        #logicText,
+        #renderText {
+            position: fixed;
+        }
+
+        #text1,
+        #text2,
+        #text3,
+        #text4,
+        #logicText,
+        #renderText {
+            font-family: monospace;
+            user-select: text;
+            font-size: 20px;
+            padding: 6px;
+            margin: 4px;
+            line-height: 1.1;
+            transition: background-color 250ms;
+            background-color: #0008;
+            border-radius: 8px;
+            white-space: pre-wrap;
+        }
+
+        #text1,
+        #text2,
+        #text3,
+        #text4 {
+            font-family: monospace;
+            max-width: 40%;
+            user-select: text;
+            font-size: 18px;
+            padding: 6px;
+            margin: 0;
+            line-height: 1.15;
+            transition: background-color 250ms;
+            background-color: #0008;
+            border-radius: 8px;
+            white-space: pre-wrap;
+            text-align: right;
+        }
+
+        #text1:hover,
+        #text2:hover,
+        #text3:hover,
+        #text4:hover {
+            background-color: #000c;
+        }
+
+        #text1 {
+            color: oklch(0.6676 0.3059 355);
+        }
+
+        #text2 {
+            color: oklch(0.8074 0.1621 86);
+        }
+
+        #text3 {
+            color: oklch(0.7685 0.2277 145);
+        }
+
+        #text4 {
+            color: oklch(0.6176 0.1702 235);
+        }
+
+        #logicText,
+        #renderText {
+            pointer-events: none;
+            top: -6px;
+            font-size: 12px;
+        }
+
+        #logicText {
+            left: -3px;
+        }
+
+        #renderText {
+            right: -3px;
+        }
+    </style>
+  <script type="module" crossorigin src="./assets/index-CFRy3kpi.js"></script>
+</head>
+
+<body>
+    <canvas></canvas>
+</body>
+
+</html>
