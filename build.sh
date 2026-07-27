@@ -1,0 +1,16 @@
+#!/bin/bash
+
+# start by building Zig code...
+zig build -Doptimize=ReleaseSafe -Dgen-enums # TODO: set to ReleaseFast for prod
+if [ $? -ne 0 ]; then
+    echo "Error: Zig build failed; commit stopped."
+    exit 1
+fi
+
+# now build NPM public/ files...
+npm run build
+if [ $? -ne 0 ]; then
+    echo "Error: NPM build failed; commit stopped."
+    exit 1
+fi
+exit 0
