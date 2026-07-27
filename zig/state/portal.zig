@@ -618,8 +618,10 @@ fn computeAnchor(bx: u4, by: u4) void {
 
     const block: f64 = @floatFromInt(dw.CHUNK_SIZE_SQ);
     anchor = .{
-        @as(f64, @floatFromInt(chunk_dx * dw.SUBPIXELS_IN_CHUNK)) + @as(f64, @floatFromInt(bx)) * block + in_region_x / dw.ZOOM_FACTOR,
-        @as(f64, @floatFromInt(chunk_dy * dw.SUBPIXELS_IN_CHUNK)) + @as(f64, @floatFromInt(by)) * block + in_region_y / dw.ZOOM_FACTOR,
+        @as(f64, @floatFromInt(chunk_dx * dw.SUBPIXELS_IN_CHUNK)) +
+            @as(f64, @floatFromInt(bx)) * block + in_region_x / dw.ZOOM_FACTOR,
+        @as(f64, @floatFromInt(chunk_dy * dw.SUBPIXELS_IN_CHUNK)) +
+            @as(f64, @floatFromInt(by)) * block + in_region_y / dw.ZOOM_FACTOR,
     };
 }
 
