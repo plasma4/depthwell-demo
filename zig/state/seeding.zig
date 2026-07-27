@@ -17,6 +17,27 @@ pub const INV_POW_2_64 = 1.0 / 18446744073709551616.0;
 
 const Vec2u = dw.utils.Vec2u;
 
+/// A world block coordinate on ONE axis, wide enough for the whole world at any depth.
+/// `Coordinate.suffix` is a full 64-bit chunk index and the quadrant supplies a 65th bit, so a block
+/// index needs 69 bits: it fits in neither a `u64` nor an `f64` mantissa, which is why every consumer
+/// takes this type and folds it rather than accepting a pre-truncated coordinate.
+pub const WorldCoord = u128;
+
+/// Folds a `WorldCoord` into the 64 bits a hash or a noise lattice consumes.
+///
+/// A fold, NOT a truncation. Truncating repeats the field exactly every 2^64 units,
+/// which is the structural cycling this type exists to remove;
+/// folding instead sends each band of high bits to an unrelated part of the hash space.
+/// Nothing is discontinuous either way: a lattice needs its cell indices to be
+/// consistent between neighbors, not contiguous, so callers must fold each corner index
+/// separately (`+% 1` BEFORE the fold, never after).
+pub inline fn foldWorld(v: WorldCoord) u64 {
+    const lo: u64 = @truncate(v);
+    const hi: u64 = @truncate(v >> 64);
+    // Identity while the high half is empty, which is every coordinate below 2^64.
+    return lo ^ (hi *% 0x9E3779B97F4A7C15);
+}
+
 /// A 512-bit seed state (useful for hashing and procedural generation).
 pub const Seed = extern struct { value: [8]u64 align(16) = @splat(0) };
 /// Contains 4 512-bit seed states, which are different for each chunk.
@@ -290,6 +311,44 @@ pub const HashState = struct {
     }
 };
 
+/// Folds a small, low-entropy value (a depth, a field id) into a seed lane.
+///
+/// Exists because XOR-ing one in does NOT work: a depth is under `HORIZON_DEPTH`, so it only perturbs
+/// the low bits, and `FastHash.hash2d()` opens with `x ^ seed_vector[0]`.
+/// Two depths whose seeds differ by `d1 ^ d2` then produce bit-identical noise at every pair of
+/// coordinates differing by that same small value, which is a structured correlation across depths.
+/// Running the value through a full avalanche first makes the two lanes unrelated.
+///
+/// The constants are deliberately NOT the Wyhash/SplitMix ones `FastHash` uses:
+/// a quadrant seed has already been through those, and repeating an avalanche adds nothing to it.
+/// All four are odd, so every multiply is a bijection, and their bits are well spread across the word.
+pub const NoiseMix = struct {
+    // unironically, it's as simple as `openssl prime -generate -bits 64`.
+    const A: u64 = 16345503884828661061;
+    const B: u64 = 14692970800855061447;
+    const C: u64 = 16718323720851214277;
+    const D: u64 = 16201838404200683783;
+
+    comptime {
+        for ([_]u64{ A, B, C, D }) |k| {
+            if (k % 2 == 0) @compileError("NoiseMix constants must be odd to stay bijective under multiplication.");
+        }
+    }
+
+    /// One lane of a noise seed: `base` avalanched together with `value`.
+    pub inline fn lane(base: u64, value: u64) u64 {
+        var x = base +% (value *% A);
+        x ^= x >> 32;
+        x *%= B;
+        x ^= x >> 29;
+        x *%= C;
+        x ^= x >> 32;
+        x *%= D;
+        x ^= x >> 31;
+        return x;
+    }
+};
+
 /// A high-performance, stateless hash.
 /// Significantly faster than both ChaCha12/Xoshiro512** for procedural generation.
 /// Fully deterministic and highly optimized across both WASM and 64-bit Native targets.
@@ -313,6 +372,11 @@ pub const FastHash = struct {
         x *%= 0x94d049bb133111eb;
         x ^= x >> 31;
         return x;
+    }
+
+    /// `hash2d()` for a full-width world coordinate; see `WorldCoord` and `foldWorld()`.
+    pub inline fn hash2dWorld(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord) u64 {
+        return hash2d(seed_vector, foldWorld(x), foldWorld(y));
     }
 
     /// Returns a 64-bit hash value, assuming `seed_vector` is securely generated from BLAKE3 already.

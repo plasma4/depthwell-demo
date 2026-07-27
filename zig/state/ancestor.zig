@@ -15,6 +15,7 @@ const memory = dw.memory;
 const world = dw.world;
 const procedural = dw.procedural;
 const seeding = dw.seeding;
+const WorldCoord = seeding.WorldCoord;
 
 const Sprite = dw.Sprite;
 const Block = memory.Block;
@@ -288,12 +289,22 @@ const INHERITED_ORE_KEEP_CHANCE = 0.73;
 /// Total block width of the world across one dimension.
 const WORLD_BLOCKS_WIDE = @as(u32, dw.CHUNK_SIZE) << (STARTING_ZOOM_TIMES * dw.ZOOM_LOG2);
 
-/// Mask for noise coordinates to stay within floating-point precision.
-pub const NOISE_COORD_MASK: u64 = std.math.maxInt(u32);
+/// One axis of a block's absolute position at its own depth, as a full-width `WorldCoord`.
+///
+/// `quadrant_bit` is that axis' bit of `Coordinate.quadrant`, which is the 65th (and highest) bit of
+/// the chunk index; without it the two halves of the world would share a coordinate space and,
+/// with it, their noise. Every seed in play is already per-quadrant, so this is belt and braces,
+/// but it costs one shift and it is what makes the field unique across the whole world rather than
+/// merely across one quadrant of it.
+///
+/// The product needs 69 bits, which is why noise takes a `WorldCoord` and not a `u64`:
+/// see `seeding.foldWorld()` for how it reaches a 64-bit hash without reintroducing a period.
+inline fn worldBlock(chunk: u64, quadrant_bit: u1, block: u4) WorldCoord {
+    const chunk_index = (@as(WorldCoord, quadrant_bit) << 64) | chunk;
+    return chunk_index * dw.CHUNK_SIZE + block;
+}
 
 comptime {
-    if ((NOISE_COORD_MASK +% 1) % dw.CHUNK_SIZE != 0)
-        @compileError("The noise period must be a power-of-two minus one.");
     // The mask must be able to take the exposed row of a face...
     if (EROSION_DEPTH <= 0.5 * CELL_DENSITY_STEP)
         @compileError("A full erosion mask cannot even reach a face's exposed cell row.");
@@ -305,8 +316,8 @@ comptime {
 /// Determines whether a specified ore/gem deposit should remain.
 inline fn keepsInheritedOverlay(
     noise_seed: dw.utils.Vec2u,
-    wx: u64,
-    wy: u64,
+    wx: WorldCoord,
+    wy: WorldCoord,
     lx: u4,
     ly: u4,
 ) bool {
@@ -335,7 +346,7 @@ inline fn keepsInheritedOverlay(
 }
 
 /// Computes a continuous terrain erosion factor in [0, 1] using multi-octave ridged and undulating noise.
-fn erosionMask(noise_seed: dw.utils.Vec2u, wx: u64, wy: u64) f32 {
+fn erosionMask(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord) f32 {
     // Value noise, NOT a folded gradient field.
     var gouges: f32 = 0;
     var weight: f32 = 0;
@@ -385,8 +396,8 @@ fn cornerDensities(parent_block: Block, n: [8]Block) @Vector(4, f32) {
     }) * @as(@Vector(4, f32), @splat(CORNER_UNIT));
 }
 
-/// Determines whether terrain erosion carves away a child cell based on bilinear corner density and erosion noise.
-fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx: u64, wy: u64, lx: u4, ly: u4) bool {
+/// If true, a block is deleted based on bilinear corner density and erosion noise.
+fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord, lx: u4, ly: u4) bool {
     var buried = true;
     for (n) |b| buried = buried and b.isSolid();
     if (buried) return false;
@@ -413,7 +424,7 @@ fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx:
 }
 
 /// Generates a 2D material displacement vector combining coarse directional drift and fine creased noise.
-fn warpField(noise_seed: dw.utils.Vec2u, wx: u64, wy: u64) dw.utils.Vec2f32 {
+fn warpField(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord) dw.utils.Vec2f32 {
     const half: dw.utils.Vec2f32 = @splat(0.5);
     const coarse = procedural.getDualValueNoise(noise_seed, wx, wy, 1.0 / MATERIAL_WARP_SCALE);
     const fine = procedural.getDualValueNoise(noise_seed, wx, wy, MATERIAL_WARP_LACUNARITY / MATERIAL_WARP_SCALE);
@@ -438,8 +449,71 @@ fn warpedMaterial(parent_block: Block, n: [8]Block, warp: dw.utils.Vec2f32, lx: 
     const raw = (oy + 1) * 3 + (ox + 1);
     const source = n[@intCast(raw - @intFromBool(raw > 4))];
 
-    // `isFoundation()` also rejects edge stone, which must never bleed inward.
+    // isFoundation() also rejects edge stone, which must never bleed inward!
     return if (source.isFoundation()) source else parent_block;
+}
+
+// for whether the portal is at the left or right
+const PORTAL_COLUMN_LEFT: u4 = dw.BLOCKS_PER_PARENT / 2 - 1;
+const PORTAL_COLUMN_RIGHT: u4 = dw.BLOCKS_PER_PARENT / 2;
+
+comptime {
+    if (PORTAL_COLUMN_RIGHT != PORTAL_COLUMN_LEFT + 1)
+        @compileError("The portal's two columns must be adjacent, since they are one 2x1 landing area.");
+    if (dw.BLOCKS_PER_PARENT < 4) @compileError("A portal's child region needs a center column pair and a row to stand on.");
+}
+
+/// One child of a `.portal`/`.invportal` parent. These "de-duplicate" into one instance instead of a 4x4.
+/// TODO: dry this logic to instead let you arbitrarily dedupe children (such as mushrooms/some decor).
+fn portalChild(
+    parent_sprite: Sprite,
+    noise_seed: dw.utils.Vec2u,
+    wx: WorldCoord,
+    wy: WorldCoord,
+    lx: u4,
+    ly: u4,
+    seed: u64,
+    inherited_water: u4,
+) memory.BlockSpec {
+    const row: u4 = if (parent_sprite == .invportal) 0 else dw.BLOCKS_PER_PARENT - 1;
+    if (ly != row) return .{};
+
+    // Hashed on the PARENT's world block, so every cell of the region agrees on the answer.
+    // One bit of a finalized hash is an even split, which is exactly the 50/50 alignment wanted here.
+    const parent_hash = seeding.FastHash.hash2dWorld(
+        noise_seed,
+        wx / dw.BLOCKS_PER_PARENT,
+        wy / dw.BLOCKS_PER_PARENT,
+    );
+    const column: u4 = if (parent_hash & 1 == 0) PORTAL_COLUMN_LEFT else PORTAL_COLUMN_RIGHT;
+    if (lx != column) return .{};
+
+    return .{ .id = parent_sprite, .seed = seed, .water_volume = inherited_water };
+}
+
+/// A liquid parent's level as seen by the child at row `ly` of its region.
+/// For example, a block of water at HP = 11 would turn into the following HP water values at D+1:
+/// ```
+/// 0 0 0 0
+/// 3 3 3 3
+/// 4 4 4 4
+/// 4 4 4 4
+/// ```
+inline fn inheritedLiquidVolume(parent_volume: u4, ly: u4) u4 {
+    if (parent_volume >= dw.water.RESTING_VOLUME) return memory.Block.MAX_HP;
+
+    const max: u32 = memory.Block.MAX_HP;
+    // height of the surface above the region's floor, in the same units, scaled to the region
+    const level: u32 = @as(u32, parent_volume) * dw.BLOCKS_PER_PARENT;
+    const rows_below: u32 = dw.BLOCKS_PER_PARENT - 1 - ly; // full rows of this column beneath the cell
+    return @intCast(@min(max, level -| rows_below * max));
+}
+
+/// Whether this parent block is the surface a portal is anchored to:
+/// the floor directly under a `.portal`, or the ceiling directly over an `.invportal`.
+/// Neighbors are row-major with the center removed, so index 1 is above and index 6 below.
+inline fn anchorsPortal(parent_neighbors: [8]Block) bool {
+    return parent_neighbors[1].id == .portal or parent_neighbors[6].id == .invportal;
 }
 
 /// Evaluates child block evolution from its parent block and 8 parent neighbors.
@@ -464,10 +538,7 @@ pub fn applyAncestorLogic(
     if (parent_sprite == .edge_stone)
         return .{ .id = parent_sprite, .seed = noise_hash_2 };
 
-    // A submerged waterloggable parent must stay submerged in its children. Generating them dry leaves the
-    // pool out of equilibrium, so the sim floods them on the chunk's first tick and writes a modification
-    // entry for terrain the player never touched. On a waterloggable block, `hp` IS its water volume.
-    // (Liquids need no propagation: `BlockSpec.compile()` already fills a liquid id to `MAX_HP`.)
+    // A submerged waterloggable parent must stay submerged in its children!
     const inherited_water: u4 = if (parent_sprite.isWaterloggable()) parent_block.hp else 0;
 
     // Inherit plant still!
@@ -475,33 +546,56 @@ pub fn applyAncestorLogic(
         return .{ .id = .spiralvine, .seed = noise_hash_2, .water_volume = inherited_water };
 
     if (parent_sprite == .mushroom) {
-        // Only make specific sub-blocks of a mushroom parent become big mushroom!
+        // Only make specific sub-blocks of a mushroom parent become big mushrooms!
+        // TODO: dry here (maybe similar to portal where there's a comptime odds list)
         return if ((bx % 4 == 1 or bx % 4 == 2) and by % 4 == 3)
             .{ .id = .big_mushroom, .seed = noise_hash_2, .water_volume = inherited_water }
         else
             .{}; // bypass edges logic too
     }
 
-    // Fallback for all other non-foundation blocks (decorations, chests, furnaces, liquids, etc.)
+    const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
+    const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
+    const quadrant_seed = world.quad_cache.getQuadrantSeed(@intCast(key.quadrant), key.depth);
+    const noise_seed: dw.utils.Vec2u = .{
+        seeding.NoiseMix.lane(quadrant_seed.value[0], key.depth),
+        seeding.NoiseMix.lane(quadrant_seed.value[1], ~key.depth),
+    };
+    const wx = worldBlock(key.suffix[0], @intCast(key.quadrant % 2), bx);
+    const wy = worldBlock(key.suffix[1], @intCast(key.quadrant / 2), by);
+
+    if (parent_sprite == .portal or parent_sprite == .invportal) {
+        return portalChild(parent_sprite, noise_seed, wx, wy, lx, ly, noise_hash_2, inherited_water);
+    }
+
+    if (parent_sprite.isLiquid()) {
+        // split the water
+        if (parent_neighbors[1].id.isLiquid()) {
+            return .{
+                .id = parent_sprite.evolvesTo(),
+                .seed = noise_hash_2,
+                .water_volume = memory.Block.MAX_HP,
+            };
+        }
+
+        const volume = inheritedLiquidVolume(parent_block.hp, ly);
+        if (volume == 0) return .{};
+        return .{ .id = parent_sprite.evolvesTo(), .seed = noise_hash_2, .water_volume = volume };
+    }
+
+    // fallback for all other non-foundation blocks (decorations, chests, furnaces, liquids, etc.)
     if (!parent_sprite.isFoundation()) {
         return .{ .id = parent_sprite.evolvesTo(), .seed = noise_hash_2, .water_volume = inherited_water };
     }
 
     // Foundations from here on: only they carry a surface for the carve to shape.
     // Nothing below may turn air into a solid, since the player could be standing in it.
-    const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
-    const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
-
-    // Every noise field below reads global child coordinates under one quadrant-wide seed,
-    // so chunk identity never enters and the fields line up across chunk borders.
-    // The depth is folded in to stop a parent's field from repeating verbatim in the children drawn on top of it.
-    const quadrant_seed = world.quad_cache.getQuadrantSeed(@intCast(key.quadrant), key.depth);
-    const noise_seed: dw.utils.Vec2u = .{ quadrant_seed.value[0] ^ key.depth, quadrant_seed.value[1] };
-    const wx = ((@as(u64, key.suffix[0]) *% dw.CHUNK_SIZE) +% bx) & NOISE_COORD_MASK;
-    const wy = ((@as(u64, key.suffix[1]) *% dw.CHUNK_SIZE) +% by) & NOISE_COORD_MASK;
 
     // Geometry FIRST!
-    if (carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
+    // A portal's anchor is the one surface the carve may not touch: a descent lands its player standing on
+    // the floor of the portal block's child region, and eroding that floor drops them straight through it.
+    if (!anchorsPortal(parent_neighbors) and
+        carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
 
     // Now, resolve material domain warping for solid cells.
     const warp = warpField(noise_seed, wx, wy);
@@ -554,26 +648,24 @@ pub fn applyAncestorLogic(
 /// Accesses and potentially modifies `ancestor_cache`.
 pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
     const target_depth = key.depth;
-    if (target_depth == STARTING_ZOOM_TIMES) {
-        const block_idx = (@as(usize, by) << dw.CHUNK_SIZE_LOG2) | bx;
+    const block_idx = (@as(usize, by) << dw.CHUNK_SIZE_LOG2) | bx;
 
-        // A cache hit is already materialized (mods overlaid by `materializeChunk()`), so no separate
-        // `mod_store` lookup is needed: a miss replays the edits as part of generating the slot.
+    if (target_depth == memory.game.depth) {
+        // Current depth is SimBuffer's job.
+        if (world.getCachedChunk(key)) |chunk| return chunk.blocks[block_idx];
+    } else {
+        // isHorizonDepth() is false at the base depth, so the base branch below still owns it.
+        if (isHorizonDepth(target_depth)) return world.getBlockAt(key.asCoord(), bx, by, target_depth);
+        // Cache hit; no need to check mod_store or elsewhere.
         if (ancestor_cache.get(key)) |cached| return cached.blocks[block_idx];
+    }
 
+    // The base depth has no parent to inherit from, so it materializes into the cache directly.
+    if (target_depth == STARTING_ZOOM_TIMES) {
         const slot = ancestor_cache.allocateSlot(key);
         world.materializeChunk(slot, key);
         return slot.blocks[block_idx];
     }
-
-    if (isHorizonDepth(target_depth)) {
-        return world.getBlockAt(key.asCoord(), bx, by, target_depth);
-    }
-
-    const block_idx = (@as(usize, by) << dw.CHUNK_SIZE_LOG2) | bx;
-
-    // A cache hit is already materialized (mods overlaid).
-    if (ancestor_cache.get(key)) |cached| return cached.blocks[block_idx];
 
     const p = getParentInfo(key, bx, by);
     const parent_block = getInheritedMaterial(p.coord.asDepthCoordinate(target_depth - 1), p.bx, p.by);
@@ -701,6 +793,41 @@ fn carvesAnywhere(parent_block: Block, n: [8]Block, lx: u4, ly: u4) bool {
         }
     }
     return false;
+}
+
+test "liquid refinement keeps the surface level and settles downward" {
+    const max: u32 = memory.Block.MAX_HP;
+
+    // A parent two thirds full puts its surface two thirds up the region, not at its ceiling.
+    try testing.expectEqual(@as(u4, 0), inheritedLiquidVolume(11, 0));
+    try testing.expectEqual(@as(u4, 14), inheritedLiquidVolume(11, 1));
+    try testing.expectEqual(@as(u4, 15), inheritedLiquidVolume(11, 2));
+    try testing.expectEqual(@as(u4, 15), inheritedLiquidVolume(11, 3));
+
+    // A SETTLED parent is full water even though it sits below MAX_HP, so it must refine to solid water.
+    // Otherwise the top row empties, and that empty row compounds one depth at a time.
+    for (dw.water.RESTING_VOLUME..max + 1) |v| {
+        for (0..dw.BLOCKS_PER_PARENT) |ly| {
+            try testing.expectEqual(@as(u4, memory.Block.MAX_HP), inheritedLiquidVolume(@intCast(v), @intCast(ly)));
+        }
+    }
+
+    for (0..dw.water.RESTING_VOLUME) |v| {
+        const parent: u4 = @intCast(v);
+        var total: u32 = 0;
+        var previous: u4 = 0;
+        for (0..dw.BLOCKS_PER_PARENT) |ly| {
+            // ly counts DOWN the region, so volume may only grow:
+            // a column that is fuller higher up would fall the instant the sim ran.
+            const volume = inheritedLiquidVolume(parent, @intCast(ly));
+            try testing.expect(volume >= previous);
+            previous = volume;
+            total += volume;
+        }
+
+        // verify correct new water amount
+        try testing.expectEqual(@as(u32, parent) * dw.BLOCKS_PER_PARENT, total);
+    }
 }
 
 test "slope carve: a fully enclosed block is never touched" {

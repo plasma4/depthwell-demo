@@ -505,7 +505,5 @@ if (is_dev && engine.isDebug) {
     document.body.appendChild(container);
 }
 
-// Begin the logic
-setTimeout(function () {
-    engine.renderLoop(0);
-}, 17);
+// begin the logic!
+engine.renderLoop(0);
