@@ -507,20 +507,41 @@ comptime {
     }
 }
 
+/// Per-lane domain offsets that keep each lane's warp field independent of the others.
+///
+/// Both are ADDED, and both stay small enough that a lane's offset coordinate is still exactly
+/// representable as an `f64` (see `FLOAT_EXACT_LIMIT`). Subtracting one wraps instead: `y` never exceeds
+/// `ancestor.NOISE_COORD_MASK`, so `y -% offset` lands near 2^64, where an `f64` only lands on every
+/// 2048th integer, and the lane's warp goes flat across 2048-block rectangles of the world.
+const ORE_LANE_STEP_X: u64 = 0xa39dd8f53;
+const ORE_LANE_STEP_Y: u64 = 0x6f4c1b207;
+
+comptime {
+    const max_lane: u64 = std.math.maxInt(u3);
+    if (@max(ORE_LANE_STEP_X, ORE_LANE_STEP_Y) *% max_lane >= FLOAT_EXACT_LIMIT)
+        @compileError("An ore lane offset must keep its coordinate exactly representable as an f64.");
+    if (ORE_LANE_STEP_X == ORE_LANE_STEP_Y)
+        @compileError("The two axes need different steps, or a lane offset only ever moves diagonally.");
+}
+
 inline fn oreField(seed: Vec2u, x: u64, y: u64, lane: u3, rule: OreDispersal) f32 {
     const inv_scale = 1.0 / rule.scale;
     // fast domain warping
     const warp = getDualValueNoise(
         seed,
-        x +% 0xa39dd8f53 * @as(u64, lane),
-        y -% 0xa39dd8f53 * @as(u64, lane),
+        x +% ORE_LANE_STEP_X * @as(u64, lane),
+        y +% ORE_LANE_STEP_Y * @as(u64, lane),
         inv_scale * 0.4,
     );
     const warp_amt = rule.scale * rule.warp_strength;
     const warp_x: i64 = @intFromFloat((warp[0] - 0.5) * warp_amt);
     const warp_y: i64 = @intFromFloat((warp[1] - 0.5) * warp_amt);
-    const sample_x = x +% @as(u64, @bitCast(warp_x));
-    const sample_y = y +% @as(u64, @bitCast(warp_y));
+    // A warp offset is signed, so `@bitCast`-ing a negative one lands the sample near 2^64 whenever it
+    // pushes past the origin: exactly the range where an `f64` stops representing consecutive integers
+    // and the field flattens into rectangles. Wrapping back into the noise domain keeps the coordinate
+    // exact, on the same period every world position already carries (`ancestor.NOISE_COORD_MASK`).
+    const sample_x = (x +% @as(u64, @bitCast(warp_x))) & dw.ancestor.NOISE_COORD_MASK;
+    const sample_y = (y +% @as(u64, @bitCast(warp_y))) & dw.ancestor.NOISE_COORD_MASK;
 
     var value: f32 = 0;
     var weight: f32 = 0;
@@ -727,6 +748,18 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
     // comptime gate here ONLY, not in options so we don't explode FBM value calls
     if (comptime !options.use_f2_f1) {
         // Excellent for sharp branching networks and rich ore veins
+        //
+        // KNOWN DEFECT, left alone deliberately: this packs both axes into the X argument and passes
+        // `options.id` as Y, so the field is not 2D at all. One step in Y moves the packed coordinate by
+        // 2^32, which is millions of cells at any sane `cell_size`, leaving neighboring ROWS completely
+        // uncorrelated while neighboring columns stay smooth. That is what draws a biome as a long flat
+        // horizontal band. Worse, `y << 32` runs past an `f64`'s 53-bit mantissa once `y` clears 2^21,
+        // and `getPerlinNoise()` converts it (see `FLOAT_EXACT_LIMIT`), so deep rows also quantize into
+        // 2048-block runs of one constant value.
+        //
+        // The fix is `fbm(getPerlinNoise, seed_vector, x, y, options.cell_size, 3)` with `options.id`
+        // folded into `seed_vector` instead; it is one line, but it redraws every biome in the world,
+        // so it is a deliberate retune rather than a repair.
         return fbm(getPerlinNoise, seed_vector, x + (@as(u64, y) << 32), options.id, options.cell_size, 3);
     }
 
@@ -824,10 +857,23 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
     return @min((@sqrt(d2_sq) - @sqrt(d1_sq)) * inv_cell_size, 1.0);
 }
 
+/// Largest integer a noise coordinate may carry and still be represented exactly as an `f64`.
+/// Past `2^53` the conversion starts skipping integers, which silently flattens the field
+/// (see the assert in `getDualValueNoise()`).
+pub const FLOAT_EXACT_LIMIT: u64 = 1 << 53;
+
 /// Returns two independent noise values (32-bit float) using vectorized 4-corner value noise.
 ///
 /// Use for: distorting other noise functions.
 pub fn getDualValueNoise(seed: Vec2u, x: u64, y: u64, inv_scale: f32) dw.utils.Vec2f32 {
+    // Coordinates go through `@floatFromInt`, and an `f64` cannot hold consecutive integers past its
+    // 53-bit mantissa: at 2^62 it only lands on every 512th one. A caller that salts a coordinate with a
+    // full-width constant therefore hands whole power-of-two runs of the world the SAME lattice cell and
+    // the same interpolant, so the field goes flat across enormous axis-aligned rectangles.
+    // Salt the SEED, never the coordinate; `ancestor.NOISE_COORD_MASK` is what keeps real world
+    // positions inside this bound.
+    std.debug.assert(x <= FLOAT_EXACT_LIMIT and y <= FLOAT_EXACT_LIMIT);
+
     const fx_raw = @as(f64, @floatFromInt(x)) * @as(f64, inv_scale);
     const fy_raw = @as(f64, @floatFromInt(y)) * @as(f64, inv_scale);
 

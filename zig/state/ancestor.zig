@@ -385,7 +385,7 @@ fn cornerDensities(parent_block: Block, n: [8]Block) @Vector(4, f32) {
     }) * @as(@Vector(4, f32), @splat(CORNER_UNIT));
 }
 
-/// Determines whether terrain erosion carves away a child cell based on bilinear corner density and erosion noise.
+/// If true, a block is deleted based on bilinear corner density and erosion noise.
 fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx: u64, wy: u64, lx: u4, ly: u4) bool {
     var buried = true;
     for (n) |b| buried = buried and b.isSolid();
@@ -442,6 +442,77 @@ fn warpedMaterial(parent_block: Block, n: [8]Block, warp: dw.utils.Vec2f32, lx: 
     return if (source.isFoundation()) source else parent_block;
 }
 
+/// The two columns a portal may stand in: the middle pair of its parent's child region, so it always
+/// sits under the spot a descent drops the player on (`computeLayer()` centers them there).
+/// Which of the two it takes is an even coin flip, so the portal is left- or right-aligned within the
+/// pair rather than pinned to one side of every region in the world.
+const PORTAL_COLUMN_LEFT: u4 = dw.BLOCKS_PER_PARENT / 2 - 1;
+const PORTAL_COLUMN_RIGHT: u4 = dw.BLOCKS_PER_PARENT / 2;
+
+comptime {
+    if (PORTAL_COLUMN_RIGHT != PORTAL_COLUMN_LEFT + 1)
+        @compileError("The portal's two columns must be adjacent, since they are one 2x1 landing area.");
+    if (dw.BLOCKS_PER_PARENT < 4) @compileError("A portal's child region needs a center column pair and a row to stand on.");
+}
+
+/// One child of a `.portal`/`.invportal` parent.
+///
+/// A portal is a single block, not a `BLOCKS_PER_PARENT`-square wall of them,
+/// so exactly one cell keeps it and the rest opens into the chamber the player lands in.
+/// The column is hashed from the cell's own world position rather than chosen by geometry,
+/// which is what keeps two portals in the same chunk from lining up.
+/// `.portal` is floor-anchored so it takes the region's bottom row; `.invportal` hangs from the top.
+fn portalChild(
+    parent_sprite: Sprite,
+    noise_seed: dw.utils.Vec2u,
+    wx: u64,
+    wy: u64,
+    lx: u4,
+    ly: u4,
+    seed: u64,
+    inherited_water: u4,
+) memory.BlockSpec {
+    const row: u4 = if (parent_sprite == .invportal) 0 else dw.BLOCKS_PER_PARENT - 1;
+    if (ly != row) return .{};
+
+    // Hashed on the PARENT's world block, so every cell of the region agrees on the answer.
+    // One bit of a finalized hash is an even split, which is exactly the 50/50 alignment wanted here.
+    const parent_hash = seeding.FastHash.hash2d(
+        noise_seed,
+        wx / dw.BLOCKS_PER_PARENT,
+        wy / dw.BLOCKS_PER_PARENT,
+    );
+    const column: u4 = if (parent_hash & 1 == 0) PORTAL_COLUMN_LEFT else PORTAL_COLUMN_RIGHT;
+    if (lx != column) return .{};
+
+    return .{ .id = parent_sprite, .seed = seed, .water_volume = inherited_water };
+}
+
+/// A liquid parent's level as seen by the child at row `ly` of its region.
+///
+/// The world gets `BLOCKS_PER_PARENT` times deeper each depth, so a pool SHOULD hold that much more
+/// water; what must be preserved is the surface LEVEL, not the unit count.
+/// A parent at level `v` fills `v / MAX_HP` of its own height, so its region fills that fraction of
+/// `BLOCKS_PER_PARENT` rows from the bottom, and the one row the surface falls inside takes the remainder.
+///
+/// Handing every child a full cell instead raises that surface to the top of the region,
+/// which leaves the pool out of equilibrium: the sim corrects it on the chunk's first tick and writes
+/// modification entries for water the player never touched.
+inline fn inheritedLiquidVolume(parent_volume: u4, ly: u4) u4 {
+    const max: u32 = memory.Block.MAX_HP;
+    // Height of the surface above the region's floor, in the same units, scaled to the region.
+    const level: u32 = @as(u32, parent_volume) * dw.BLOCKS_PER_PARENT;
+    const rows_below: u32 = dw.BLOCKS_PER_PARENT - 1 - ly; // full rows of this column beneath the cell
+    return @intCast(@min(max, level -| rows_below * max));
+}
+
+/// Whether this parent block is the surface a portal is anchored to:
+/// the floor directly under a `.portal`, or the ceiling directly over an `.invportal`.
+/// Neighbors are row-major with the center removed, so index 1 is above and index 6 below.
+inline fn anchorsPortal(parent_neighbors: [8]Block) bool {
+    return parent_neighbors[1].id == .portal or parent_neighbors[6].id == .invportal;
+}
+
 /// Evaluates child block evolution from its parent block and 8 parent neighbors.
 /// Handles water volume propagation, slope carving, material warping, and ore dispersal.
 pub fn applyAncestorLogic(
@@ -482,6 +553,37 @@ pub fn applyAncestorLogic(
             .{}; // bypass edges logic too
     }
 
+    // A cell's position inside its parent's child region, and the world-space fields every pass below reads.
+    // Every noise field reads global child coordinates under one quadrant-wide seed,
+    // so chunk identity never enters and the fields line up across chunk borders.
+    // The depth is folded in to stop a parent's field from repeating verbatim in the children drawn on top of it.
+    const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
+    const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
+    const quadrant_seed = world.quad_cache.getQuadrantSeed(@intCast(key.quadrant), key.depth);
+    // The depth has to be folded in: at or below `HORIZON_DEPTH` every depth shares one quadrant seed
+    // (see `QuadCache.getQuadrantSeed()`), so without this the fractal would repeat itself verbatim.
+    // It goes through `NoiseMix` rather than an XOR, which would only perturb the low bits of a lane
+    // that `FastHash.hash2d()` immediately XORs a coordinate into; see `seeding.NoiseMix`.
+    // The lanes take complementary values so they can never avalanche the same input.
+    const noise_seed: dw.utils.Vec2u = .{
+        seeding.NoiseMix.lane(quadrant_seed.value[0], key.depth),
+        seeding.NoiseMix.lane(quadrant_seed.value[1], ~key.depth),
+    };
+    const wx = ((@as(u64, key.suffix[0]) *% dw.CHUNK_SIZE) +% bx) & NOISE_COORD_MASK;
+    const wy = ((@as(u64, key.suffix[1]) *% dw.CHUNK_SIZE) +% by) & NOISE_COORD_MASK;
+
+    if (parent_sprite == .portal or parent_sprite == .invportal) {
+        return portalChild(parent_sprite, noise_seed, wx, wy, lx, ly, noise_hash_2, inherited_water);
+    }
+
+    if (parent_sprite.isLiquid()) {
+        // A liquid's `hp` IS its volume, so refining one cell into a region has to SPLIT that volume
+        // rather than hand every child a full one; see `inheritedLiquidVolume()`.
+        const volume = inheritedLiquidVolume(parent_block.hp, ly);
+        if (volume == 0) return .{};
+        return .{ .id = parent_sprite.evolvesTo(), .seed = noise_hash_2, .water_volume = volume };
+    }
+
     // Fallback for all other non-foundation blocks (decorations, chests, furnaces, liquids, etc.)
     if (!parent_sprite.isFoundation()) {
         return .{ .id = parent_sprite.evolvesTo(), .seed = noise_hash_2, .water_volume = inherited_water };
@@ -489,19 +591,12 @@ pub fn applyAncestorLogic(
 
     // Foundations from here on: only they carry a surface for the carve to shape.
     // Nothing below may turn air into a solid, since the player could be standing in it.
-    const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
-    const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
-
-    // Every noise field below reads global child coordinates under one quadrant-wide seed,
-    // so chunk identity never enters and the fields line up across chunk borders.
-    // The depth is folded in to stop a parent's field from repeating verbatim in the children drawn on top of it.
-    const quadrant_seed = world.quad_cache.getQuadrantSeed(@intCast(key.quadrant), key.depth);
-    const noise_seed: dw.utils.Vec2u = .{ quadrant_seed.value[0] ^ key.depth, quadrant_seed.value[1] };
-    const wx = ((@as(u64, key.suffix[0]) *% dw.CHUNK_SIZE) +% bx) & NOISE_COORD_MASK;
-    const wy = ((@as(u64, key.suffix[1]) *% dw.CHUNK_SIZE) +% by) & NOISE_COORD_MASK;
 
     // Geometry FIRST!
-    if (carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
+    // A portal's anchor is the one surface the carve may not touch: a descent lands its player standing on
+    // the floor of the portal block's child region, and eroding that floor drops them straight through it.
+    if (!anchorsPortal(parent_neighbors) and
+        carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
 
     // Now, resolve material domain warping for solid cells.
     const warp = warpField(noise_seed, wx, wy);
@@ -701,6 +796,33 @@ fn carvesAnywhere(parent_block: Block, n: [8]Block, lx: u4, ly: u4) bool {
         }
     }
     return false;
+}
+
+test "liquid refinement keeps the surface level and settles downward" {
+    const max: u32 = memory.Block.MAX_HP;
+
+    // A parent two thirds full puts its surface two thirds up the region, not at its ceiling.
+    try testing.expectEqual(@as(u4, 0), inheritedLiquidVolume(11, 0));
+    try testing.expectEqual(@as(u4, 14), inheritedLiquidVolume(11, 1));
+    try testing.expectEqual(@as(u4, 15), inheritedLiquidVolume(11, 2));
+    try testing.expectEqual(@as(u4, 15), inheritedLiquidVolume(11, 3));
+
+    for (0..max + 1) |v| {
+        const parent: u4 = @intCast(v);
+        var total: u32 = 0;
+        var previous: u4 = 0;
+        for (0..dw.BLOCKS_PER_PARENT) |ly| {
+            // `ly` counts DOWN the region, so volume may only grow: a column that is fuller higher up
+            // would fall the instant the sim ran.
+            const volume = inheritedLiquidVolume(parent, @intCast(ly));
+            try testing.expect(volume >= previous);
+            previous = volume;
+            total += volume;
+        }
+        // The region is `BLOCKS_PER_PARENT` times taller, so one column holds that much more water at
+        // the same surface level; over the whole region that is the `ZOOM_FACTOR`-squared the world grew by.
+        try testing.expectEqual(@as(u32, parent) * dw.BLOCKS_PER_PARENT, total);
+    }
 }
 
 test "slope carve: a fully enclosed block is never touched" {
