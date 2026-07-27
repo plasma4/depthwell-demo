@@ -293,6 +293,43 @@ pub const HashState = struct {
 /// A high-performance, stateless hash.
 /// Significantly faster than both ChaCha12/Xoshiro512** for procedural generation.
 /// Fully deterministic and highly optimized across both WASM and 64-bit Native targets.
+/// Folds a small, low-entropy value (a depth, a field id) into a seed lane.
+///
+/// Exists because XOR-ing one in does NOT work: a depth is under `HORIZON_DEPTH`, so it only perturbs
+/// the low bits, and `FastHash.hash2d()` opens with `x ^ seed_vector[0]`.
+/// Two depths whose seeds differ by `d1 ^ d2` then produce bit-identical noise at every pair of
+/// coordinates differing by that same small value, which is a structured correlation across depths.
+/// Running the value through a full avalanche first makes the two lanes unrelated.
+///
+/// The constants are deliberately NOT the Wyhash/SplitMix ones `FastHash` uses:
+/// a quadrant seed has already been through those, and repeating an avalanche adds nothing to it.
+/// All four are odd, so every multiply is a bijection, and their bits are well spread across the word.
+pub const NoiseMix = struct {
+    const A: u64 = 0x9FB21C651E98DF25;
+    const B: u64 = 0xD6E8FEB86659FD93;
+    const C: u64 = 0xA24BAED4963EE407;
+    const D: u64 = 0x2545F4914F6CDD1D;
+
+    comptime {
+        for ([_]u64{ A, B, C, D }) |k| {
+            if (k % 2 == 0) @compileError("NoiseMix constants must be odd to stay bijective under multiplication.");
+        }
+    }
+
+    /// One lane of a noise seed: `base` avalanched together with `value`.
+    pub inline fn lane(base: u64, value: u64) u64 {
+        var x = base +% (value *% A);
+        x ^= x >> 32;
+        x *%= B;
+        x ^= x >> 29;
+        x *%= C;
+        x ^= x >> 32;
+        x *%= D;
+        x ^= x >> 31;
+        return x;
+    }
+};
+
 pub const FastHash = struct {
     // Look inside
     // >It's not really secret.

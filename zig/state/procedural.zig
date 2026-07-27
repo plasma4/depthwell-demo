@@ -31,6 +31,9 @@ pub const density_min = TuningFloat(0.36);
 pub const density_max = TuningFloat(0.94);
 pub const hybrid_weight = TuningFloat(0.6);
 
+// 2**53-1 (f64 max safe integer, JS definition).
+pub const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
 /// Generates a block for seeding (based on previous procedural generation logic).
 /// The terms moisture/density are used extremely loosely here.
 /// Moisture is over a larger area, acting as the "biome" for structure logic.
@@ -507,20 +510,35 @@ comptime {
     }
 }
 
+// per-lane domain offsets that keep each lane's warp field independent of the others.
+// these were generated through (`openssl prime -generate -bits 40`).
+const ORE_LANE_STEP_X: u64 = 944637515351;
+const ORE_LANE_STEP_Y: u64 = 1089013738927;
+
+comptime {
+    const max_lane: u64 = std.math.maxInt(u3);
+    if (@max(ORE_LANE_STEP_X, ORE_LANE_STEP_Y) *% max_lane >= MAX_SAFE_INTEGER)
+        @compileError("An ore lane offset must keep its coordinate exactly representable as an f64.");
+    if (ORE_LANE_STEP_X == ORE_LANE_STEP_Y)
+        @compileError("The two axes need different steps, or a lane offset only ever moves diagonally.");
+}
+
 inline fn oreField(seed: Vec2u, x: u64, y: u64, lane: u3, rule: OreDispersal) f32 {
     const inv_scale = 1.0 / rule.scale;
     // fast domain warping
     const warp = getDualValueNoise(
         seed,
-        x +% 0xa39dd8f53 * @as(u64, lane),
-        y -% 0xa39dd8f53 * @as(u64, lane),
+        x +% ORE_LANE_STEP_X * @as(u64, lane), // * before +%, this works out
+        y +% ORE_LANE_STEP_Y * @as(u64, lane),
         inv_scale * 0.4,
     );
     const warp_amt = rule.scale * rule.warp_strength;
     const warp_x: i64 = @intFromFloat((warp[0] - 0.5) * warp_amt);
     const warp_y: i64 = @intFromFloat((warp[1] - 0.5) * warp_amt);
-    const sample_x = x +% @as(u64, @bitCast(warp_x));
-    const sample_y = y +% @as(u64, @bitCast(warp_y));
+    // TODO: we need a better alternative; this creates clear visual wrapping
+    // wrap back to keep coordinates exact
+    const sample_x = (x +% @as(u64, @bitCast(warp_x))) & dw.ancestor.NOISE_COORD_MASK;
+    const sample_y = (y +% @as(u64, @bitCast(warp_y))) & dw.ancestor.NOISE_COORD_MASK;
 
     var value: f32 = 0;
     var weight: f32 = 0;
@@ -727,7 +745,14 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
     // comptime gate here ONLY, not in options so we don't explode FBM value calls
     if (comptime !options.use_f2_f1) {
         // Excellent for sharp branching networks and rich ore veins
-        return fbm(getPerlinNoise, seed_vector, x + (@as(u64, y) << 32), options.id, options.cell_size, 3);
+        return fbm(
+            getPerlinNoise,
+            seed_vector,
+            x,
+            y + (@as(u64, options.id) * 1087233933719),
+            options.cell_size,
+            3,
+        );
     }
 
     const fx: f32 = @floatFromInt(x);
@@ -828,6 +853,8 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
 ///
 /// Use for: distorting other noise functions.
 pub fn getDualValueNoise(seed: Vec2u, x: u64, y: u64, inv_scale: f32) dw.utils.Vec2f32 {
+    std.debug.assert(x <= MAX_SAFE_INTEGER and y <= MAX_SAFE_INTEGER);
+
     const fx_raw = @as(f64, @floatFromInt(x)) * @as(f64, inv_scale);
     const fy_raw = @as(f64, @floatFromInt(y)) * @as(f64, inv_scale);
 

@@ -128,7 +128,7 @@ const player_sliders = [_]SliderDef{
 
 const render_sliders = [_]SliderDef{
     .{
-        .name = "Wireframe opacity",
+        .name = "Wireframe brightness",
         .min = 0.0,
         .max = 1.0,
         .val = &dw.render.WIREFRAME_OPACITY,

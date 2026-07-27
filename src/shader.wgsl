@@ -227,6 +227,34 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
     let id = in.sprite_id /* & 65535 */;
     let is_decor = id >= DECOR_START;
 
+    // instead of doing alpha blending the wireframe opacity has been lazily chucked here, since we rarely use it
+    if scene.wireframe_opacity != 0.0 {
+        // render wireframe due to being at the edge of a block?
+        let inv_tile_scale = 1.00001 / (TILE_SIZE * scene.zoom);
+        let is_block_edge = any(in.local_uv < vec2f(inv_tile_scale)) || any(in.local_uv > vec2f(1.0 - inv_tile_scale));
+
+        if is_block_edge {
+            let mods = in.tile_coords & vec2u(15u);
+
+            // Is this pixel on the edge of a CHUNK?
+            let is_chunk_edge = any((mods == vec2u(0u)) & (in.local_uv < vec2f(inv_tile_scale))) ||
+                                any((mods == vec2u(15u)) & (in.local_uv > vec2f(1.0 - inv_tile_scale)));
+
+            var wire_color = vec4f(0.0);
+            if is_chunk_edge {
+                wire_color = vec4f(1.0, 1.0, 0.0, min(1.0, scene.wireframe_opacity * 2.5));
+            } else {
+                // neat-lookin' fancy wireframe coloring
+                let rg = vec2f(mods) * 0.0625;
+                let b = 0.5 + f32(mods.x ^ mods.y) * 0.03125;
+                wire_color = vec4f(rg.x, rg.y, b, scene.wireframe_opacity);
+            }
+            return wire_color;
+        } else if erode_mask == 0u {
+            discard;
+        }
+    }
+
     if id == WATER_START || id == WATER_START + 1u {
         let has_liquid_above = (in.waterlogged & 1u) != 0u;
         let has_solid_above = ((in.edge_flags & EDGE_TOP) != 0u) && !has_liquid_above;
@@ -452,33 +480,6 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
         }
     }
 
-    var wire_color = vec4f(0.0);
-
-    if scene.wireframe_opacity != 0.0 {
-        // render wireframe due to being at the edge of a block?
-        let inv_tile_scale = 1.00001 / (TILE_SIZE * scene.zoom);
-        let is_block_edge = any(in.local_uv < vec2f(inv_tile_scale)) || any(in.local_uv > vec2f(1.0 - inv_tile_scale));
-
-        if is_block_edge {
-            let mods = in.tile_coords & vec2u(15u);
-
-            // Is this pixel on the edge of a CHUNK?
-            let is_chunk_edge = any((mods == vec2u(0u)) & (in.local_uv < vec2f(inv_tile_scale))) ||
-                                any((mods == vec2u(15u)) & (in.local_uv > vec2f(1.0 - inv_tile_scale)));
-
-            if is_chunk_edge {
-                wire_color = vec4f(1.0, 1.0, 0.0, min(1.0, scene.wireframe_opacity * 2.5));
-            } else {
-                // neat-lookin' fancy wireframe coloring
-                let rg = vec2f(mods) * 0.0625;
-                let b = 0.5 + f32(mods.x ^ mods.y) * 0.03125;
-                wire_color = vec4f(rg.x, rg.y, b, scene.wireframe_opacity);
-            }
-        } else if erode_mask == 0u {
-            discard;
-        }
-    }
-
     // Convert to oklab and nudge values with seed
     var lab = linear_srgb_to_oklab(tex_color.rgb);
     var lch = oklab_to_oklch(lab);
@@ -541,12 +542,6 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
 
         final_rgb = oklab_water(final_rgb, water_col.rgb, weight);
         final_a = mix(water_col.a, 1.0, tex_color.a);
-    }
-
-    if scene.wireframe_opacity != 0.0 {
-        // Correctly mix the wireframe dynamically depending on whether the block exists below it.
-        final_rgb = mix(final_rgb, wire_color.rgb, wire_color.a);
-        final_a = max(final_a, wire_color.a);
     }
 
     return vec4f(apply_color_management(final_rgb), final_a);

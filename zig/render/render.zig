@@ -53,13 +53,11 @@ pub inline fn dispatchMouseType() void {
 ///
 /// Draw order is painter's order, and JS consumes the scratch buffer synchronously on each call back,
 /// so one scratch fill can serve both the background and the tiles of a layer before the next fill.
-/// A portal descent adds a second layer on top: the D+1 preview, faded in over D
-/// (see `state/portal.zig`), which is why the background is drawn from here rather than by the host.
+///
+/// A portal descent adds a second layer on top: the D+1 preview, faded in over D (see `state/portal.zig`)!
 pub fn prepareVisibleData(dt: f64, time_diff: f64, canvas_w: f64, canvas_h: f64) void {
     dw.chunks.updateVisibleChunks(dt, canvas_w, canvas_h);
-    // D's background stays fully opaque: the D+1 background is what dissolves over it, which keeps the
-    // pair summing to full coverage the whole way through instead of dimming toward the clear colour.
-    // A return fade is the one case that WANTS that dimming, and drives it through `worldOpacity()`.
+
     const world_opacity = dw.portal.worldOpacity();
     drawBackground(world_opacity);
     handleVisibleChunks(world_opacity, WIREFRAME_OPACITY);
