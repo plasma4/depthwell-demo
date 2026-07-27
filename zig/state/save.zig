@@ -311,26 +311,14 @@ fn readHeaderCore(r: *Reader, section_len: usize) !void {
     g.keys_held_mask = 0;
 }
 
-/// Section version for the quad cache. Bumped when `QuadCache.ANCESTOR_GRID` changed the size of
-/// `ancestor_materials`, since the payload is written as raw bytes and carries no shape of its own.
-/// v3 appends `materials_path` (what each depth's horizon window is recovered from).
-const QUADCACHE_VERSION = 3;
-
-/// Tag for the `materials_mode` the save was written under, so a blob from a build with the other
-/// strategy is refused rather than read as garbage: the two store different types in the same slot.
-fn materialsModeTag() u8 {
-    return @intFromEnum(world.materials_mode);
-}
-
 /// Exports quad cache (fractal descent state; raw internal fields + the path lists)
 fn writeQuadCache(w: *Writer) !void {
-    const at = try w.beginSection(.quadcache, QUADCACHE_VERSION);
+    const at = try w.beginSection(.quadcache, 1);
     const qc = &world.quad_cache;
     try w.bytes(std.mem.asBytes(&qc.path_hashes));
     try w.bytes(std.mem.asBytes(&qc.origins_x));
     try w.bytes(std.mem.asBytes(&qc.origins_y));
     try w.bytes(std.mem.asBytes(&qc.historical_seeds));
-    try w.bytes(std.mem.asBytes(&qc.ancestor_materials));
     try w.int(u8, @as(u8, @intFromBool(qc.most_top)) |
         (@as(u8, @intFromBool(qc.most_bottom)) << 1) |
         (@as(u8, @intFromBool(qc.most_left)) << 2) |
@@ -342,7 +330,6 @@ fn writeQuadCache(w: *Writer) !void {
     for (0..len) |i| try w.int(u64, qc.left_path.at(i).*);
     for (0..len) |i| try w.int(u64, qc.top_path.at(i).*);
 
-    try w.int(u8, materialsModeTag());
     const materials_len = qc.materials_path.len;
     try w.varint(materials_len);
     for (0..materials_len) |i| try w.bytes(std.mem.asBytes(qc.materials_path.at(i)));
@@ -350,18 +337,12 @@ fn writeQuadCache(w: *Writer) !void {
     w.endSection(at);
 }
 
-fn readQuadCache(r: *Reader, section_version: u16) !void {
-    // v1 stored a 4x4 `ancestor_materials`; v2 stores `QuadCache.ANCESTOR_GRID` square. The framing
-    // length keeps the stream aligned either way, so a blind read would not fail, it would just fill
-    // the descent state with whatever followed. Refuse instead.
-    if (section_version != QUADCACHE_VERSION) return SaveError.BadData;
-
+fn readQuadCache(r: *Reader) !void {
     const qc = &world.quad_cache;
     try r.readInto(std.mem.asBytes(&qc.path_hashes));
     try r.readInto(std.mem.asBytes(&qc.origins_x));
     try r.readInto(std.mem.asBytes(&qc.origins_y));
     try r.readInto(std.mem.asBytes(&qc.historical_seeds));
-    try r.readInto(std.mem.asBytes(&qc.ancestor_materials));
     const edges = try r.int(u8);
     qc.most_top = (edges & 1) != 0;
     qc.most_bottom = (edges & 2) != 0;
@@ -388,10 +369,6 @@ fn readQuadCache(r: *Reader, section_version: u16) !void {
         qc.top_path.at(i).* = try r.int(u64);
     }
 
-    // Refuse a save written by a build using the other materials strategy: the slots below are a
-    // different type entirely, and reading them blind would fill the descent state with noise.
-    if (try r.int(u8) != materialsModeTag()) return SaveError.BadData;
-
     const materials_len: usize = @intCast(try r.varint());
     if (materials_len > qc.materials_path.prealloc_segment.len) {
         try qc.materials_path.growCapacity(world.alloc, materials_len);
@@ -400,6 +377,9 @@ fn readQuadCache(r: *Reader, section_version: u16) !void {
     for (0..materials_len) |i| {
         try r.readInto(std.mem.asBytes(qc.materials_path.at(i)));
     }
+
+    // Windows are derived, so none were saved; `finalizeLoad()` rebuilds them from these traces.
+    qc.materials_windows.len = 0;
 }
 
 /// Writes the ascent stack (the blocks the player has ascended past, deepest last).
@@ -618,7 +598,7 @@ fn writeEntryPayload(w: *Writer, entry: *const world.ModEntry) !void {
 /// Serializes every chunk the player has modified, keyed by its `DepthCoordinate`.
 /// Reads the index/entries live (non-budgeted).
 fn writeModStore(w: *Writer) !void {
-    const at = try w.beginSection(.mod_store, 3);
+    const at = try w.beginSection(.mod_store, 1);
     try w.varint(world.mod_store.index.count());
 
     var it = world.mod_store.index.iterator();
@@ -790,6 +770,11 @@ pub fn finalizeLoad() void {
 
     world.max_possible_suffix = world.getMaxSuffixAtDepth(g.depth);
 
+    // The live horizon window is derived from the loaded traces rather than stored, so it has to be
+    // rebuilt before anything generates a chunk: past the horizon it IS the material every depth below
+    // is refined from (see `QuadCache.getMaterials()`).
+    _ = world.quad_cache.getMaterials(g.depth, &world.quad_cache.ancestor_materials);
+
     // repopulate the SimBuffer around the player using the newly loaded state
     world.SimBuffer.sync(g.getPlayerCoord(), .{ 0, 0 });
 
@@ -800,7 +785,7 @@ pub fn finalizeLoad() void {
 
     // A save can land between a water-adjacent block change and the next tick's batched flag recompute
     // (see queueWaterFlags()), baking stale/sentinel edge flags into the stored blocks.
-    // So, re-queuing every water chunk so those flags heal on the first tick after a load is needed.
+    // So, re-queuing every water chunk so those flags heal is needed.
     var cy: usize = 0;
     while (cy < world.SIM_BUFFER_WIDTH) : (cy += 1) {
         var cx: usize = 0;
@@ -810,6 +795,9 @@ pub fn finalizeLoad() void {
             }
         }
     }
+    // Resolved here rather than left for the first tick: a frame renders before that tick, and it
+    // would draw every one of those chunks with the stale flags for its duration.
+    dw.water.flushPendingFlags();
 }
 
 /// Structurally validates a save blob without touching any game state: magic, BLAKE3 hash, format version, and section framing
@@ -861,6 +849,7 @@ fn deserialize(buf: []const u8) !void {
         const tag_raw = try r.int(u16);
         if (tag_raw == @intFromEnum(SectionTag.end)) break;
         const section_version = try r.int(u16);
+        _ = section_version;
         const byte_len = try r.int(u64);
         const section_end = r.pos + @as(usize, @intCast(byte_len));
         if (section_end > buf.len) return SaveError.Truncated;
@@ -871,7 +860,7 @@ fn deserialize(buf: []const u8) !void {
         switch (tag) {
             .sprite_table => try readSpriteTable(&r),
             .header_core => try readHeaderCore(&r, @intCast(byte_len)),
-            .quadcache => try readQuadCache(&r, section_version),
+            .quadcache => try readQuadCache(&r),
             .inventory => try readInventory(&r),
             .menus => try readMenus(&r),
             .tools => try readTools(&r),

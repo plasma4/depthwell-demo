@@ -259,7 +259,7 @@ export async function create(
             targets: [
                 {
                     format: format,
-                    // fs_background returns premultiplied colour (rgb * opacity, opacity),
+                    // fs_background returns premultiplied color (rgb * opacity, opacity),
                     // so the background cross-dissolves during a portal descent, where the D+1 background is drawn over D's.
                     blend: {
                         color: {

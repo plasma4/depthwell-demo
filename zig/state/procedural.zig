@@ -21,6 +21,7 @@ const Seed = seeding.Seed;
 const Vec2f = dw.utils.Vec2f;
 const Vec2u = dw.utils.Vec2u;
 const Vec4u = dw.utils.Vec4u;
+const WorldCoord = seeding.WorldCoord;
 
 // Lots of values controllable by debug sliders here!
 pub const dual_value_scale = TuningFloat(21.0);
@@ -30,6 +31,49 @@ pub const fbm_scale = TuningFloat(1.0);
 pub const density_min = TuningFloat(0.36);
 pub const density_max = TuningFloat(0.94);
 pub const hybrid_weight = TuningFloat(0.6);
+
+/// Fractional bits kept when a world coordinate is placed on a noise lattice.
+/// 32 leaves the smoothest scale in use (a cell tens of blocks wide) millions of steps per block,
+/// so the interpolant is continuous well past anything the eye can resolve.
+const LATTICE_FRAC_BITS = 32;
+/// Largest lattice frequency, in cells per block, the fixed-point placement can represent.
+/// Bounds the scale factor at `2^(LATTICE_FRAC_BITS + 4)`, keeping the product of a 69-bit
+/// coordinate and the factor inside a `WorldCoord`.
+const MAX_INV_SCALE = 16.0;
+
+/// One axis of a world coordinate placed on a noise lattice.
+const LatticeAxis = struct {
+    /// Index of the cell the coordinate falls in, unfolded so that neighbors stay adjacent.
+    cell: WorldCoord,
+    /// Position within that cell, in [0, 1).
+    t: f32,
+
+    /// Hash input for the cell `offset` steps along this axis (0 or 1, the two interpolated corners).
+    /// The step happens BEFORE the fold, which is what keeps the two corners of a cell agreeing
+    /// with the neighboring cell that shares them.
+    inline fn corner(self: @This(), comptime offset: u1) u64 {
+        return seeding.foldWorld(self.cell +% offset);
+    }
+};
+
+/// Places one axis of a world coordinate on a lattice of `1 / inv_scale` blocks per cell.
+///
+/// Fixed point rather than `f64`: a coordinate spans up to 69 bits (see `WorldCoord`), and an `f64`
+/// product quantizes past 2^53. This used to be handled by masking the coordinate to 32 bits before
+/// it ever arrived, which is precisely what made the entire world's noise repeat every 2^32 blocks.
+inline fn latticeAxis(v: WorldCoord, inv_scale: f32) LatticeAxis {
+    std.debug.assert(inv_scale > 0 and inv_scale <= MAX_INV_SCALE);
+    // Rounded, so the lattice a caller asks for is reproduced to within one part in 2^32 per block.
+    const step: u64 = @intFromFloat(@round(@as(f64, inv_scale) * (1 << LATTICE_FRAC_BITS)));
+    // A scale so fine that a whole block fits inside one lattice step has no cells left to interpolate.
+    std.debug.assert(step != 0);
+
+    const scaled = v *% @as(WorldCoord, step);
+    return .{
+        .cell = scaled >> LATTICE_FRAC_BITS,
+        .t = @as(f32, @floatFromInt(@as(u32, @truncate(scaled)))) * INV_POW_2_32,
+    };
+}
 
 /// Generates a block for seeding (based on previous procedural generation logic).
 /// The terms moisture/density are used extremely loosely here.
@@ -507,20 +551,32 @@ comptime {
     }
 }
 
-inline fn oreField(seed: Vec2u, x: u64, y: u64, lane: u3, rule: OreDispersal) f32 {
+// per-lane domain offsets that keep each lane's warp field independent of the others.
+// these were generated through (`openssl prime -generate -bits 40`).
+const ORE_LANE_STEP_X: u64 = 944637515351;
+const ORE_LANE_STEP_Y: u64 = 1089013738927;
+
+comptime {
+    if (ORE_LANE_STEP_X == ORE_LANE_STEP_Y)
+        @compileError("The two axes need different steps, or a lane offset only ever moves diagonally.");
+}
+
+inline fn oreField(seed: Vec2u, x: WorldCoord, y: WorldCoord, lane: u3, rule: OreDispersal) f32 {
     const inv_scale = 1.0 / rule.scale;
     // fast domain warping
     const warp = getDualValueNoise(
         seed,
-        x +% 0xa39dd8f53 * @as(u64, lane),
-        y -% 0xa39dd8f53 * @as(u64, lane),
+        x +% ORE_LANE_STEP_X * @as(u64, lane), // * before +%, this works out
+        y +% ORE_LANE_STEP_Y * @as(u64, lane),
         inv_scale * 0.4,
     );
     const warp_amt = rule.scale * rule.warp_strength;
     const warp_x: i64 = @intFromFloat((warp[0] - 0.5) * warp_amt);
     const warp_y: i64 = @intFromFloat((warp[1] - 0.5) * warp_amt);
-    const sample_x = x +% @as(u64, @bitCast(warp_x));
-    const sample_y = y +% @as(u64, @bitCast(warp_y));
+    // The warp displaces the sample by a handful of blocks, so wrapping arithmetic is all it needs:
+    // the lattice reads a displaced coordinate exactly the same way it reads an undisplaced one.
+    const sample_x = x +% @as(WorldCoord, @bitCast(@as(i128, warp_x)));
+    const sample_y = y +% @as(WorldCoord, @bitCast(@as(i128, warp_y)));
 
     var value: f32 = 0;
     var weight: f32 = 0;
@@ -546,7 +602,7 @@ inline fn oreField(seed: Vec2u, x: u64, y: u64, lane: u3, rule: OreDispersal) f3
 }
 
 /// Returns a newly formed ore, if the host and depth gate permit one.
-pub fn disperseOre(host: Sprite, density: f32, x: u64, y: u64, depth: u64, seed: Vec2u) ?Sprite {
+pub fn disperseOre(host: Sprite, density: f32, x: WorldCoord, y: WorldCoord, depth: u64, seed: Vec2u) ?Sprite {
     if (!host.isStone()) return null;
 
     // fast global exit: no ore/gem rule exists outside density range [0.20, 0.90]
@@ -576,7 +632,7 @@ pub fn disperseOre(host: Sprite, density: f32, x: u64, y: u64, depth: u64, seed:
         // gem roll check (this gate also improves perf; less seed evaluations!)
         if (rule.is_gem) {
             const gem_roll = gem_roll_cache orelse b: {
-                const roll = FastHash.float2d_32(seed, x, y);
+                const roll = FastHash.float2d_32(seed, seeding.foldWorld(x), seeding.foldWorld(y));
                 gem_roll_cache = roll;
                 break :b roll;
             };
@@ -634,6 +690,49 @@ test "ore dispersal produces deposits at base and recursive depths" {
     try std.testing.expect(deep_count > 0);
 }
 
+test "noise resolves the whole world, not a 32-bit window of it" {
+    const seed: Vec2u = .{ 0x243f6a8885a308d3, 0x13198a2e03707344 };
+    const scale = 1.0 / 7.0;
+
+    // Two points a power of two apart, at the sizes the coordinate used to be masked or truncated to.
+    // Each of these used to name the SAME lattice cell as the origin, which is what made the world
+    // repeat; a coordinate this size also no longer survives an f64 product.
+    const origin: WorldCoord = 1 << 68 | 12345;
+    for ([_]WorldCoord{ 1 << 32, 1 << 53, 1 << 64 }) |period| {
+        const here = getDualValueNoise(seed, origin, origin, scale);
+        const away = getDualValueNoise(seed, origin +% period, origin, scale);
+        try std.testing.expect(here[0] != away[0]);
+    }
+
+    // ...and the field still varies block to block out there, rather than quantizing to one value
+    // per f64 step. A run this short lands in at most a couple of cells, so it is a lower bound.
+    var distinct: usize = 0;
+    var previous: f32 = -1;
+    for (0..16) |i| {
+        const v = getDualValueNoise(seed, origin + i, origin, scale)[0];
+        if (v != previous) distinct += 1;
+        previous = v;
+    }
+    try std.testing.expect(distinct >= 8);
+}
+
+test "lattice cells stay adjacent across a fold boundary" {
+    // Crossing 2^64 is where the fold changes bands. Cells must keep sharing corners across it,
+    // or the terrain tears along a line: the corner one cell up must equal the next cell's own corner.
+    const scale = 1.0 / 4.0; // 4 blocks per cell, so a cell boundary is easy to straddle
+    const boundary: WorldCoord = @as(WorldCoord, 1) << 64;
+    for ([_]WorldCoord{ boundary - 8, boundary - 4, boundary, boundary + 4 }) |v| {
+        const here = latticeAxis(v, scale);
+        const next = latticeAxis(v + 4, scale);
+        try std.testing.expectEqual(here.cell + 1, next.cell);
+        try std.testing.expectEqual(here.corner(1), next.corner(0));
+    }
+
+    // The fraction is a real position within the cell, not a rounded one.
+    const quarter = latticeAxis(boundary + 1, scale);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), quarter.t, 1e-6);
+}
+
 /// Represents 3 values: `v`, `min`, and `max`.
 const ValueRange = struct { f32, f32, f32 };
 
@@ -682,24 +781,20 @@ inline fn fade(t: f32) f32 {
 /// Bypasses domain warping and multi-tap cellular distance lookups entirely.
 ///
 /// Use for: basic, boring but fast noise.
-fn getBilinearValueNoise(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) f32 {
-    const fx = @as(f64, @floatFromInt(x)) / @as(f64, cell_size);
-    const fy = @as(f64, @floatFromInt(y)) / @as(f64, cell_size);
+fn getBilinearValueNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
+    const ax = latticeAxis(x, 1.0 / cell_size);
+    const ay = latticeAxis(y, 1.0 / cell_size);
 
-    const x0_f = @floor(fx);
-    const y0_f = @floor(fy);
-    const tx: f32 = @floatCast(fx - x0_f);
-    const ty: f32 = @floatCast(fy - y0_f);
-
-    const ix0: u64 = @intFromFloat(x0_f);
-    const iy0: u64 = @intFromFloat(y0_f);
-
-    const u = fade(tx);
-    const v = fade(ty);
+    const u = fade(ax.t);
+    const v = fade(ay.t);
 
     // Vectorized 4-tap lookup
-    const vx: Vec4u = .{ ix0, ix0 +% 1, ix0, ix0 +% 1 };
-    const vy: Vec4u = .{ iy0, iy0, iy0 +% 1, iy0 +% 1 };
+    const ix0 = ax.corner(0);
+    const ix1 = ax.corner(1);
+    const iy0 = ay.corner(0);
+    const iy1 = ay.corner(1);
+    const vx: Vec4u = .{ ix0, ix1, ix0, ix1 };
+    const vy: Vec4u = .{ iy0, iy0, iy1, iy1 };
     const h = FastHash.hash2d_4x(seed_vector, vx, vy);
 
     // Fast u32 to f32 vector conversion
@@ -727,7 +822,14 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
     // comptime gate here ONLY, not in options so we don't explode FBM value calls
     if (comptime !options.use_f2_f1) {
         // Excellent for sharp branching networks and rich ore veins
-        return fbm(getPerlinNoise, seed_vector, x + (@as(u64, y) << 32), options.id, options.cell_size, 3);
+        return fbm(
+            getPerlinNoise,
+            seed_vector,
+            x,
+            y + (@as(u64, options.id) * 1087233933719),
+            options.cell_size,
+            3,
+        );
     }
 
     const fx: f32 = @floatFromInt(x);
@@ -827,25 +929,21 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
 /// Returns two independent noise values (32-bit float) using vectorized 4-corner value noise.
 ///
 /// Use for: distorting other noise functions.
-pub fn getDualValueNoise(seed: Vec2u, x: u64, y: u64, inv_scale: f32) dw.utils.Vec2f32 {
-    const fx_raw = @as(f64, @floatFromInt(x)) * @as(f64, inv_scale);
-    const fy_raw = @as(f64, @floatFromInt(y)) * @as(f64, inv_scale);
-
-    const x0_f = @floor(fx_raw);
-    const y0_f = @floor(fy_raw);
-    const x0: u64 = @intFromFloat(x0_f);
-    const y0: u64 = @intFromFloat(y0_f);
-
-    const tx: f32 = @floatCast(fx_raw - x0_f);
-    const ty: f32 = @floatCast(fy_raw - y0_f);
+pub fn getDualValueNoise(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) dw.utils.Vec2f32 {
+    const ax = latticeAxis(x, inv_scale);
+    const ay = latticeAxis(y, inv_scale);
 
     // Use fade curves
-    const u = fade(tx);
-    const v = fade(ty);
+    const u = fade(ax.t);
+    const v = fade(ay.t);
 
     // Prepare 4 corners: (x0, y0), (x0+1, y0), (x0, y0+1), (x0+1, y0+1)
-    const vx: Vec4u = .{ x0, x0 +% 1, x0, x0 +% 1 };
-    const vy: Vec4u = .{ y0, y0, y0 +% 1, y0 +% 1 };
+    const x0 = ax.corner(0);
+    const x1 = ax.corner(1);
+    const y0 = ay.corner(0);
+    const y1 = ay.corner(1);
+    const vx: Vec4u = .{ x0, x1, x0, x1 };
+    const vy: Vec4u = .{ y0, y0, y1, y1 };
 
     // Generate 4 values all at once!
     const h_vec = FastHash.hash2d_4x(seed, vx, vy);
@@ -905,24 +1003,22 @@ const Lattice = struct {
     h: Vec4u,
 };
 
-inline fn lattice(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) Lattice {
-    const fx = @as(f64, @floatFromInt(x)) / @as(f64, cell_size);
-    const fy = @as(f64, @floatFromInt(y)) / @as(f64, cell_size);
-    const x0_f = @floor(fx);
-    const y0_f = @floor(fy);
-    const x0: u64 = @intFromFloat(x0_f);
-    const y0: u64 = @intFromFloat(y0_f);
-    const tx: f32 = @floatCast(fx - x0_f);
-    const ty: f32 = @floatCast(fy - y0_f);
-    const vx: Vec4u = .{ x0, x0 +% 1, x0, x0 +% 1 };
-    const vy: Vec4u = .{ y0, y0, y0 +% 1, y0 +% 1 };
+inline fn lattice(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) Lattice {
+    const ax = latticeAxis(x, 1.0 / cell_size);
+    const ay = latticeAxis(y, 1.0 / cell_size);
+    const x0 = ax.corner(0);
+    const x1 = ax.corner(1);
+    const y0 = ay.corner(0);
+    const y1 = ay.corner(1);
+    const vx: Vec4u = .{ x0, x1, x0, x1 };
+    const vy: Vec4u = .{ y0, y0, y1, y1 };
     return .{
         .x0 = x0,
         .y0 = y0,
-        .tx = tx,
-        .ty = ty,
-        .u = fade(tx),
-        .v = fade(ty),
+        .tx = ax.t,
+        .ty = ay.t,
+        .u = fade(ax.t),
+        .v = fade(ay.t),
         .h = FastHash.hash2d_4x(seed_vector, vx, vy),
     };
 }
@@ -931,7 +1027,7 @@ inline fn lattice(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) Lattice {
 /// removing value-noise plateaus for smooth, continuous slopes.
 ///
 /// Use for: organic, flowing hills/valleys.
-pub fn getPerlinNoise(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) f32 {
+pub fn getPerlinNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
     const l = lattice(seed_vector, x, y, cell_size);
     const n00 = grad2(l.h[0], l.tx, l.ty);
     const n10 = grad2(l.h[1], l.tx - 1.0, l.ty);
@@ -1046,10 +1142,10 @@ pub fn getSimplexNoise(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) f32 {
 /// Generic fractal Brownian motion: stack `octaves` of any candidate noise at halving amplitude and
 /// cell size.
 pub inline fn fbm(
-    comptime noiseFn: fn (Vec2u, u64, u64, f32) f32,
+    comptime noiseFn: fn (Vec2u, WorldCoord, WorldCoord, f32) f32,
     seed_vector: Vec2u,
-    x: u64,
-    y: u64,
+    x: WorldCoord,
+    y: WorldCoord,
     cell_size: f32,
     comptime octaves: u32,
 ) f32 {
