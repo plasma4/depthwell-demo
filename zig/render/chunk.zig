@@ -219,9 +219,7 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
     const edge_bottom = interp_cam_y + half_h_sp;
 
     // find the chunk indices that end up covering the screen, padded on every side by the lighting
-    // margin so off-screen light sources that can bleed onscreen are present during the flood. The
-    // margin is shared from `lighting` (>= 1, so it also supplies the far-edge rounding pad the old
-    // hard-coded `+ 1` provided). See `lighting.CHUNK_MARGIN`.
+    // margin so off-screen light sources that can bleed onscreen are present during the flood.
     const margin: i32 = @intCast(dw.lighting.CHUNK_MARGIN);
     const min_cx = @as(i32, @intFromFloat(@floor(edge_left / subpixels_per_chunk))) - margin;
     const min_cy = @as(i32, @intFromFloat(@floor(edge_top / subpixels_per_chunk))) - margin;
@@ -300,8 +298,8 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
         }
     }
 
-    // Compute frame lighting using continuous, dt-interpolated player positions (in subpixels)
-    // relative to the visible chunk buffer, preventing light-snapping between blocks (bad!).
+    // compute frame lighting using continuous, dt-interpolated player positions (in subpixels)
+    // all relative to the visible chunk buffer, preventing light-snapping between blocks (bad!)
     const subpixels_per_block: f64 = @floatFromInt(dw.CHUNK_SIZE_SQ);
     const player_bx: f32 = @floatCast(@as(f64, @floatFromInt(-min_cx * CHUNK_SIZE)) + pass.player[0] / subpixels_per_block);
     const player_by: f32 = @floatCast(@as(f64, @floatFromInt(-min_cy * CHUNK_SIZE)) + pass.player[1] / subpixels_per_block);

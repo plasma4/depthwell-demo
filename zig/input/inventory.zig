@@ -97,7 +97,7 @@ pub fn resetNameBanner() void {
 
 /// Resets all inventory items (unrelated to pickaxes), as well as the name banner animation.
 pub fn reset() void {
-    inventory_counts = @splat(0);
+    @memset(&inventory_counts, 0);
     selected_sprite = .none;
     selected_row = 0;
     resetNameBanner();

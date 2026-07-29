@@ -17,8 +17,8 @@ const Coordinate = world.Coordinate;
 const Vec2f32 = dw.utils.Vec2f32;
 const Vec4f32 = dw.utils.Vec4f32;
 
-/// Length of a descent; at 60fps this is a bit over one second.
-pub const TOTAL_FRAMES: u32 = 150;
+/// Length of a descent (60 frames becomes 1 second).
+pub const TOTAL_FRAMES: u32 = 120;
 /// Frames the player takes to be drawn from where they stand into the portal's mouth.
 pub const PULL_FRAMES: u32 = 24;
 
@@ -44,7 +44,7 @@ const MAX_PALETTE: usize = @intCast(4 * DEBRIS_RADIUS * DEBRIS_RADIUS);
 
 /// How many shards a descent spawns. Each is one block sprite falling in from a ring around the portal.
 /// They are drawn from the sampled palette, so a type shows up as many times as it happens to be picked.
-const SHARD_COUNT: usize = 1024;
+const SHARD_COUNT: usize = 2048;
 
 /// Fraction of the descent over which shards keep starting. Runs almost to the end so terrain is still
 /// being drawn in as the zoom closes on `ZOOM_FACTOR`, rather than stopping partway.
@@ -618,8 +618,10 @@ fn computeAnchor(bx: u4, by: u4) void {
 
     const block: f64 = @floatFromInt(dw.CHUNK_SIZE_SQ);
     anchor = .{
-        @as(f64, @floatFromInt(chunk_dx * dw.SUBPIXELS_IN_CHUNK)) + @as(f64, @floatFromInt(bx)) * block + in_region_x / dw.ZOOM_FACTOR,
-        @as(f64, @floatFromInt(chunk_dy * dw.SUBPIXELS_IN_CHUNK)) + @as(f64, @floatFromInt(by)) * block + in_region_y / dw.ZOOM_FACTOR,
+        @as(f64, @floatFromInt(chunk_dx * dw.SUBPIXELS_IN_CHUNK)) +
+            @as(f64, @floatFromInt(bx)) * block + in_region_x / dw.ZOOM_FACTOR,
+        @as(f64, @floatFromInt(chunk_dy * dw.SUBPIXELS_IN_CHUNK)) +
+            @as(f64, @floatFromInt(by)) * block + in_region_y / dw.ZOOM_FACTOR,
     };
 }
 

@@ -6,7 +6,7 @@ import * as InputManager from "./inputManager";
 import * as EngineMaker from "./engineMaker";
 import { SaveManager } from "./saveManager";
 
-/** Forces a 1:1 logical-to-real visual resolution. Useful for pixel-perfect testing. */
+/** Forces a 1:1 logical-to-real visual resolution. Useful for pixel-perfect testing/screenshots. */
 const FORCE_RESOLUTION_TEST = false;
 
 /** Typed array types mapped to integers. */

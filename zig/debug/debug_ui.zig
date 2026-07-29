@@ -128,7 +128,7 @@ const player_sliders = [_]SliderDef{
 
 const render_sliders = [_]SliderDef{
     .{
-        .name = "Wireframe opacity",
+        .name = "Wireframe brightness",
         .min = 0.0,
         .max = 1.0,
         .val = &dw.render.WIREFRAME_OPACITY,
@@ -148,7 +148,7 @@ pub const buttons = [_]ButtonDef{
     //     .action = teleportToEdge,
     // },
     .{
-        .name = "Teleport randomly",
+        .name = "Teleport",
         .action = teleportRandomly,
     },
     .{
@@ -161,7 +161,7 @@ pub const buttons = [_]ButtonDef{
     },
     .{
         .name = "Toggle global light",
-        .toggle = &dw.lighting.DEBUG_LIGHT,
+        .toggle = &dw.lighting.IS_LIGHT_GLOBAL,
     },
     .{
         .name = "Log worldgen odds",
@@ -171,16 +171,11 @@ pub const buttons = [_]ButtonDef{
     //     .name = "Verify invariants",
     //     .action = dw.audit.verifySimInvariants,
     // },
-    // .{
-    //     .name = "Toggle base heatmap",
-    //     .toggle = &procedural.USE_BASE_HEATMAP,
-    //     .regen = true,
-    // },
-    // .{
-    //     .name = "Toggle ore heatmap",
-    //     .toggle = &procedural.USE_ORE_HEATMAP,
-    //     .regen = true,
-    // },
+    .{
+        .name = "Heatmap",
+        .toggle = &dw.procedural.USE_HEATMAP,
+        .regen = true,
+    },
 };
 
 /// Teleports to the top left quadrant. Then, tries to find a valid spawn point.
@@ -238,7 +233,7 @@ pub fn changeSlider(id: u32, val: f64) void {
         func(val);
     }
     if (s.regen) {
-        world.clearCaches(true);
+        clearCaches();
     }
 }
 
@@ -254,7 +249,7 @@ pub fn clickButton(id: u32) void {
         value.* = !value.*;
     }
     if (b.regen) {
-        world.clearCaches(true);
+        clearCaches();
     }
 }
 

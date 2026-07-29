@@ -21,6 +21,7 @@ const Seed = seeding.Seed;
 const Vec2f = dw.utils.Vec2f;
 const Vec2u = dw.utils.Vec2u;
 const Vec4u = dw.utils.Vec4u;
+const WorldCoord = seeding.WorldCoord;
 
 // Lots of values controllable by debug sliders here!
 pub const dual_value_scale = TuningFloat(21.0);
@@ -31,37 +32,207 @@ pub const density_min = TuningFloat(0.36);
 pub const density_max = TuningFloat(0.94);
 pub const hybrid_weight = TuningFloat(0.6);
 
+const TerrainData = struct {
+    sprite: Sprite = .none,
+    /// Multiplies the cutoff for stone density.
+    cutoff: f32,
+    /// Acts as a biome selector.
+    moisture: f32,
+    /// Granular (smaller-scale) base sprite details!
+    density: f32,
+    /// Ore density.
+    ore_density: f32,
+    /// Controls whether certain rarer block types spawn.
+    weirdness: f32,
+};
+
 /// Generates a block for seeding (based on previous procedural generation logic).
 /// The terms moisture/density are used extremely loosely here.
 /// Moisture is over a larger area, acting as the "biome" for structure logic.
-pub fn generateBaseProceduralSprite(moisture: f64, density: f64) Sprite {
+pub inline fn generateBaseProceduralSprite(d: *const TerrainData) Sprite {
     // check is_debug because these will always be off in non-dev
     // sprite IDs in this range create a heatmap
-    if (dw.is_debug and USE_BASE_HEATMAP and !USE_ORE_HEATMAP)
-        return @enumFromInt(65000 + @as(u20, @intFromFloat(moisture * 256.0)));
-    if (dw.is_debug and USE_BASE_HEATMAP and USE_ORE_HEATMAP) return .stone;
+    if (dw.is_debug and USE_HEATMAP and !USE_ORE_HEATMAP)
+        return @enumFromInt(65000 + @as(u20, @intFromFloat(d.weirdness * 256.0)));
 
-    if (density <= density_min.getF32() or density >= density_max.getF32()) {
-        if (moisture >= 0.93 and moisture <= 0.94) return .purple_strange_stone;
+    const cutoff_density = d.density * d.cutoff;
+    if (cutoff_density <= density_min.getF32() or d.density >= density_max.getF32()) {
+        if (d.moisture >= 0.93 and d.moisture <= 0.94) return .purple_strange_stone;
         return .none;
-    } else if (density <= 0.04 and moisture >= 0.3 and moisture <= 0.4) {
+    } else if (d.density <= 0.04 and d.moisture >= 0.3 and d.moisture <= 0.4) {
         return .blue_strange_stone;
     }
 
-    if (moisture >= 0.995) return .stone;
-    if (moisture >= 0.98 and moisture < 0.995) return .ancient_stone;
-    if (moisture >= 0.93 and moisture <= 0.94) return .red_stone;
-    if (moisture >= 0.9) return .none;
+    if (d.moisture >= 0.995) return .stone;
+    if (d.moisture >= 0.98 and d.moisture < 0.995) return .ancient_stone;
+    if (d.moisture >= 0.93 and d.moisture <= 0.94) return .red_stone;
+    if (d.moisture >= 0.9) return .none;
 
-    if (moisture >= 0.88 and moisture <= 0.92) return .lava_stone;
-    if (moisture >= 0.50 and density >= 0.53 and density <= 0.6) return .green_stone;
+    if (d.weirdness >= 0.6 and d.moisture >= 0.88 and d.moisture <= 0.94) return .lava_stone;
+    if (d.moisture >= 0.50 and d.density >= 0.53 and d.density <= 0.6)
+        return if (d.weirdness > 0.8) .lime_stone else .green_stone;
 
-    if (moisture >= 0.62 and density >= 0.83) return .seagreen_stone;
-    if (moisture <= 0.55 and density >= 0.60 and density <= 0.72) return .blue_stone;
-    if (density >= 0.40 and density <= 0.55) return .deep_blue_stone;
+    if (d.moisture >= 0.62 and d.density >= 0.83) return .seagreen_stone;
+    if (d.moisture <= 0.55 and d.density >= 0.60 and d.density <= 0.72) return .blue_stone;
+    if (d.weirdness < 0.1 and d.density >= 0.40 and d.density <= 0.55)
+        return if (d.moisture > 0.8) .gray_stone else .deep_blue_stone;
 
-    if (moisture >= 0.20 and moisture <= 0.26) return .mossy_stone;
+    if (d.moisture >= 0.20 and d.moisture <= 0.26) return .mossy_stone;
     return .stone;
+}
+
+/// Uncached base-terrain evaluation. Call `getBaseSpriteType()` instead outside of the cache itself.
+fn computeBaseSpriteType(
+    chunk_x: u32,
+    chunk_y: u32,
+    block_x: u4,
+    block_y: u4,
+) TerrainData {
+    const wx = chunk_x * 16 + block_x;
+    const wy = chunk_y * 16 + block_y;
+
+    var base_data: TerrainData = .{
+        // NOTE: use_f2_f1 is false here, so this takes fbm+getPerlinNoise.
+        .cutoff = 0.75 + 0.3 * getHybridNoise(
+            memory.game.getHashSeed(.cutoff),
+            wx,
+            wy,
+            20,
+        ),
+        .weirdness = getBillowNoise(
+            memory.game.getHashSeed(.weirdness),
+            wx,
+            wy,
+            140,
+        ),
+
+        .moisture = getFbmValue(
+            memory.game.getHashSeed(.moisture),
+            wx,
+            wy,
+            .{
+                .cell_size = 375.0, // very LARGE cells for biome generation
+                .fbm_shift_size = 0.0,
+                .use_f2_f1 = false,
+            },
+        ),
+        .density = getFbmValue(
+            memory.game.getHashSeed(.density),
+            wx,
+            wy,
+            .{
+                .cell_size = 93.0, // smaller cells for cave terrain
+                .fbm_shift_size = 24.0,
+                .use_f2_f1 = true,
+            },
+        ),
+        .ore_density = getFbmValue(
+            memory.game.getHashSeed(.ore_density),
+            wx,
+            wy,
+            .{
+                .cell_size = 122.0, // smaller cells for cave terrain
+                .fbm_shift_size = 0.0,
+                .use_f2_f1 = false,
+            },
+        ),
+    };
+
+    base_data.sprite = generateBaseProceduralSprite(&base_data);
+    return base_data;
+}
+
+/// Fractional bits kept when a world coordinate is placed on a noise lattice.
+/// 32 leaves the smoothest scale in use (a cell tens of blocks wide) millions of steps per block,
+/// so the interpolant is continuous well past anything the eye can resolve.
+const LATTICE_FRAC_BITS = 32;
+/// Largest lattice frequency, in cells per block, the fixed-point placement can represent.
+/// Bounds `step` at `2^(LATTICE_FRAC_BITS + 4)`, which is what caps `k` in `latticeAxis()`.
+const MAX_INV_SCALE = 16.0;
+/// Bit position a world coordinate is split at for the lattice multiply (see `latticeAxis()`).
+const SPLIT_BIT = 32;
+/// Significant bits kept in the lattice step's mantissa, also from `latticeAxis()`.
+/// An `f32` scale carries exactly this many, which is what makes the split of `step` lossless.
+const STEP_MANT_BITS = 24;
+
+comptime {
+    // the high half of the coordinate must survive its own partial product, and so must the low half.
+    if (seeding.WORLD_COORD_BITS - SPLIT_BIT + STEP_MANT_BITS > 64)
+        @compileError("A split world coordinate's high half overflows its partial product.");
+    if (SPLIT_BIT + STEP_MANT_BITS > 64)
+        @compileError("A split world coordinate's low half overflows its partial product.");
+    // Recombining shifts right by `LATTICE_FRAC_BITS - k`, and that is only exact within the low half.
+    if (LATTICE_FRAC_BITS > SPLIT_BIT)
+        @compileError("The lattice fraction must fit below the split, or recombining loses its carry.");
+}
+
+/// One axis of a world coordinate placed on a noise lattice.
+const LatticeAxis = struct {
+    /// Hash inputs for the two interpolated corners, already folded to 64 bits.
+    corners: [2]u64,
+    /// Position within the cell, in [0, 1).
+    t: f32,
+
+    /// Hash input for the cell `offset` steps along this axis (0 or 1, the two interpolated corners).
+    inline fn corner(self: @This(), comptime offset: u1) u64 {
+        return self.corners[offset];
+    }
+};
+
+/// Places one axis of a world coordinate on a lattice of `1 / inv_scale` blocks per cell.
+///
+/// Fixed point rather than `f64`: a coordinate spans up to 69 bits (see `WorldCoord`), and an `f64`
+/// product quantizes past 2^53. This used to be handled by masking the coordinate to 32 bits before
+/// it ever arrived, which is precisely what made the entire world's noise repeat every 2^32 blocks.
+///
+/// The full-width product is computed WITHOUT any 128-bit multiply, which costs about a fifth of
+/// every noise sample on wasm32. Two facts make that possible:
+/// an `f32` scale has only `STEP_MANT_BITS` significant bits, so `step` splits losslessly into a
+/// narrow mantissa and a shift; and a 69-bit coordinate split at `SPLIT_BIT` leaves two halves whose
+/// products with that mantissa each fit a `u64`. Recombining is exact because the high half's
+/// contribution is a multiple of `2^SPLIT_BIT` and the recombining shift never exceeds `SPLIT_BIT`.
+inline fn latticeAxis(v: WorldCoord, inv_scale: f32) LatticeAxis {
+    std.debug.assert(inv_scale > 0 and inv_scale <= MAX_INV_SCALE);
+    // Rounded, so the lattice a caller asks for is reproduced to within one part in 2^32 per block.
+    const step: u64 = @intFromFloat(@round(@as(f64, inv_scale) * (1 << LATTICE_FRAC_BITS)));
+    // A scale so fine that a whole block fits inside one lattice step has no cells left to interpolate.
+    std.debug.assert(step != 0);
+
+    // `step` as `m << k`. Lossless: `step` came from an f32, so below its top `STEP_MANT_BITS` bits
+    // it is all zeroes. Both fall out of constant folding whenever the scale is comptime-known.
+    const width = 64 - @clz(step);
+    const k: u6 = if (width > STEP_MANT_BITS) @intCast(width - STEP_MANT_BITS) else 0;
+    const m = step >> k;
+    std.debug.assert(m << k == step);
+    const shift: u6 = LATTICE_FRAC_BITS - k;
+
+    const low_half: u64 = @truncate(v & ((1 << SPLIT_BIT) - 1));
+    const low_product = low_half *% m;
+    // The fraction only ever reads below the split, so it is done either way.
+    const frac: u32 = @truncate((low_product & ((@as(u64, 1) << shift) - 1)) << k);
+    const t = @as(f32, @floatFromInt(frac)) * INV_POW_2_32;
+
+    // Every coordinate short of 2^32 leaves the whole high-order path dead. That is the entire base
+    // depth, which is where most samples are taken, and the branch is perfectly predicted there.
+    const high_half: u64 = @truncate(v >> SPLIT_BIT);
+    if (high_half == 0) {
+        const cell = low_product >> shift;
+        return .{ .corners = .{ cell, cell +% 1 }, .t = t };
+    }
+
+    const high_product = high_half *% m;
+    // The cell index needs up to 73 bits, so it is carried as an explicit low/high pair.
+    const cell_low = (high_product << k) +% (low_product >> shift);
+    const cell_high = (if (k == 0) 0 else high_product >> @intCast(64 - @as(u7, k))) +
+        @intFromBool(cell_low < (high_product << k));
+
+    // `foldWorld()` open-coded, so that the two corners share one multiply. Stepping the low half
+    // over its own boundary carries into the high half, and a fold of one more high unit is exactly
+    // one more `FOLD_MULTIPLIER`.
+    const folded = cell_high *% seeding.FOLD_MULTIPLIER;
+    const next_low = cell_low +% 1;
+    const next_folded = folded +% (seeding.FOLD_MULTIPLIER & (0 -% @as(u64, @intFromBool(next_low == 0))));
+    return .{ .corners = .{ cell_low ^ folded, next_low ^ next_folded }, .t = t };
 }
 
 /// Returns a struct with an a `value: f64` and `getF32()`.
@@ -98,17 +269,16 @@ inline fn TuningBool(comptime default_value: bool) type {
     }
 }
 
-/// Determines whether to use a heatmap or not for base terrain. Ignored if `dw.is_debug` is false.
-pub var USE_BASE_HEATMAP = false;
-/// Determines whether to use a heatmap or not for ore generation. Ignored if `dw.is_debug` is false.
+/// Determines whether to use a heatmap or not for terrain.
+/// Ignored if `dw.is_debug` is false; must also be true if `USE_ORE_HEATMAP` is true.
+pub var USE_HEATMAP = false;
+/// Determines whether to use a heatmap or not for ore generation.
+/// Ignored if `dw.is_debug` is false.
 pub var USE_ORE_HEATMAP = false;
 
 /// Configuration options passed to the FBM (Fractal Brownian Motion) and Worley
 /// noise generation algorithm (`getFbmValue()`).
 const TerrainOptions = struct {
-    /// Unique ID for terrain in order to vary seeds.
-    id: comptime_int,
-
     /// Controls the scale of the primary noise grid cells.
     /// Larger values stretch out the noise patterns.
     cell_size: comptime_float,
@@ -128,13 +298,6 @@ const TerrainOptions = struct {
     use_f2_f1: bool = true,
 };
 
-/// Temporary data produced during the first pass of structural generation.
-const BaseTerrainData = struct {
-    sprite: Sprite,
-    moisture: f32,
-    density: f32,
-};
-
 /// Adds larger structures across multiple blocks in a deterministic fashion.
 /// Continues from steps 1-3 in `getBaseSpriteType()`.
 ///
@@ -152,14 +315,19 @@ pub fn addStructures(
 const BaseTerrainCacheEntry = struct {
     wx: u32 = 0,
     wy: u32 = 0,
-    data: BaseTerrainData = undefined,
+    data: TerrainData = undefined,
     occupied: bool = false,
 };
 
-/// Direct-mapped cache of `computeBaseSpriteType()` results (must be a power of two).
+/// Block window one full sweep of the cache covers, in blocks (see `dw.utils.tileIndex()`).
+/// Wider than tall because generation sweeps wider than it is tall (`SCREEN_WIDTH` > `SCREEN_HEIGHT`),
+/// and comfortably past the visible chunk window in both axes, so a chunk pass never evicts its own neighbors.
+const BASE_CACHE_TILE_W = 128;
+const BASE_CACHE_TILE_H = 64;
+/// Direct-mapped cache of `computeBaseSpriteType()` results (a power of two by construction).
 /// The same cell is recomputed many times per chunk gen (pass 1, the edge-flag halo, the vine scan, and structure terrain gates all resample it, plus overlap across neighbors), so memoizing removes that FBM redundancy: the dominant generation cost.
 /// Release-only: in debug the `TuningFloat` sliders mutate FBM output live, so debug always recomputes.
-const BASE_CACHE_SLOTS = 8192;
+const BASE_CACHE_SLOTS = BASE_CACHE_TILE_W * BASE_CACHE_TILE_H;
 var base_terrain_cache: [BASE_CACHE_SLOTS]BaseTerrainCacheEntry = @splat(.{});
 /// Current seed the cache holds; a mismatch (reseed) invalidates every entry at once.
 var base_cache_key: u64 = 0;
@@ -171,10 +339,10 @@ pub inline fn terrainGeneration() u64 {
     return seed[0] ^ seed[1];
 }
 
-/// Direct-mapped slot for a world block; mixes the coords so adjacent cells do not collide.
+/// Direct-mapped slot for a world block. Tiled rather than hashed, so a whole chunk pass is
+/// conflict-free instead of merely unlikely to collide; see `dw.utils.tileIndex()`.
 inline fn baseCacheIndex(wx: u32, wy: u32) usize {
-    const h = (@as(u64, wx) *% 0x9E3779B97F4A7C15) ^ (@as(u64, wy) *% 0x85EBCA77C2B2AE63);
-    return @intCast((h >> 32) & (BASE_CACHE_SLOTS - 1));
+    return dw.utils.tileIndex(BASE_CACHE_TILE_W, BASE_CACHE_TILE_H, wx, wy);
 }
 
 /// Returns a base sprite type, memoized in release (see `BASE_CACHE_SLOTS`). Does 3 passes:
@@ -187,7 +355,7 @@ pub fn getBaseSpriteType(
     chunk_y: u32,
     block_x: u4,
     block_y: u4,
-) BaseTerrainData {
+) TerrainData {
     // Debug drags terrain sliders live, so caching would serve stale samples; just recompute for simplicity.
     if (dw.is_debug) return computeBaseSpriteType(chunk_x, chunk_y, block_x, block_y);
 
@@ -197,7 +365,8 @@ pub fn getBaseSpriteType(
     const seed = memory.game.getHashSeed(.moisture);
     const key = seed[0] ^ seed[1];
     if (key != base_cache_key) {
-        base_terrain_cache = @splat(.{});
+        // @memset, not `= @splat(.{})`: an array this large would be built as a stack temporary first.
+        @memset(&base_terrain_cache, .{});
         base_cache_key = key;
     }
 
@@ -207,49 +376,6 @@ pub fn getBaseSpriteType(
     const data = computeBaseSpriteType(chunk_x, chunk_y, block_x, block_y);
     entry.* = .{ .wx = wx, .wy = wy, .data = data, .occupied = true };
     return data;
-}
-
-/// Uncached base-terrain evaluation. Call `getBaseSpriteType()` instead outside of the cache itself.
-fn computeBaseSpriteType(
-    chunk_x: u32,
-    chunk_y: u32,
-    block_x: u4,
-    block_y: u4,
-) BaseTerrainData {
-    const wx = chunk_x * 16 + block_x;
-    const wy = chunk_y * 16 + block_y;
-
-    // NOTE: `use_f2_f1` is false here, so this takes fbm+getPerlinNoise.
-    const moisture = getFbmValue( // acts as a biome selector
-        memory.game.getHashSeed(.moisture),
-        wx,
-        wy,
-        .{
-            .id = 1,
-            .cell_size = 375.0, // very LARGE cells for biome generation
-            .fbm_shift_size = 0.0,
-            .use_f2_f1 = false,
-        },
-    );
-    const density = getFbmValue( // more granular density
-        memory.game.getHashSeed(.density),
-        wx,
-        wy,
-        .{
-            .id = 2,
-            .cell_size = 80.0, // smaller cells for cave terrain
-            .fbm_shift_size = 24.0,
-            .use_f2_f1 = true,
-        },
-    );
-
-    const sprite = generateBaseProceduralSprite(moisture, density);
-
-    return .{
-        .sprite = sprite,
-        .moisture = moisture,
-        .density = density,
-    };
 }
 
 /// A comptime row in the ore palette. Evaluated at base depth and recursive refinement layers.
@@ -276,6 +402,8 @@ const OreDispersal = struct {
 
 /// List of rules for ore and gem dispersals.
 /// Window widths (val_max - val_min) directly control ore rarity to match audit counts.
+///
+/// No ore/gem rule should exist outside density range [0.20, 0.90].
 const ORE_DISPERSALS = [_]OreDispersal{
     .{
         .sprite = .copper,
@@ -285,7 +413,7 @@ const ORE_DISPERSALS = [_]OreDispersal{
         .hybrid_weight = 0.20,
         .warp_strength = 0.80,
         .val_min = 0.46,
-        .val_max = 0.54, // Window width 0.08 (~1.1% share)
+        .val_max = 0.52,
         .min_density = 0.42,
         .max_density = 0.70,
         .seed_lane = 0,
@@ -298,7 +426,7 @@ const ORE_DISPERSALS = [_]OreDispersal{
         .hybrid_weight = 0.35,
         .warp_strength = 0.75,
         .val_min = 0.55,
-        .val_max = 0.595, // Window width 0.045 (~0.63% share)
+        .val_max = 0.58,
         .min_density = 0.40,
         .max_density = 0.68,
         .seed_lane = 1,
@@ -312,7 +440,7 @@ const ORE_DISPERSALS = [_]OreDispersal{
         .hybrid_weight = 0.25,
         .warp_strength = 0.65,
         .val_min = 0.20,
-        .val_max = 0.25, // Window width 0.05 (~0.15% share)
+        .val_max = 0.25,
         .min_density = 0.30,
         .max_density = 0.48,
         .seed_lane = 2,
@@ -325,7 +453,7 @@ const ORE_DISPERSALS = [_]OreDispersal{
         .hybrid_weight = 0.30,
         .warp_strength = 0.65,
         .val_min = 0.30,
-        .val_max = 0.36, // Window width 0.06 (~0.24% share)
+        .val_max = 0.36,
         .min_density = 0.60,
         .max_density = 0.82,
         .seed_lane = 0,
@@ -338,7 +466,7 @@ const ORE_DISPERSALS = [_]OreDispersal{
         .hybrid_weight = 0.55,
         .warp_strength = 0.80,
         .val_min = 0.58,
-        .val_max = 0.595, // Narrow window width 0.015 (~0.21% share)
+        .val_max = 0.595,
         .min_density = 0.40,
         .max_density = 0.65,
         .seed_lane = 1,
@@ -397,7 +525,7 @@ const ORE_DISPERSALS = [_]OreDispersal{
         .hybrid_weight = 0.30,
         .warp_strength = 0.55,
         .val_min = 0.94,
-        .val_max = 0.98, // Window width 0.04 (~0.08% share)
+        .val_max = 0.98,
         .min_density = 0.52,
         .max_density = 0.90,
         .seed_lane = 2,
@@ -507,29 +635,43 @@ comptime {
     }
 }
 
-inline fn oreField(seed: Vec2u, x: u64, y: u64, lane: u3, rule: OreDispersal) f32 {
+// per-lane domain offsets that keep each lane's warp field independent of the others.
+// these were generated through (`openssl prime -generate -bits 40`).
+const ORE_LANE_STEP_X: u64 = 944637515351;
+const ORE_LANE_STEP_Y: u64 = 1089013738927;
+
+comptime {
+    if (ORE_LANE_STEP_X == ORE_LANE_STEP_Y)
+        @compileError("The two axes need different steps, or a lane offset only ever moves diagonally.");
+}
+
+/// Comptime `rule`: every scale, weight, and octave count below then folds into its call site,
+/// including the lattice step split inside each noise sample (see `getDualValueNoiseFixed()`).
+inline fn oreField(seed: Vec2u, x: WorldCoord, y: WorldCoord, comptime lane: u3, comptime rule: OreDispersal) f32 {
     const inv_scale = 1.0 / rule.scale;
     // fast domain warping
-    const warp = getDualValueNoise(
+    const warp = getDualValueNoiseFixed(
         seed,
-        x +% 0xa39dd8f53 * @as(u64, lane),
-        y -% 0xa39dd8f53 * @as(u64, lane),
+        x +% ORE_LANE_STEP_X * @as(u64, lane), // * before +%, this works out
+        y +% ORE_LANE_STEP_Y * @as(u64, lane),
         inv_scale * 0.4,
     );
     const warp_amt = rule.scale * rule.warp_strength;
     const warp_x: i64 = @intFromFloat((warp[0] - 0.5) * warp_amt);
     const warp_y: i64 = @intFromFloat((warp[1] - 0.5) * warp_amt);
-    const sample_x = x +% @as(u64, @bitCast(warp_x));
-    const sample_y = y +% @as(u64, @bitCast(warp_y));
+    // The warp displaces the sample by a handful of blocks, so wrapping arithmetic is all it needs:
+    // the lattice reads a displaced coordinate exactly the same way it reads an undisplaced one.
+    const sample_x = x +% @as(WorldCoord, @bitCast(@as(i128, warp_x)));
+    const sample_y = y +% @as(WorldCoord, @bitCast(@as(i128, warp_y)));
 
     var value: f32 = 0;
-    var weight: f32 = 0;
-    var amp: f32 = 1.0;
-    var freq: u64 = 1;
+    // Both the octave weight and their total are fixed by the rule, so the normalization is a constant.
+    comptime var weight: f32 = 0;
 
-    inline for (0..3) |octave| {
-        if (octave >= rule.octaves) break;
-        const n = getDualValueNoise(
+    inline for (0..rule.octaves) |octave| {
+        const freq: u64 = 1 << octave;
+        const amp: f32 = 1.0 / @as(f32, @floatFromInt(freq));
+        const n = getDualValueNoiseFixed(
             seed,
             sample_x *% freq +% octave *% 7919,
             sample_y *% freq +% octave *% 104729,
@@ -539,75 +681,75 @@ inline fn oreField(seed: Vec2u, x: u64, y: u64, lane: u3, rule: OreDispersal) f3
         const ridged = 1.0 - @abs(2.0 * n - 1.0);
         value += amp * (n * (1.0 - rule.hybrid_weight) + ridged * rule.hybrid_weight);
         weight += amp;
-        amp *= 0.5;
-        freq *%= 2;
     }
     return value / weight;
 }
 
 /// Returns a newly formed ore, if the host and depth gate permit one.
-pub fn disperseOre(host: Sprite, density: f32, x: u64, y: u64, depth: u64, seed: Vec2u) ?Sprite {
+pub fn disperseOre(host: Sprite, density: f32, x: WorldCoord, y: WorldCoord, depth: u64, seed: Vec2u) ?Sprite {
     if (!host.isStone()) return null;
 
     // fast global exit: no ore/gem rule exists outside density range [0.20, 0.90]
     if (density < 0.20 or density > 0.90) return null;
 
-    // stack-allocated lazy caches: lane noise fields (0..4) and gem rolls are computed AT MOST ONCE!
-    var rule_cache: [ORE_DISPERSALS.len]?f32 = @splat(null);
+    // The gem roll is shared by every gem rule, so it is computed AT MOST ONCE per block.
+    // The noise fields are NOT shareable: each rule warps and folds the domain with its own
+    // scale/weights, so a field is only ever read by the one rule that asked for it.
     var gem_roll_cache: ?f32 = null;
 
-    for (ORE_DISPERSALS, 0..) |rule, i| {
-        // first, do depth+host stone filters
-        if (depth < dw.startup.STARTING_ZOOM_TIMES + rule.min_depth_offset) continue;
-        if (rule.forbidden_stone != .none and host == rule.forbidden_stone) continue;
-        if (rule.required_stone != .none and host != rule.required_stone) continue;
+    // `inline for` so each rule's scale, window, and octave count are constants at its call to
+    // `oreField()`; the reciprocal, the warp amount, and the whole lattice step split then fold away.
+    inline for (ORE_DISPERSALS) |rule| {
+        // A labeled block, not `continue`: leaving an unrolled iteration early is RUNTIME control
+        // flow, which `continue` (comptime, it picks the next iteration to compile) cannot express.
+        next_rule: {
+            // first, do depth+host stone filters
+            if (depth < dw.startup.STARTING_ZOOM_TIMES + rule.min_depth_offset) break :next_rule;
+            if (rule.forbidden_stone != .none and host == rule.forbidden_stone) break :next_rule;
+            if (rule.required_stone != .none and host != rule.required_stone) break :next_rule;
 
-        // now add contextural density overrides (example extra "biome" rules)
-        var min_d = rule.min_density;
-        var max_d = rule.max_density;
-        if (rule.sprite == .gold and host == .lava_stone) min_d = 0.52;
-        if (rule.sprite == .silver and host == .blue_strange_stone) {
-            min_d = 0.18;
-            max_d = 0.20;
+            // now add contextural density overrides (example extra "biome" rules)
+            var min_d = rule.min_density;
+            var max_d = rule.max_density;
+            if (rule.sprite == .gold and host == .lava_stone) min_d = 0.52;
+            if (rule.sprite == .silver and host == .blue_strange_stone) {
+                min_d = 0.18;
+                max_d = 0.20;
+            }
+
+            if (density < min_d or density > max_d) break :next_rule;
+
+            // gem roll check (this gate also improves perf; less seed evaluations!)
+            if (rule.is_gem) {
+                const gem_roll = gem_roll_cache orelse b: {
+                    const roll = FastHash.float2d_32(seed, seeding.foldWorld(x), seeding.foldWorld(y));
+                    gem_roll_cache = roll;
+                    break :b roll;
+                };
+
+                const purple_boost: f32 = if (host == .purple_strange_stone) 1.33 else 1.0;
+                const target_odds = base_gem_odds.getF32() * rule.gem_chance_scale * purple_boost;
+                if (gem_roll > target_odds) break :next_rule;
+            }
+
+            const val = oreField(seed, x, y, rule.seed_lane, rule);
+            if (val >= rule.val_min and val <= rule.val_max) return rule.sprite;
         }
-
-        if (density < min_d or density > max_d) continue;
-
-        // gem roll check (this gate also improves perf; less seed evaluations!)
-        if (rule.is_gem) {
-            const gem_roll = gem_roll_cache orelse b: {
-                const roll = FastHash.float2d_32(seed, x, y);
-                gem_roll_cache = roll;
-                break :b roll;
-            };
-
-            const purple_boost: f32 = if (host == .purple_strange_stone) 1.33 else 1.0;
-            const target_odds = base_gem_odds.getF32() * rule.gem_chance_scale * purple_boost;
-            if (gem_roll > target_odds) continue;
-        }
-
-        // memoized field evaluation (computed AT MOST ONCE per seed_lane across all zoom levels)
-        const val = rule_cache[i] orelse b: {
-            const computed = oreField(seed, x, y, rule.seed_lane, rule);
-            rule_cache[i] = computed;
-            break :b computed;
-        };
-
-        if (val >= rule.val_min and val <= rule.val_max) return rule.sprite;
     }
 
     return null;
 }
 
 /// Applies the comptime ore palette to a base-depth stone block.
-pub fn addOresAndGems(base_data: BaseTerrainData, x: u32, y: u32) Sprite {
-    if (dw.is_debug and USE_ORE_HEATMAP) {
+pub fn addOresAndGems(base_data: TerrainData, x: u32, y: u32) Sprite {
+    if (dw.is_debug and USE_HEATMAP and USE_ORE_HEATMAP) {
         const field = oreField(memory.game.getHashSeed(.ores1), x, y, 0, ORE_DISPERSALS[0]);
         return @enumFromInt(65000 + @as(u20, @intFromFloat(field * 256.0)));
     }
+
     return disperseOre(
         base_data.sprite,
-        base_data.density,
+        base_data.ore_density,
         x,
         y,
         dw.startup.STARTING_ZOOM_TIMES,
@@ -632,6 +774,83 @@ test "ore dispersal produces deposits at base and recursive depths" {
 
     try std.testing.expect(base_count > 0);
     try std.testing.expect(deep_count > 0);
+}
+
+test "noise resolves the whole world, not a 32-bit window of it" {
+    const seed: Vec2u = .{ 0x243f6a8885a308d3, 0x13198a2e03707344 };
+    const scale = 1.0 / 7.0;
+
+    // Two points a power of two apart, at the sizes the coordinate used to be masked or truncated to.
+    // Each of these used to name the SAME lattice cell as the origin, which is what made the world
+    // repeat; a coordinate this size also no longer survives an f64 product.
+    const origin: WorldCoord = 1 << 68 | 12345;
+    for ([_]WorldCoord{ 1 << 32, 1 << 53, 1 << 64 }) |period| {
+        const here = getDualValueNoise(seed, origin, origin, scale);
+        const away = getDualValueNoise(seed, origin +% period, origin, scale);
+        try std.testing.expect(here[0] != away[0]);
+    }
+
+    // ...and the field still varies block to block out there, rather than quantizing to one value
+    // per f64 step. A run this short lands in at most a couple of cells, so it is a lower bound.
+    var distinct: usize = 0;
+    var previous: f32 = -1;
+    for (0..16) |i| {
+        const v = getDualValueNoise(seed, origin + i, origin, scale)[0];
+        if (v != previous) distinct += 1;
+        previous = v;
+    }
+    try std.testing.expect(distinct >= 8);
+}
+
+test "lattice cells stay adjacent across a fold boundary" {
+    // Crossing 2^64 is where the fold changes bands. Cells must keep sharing corners across it,
+    // or the terrain tears along a line: the corner one cell up must equal the next cell's own corner.
+    const scale = 1.0 / 4.0; // 4 blocks per cell, so a cell boundary is easy to straddle
+    const boundary: WorldCoord = @as(WorldCoord, 1) << 64;
+    for ([_]WorldCoord{ boundary - 8, boundary - 4, boundary, boundary + 4 }) |v| {
+        const here = latticeAxis(v, scale);
+        const next = latticeAxis(v + 4, scale);
+        try std.testing.expectEqual(here.corner(1), next.corner(0));
+    }
+
+    // The fraction is a real position within the cell, not a rounded one.
+    const quarter = latticeAxis(boundary + 1, scale);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), quarter.t, 1e-6);
+}
+
+test "the split lattice multiply agrees with a plain 128-bit one" {
+    // `latticeAxis()` avoids a 128-bit multiply by splitting the coordinate and the step. That is an
+    // optimization ONLY: it must reproduce the obvious implementation exactly, at every scale in use
+    // and across the whole 69-bit coordinate range, or the terrain silently changes shape.
+    const scales = [_]f32{ 1.0 / 375.0, 1.0 / 93.75, 1.0 / 21.0, 1.0 / 7.0, 1.0 / 3.0, 1.0, 2.0, MAX_INV_SCALE };
+    const limit = @as(WorldCoord, 1) << seeding.WORLD_COORD_BITS;
+
+    var state: u64 = 0x9E3779B97F4A7C15;
+    for (0..4096) |i| {
+        state = state *% 6364136223846793005 +% 1442695040888963407;
+        // Small coordinates take the fast path, the rest take the wide one, and the last few sit at
+        // the very top of the range where the high half is widest.
+        const v: WorldCoord = switch (i % 4) {
+            0 => state & 0xFFFFFFFF,
+            1 => state,
+            2 => @as(WorldCoord, state) % limit,
+            else => limit - 1 - (state & 0xFFFF),
+        };
+
+        for (scales) |scale| {
+            const step: u64 = @intFromFloat(@round(@as(f64, scale) * (1 << LATTICE_FRAC_BITS)));
+            const scaled = @as(WorldCoord, v) *% step;
+            const cell = scaled >> LATTICE_FRAC_BITS;
+
+            const axis = latticeAxis(v, scale);
+            try std.testing.expectEqual(seeding.foldWorld(cell), axis.corner(0));
+            try std.testing.expectEqual(seeding.foldWorld(cell +% 1), axis.corner(1));
+            try std.testing.expectEqual(
+                @as(f32, @floatFromInt(@as(u32, @truncate(scaled)))) * INV_POW_2_32,
+                axis.t,
+            );
+        }
+    }
 }
 
 /// Represents 3 values: `v`, `min`, and `max`.
@@ -682,24 +901,20 @@ inline fn fade(t: f32) f32 {
 /// Bypasses domain warping and multi-tap cellular distance lookups entirely.
 ///
 /// Use for: basic, boring but fast noise.
-fn getBilinearValueNoise(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) f32 {
-    const fx = @as(f64, @floatFromInt(x)) / @as(f64, cell_size);
-    const fy = @as(f64, @floatFromInt(y)) / @as(f64, cell_size);
+fn getBilinearValueNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
+    const ax = latticeAxis(x, 1.0 / cell_size);
+    const ay = latticeAxis(y, 1.0 / cell_size);
 
-    const x0_f = @floor(fx);
-    const y0_f = @floor(fy);
-    const tx: f32 = @floatCast(fx - x0_f);
-    const ty: f32 = @floatCast(fy - y0_f);
-
-    const ix0: u64 = @intFromFloat(x0_f);
-    const iy0: u64 = @intFromFloat(y0_f);
-
-    const u = fade(tx);
-    const v = fade(ty);
+    const u = fade(ax.t);
+    const v = fade(ay.t);
 
     // Vectorized 4-tap lookup
-    const vx: Vec4u = .{ ix0, ix0 +% 1, ix0, ix0 +% 1 };
-    const vy: Vec4u = .{ iy0, iy0, iy0 +% 1, iy0 +% 1 };
+    const ix0 = ax.corner(0);
+    const ix1 = ax.corner(1);
+    const iy0 = ay.corner(0);
+    const iy1 = ay.corner(1);
+    const vx: Vec4u = .{ ix0, ix1, ix0, ix1 };
+    const vy: Vec4u = .{ iy0, iy0, iy1, iy1 };
     const h = FastHash.hash2d_4x(seed_vector, vx, vy);
 
     // Fast u32 to f32 vector conversion
@@ -727,7 +942,14 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
     // comptime gate here ONLY, not in options so we don't explode FBM value calls
     if (comptime !options.use_f2_f1) {
         // Excellent for sharp branching networks and rich ore veins
-        return fbm(getPerlinNoise, seed_vector, x + (@as(u64, y) << 32), options.id, options.cell_size, 3);
+        return fbm(
+            getPerlinNoiseFixed,
+            seed_vector,
+            x,
+            y,
+            options.cell_size,
+            3,
+        );
     }
 
     const fx: f32 = @floatFromInt(x);
@@ -747,7 +969,7 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
 
     if (amp > 0) {
         inline for (0..fbm_octaves) |_| {
-            const n = getDualValueNoise(
+            const n = getDualValueNoiseTuned(
                 seed_vector,
                 x * freq,
                 y * freq,
@@ -827,25 +1049,48 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
 /// Returns two independent noise values (32-bit float) using vectorized 4-corner value noise.
 ///
 /// Use for: distorting other noise functions.
-pub fn getDualValueNoise(seed: Vec2u, x: u64, y: u64, inv_scale: f32) dw.utils.Vec2f32 {
-    const fx_raw = @as(f64, @floatFromInt(x)) * @as(f64, inv_scale);
-    const fy_raw = @as(f64, @floatFromInt(y)) * @as(f64, inv_scale);
+/// Prefer `getDualValueNoiseFixed()` whenever the scale is a constant.
+pub fn getDualValueNoise(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) dw.utils.Vec2f32 {
+    return dualValueNoise(seed, x, y, inv_scale);
+}
 
-    const x0_f = @floor(fx_raw);
-    const y0_f = @floor(fy_raw);
-    const x0: u64 = @intFromFloat(x0_f);
-    const y0: u64 = @intFromFloat(y0_f);
+/// `getDualValueNoise()` with the lattice scale fixed at compile time. Same field, same values.
+///
+/// The difference is entirely in what survives: `latticeAxis()`'s step split, its three bounds
+/// asserts (live in `ReleaseSafe`), and the reciprocal all constant-fold, and that is most of the
+/// integer work in a sample. The runtime form stays for the debug sliders, which mutate a scale live.
+pub fn getDualValueNoiseFixed(
+    seed: Vec2u,
+    x: WorldCoord,
+    y: WorldCoord,
+    comptime inv_scale: f32,
+) dw.utils.Vec2f32 {
+    return dualValueNoise(seed, x, y, inv_scale);
+}
 
-    const tx: f32 = @floatCast(fx_raw - x0_f);
-    const ty: f32 = @floatCast(fy_raw - y0_f);
+/// Dual-value noise at a scale a `TuningFloat` slider owns: a real variable in debug, a constant in
+/// every release mode. Callers must therefore pass something a release build can resolve at comptime.
+inline fn getDualValueNoiseTuned(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) dw.utils.Vec2f32 {
+    if (comptime dw.is_debug) return getDualValueNoise(seed, x, y, inv_scale);
+    return getDualValueNoiseFixed(seed, x, y, inv_scale);
+}
+
+/// Shared body of both dual-value entry points; `inline` so a comptime `inv_scale` stays comptime.
+inline fn dualValueNoise(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) dw.utils.Vec2f32 {
+    const ax = latticeAxis(x, inv_scale);
+    const ay = latticeAxis(y, inv_scale);
 
     // Use fade curves
-    const u = fade(tx);
-    const v = fade(ty);
+    const u = fade(ax.t);
+    const v = fade(ay.t);
 
     // Prepare 4 corners: (x0, y0), (x0+1, y0), (x0, y0+1), (x0+1, y0+1)
-    const vx: Vec4u = .{ x0, x0 +% 1, x0, x0 +% 1 };
-    const vy: Vec4u = .{ y0, y0, y0 +% 1, y0 +% 1 };
+    const x0 = ax.corner(0);
+    const x1 = ax.corner(1);
+    const y0 = ay.corner(0);
+    const y1 = ay.corner(1);
+    const vx: Vec4u = .{ x0, x1, x0, x1 };
+    const vy: Vec4u = .{ y0, y0, y1, y1 };
 
     // Generate 4 values all at once!
     const h_vec = FastHash.hash2d_4x(seed, vx, vy);
@@ -905,24 +1150,22 @@ const Lattice = struct {
     h: Vec4u,
 };
 
-inline fn lattice(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) Lattice {
-    const fx = @as(f64, @floatFromInt(x)) / @as(f64, cell_size);
-    const fy = @as(f64, @floatFromInt(y)) / @as(f64, cell_size);
-    const x0_f = @floor(fx);
-    const y0_f = @floor(fy);
-    const x0: u64 = @intFromFloat(x0_f);
-    const y0: u64 = @intFromFloat(y0_f);
-    const tx: f32 = @floatCast(fx - x0_f);
-    const ty: f32 = @floatCast(fy - y0_f);
-    const vx: Vec4u = .{ x0, x0 +% 1, x0, x0 +% 1 };
-    const vy: Vec4u = .{ y0, y0, y0 +% 1, y0 +% 1 };
+inline fn lattice(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) Lattice {
+    const ax = latticeAxis(x, 1.0 / cell_size);
+    const ay = latticeAxis(y, 1.0 / cell_size);
+    const x0 = ax.corner(0);
+    const x1 = ax.corner(1);
+    const y0 = ay.corner(0);
+    const y1 = ay.corner(1);
+    const vx: Vec4u = .{ x0, x1, x0, x1 };
+    const vy: Vec4u = .{ y0, y0, y1, y1 };
     return .{
         .x0 = x0,
         .y0 = y0,
-        .tx = tx,
-        .ty = ty,
-        .u = fade(tx),
-        .v = fade(ty),
+        .tx = ax.t,
+        .ty = ay.t,
+        .u = fade(ax.t),
+        .v = fade(ay.t),
         .h = FastHash.hash2d_4x(seed_vector, vx, vy),
     };
 }
@@ -931,7 +1174,24 @@ inline fn lattice(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) Lattice {
 /// removing value-noise plateaus for smooth, continuous slopes.
 ///
 /// Use for: organic, flowing hills/valleys.
-pub fn getPerlinNoise(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) f32 {
+/// Prefer `getPerlinNoiseFixed()` whenever the cell size is a constant.
+pub fn getPerlinNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
+    return perlinNoise(seed_vector, x, y, cell_size);
+}
+
+/// `getPerlinNoise()` with the cell size fixed at compile time; see `getDualValueNoiseFixed()`
+/// for what that buys. Same field, same values.
+pub fn getPerlinNoiseFixed(
+    seed_vector: Vec2u,
+    x: WorldCoord,
+    y: WorldCoord,
+    comptime cell_size: f32,
+) f32 {
+    return perlinNoise(seed_vector, x, y, cell_size);
+}
+
+/// Shared body of both Perlin entry points; `inline` so a comptime `cell_size` stays comptime.
+inline fn perlinNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
     const l = lattice(seed_vector, x, y, cell_size);
     const n00 = grad2(l.h[0], l.tx, l.ty);
     const n10 = grad2(l.h[1], l.tx - 1.0, l.ty);
@@ -1045,23 +1305,24 @@ pub fn getSimplexNoise(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) f32 {
 
 /// Generic fractal Brownian motion: stack `octaves` of any candidate noise at halving amplitude and
 /// cell size.
+///
+/// `cell_size` is comptime so each octave's own size is too, which lets `noiseFn` be a `...Fixed()`
+/// variant (hence `anytype`, since a comptime parameter cannot be spelled in a function type).
+/// Halving is exact in binary floating point, so the octave sizes are the same numbers either way.
 pub inline fn fbm(
-    comptime noiseFn: fn (Vec2u, u64, u64, f32) f32,
+    comptime noiseFn: anytype,
     seed_vector: Vec2u,
-    x: u64,
-    y: u64,
-    cell_size: f32,
+    x: WorldCoord,
+    y: WorldCoord,
+    comptime cell_size: f32,
     comptime octaves: u32,
 ) f32 {
     var sum: f32 = 0;
-    var amp: f32 = 1.0;
-    var norm: f32 = 0;
-    var cs: f32 = cell_size;
-    inline for (0..octaves) |_| {
-        sum += amp * (noiseFn(seed_vector, x, y, cs) - 0.5);
+    comptime var norm: f32 = 0;
+    inline for (0..octaves) |octave| {
+        const amp: f32 = 1.0 / @as(f32, @floatFromInt(@as(u32, 1) << octave));
+        sum += amp * (noiseFn(seed_vector, x, y, cell_size * amp) - 0.5);
         norm += amp;
-        amp *= 0.5;
-        cs *= 0.5;
     }
     return std.math.clamp(sum / norm + 0.5, 0.0, 1.0);
 }

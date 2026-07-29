@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# start by building Zig code...
-zig build -Doptimize=ReleaseSafe -Dgen-enums # TODO: set to ReleaseFast for prod
+# start by building Zig code for release...
+zig build -Dwasm-opt -Dgen-enums
 if [ $? -ne 0 ]; then
     echo "Error: Zig build failed; commit stopped."
     exit 1

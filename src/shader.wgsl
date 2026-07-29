@@ -12,10 +12,10 @@
 const TILES_PER_ROW: f32 = 16.0;
 const TILES_PER_COLUMN: f32 = 19.0;
 const STONE_START: u32 = 12u;
-const ORE_START: u32 = 38u;
-const GEM_START: u32 = 44u;
-const GEM_MASK_START: u32 = 58u;
-const WATER_START: u32 = 289u;
+const ORE_START: u32 = 40u;
+const GEM_START: u32 = 46u;
+const GEM_MASK_START: u32 = 60u;
+const WATER_START: u32 = 291u;
 // #CONSTANT REGION END#
 
 const PI = radians(180.0);
@@ -226,6 +226,34 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
     var erode_mask: u32 = 1u;
     let id = in.sprite_id /* & 65535 */;
     let is_decor = id >= DECOR_START;
+
+    // instead of doing alpha blending the wireframe opacity has been lazily chucked here, since we rarely use it
+    if scene.wireframe_opacity != 0.0 {
+        // render wireframe due to being at the edge of a block?
+        let inv_tile_scale = 1.00001 / (TILE_SIZE * scene.zoom);
+        let is_block_edge = any(in.local_uv < vec2f(inv_tile_scale)) || any(in.local_uv > vec2f(1.0 - inv_tile_scale));
+
+        if is_block_edge {
+            let mods = in.tile_coords & vec2u(15u);
+
+            // Is this pixel on the edge of a CHUNK?
+            let is_chunk_edge = any((mods == vec2u(0u)) & (in.local_uv < vec2f(inv_tile_scale))) ||
+                any((mods == vec2u(15u)) & (in.local_uv > vec2f(1.0 - inv_tile_scale)));
+
+            var wire_color = vec4f(0.0);
+            if is_chunk_edge {
+                wire_color = vec4f(1.0, 1.0, 0.0, min(1.0, scene.wireframe_opacity * 2.5));
+            } else {
+                // neat-lookin' fancy wireframe coloring
+                let rg = vec2f(mods) * 0.0625;
+                let b = 0.5 + f32(mods.x ^ mods.y) * 0.03125;
+                wire_color = vec4f(rg.x, rg.y, b, scene.wireframe_opacity);
+            }
+            return wire_color;
+        } else if erode_mask == 0u {
+            discard;
+        }
+    }
 
     if id == WATER_START || id == WATER_START + 1u {
         let has_liquid_above = (in.waterlogged & 1u) != 0u;
@@ -452,33 +480,6 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
         }
     }
 
-    var wire_color = vec4f(0.0);
-
-    if scene.wireframe_opacity != 0.0 {
-        // render wireframe due to being at the edge of a block?
-        let inv_tile_scale = 1.00001 / (TILE_SIZE * scene.zoom);
-        let is_block_edge = any(in.local_uv < vec2f(inv_tile_scale)) || any(in.local_uv > vec2f(1.0 - inv_tile_scale));
-
-        if is_block_edge {
-            let mods = in.tile_coords & vec2u(15u);
-
-            // Is this pixel on the edge of a CHUNK?
-            let is_chunk_edge = any((mods == vec2u(0u)) & (in.local_uv < vec2f(inv_tile_scale))) ||
-                                any((mods == vec2u(15u)) & (in.local_uv > vec2f(1.0 - inv_tile_scale)));
-
-            if is_chunk_edge {
-                wire_color = vec4f(1.0, 1.0, 0.0, min(1.0, scene.wireframe_opacity * 2.5));
-            } else {
-                // neat-lookin' fancy wireframe coloring
-                let rg = vec2f(mods) * 0.0625;
-                let b = 0.5 + f32(mods.x ^ mods.y) * 0.03125;
-                wire_color = vec4f(rg.x, rg.y, b, scene.wireframe_opacity);
-            }
-        } else if erode_mask == 0u {
-            discard;
-        }
-    }
-
     // Convert to oklab and nudge values with seed
     var lab = linear_srgb_to_oklab(tex_color.rgb);
     var lch = oklab_to_oklch(lab);
@@ -541,12 +542,6 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
 
         final_rgb = oklab_water(final_rgb, water_col.rgb, weight);
         final_a = mix(water_col.a, 1.0, tex_color.a);
-    }
-
-    if scene.wireframe_opacity != 0.0 {
-        // Correctly mix the wireframe dynamically depending on whether the block exists below it.
-        final_rgb = mix(final_rgb, wire_color.rgb, wire_color.a);
-        final_a = max(final_a, wire_color.a);
     }
 
     return vec4f(apply_color_management(final_rgb), final_a);
@@ -816,8 +811,19 @@ fn calculate_edge_darkening(local_uv: vec2f, edge_flags: u32, seed: u32, width_b
     ----
 */
 
+// water field is periodic over 256 chunks
+const WATER_PERIOD = 65536.0;
+// radians per cycle-unit of a wave vector
+const WATER_CYCLE = TAU / WATER_PERIOD;
+
 fn wrap_water_coords(coords: vec2f) -> vec2f {
-    return coords - floor(coords / 65536.0) * 65536.0;
+    return coords - floor(coords / WATER_PERIOD) * WATER_PERIOD;
+}
+
+// One plane wave of the field, in [0, 1]. `cycles` is the wave vector (see above, integers only)
+// and `speed` is its drift along that vector, in cycles per second.
+fn water_wave(coord: vec2f, cycles: vec2f, speed: f32, t: f32) -> f32 {
+    return sin(dot(coord, cycles) * WATER_CYCLE + t * speed * TAU) * 0.5 + 0.5;
 }
 
 // World-space pixel coordinate of this fragment (floating point, any value)
@@ -830,46 +836,66 @@ fn water_base_lch(t: f32) -> vec3f {
     let H = 3.8 + sin(t * (TAU / 3600.0)) * 0.34;
     return vec3f(0.42, 0.12, H);
 }
-fn water_effect(coord: vec2f, t: f32) -> f32 {
-    let R = 256.0; // grid repeat period
-    let L_FREQ = TAU / 3600.0; // base frequency per time loop
-    // Every multiplier below is now an exact integer multiplied by L_FREQ
-    let warp_val = sin((coord.y * 2.0) / R * TAU + t * (20.0 * L_FREQ)) * 5.5 + cos((coord.x * 3.0) / R * TAU - t * (12.0 * L_FREQ)) * 4.0;
+
+// The caustic field. Returns:
+//   .x the additive caustic brightness
+//   .y: a broad swell in [0, 1] the body uses for its lightness gradient, no extra trig
+fn water_effect(coord: vec2f, t: f32) -> vec2f {
+    // A product of two low, near-incommensurate waves: neither's own period reads as the beat's.
+    let swell = water_wave(coord, vec2f(37.0, 23.0), 0.011, t) *
+        water_wave(coord, vec2f(-29.0, 41.0), -0.008, t);
+    let swell_bias = 0.30 + 1.40 * swell;
+
+    // Coarse warp, so the streaks bend rather than run straight across the screen.
+    let warp_val = (water_wave(coord, vec2f(0.0, 512.0), 0.0056, t) - 0.5) * 11.0 +
+        (water_wave(coord, vec2f(768.0, 0.0), -0.0033, t) - 0.5) * 8.0;
 
     let world = coord + vec2f(warp_val, -warp_val);
     let world2 = coord - vec2f(warp_val, -warp_val);
 
-    // First caustic layer
-    // All layers are made to be periodic every 65536 pixels.
-    let d_a = world.x * 0.906 - world.y * 0.423;
-    let a1 = sin((d_a + t * 15.0) / (65536.0 / 1489.0) * TAU) * 0.5 + 0.5;
-    let a2 = sin((d_a * 1.15 + t * 13.0) / (65536.0 / 1638.0) * TAU) * 0.5 + 0.5;
-    let band_a = a1 * a2 * 0.24;
+    // Layer A: the long bright ribbons. Two near-parallel waves beating against each other.
+    let a1 = water_wave(world, vec2f(1349.0, -630.0), 0.341, t);
+    let a2 = water_wave(world, vec2f(1707.0, -797.0), 0.374, t);
+    let band_a = a1 * a2;
 
-    // Second layer (which crosses directions)
-    let d_b = world2.x * 0.643 - world.y * -0.766;
-    let b1 = sin((d_b * 3.2 + t * 4.0) / 32.0 * TAU) * 0.5 + 0.5;
-    let b2 = sin((d_b * 4.2 + t * 5.42) / (65536.0 / 2341.0) * TAU) * 0.5 + 0.5;
+    // Crests of A only, sharpened thru math!
+    let s2 = band_a * band_a;
+    let sparkle = s2 * s2 * s2 * 0.4;
+
+    // Layer B: fine cross-hatched ripple, riding the two warped frames against each other.
+    let d_b = vec2f(world2.x, world.y);
+    let b1 = water_wave(d_b, vec2f(4215.0, 5021.0), 0.125, t);
+    let b2 = water_wave(d_b, vec2f(6322.0, 7531.0), 0.194, t);
     let temp_b = b1 * b2;
     let band_b = temp_b * temp_b * 0.03;
 
-    let d_c = world.x * 0.906 + world2.y * 0.423;
-    let band_c = max(0.0, sin((d_c + t * 15.0) / (65536.0 / 1489.0) * TAU));
+    // Layer C: a hard-edged sheet along A's direction, squared into thin bright lines.
+    let band_c = max(0.0, water_wave(vec2f(world.x, world2.y), vec2f(1349.0, 630.0), 0.341, t) * 2.0 - 1.0);
 
-    // Warping distortion using periodic wavelengths
-    let warp_y_freq = 1043.0 * TAU / 65536.0;
-    let warp_x_freq = 834.0 * TAU / 65536.0;
-    let warp = sin(world.y * warp_y_freq + t * 0.3) * 4.0 + cos(world.x * warp_x_freq - t * 0.3) * 4.0;
+    // Layer E: A's perpendicular, coarser; inverted vs. swell_bias.
+    let e1 = water_wave(world2, vec2f(396.0, 848.0), -0.09, t);
+    let e2 = water_wave(world2, vec2f(533.0, 1142.0), 0.13, t);
+    let temp_e = e1 * e2;
+    let band_e = temp_e * temp_e * e2 * 0.30;
 
-    // Apply warp to a new diagonal direction for the curvy streak
-    let d_curvy = (world.x + warp) * 0.5 + (world.y - warp) * 0.866;
-    let c1 = sin((d_curvy + t * 1.2) / (65536.0 / 1311.0) * TAU) * 0.5 + 0.5;
-    let c2 = cos((d_curvy - t * 0.35) / (65536.0 / 1872.0) * TAU) * 0.5 + 0.5;
+    // Now a warp for the curvy streak, kept separate from the coarse one so it can be much tighter.
+    let warp = (water_wave(world, vec2f(0.0, 1043.0), 0.048, t) - 0.5) * 8.0 +
+        (water_wave(world, vec2f(834.0, 0.0), -0.048, t) - 0.5) * 8.0;
+
+    let curvy = vec2f(world.x + warp, world.y - warp);
+    let c1 = water_wave(curvy, vec2f(656.0, 1135.0), 0.024, t);
+    let c2 = water_wave(curvy, vec2f(936.0, 1621.0), -0.010, t);
     let temp_c = c1 * c2;
     let temp_c2 = temp_c * temp_c;
     let curvy_streak = temp_c2 * temp_c2 * temp_c2 * 0.3;
 
-    return band_a + band_b + band_c * band_c * 0.2 + curvy_streak;
+    let toward_a = clamp(swell_bias, 0.0, 1.0);
+    let caustic = (band_a * 0.24 + band_c * band_c * 0.2 + sparkle) * (0.45 + 0.55 * toward_a) +
+        band_e * (1.0 - toward_a) +
+        band_b +
+        curvy_streak * (0.35 + 0.65 * toward_a);
+
+    return vec2f(caustic, toward_a);
 }
 
 // Procedural effect for lighting (linear sRGB)
@@ -886,16 +912,19 @@ fn water_body_linear(in: TileOutput) -> vec4f {
 
     var lch = water_base_lch(t);
 
-    // Depth gradient that's lighter near y=0 (surface), darker going down.
-    let depth_t = clamp(world.y / 192.0, 0.0, 1.0); // 192px
-    lch.x = mix(0.52, 0.34, depth_t); // light surface
-    lch.y = mix(0.10, 0.14, depth_t);// slightly more saturated deep
+    let effect = water_effect(world, t);
+    let caustic = effect.x;
 
-    // Horizontal color band (depth striping)
-    let band_t = sin(world.y / 24.0 + t * 0.4) * 0.5 + 0.5;
+    // Broad open/deep gradient. This rides the caustic field's own swell rather than absolute world y:
+    // a raw world.y ramp only means anything within the first screens of the wrap window and steps at its boundary,
+    // whereas the swell is periodic over the same window as everything else here.
+    lch.x = mix(0.34, 0.52, effect.y); // lighter in the open water between the streak patches
+    lch.y = mix(0.14, 0.10, effect.y); // slightly more saturated in the darker stretches
+
+    // Horizontal color band (depth striping). 2731 cycles over the period holds the ~24px spacing.
+    let band_t = water_wave(world, vec2f(0.0, 2731.0), 0.064, t);
     lch.x += band_t * 0.04;
 
-    let caustic = water_effect(world, t);
     lch.x = clamp(lch.x + caustic, 0.26, 0.90);
     lch.y = clamp(lch.y + caustic * 0.10, 0.04, 0.28);
 
