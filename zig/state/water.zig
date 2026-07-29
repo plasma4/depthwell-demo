@@ -82,6 +82,9 @@ pub fn queueWaterFlags(cx: SimIndexType, cy: SimIndexType) void {
     if (cy < SIM_BUFFER_WIDTH - 1) pending_flag_chunks.set(idx + SIM_BUFFER_WIDTH);
 }
 
+/// Volume a settled cell of OPEN water comes to rest at.
+pub const RESTING_VOLUME: u4 = MAX_HP - 1;
+
 /// Helper to get the volume of a block (0 to 15 for water/waterlogged blocks, 0 otherwise).
 /// (Integer casting automatically enforces HP being within `u4` range.)
 pub inline fn getVolume(ptr: Block) u4 {
@@ -766,29 +769,33 @@ pub fn tickWater() void {
     }
 
     // Phase 4: recompute edge/waterlogged flags for every chunk touched this tick.
-    chunk_y = 0;
-    while (true) : (chunk_y += 1) {
-        var chunk_x: SimIndexType = 0;
-        while (true) : (chunk_x += 1) {
-            const chunk_idx = (@as(usize, @intCast(chunk_y)) << world.SIM_WIDTH_LOG2) | chunk_x;
-            if (!chunks_to_update_flags.isSet(chunk_idx)) {
-                if (chunk_x == SIM_BUFFER_WIDTH - 1) break;
-                continue;
-            }
-            if (SimBuffer.keys[SimBuffer.getIndex(chunk_x, @intCast(chunk_y))] == null) {
-                if (chunk_x == SIM_BUFFER_WIDTH - 1) break;
-                continue;
-            }
+    recomputeFlagsFor(&chunks_to_update_flags);
+}
 
-            const curr = getChunkPtr(chunk_x, @intCast(chunk_y));
-            const left = if (chunk_x > 0) getChunkPtr(chunk_x - 1, @intCast(chunk_y)) else null;
-            const right = if (chunk_x < SIM_BUFFER_WIDTH - 1) getChunkPtr(chunk_x + 1, @intCast(chunk_y)) else null;
-            const top = if (chunk_y > 0) getChunkPtr(chunk_x, @intCast(chunk_y - 1)) else null;
-            const bottom = if (chunk_y < SIM_BUFFER_WIDTH - 1) getChunkPtr(chunk_x, @intCast(chunk_y + 1)) else null;
+/// Recomputes water/edge flags for every resident chunk set in `chunks`.
+fn recomputeFlagsFor(chunks: *const std.StaticBitSet(SIM_BUFFER_SIZE)) void {
+    var it = chunks.iterator(.{});
+    while (it.next()) |idx| {
+        const cx: SimIndexType = @intCast(idx & (SIM_BUFFER_WIDTH - 1));
+        const cy: SimIndexType = @intCast(idx >> world.SIM_WIDTH_LOG2);
+        if (SimBuffer.keys[SimBuffer.getIndex(cx, cy)] == null) continue;
 
-            updateChunkWaterFlags(curr, left, right, top, bottom);
-            if (chunk_x == SIM_BUFFER_WIDTH - 1) break;
-        }
-        if (chunk_y == SIM_BUFFER_WIDTH - 1) break;
+        updateChunkWaterFlags(
+            getChunkPtr(cx, cy),
+            if (cx > 0) getChunkPtr(cx - 1, cy) else null,
+            if (cx < SIM_BUFFER_WIDTH - 1) getChunkPtr(cx + 1, cy) else null,
+            if (cy > 0) getChunkPtr(cx, cy - 1) else null,
+            if (cy < SIM_BUFFER_WIDTH - 1) getChunkPtr(cx, cy + 1) else null,
+        );
     }
+}
+
+/// Resolves everything `queueWaterFlags()` has queued immediately, instead of on the next tick.
+///
+/// Loading needs this: a frame can render before the first tick ever runs, and the flags a save
+/// carries may be the stale ones from between a block change and its batched recompute
+/// (see `finalizeLoad()`), which draws every queued water cell full for exactly one frame.
+pub fn flushPendingFlags() void {
+    recomputeFlagsFor(&pending_flag_chunks);
+    pending_flag_chunks = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
 }

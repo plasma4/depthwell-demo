@@ -15,6 +15,7 @@ const memory = dw.memory;
 const world = dw.world;
 const procedural = dw.procedural;
 const seeding = dw.seeding;
+const WorldCoord = seeding.WorldCoord;
 
 const Sprite = dw.Sprite;
 const Block = memory.Block;
@@ -182,17 +183,15 @@ pub const AncestorCache = struct {
 
     /// Clears cache keys and clock reference data per tier without re-allocating chunk payloads.
     pub fn clear(self: *@This()) void {
-        // small @splat()s: prevents a crash due to stack being consumed
-        // keep in mind @splat() in Debug naively uses the stack frame here!
         for (0..HOT_TIERS) |i| {
-            self.hot_keys[i] = @splat(@splat(DepthCoordinate.invalid));
-            self.hot_clock[i] = @splat(0);
-            self.hot_hand[i] = @splat(0);
+            @memset(&self.hot_keys[i], @splat(DepthCoordinate.invalid));
+            @memset(&self.hot_clock[i], 0);
+            @memset(&self.hot_hand[i], 0);
         }
         for (0..COLD_TIERS) |i| {
-            self.cold_keys[i] = @splat(@splat(DepthCoordinate.invalid));
-            self.cold_clock[i] = @splat(0);
-            self.cold_hand[i] = @splat(0);
+            @memset(&self.cold_keys[i], @splat(DepthCoordinate.invalid));
+            @memset(&self.cold_clock[i], 0);
+            @memset(&self.cold_hand[i], 0);
         }
     }
 
@@ -259,6 +258,15 @@ const SLOPE_THRESHOLD = 2 * CORNER_UNIT;
 const CELL_DENSITY_STEP = (4 * CORNER_UNIT - SLOPE_THRESHOLD) / dw.BLOCKS_PER_PARENT;
 /// How much density the erosion mask can subtract at full strength: spans 1.65 cell rows to break single-row horizontal plateau lock.
 const EROSION_DEPTH = 1.65 * CELL_DENSITY_STEP;
+/// Density a thin parent gets back as its own body, at full strength (see `carvesSlope()`).
+const BODY_BIAS = 1.25 * CORNER_UNIT;
+/// Mean corner density at which a parent gets its full `BODY_BIAS`.
+/// One solid block with nothing around it, which is as unsupported as a parent can be.
+const BODY_SUPPORT_FULL = CORNER_UNIT;
+/// Mean corner density at which the body bias is gone. Sits above a one-block-thick wall (`2 * CORNER_UNIT`)
+/// so walls still thicken a little, and below any real surface, whose slopes must stay the density field's business.
+const BODY_SUPPORT_NONE = 2.5 * CORNER_UNIT;
+
 /// Cell size of the coarsest erosion octave, in child blocks (a parent block is `BLOCKS_PER_PARENT` wide).
 const EROSION_SCALE = 16.0;
 /// Octaves of gouging. Each halves both cell size and weight, so this reaches down to `EROSION_SCALE / 4` child blocks:
@@ -288,16 +296,55 @@ const INHERITED_ORE_KEEP_CHANCE = 0.73;
 /// Total block width of the world across one dimension.
 const WORLD_BLOCKS_WIDE = @as(u32, dw.CHUNK_SIZE) << (STARTING_ZOOM_TIMES * dw.ZOOM_LOG2);
 
-/// Mask for noise coordinates to stay within floating-point precision.
-pub const NOISE_COORD_MASK: u64 = std.math.maxInt(u32);
+/// One axis of a block's absolute position at its own depth, as a full-width `WorldCoord`.
+/// Used to prevent any procedural visual cycling; there's a max of 2**69 blocks per axis at any depth.
+///
+/// `quadrant_bit` is that axis' bit of `Coordinate.quadrant`;
+/// arguments sorted from most to least significant (as if this was a `u69`).
+inline fn worldBlock(quadrant_bit: u1, chunk: u64, block: u4) WorldCoord {
+    const chunk_index = (@as(WorldCoord, quadrant_bit) << 64) | chunk;
+    return chunk_index * dw.CHUNK_SIZE + block;
+}
+
+/// Bounds (inclusive) of the core that a solid parent ALWAYS keeps at the next depth:
+/// the center `BLOCKS_PER_PARENT / 2` square of its child region, so a 2x2 out of the standard 4x4.
+///
+/// (See diagram below: `o` is optional, `R` is required; this is meant for standard dupe-able solids.)
+/// ```
+/// o o o o
+/// o R R o
+/// o R R o
+/// o o o o
+/// ```
+const CORE_MIN: u4 = dw.BLOCKS_PER_PARENT / 2 - 1;
+const CORE_MAX: u4 = dw.BLOCKS_PER_PARENT / 2;
+
+/// Whether a child cell sits in the core its parent may never lose (see `CORE_MIN`).
+inline fn isParentCore(lx: u4, ly: u4) bool {
+    return lx >= CORE_MIN and lx <= CORE_MAX and ly >= CORE_MIN and ly <= CORE_MAX;
+}
+
+/// Whether a child cell can't be carved; true if the block is the 2x2 core,
+/// OR if we want horizonta/vertical arms.
+inline fn isProtectedCell(n: [8]Block, lx: u4, ly: u4) bool {
+    const core_x = lx >= CORE_MIN and lx <= CORE_MAX;
+    const core_y = ly >= CORE_MIN and ly <= CORE_MAX;
+
+    if (core_x and core_y) return true;
+    // Neighbor 1 is above, 3 left, 4 right, 6 below (due to edge flags)
+    if (core_x) return if (ly < CORE_MIN) n[1].isSolid() else n[6].isSolid();
+    if (core_y) return if (lx < CORE_MIN) n[3].isSolid() else n[4].isSolid();
+    // The region's corners belong to the silhouette, not to the guarantee.
+    return false;
+}
 
 comptime {
-    if ((NOISE_COORD_MASK +% 1) % dw.CHUNK_SIZE != 0)
-        @compileError("The noise period must be a power-of-two minus one.");
-    // The mask must be able to take the exposed row of a face...
+    // The mask must be able to take the exposed row of a face.
     if (EROSION_DEPTH <= 0.5 * CELL_DENSITY_STEP)
         @compileError("A full erosion mask cannot even reach a face's exposed cell row.");
-    // ...and must not be able to take the row behind it, which is what holds erosion to one cell.
+    // How far past that row it reaches is free, since the core guard, not the mask, is what stops it.
+    if (dw.BLOCKS_PER_PARENT % 2 != 0)
+        @compileError("A parent's child region needs an even width for its core to sit at the center.");
     if (INHERITED_ORE_KEEP_CHANCE <= 0 or INHERITED_ORE_KEEP_CHANCE >= 1)
         @compileError("Inherited ore keep chance must be strictly between zero and one.");
 }
@@ -305,8 +352,8 @@ comptime {
 /// Determines whether a specified ore/gem deposit should remain.
 inline fn keepsInheritedOverlay(
     noise_seed: dw.utils.Vec2u,
-    wx: u64,
-    wy: u64,
+    wx: WorldCoord,
+    wy: WorldCoord,
     lx: u4,
     ly: u4,
 ) bool {
@@ -324,7 +371,7 @@ inline fn keepsInheritedOverlay(
     //     if (lx == anchor_x and ly == anchor_y) return true;
     // }
 
-    const coherent_roll = procedural.getDualValueNoise(
+    const coherent_roll = procedural.getDualValueNoiseFixed(
         noise_seed,
         wx,
         wy,
@@ -335,14 +382,14 @@ inline fn keepsInheritedOverlay(
 }
 
 /// Computes a continuous terrain erosion factor in [0, 1] using multi-octave ridged and undulating noise.
-fn erosionMask(noise_seed: dw.utils.Vec2u, wx: u64, wy: u64) f32 {
+fn erosionMask(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord) f32 {
     // Value noise, NOT a folded gradient field.
     var gouges: f32 = 0;
     var weight: f32 = 0;
     inline for (0..EROSION_OCTAVES) |octave| {
         const step: f32 = @floatFromInt(@as(u32, 1) << octave);
         const shift = @as(u64, octave) * 0x40383698ed; // large prime-y num
-        const v = procedural.getDualValueNoise(
+        const v = procedural.getDualValueNoiseFixed(
             noise_seed,
             wx +% shift,
             wy +% shift,
@@ -356,7 +403,7 @@ fn erosionMask(noise_seed: dw.utils.Vec2u, wx: u64, wy: u64) f32 {
     }
 
     // The coarse octave's second lane is the broad swell, and comes free with the call above.
-    const undulation = procedural.getDualValueNoise(
+    const undulation = procedural.getDualValueNoiseFixed(
         noise_seed,
         wx,
         wy,
@@ -385,8 +432,11 @@ fn cornerDensities(parent_block: Block, n: [8]Block) @Vector(4, f32) {
     }) * @as(@Vector(4, f32), @splat(CORNER_UNIT));
 }
 
-/// Determines whether terrain erosion carves away a child cell based on bilinear corner density and erosion noise.
-fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx: u64, wy: u64, lx: u4, ly: u4) bool {
+/// If true, a block is deleted based on bilinear corner density and erosion noise.
+fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord, lx: u4, ly: u4) bool {
+    // The core and its bridges outrank every density and erosion term below; see `CORE_MIN`.
+    if (isProtectedCell(n, lx, ly)) return false;
+
     var buried = true;
     for (n) |b| buried = buried and b.isSolid();
     if (buried) return false;
@@ -398,13 +448,30 @@ fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx:
     const warp_offset_x = (warp[0] - 0.5) * 1.8;
     const warp_offset_y = (warp[1] - 0.5) * 1.8;
 
-    const u = std.math.clamp((2.0 * @as(f32, @floatFromInt(lx)) + 1.0 + warp_offset_x) / 8.0, 0.0, 1.0);
-    const v = std.math.clamp((2.0 * @as(f32, @floatFromInt(ly)) + 1.0 + warp_offset_y) / 8.0, 0.0, 1.0);
+    const u = std.math.clamp(
+        (2.0 * @as(f32, @floatFromInt(lx)) + 1.0 + warp_offset_x) / 8.0,
+        0.0,
+        1.0,
+    );
+    const v = std.math.clamp(
+        (2.0 * @as(f32, @floatFromInt(ly)) + 1.0 + warp_offset_y) / 8.0,
+        0.0,
+        1.0,
+    );
     const weights: @Vector(4, f32) = .{ (1 - u) * (1 - v), u * (1 - v), (1 - u) * v, u * v };
 
     // Continuous noise jitter breaks discrete corner density steps (16, 32, 48)
-    const jitter = (procedural.getDualValueNoise(noise_seed, wx, wy, 1.0 / 7.0)[0] - 0.5) * (0.8 * CORNER_UNIT);
-    const density = @reduce(.Add, corners * weights) + jitter;
+    const jitter = (procedural.getDualValueNoiseFixed(noise_seed, wx, wy, 1.0 / 7.0)[0] - 0.5) * (0.8 * CORNER_UNIT);
+
+    // horizontal/vertical groups of blocks on their own look lonely so we give them "supports" if you will
+    const support = @reduce(.Add, corners) * 0.25;
+    const body = std.math.clamp(
+        (BODY_SUPPORT_NONE - support) / (BODY_SUPPORT_NONE - BODY_SUPPORT_FULL),
+        0.0,
+        1.0,
+    );
+
+    const density = @reduce(.Add, corners * weights) + jitter + BODY_BIAS * body;
 
     // Protect deep parent interiors based on continuous density field
     if (density >= 3.5 * CORNER_UNIT) return false;
@@ -413,10 +480,20 @@ fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx:
 }
 
 /// Generates a 2D material displacement vector combining coarse directional drift and fine creased noise.
-fn warpField(noise_seed: dw.utils.Vec2u, wx: u64, wy: u64) dw.utils.Vec2f32 {
+fn warpField(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord) dw.utils.Vec2f32 {
     const half: dw.utils.Vec2f32 = @splat(0.5);
-    const coarse = procedural.getDualValueNoise(noise_seed, wx, wy, 1.0 / MATERIAL_WARP_SCALE);
-    const fine = procedural.getDualValueNoise(noise_seed, wx, wy, MATERIAL_WARP_LACUNARITY / MATERIAL_WARP_SCALE);
+    const coarse = procedural.getDualValueNoiseFixed(
+        noise_seed,
+        wx,
+        wy,
+        1.0 / MATERIAL_WARP_SCALE,
+    );
+    const fine = procedural.getDualValueNoiseFixed(
+        noise_seed,
+        wx,
+        wy,
+        MATERIAL_WARP_LACUNARITY / MATERIAL_WARP_SCALE,
+    );
 
     const creased = @abs(fine - half) * @as(dw.utils.Vec2f32, @splat(2));
     return coarse * @as(dw.utils.Vec2f32, @splat(1 - MATERIAL_CREASE_WEIGHT)) +
@@ -438,8 +515,71 @@ fn warpedMaterial(parent_block: Block, n: [8]Block, warp: dw.utils.Vec2f32, lx: 
     const raw = (oy + 1) * 3 + (ox + 1);
     const source = n[@intCast(raw - @intFromBool(raw > 4))];
 
-    // `isFoundation()` also rejects edge stone, which must never bleed inward.
+    // isFoundation() also rejects edge stone, which must never bleed inward!
     return if (source.isFoundation()) source else parent_block;
+}
+
+// for whether the portal is at the left or right
+const PORTAL_COLUMN_LEFT: u4 = dw.BLOCKS_PER_PARENT / 2 - 1;
+const PORTAL_COLUMN_RIGHT: u4 = dw.BLOCKS_PER_PARENT / 2;
+
+comptime {
+    if (PORTAL_COLUMN_RIGHT != PORTAL_COLUMN_LEFT + 1)
+        @compileError("The portal's two columns must be adjacent, since they are one 2x1 landing area.");
+    if (dw.BLOCKS_PER_PARENT < 4) @compileError("A portal's child region needs a center column pair and a row to stand on.");
+}
+
+/// One child of a `.portal`/`.invportal` parent. These "de-duplicate" into one instance instead of a 4x4.
+/// TODO: DRY this logic to instead let you arbitrarily dedupe children (such as mushrooms/some decor).
+fn portalChild(
+    parent_sprite: Sprite,
+    noise_seed: dw.utils.Vec2u,
+    wx: WorldCoord,
+    wy: WorldCoord,
+    lx: u4,
+    ly: u4,
+    seed: u64,
+    inherited_water: u4,
+) memory.BlockSpec {
+    const row: u4 = if (parent_sprite == .invportal) 0 else dw.BLOCKS_PER_PARENT - 1;
+    if (ly != row) return .{};
+
+    // Hashed on the PARENT's world block, so every cell of the region agrees on the answer.
+    // One bit of a finalized hash is an even split, which is exactly the 50/50 alignment wanted here.
+    const parent_hash = seeding.FastHash.hash2dWorld(
+        noise_seed,
+        wx / dw.BLOCKS_PER_PARENT,
+        wy / dw.BLOCKS_PER_PARENT,
+    );
+    const column: u4 = if (parent_hash & 1 == 0) PORTAL_COLUMN_LEFT else PORTAL_COLUMN_RIGHT;
+    if (lx != column) return .{};
+
+    return .{ .id = parent_sprite, .seed = seed, .water_volume = inherited_water };
+}
+
+/// A liquid parent's level as seen by the child at row `ly` of its region.
+/// For example, a block of water at HP = 11 would turn into the following HP water values at D+1:
+/// ```
+/// 0 0 0 0
+/// 3 3 3 3
+/// 4 4 4 4
+/// 4 4 4 4
+/// ```
+inline fn inheritedLiquidVolume(parent_volume: u4, ly: u4) u4 {
+    if (parent_volume >= dw.water.RESTING_VOLUME) return memory.Block.MAX_HP;
+
+    const max: u32 = memory.Block.MAX_HP;
+    // height of the surface above the region's floor, in the same units, scaled to the region
+    const level: u32 = @as(u32, parent_volume) * dw.BLOCKS_PER_PARENT;
+    const rows_below: u32 = dw.BLOCKS_PER_PARENT - 1 - ly; // full rows of this column beneath the cell
+    return @intCast(@min(max, level -| rows_below * max));
+}
+
+/// Whether this parent block is the surface a portal is anchored to:
+/// the floor directly under a `.portal`, or the ceiling directly over an `.invportal`.
+/// Neighbors are row-major with the center removed, so index 1 is above and index 6 below.
+inline fn anchorsPortal(parent_neighbors: [8]Block) bool {
+    return parent_neighbors[1].id == .portal or parent_neighbors[6].id == .invportal;
 }
 
 /// Evaluates child block evolution from its parent block and 8 parent neighbors.
@@ -464,10 +604,7 @@ pub fn applyAncestorLogic(
     if (parent_sprite == .edge_stone)
         return .{ .id = parent_sprite, .seed = noise_hash_2 };
 
-    // A submerged waterloggable parent must stay submerged in its children. Generating them dry leaves the
-    // pool out of equilibrium, so the sim floods them on the chunk's first tick and writes a modification
-    // entry for terrain the player never touched. On a waterloggable block, `hp` IS its water volume.
-    // (Liquids need no propagation: `BlockSpec.compile()` already fills a liquid id to `MAX_HP`.)
+    // A submerged waterloggable parent must stay submerged in its children!
     const inherited_water: u4 = if (parent_sprite.isWaterloggable()) parent_block.hp else 0;
 
     // Inherit plant still!
@@ -475,33 +612,56 @@ pub fn applyAncestorLogic(
         return .{ .id = .spiralvine, .seed = noise_hash_2, .water_volume = inherited_water };
 
     if (parent_sprite == .mushroom) {
-        // Only make specific sub-blocks of a mushroom parent become big mushroom!
+        // Only make specific sub-blocks of a mushroom parent become big mushrooms!
+        // TODO: DRY here (maybe similar to portal where there's a comptime odds list)
         return if ((bx % 4 == 1 or bx % 4 == 2) and by % 4 == 3)
             .{ .id = .big_mushroom, .seed = noise_hash_2, .water_volume = inherited_water }
         else
             .{}; // bypass edges logic too
     }
 
-    // Fallback for all other non-foundation blocks (decorations, chests, furnaces, liquids, etc.)
+    const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
+    const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
+    const quadrant_seed = world.quad_cache.getQuadrantSeed(@intCast(key.quadrant), key.depth);
+    const noise_seed: dw.utils.Vec2u = .{
+        seeding.NoiseMix.lane(quadrant_seed.value[0], key.depth),
+        seeding.NoiseMix.lane(quadrant_seed.value[1], ~key.depth),
+    };
+    const wx = worldBlock(@intCast(key.quadrant % 2), key.suffix[0], bx);
+    const wy = worldBlock(@intCast(key.quadrant / 2), key.suffix[1], by);
+
+    if (parent_sprite == .portal or parent_sprite == .invportal) {
+        return portalChild(parent_sprite, noise_seed, wx, wy, lx, ly, noise_hash_2, inherited_water);
+    }
+
+    if (parent_sprite.isLiquid()) {
+        // split the water
+        if (parent_neighbors[1].id.isLiquid()) {
+            return .{
+                .id = parent_sprite.evolvesTo(),
+                .seed = noise_hash_2,
+                .water_volume = memory.Block.MAX_HP,
+            };
+        }
+
+        const volume = inheritedLiquidVolume(parent_block.hp, ly);
+        if (volume == 0) return .{};
+        return .{ .id = parent_sprite.evolvesTo(), .seed = noise_hash_2, .water_volume = volume };
+    }
+
+    // fallback for all other non-foundation blocks (decorations, chests, furnaces, liquids, etc.)
     if (!parent_sprite.isFoundation()) {
         return .{ .id = parent_sprite.evolvesTo(), .seed = noise_hash_2, .water_volume = inherited_water };
     }
 
     // Foundations from here on: only they carry a surface for the carve to shape.
     // Nothing below may turn air into a solid, since the player could be standing in it.
-    const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
-    const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
-
-    // Every noise field below reads global child coordinates under one quadrant-wide seed,
-    // so chunk identity never enters and the fields line up across chunk borders.
-    // The depth is folded in to stop a parent's field from repeating verbatim in the children drawn on top of it.
-    const quadrant_seed = world.quad_cache.getQuadrantSeed(@intCast(key.quadrant), key.depth);
-    const noise_seed: dw.utils.Vec2u = .{ quadrant_seed.value[0] ^ key.depth, quadrant_seed.value[1] };
-    const wx = ((@as(u64, key.suffix[0]) *% dw.CHUNK_SIZE) +% bx) & NOISE_COORD_MASK;
-    const wy = ((@as(u64, key.suffix[1]) *% dw.CHUNK_SIZE) +% by) & NOISE_COORD_MASK;
 
     // Geometry FIRST!
-    if (carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
+    // A portal's anchor is the one surface the carve may not touch: a descent lands its player standing on
+    // the floor of the portal block's child region, and eroding that floor drops them straight through it.
+    if (!anchorsPortal(parent_neighbors) and
+        carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
 
     // Now, resolve material domain warping for solid cells.
     const warp = warpField(noise_seed, wx, wy);
@@ -511,7 +671,15 @@ pub fn applyAncestorLogic(
     const is_overlay = source.id.isOverlay() or parent_sprite.isOverlay();
     if (is_overlay) {
         const overlay_id = if (source.id.isOverlay()) source.id else parent_sprite;
-        const base_id = if (source.id.isOverlay()) source.base_id else parent_block.base_id;
+
+        // fall back to the base material
+        const raw_base = if (source.id.isOverlay()) source.base_id else parent_block.base_id;
+        const base_id: Sprite = if (raw_base != .none)
+            raw_base
+        else if (!parent_sprite.isOverlay())
+            parent_sprite
+        else
+            .stone;
 
         if (!keepsInheritedOverlay(noise_seed, wx, wy, lx, ly)) {
             return .{ .id = base_id, .seed = noise_hash_2, .water_volume = inherited_water };
@@ -527,13 +695,20 @@ pub fn applyAncestorLogic(
     var evolved_sprite: Sprite = source.id.evolvesTo();
 
     if (source.id.isStone()) {
-        const ore_density = procedural.getDualValueNoise(
+        const ore_density = procedural.getDualValueNoiseFixed(
             noise_seed,
             wx,
             wy,
             1.0 / 23.0,
         )[0];
-        if (procedural.disperseOre(source.id, ore_density, wx, wy, key.depth, noise_seed)) |ore| {
+        if (procedural.disperseOre(
+            source.id,
+            ore_density,
+            wx,
+            wy,
+            key.depth,
+            noise_seed,
+        )) |ore| {
             evolved_sprite = ore;
         }
     }
@@ -554,26 +729,24 @@ pub fn applyAncestorLogic(
 /// Accesses and potentially modifies `ancestor_cache`.
 pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
     const target_depth = key.depth;
-    if (target_depth == STARTING_ZOOM_TIMES) {
-        const block_idx = (@as(usize, by) << dw.CHUNK_SIZE_LOG2) | bx;
+    const block_idx = (@as(usize, by) << dw.CHUNK_SIZE_LOG2) | bx;
 
-        // A cache hit is already materialized (mods overlaid by `materializeChunk()`), so no separate
-        // `mod_store` lookup is needed: a miss replays the edits as part of generating the slot.
+    if (target_depth == memory.game.depth) {
+        // Current depth is SimBuffer's job.
+        if (world.getCachedChunk(key)) |chunk| return chunk.blocks[block_idx];
+    } else {
+        // isHorizonDepth() is false at the base depth, so the base branch below still owns it.
+        if (isHorizonDepth(target_depth)) return world.getBlockAt(key.asCoord(), bx, by, target_depth);
+        // Cache hit; no need to check mod_store or elsewhere.
         if (ancestor_cache.get(key)) |cached| return cached.blocks[block_idx];
+    }
 
+    // the base depth has no parent to inherit from, so just materialize
+    if (target_depth == STARTING_ZOOM_TIMES) {
         const slot = ancestor_cache.allocateSlot(key);
         world.materializeChunk(slot, key);
         return slot.blocks[block_idx];
     }
-
-    if (isHorizonDepth(target_depth)) {
-        return world.getBlockAt(key.asCoord(), bx, by, target_depth);
-    }
-
-    const block_idx = (@as(usize, by) << dw.CHUNK_SIZE_LOG2) | bx;
-
-    // A cache hit is already materialized (mods overlaid).
-    if (ancestor_cache.get(key)) |cached| return cached.blocks[block_idx];
 
     const p = getParentInfo(key, bx, by);
     const parent_block = getInheritedMaterial(p.coord.asDepthCoordinate(target_depth - 1), p.bx, p.by);
@@ -703,6 +876,44 @@ fn carvesAnywhere(parent_block: Block, n: [8]Block, lx: u4, ly: u4) bool {
     return false;
 }
 
+test "liquid refinement keeps the surface level and settles downward" {
+    const max: u32 = memory.Block.MAX_HP;
+
+    // A parent two thirds full puts its surface two thirds up the region, not at its ceiling.
+    try testing.expectEqual(@as(u4, 0), inheritedLiquidVolume(11, 0));
+    try testing.expectEqual(@as(u4, 14), inheritedLiquidVolume(11, 1));
+    try testing.expectEqual(@as(u4, 15), inheritedLiquidVolume(11, 2));
+    try testing.expectEqual(@as(u4, 15), inheritedLiquidVolume(11, 3));
+
+    // A SETTLED parent is full water even though it sits below MAX_HP, so it must refine to solid water.
+    // Otherwise the top row empties, and that empty row compounds one depth at a time.
+    for (dw.water.RESTING_VOLUME..max + 1) |v| {
+        for (0..dw.BLOCKS_PER_PARENT) |ly| {
+            try testing.expectEqual(
+                @as(u4, memory.Block.MAX_HP),
+                inheritedLiquidVolume(@intCast(v), @intCast(ly)),
+            );
+        }
+    }
+
+    for (0..dw.water.RESTING_VOLUME) |v| {
+        const parent: u4 = @intCast(v);
+        var total: u32 = 0;
+        var previous: u4 = 0;
+        for (0..dw.BLOCKS_PER_PARENT) |ly| {
+            // ly counts DOWN the region, so volume may only grow:
+            // a column that is fuller higher up would fall the instant the sim ran.
+            const volume = inheritedLiquidVolume(parent, @intCast(ly));
+            try testing.expect(volume >= previous);
+            previous = volume;
+            total += volume;
+        }
+
+        // verify correct new water amount
+        try testing.expectEqual(@as(u32, parent) * dw.BLOCKS_PER_PARENT, total);
+    }
+}
+
 test "slope carve: a fully enclosed block is never touched" {
     const all_solid: [3]bool = @splat(true);
     const buried = testNeighborhood(.{all_solid} ** 3, 1000);
@@ -713,11 +924,73 @@ test "slope carve: a fully enclosed block is never touched" {
     }
 }
 
+test "slope carve: a parent always keeps its core, and only its core is unconditional" {
+    // The worst case there is: a lone block with nothing solid around it,
+    // so every corner of its region reads one solid neighbor and the density field wants the whole thing gone.
+    const parent: Block = .makeBasicBlock(.stone, 11);
+    const alone: [8]Block = @splat(.empty);
+
+    var carved_outside = false;
+    for (0..dw.BLOCKS_PER_PARENT) |ly| {
+        for (0..dw.BLOCKS_PER_PARENT) |lx| {
+            const carves = carvesAnywhere(parent, alone, @intCast(lx), @intCast(ly));
+            if (isParentCore(@intCast(lx), @intCast(ly))) {
+                // A descent onto this block has to have something to land on.
+                try testing.expect(!carves);
+            } else if (carves) carved_outside = true;
+        }
+    }
+
+    // ...and the guard has to be a floor, not a blanket: the rest of the region must still erode,
+    // or every block in the world squares off into its full 4x4 and the slopes disappear.
+    try testing.expect(carved_outside);
+}
+
+test "slope carve: solid neighbors stay joined across the border they share" {
+    // Verify that line of blocks look joined together at D+1.
+    const parent: Block = .makeBasicBlock(.stone, 12345);
+    const solid: Block = .makeBasicBlock(.stone, 56789);
+
+    // .{ neighbor index, its opposite, whether the pair meets along x }
+    const pairs = .{
+        .{ 4, 3, true }, // east / west
+        .{ 3, 4, true },
+        .{ 6, 1, false }, // south / north
+        .{ 1, 6, false },
+    };
+
+    inline for (pairs) |pair| {
+        var n: [8]Block = @splat(.empty);
+        n[pair[0]] = solid;
+
+        // the border this parent shares with that neighbor: the far edge on the meeting axis
+        const near_edge = pair[0] == 3 or pair[0] == 1;
+        const edge: u4 = if (near_edge) 0 else dw.BLOCKS_PER_PARENT - 1;
+
+        var joined: usize = 0;
+        for (CORE_MIN..CORE_MAX + 1) |along| {
+            const lx: u4 = if (pair[2]) edge else @intCast(along);
+            const ly: u4 = if (pair[2]) @intCast(along) else edge;
+            try testing.expect(!carvesAnywhere(parent, n, lx, ly));
+            joined += 1;
+        }
+        // both parents contribute this many cells, so the join is as thick as the core itself
+        try testing.expectEqual(@as(usize, dw.BLOCKS_PER_PARENT / 2), joined);
+
+        // the opposite border has no neighbor to reach, so it stays part of the erodible silhouette
+        try testing.expect(!isProtectedCell(
+            n,
+            if (pair[2]) (if (near_edge) dw.BLOCKS_PER_PARENT - 1 else 0) else CORE_MIN,
+            if (pair[2]) CORE_MIN else (if (near_edge) dw.BLOCKS_PER_PARENT - 1 else 0),
+        ));
+    }
+}
+
 test "erosion mask: centered on break-even, and spread wide enough to commit" {
     // GOUGE_MEAN is measured from the noise, so it has to be pinned here: if the mask drifts off center it erodes uniformly,
     // which is visually identical to not eroding at all. The spread matters just as much,
     // since a mask hugging its midpoint frays every cell equally.
-    const seed: dw.utils.Vec2u = .{ 0x243f6a8885a308d3, 0x13198a2e03707344 };
+    const seed: dw.utils.Vec2u = .{ 2345623456, 9090909090 };
     var sum: f64 = 0;
     var sum_sq: f64 = 0;
     const side = 200;
@@ -767,8 +1040,8 @@ test "slope carve: neighboring parents agree on the corners they share" {
         right_map[y] = map[y][1..4].*;
     }
 
-    const left = testNeighborhood(left_map, 500);
-    const right = testNeighborhood(right_map, 501);
+    const left = testNeighborhood(left_map, 44444);
+    const right = testNeighborhood(right_map, 55555);
     const left_corners = cornerDensities(left[0], left[1]);
     const right_corners = cornerDensities(right[0], right[1]);
 
@@ -779,7 +1052,10 @@ test "slope carve: neighboring parents agree on the corners they share" {
 }
 
 test "material warp: a cell keeps its own material unless the warp reaches a neighbor" {
-    const grid = testNeighborhood(.{@as([3]bool, @splat(true))} ** 3, 3);
+    const grid = testNeighborhood(
+        .{@as([3]bool, @splat(true))} ** 3,
+        3,
+    );
     var neighbors = grid[1];
     for (&neighbors) |*b| b.* = .makeBasicBlock(.iron, 0);
 
@@ -787,13 +1063,25 @@ test "material warp: a cell keeps its own material unless the warp reaches a nei
     const centered: dw.utils.Vec2f32 = .{ 0.5, 0.5 };
     for (0..4) |ly| {
         for (0..4) |lx| {
-            const source = warpedMaterial(grid[0], neighbors, centered, @intCast(lx), @intCast(ly));
+            const source = warpedMaterial(
+                grid[0],
+                neighbors,
+                centered,
+                @intCast(lx),
+                @intCast(ly),
+            );
             try testing.expectEqual(grid[0].id, source.id);
         }
     }
 
     // Directionally warped left: near cells cross into the neighbor, far cells remain in the parent.
     const pulled: dw.utils.Vec2f32 = .{ 0.25, 0.5 };
-    try testing.expectEqual(Sprite.iron, warpedMaterial(grid[0], neighbors, pulled, 0, 1).id);
-    try testing.expectEqual(grid[0].id, warpedMaterial(grid[0], neighbors, pulled, 3, 1).id);
+    try testing.expectEqual(
+        Sprite.iron,
+        warpedMaterial(grid[0], neighbors, pulled, 0, 1).id,
+    );
+    try testing.expectEqual(
+        grid[0].id,
+        warpedMaterial(grid[0], neighbors, pulled, 3, 1).id,
+    );
 }

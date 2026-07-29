@@ -314,6 +314,20 @@ comptime {
                 logger.err(@src(), "Edge flag and sprite validity check FAILED (see logged mismatches above).", .{});
         }
 
+        /// Checks that every chunk held live, in the `SimBuffer` or in `chunk_cache` behind it,
+        /// still equals what a rebuild from `mod_store` would produce.
+        pub export fn validateSimPersistence() void {
+            if (world.SimBuffer.validateAgainstMaterialization())
+                logger.log(@src(), "Every resident SimBuffer chunk matches its materialization.", .{})
+            else
+                logger.err(@src(), "SimBuffer persistence check FAILED (see logged divergences above).", .{});
+
+            if (world.chunk_cache.validateAgainstMaterialization())
+                logger.log(@src(), "Every cached chunk outside the SimBuffer matches its materialization.", .{})
+            else
+                logger.err(@src(), "ChunkCache persistence check FAILED (see logged divergences above).", .{});
+        }
+
         pub export fn logInventory() void {
             inventory.logInventory();
         }

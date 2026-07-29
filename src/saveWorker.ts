@@ -1,11 +1,13 @@
 "use strict";
 /**
  * TL;DR: this worker attempts to force a synchronous save on tab close/hide with verification.
- * Dedicated worker that owns a permanently open synchronous OPFS handle to the emergency export slot, run on `pagehide`/`visibilitychange`.
+ * Dedicated worker that owns a permanently open synchronous OPFS handle to the emergency export slot,
+ * run on `pagehide`/`visibilitychange`.
  *
  * `FileSystemSyncAccessHandle` is worker-only, but it is the one storage API whose writes need no further event-loop turns:
  * - once a message arrives, truncate+write+flush complete synchronously
- * - a save transferred during `pagehide` survives even though the page and worker are forced to shut down in a short time window
+ * - a save transferred during `pagehide` survives
+ *   (even though the page and worker are forced to shut down in a short time window)
  *
  * A torn write fails BLAKE3 validation and the loader falls back to `MAIN`/`BAK`
  * (this way we can easily verify validity if a device crash occurs or similar)!
@@ -19,8 +21,11 @@ interface FileSystemSyncAccessHandle {
     close(): void;
 }
 
-// The handle is acquired once at startup and held for the whole session and the lock forces the main thread to read the slot through this worker as well.
-// The slot is cleared after every committed normal save, so a non-empty slot is always newer than the committed `MAIN` save.
+// The handle is acquired once at startup and held for the whole session,
+// and the lock forces the main thread to read the slot through this worker as well.
+
+// The slot is cleared after every committed normal save,
+// so a non-empty slot is always newer than the committed `MAIN` save.
 declare global {
     interface FileSystemFileHandle {
         createSyncAccessHandle(): Promise<FileSystemSyncAccessHandle>;

@@ -6,8 +6,7 @@ const SAVE_DIR = "saves";
 const MAIN = "world.dw";
 const BAK = "world.bak";
 
-// Player-facing description per `saveLastImportError()` code. Mirrors `setImportError()`
-// in `zig/state/save.zig`; keep the two in sync when a `SaveError` is added.
+// Player-facing description per `saveLastImportError()` code. Mirrors `setImportError()` in `zig/state/save.zig`.
 const IMPORT_ERROR_LABELS: Record<number, string> = {
     1: "the save was incomplete (Truncated)",
     2: "the file isn't a Depthwell save (BadMagic)",
@@ -473,12 +472,15 @@ export class SaveManager {
      */
     private reportImportFailure(): void {
         const code = this.engine.exports.saveLastImportError();
-        const label = IMPORT_ERROR_LABELS[code] ?? "an unknown error";
-        console.warn(`Save import failed because ${label}`);
+        if (code != 0) {
+            // code 0 is garbage
+            const label = IMPORT_ERROR_LABELS[code] ?? "an unknown error";
+            console.warn(`Save import failed because ${label}`);
+            alert(
+                `Loading the save failed: ${label}. Sorry about that :(\nResetting and starting a new game.`,
+            );
+        }
         this.engine.start();
-        alert(
-            `Loading the save failed: ${label}. Sorry about that :(\nResetting and starting a new game.`,
-        );
     }
 
     /**

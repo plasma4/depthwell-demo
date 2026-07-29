@@ -19,7 +19,7 @@ pub const UNMINEABLE_STRENGTH: u64 = std.math.maxInt(u64);
 /// Index where stone-like sprites begin.
 pub const STONE_START = 12;
 /// Index where stone-like sprites end.
-const STONE_END = STONE_START + 16;
+const STONE_END = STONE_START + 18;
 
 /// Index where smelted bar sprites begin.
 const BAR_START = STONE_END + 4;
@@ -56,7 +56,7 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 290) {
+    if (max_sprite_value != 292) {
         var buf: [64]u8 = undefined;
         @compileError("Max sprite value of " ++
             (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
@@ -96,6 +96,8 @@ pub const Sprite = enum(u16) {
     mossy_stone,
     seagreen_stone,
     green_stone,
+    lime_stone,
+    gray_stone,
     ancient_stone,
     sulfuric_stone,
     basalt,

@@ -191,7 +191,7 @@ pub fn drawChunkPreview() void {
     const bx_idx = memory.game.getBlockXInChunk();
     const by_idx = memory.game.getBlockYInChunk();
     const deeper_preview_x = preview_x_origin + background_margin + 18.5 * tile_size;
-    if (dw.isDebug() and !dw.procedural.USE_BASE_HEATMAP and !dw.procedural.USE_ORE_HEATMAP and depth > start_zoom) {
+    if (dw.is_debug and !dw.procedural.USE_HEATMAP and depth > start_zoom) {
         // Draw background for D-1 (teal background)
         bg.position[0] = deeper_preview_x + tile_size * 2.5;
         bg.position[1] = preview_y_origin + tile_size * 2.5;

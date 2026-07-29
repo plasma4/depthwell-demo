@@ -526,7 +526,7 @@ fn testSegmentedList(comptime prealloc: usize) !void {
             control[@as(usize, @intCast(i))] = i + 1;
         }
 
-        @memset(dest[0..], 0); // (use @splat() when performance matters with non-0)
+        @memset(dest[0..], 0);
         list.writeToSlice(dest[0..], 0);
         try testing.expect(mem.eql(i32, control[0..], dest[0..]));
 

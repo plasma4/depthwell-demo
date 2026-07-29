@@ -23,9 +23,10 @@ pub const MAX_LIGHT: u8 = 255;
 /// Min baseline brightness for unlit cells.
 pub const AMBIENT_LIGHT: u8 = 0;
 /// Debug ambient light brightness if the debug boolean is enabled.
-pub const AMBIENT_LIGHT_DEBUG: u8 = 255;
+pub const AMBIENT_LIGHT_DEBUG: u8 = 192;
 
-pub var DEBUG_LIGHT = false;
+/// Determines whether light should be global.
+pub var IS_LIGHT_GLOBAL = false;
 
 // Light strength values for various sources:
 pub var PLAYER_LIGHT: u16 = 300;
@@ -92,8 +93,8 @@ var alloc = arena.allocator();
 /// Called whenever `applyLighting()` is called to reset allocator.
 fn resetArena() void {
     if (!arena.reset(.retain_capacity)) memory.oom();
-    buckets_orange = @splat(.empty);
-    buckets_white = @splat(.empty);
+    @memset(&buckets_orange, .empty);
+    @memset(&buckets_white, .empty);
 
     cost_buffer = std.array_list.Aligned(u8, .@"16").initCapacity(alloc, 2048) catch memory.oom();
     orange_buffer = std.array_list.Aligned(u16, .@"16").initCapacity(alloc, 2048) catch memory.oom();
@@ -140,7 +141,11 @@ fn maxAirReachBlocks() comptime_int {
 }
 
 /// Buffer padding margin (in chunks) to capture off-screen light bleed.
-pub const CHUNK_MARGIN: u32 = @max(1, std.math.divCeil(u32, maxAirReachBlocks(), dw.CHUNK_SIZE) catch unreachable);
+pub const CHUNK_MARGIN: u32 = @max(1, std.math.divCeil(
+    u32,
+    maxAirReachBlocks(),
+    dw.CHUNK_SIZE,
+) catch unreachable);
 
 /// Precomputed orthogonal step cost per cell (u8 keeps the flood's neighbor reads cache-friendly).
 var cost_buffer: std.array_list.Aligned(u8, .@"16") = undefined;
@@ -280,7 +285,7 @@ pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: 
     const light_orange = orange_buffer.items;
     const light_white = white_buffer.items;
 
-    const ambient: u16 = if (dw.is_debug and DEBUG_LIGHT) AMBIENT_LIGHT_DEBUG else AMBIENT_LIGHT;
+    const ambient: u16 = if (dw.is_debug and IS_LIGHT_GLOBAL) AMBIENT_LIGHT_DEBUG else AMBIENT_LIGHT;
 
     // Single reset pass: precompute per-cell cost, initialize both channels to ambient
     // then, "seed" (add) light-emitting blocks into their channel's appropriate buckets.
@@ -320,7 +325,7 @@ pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: 
         block.light = @intCast(@min(max_light, @as(u16, MAX_LIGHT)));
 
         // this fixes an issue where orange light overtakes normal white light if ambient light is at max
-        if (AMBIENT_LIGHT == 255 or (dw.is_debug and DEBUG_LIGHT and AMBIENT_LIGHT_DEBUG == 255)) continue;
+        if (AMBIENT_LIGHT == 255 or (dw.is_debug and IS_LIGHT_GLOBAL and AMBIENT_LIGHT_DEBUG == 255)) continue;
 
         // block is orange if it receives more orange light than white, or is in the core radius (>= 255).
         const is_orange = orange >= white or orange >= 255;
