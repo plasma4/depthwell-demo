@@ -34,7 +34,11 @@ fn covers(wx: i32, wy: i32, bounds: Rect) bool {
 /// A geode should be mostly buried but never perfectly sealed to make it more findable and interesting!
 /// `Encase` walls the disc regardless of its rolled radius, with no per-radius bounding box.
 pub const constraints = [_]structures.Constraint{
-    .{ .encase = .{ .covers = covers, .min_open = 0.20, .max_open = 0.40 } },
+    .{ .encase = .{
+        .covers = covers,
+        .min_open = 0.20,
+        .max_open = 0.35,
+    } },
 };
 
 pub fn generate(

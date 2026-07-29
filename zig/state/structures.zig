@@ -502,19 +502,21 @@ const StructCacheEntry = struct {
     occupied: bool = false,
 };
 
-/// Direct-mapped bounds/blocked cache, one bank per structure kind (slots must be a power of two).
+/// Grid-cell window one full sweep of a bank covers (see `dw.utils.tileIndex()`).
+/// A cell is `spawn_area` blocks wide,
+/// so even the smallest kind's tile spans far more world than one generation pass touches.
+const STRUCT_CACHE_TILE = 32;
+/// Direct-mapped bounds/blocked cache, one bank per structure kind (a power of two by construction).
 /// A structure's bounds and verdicts are identical for every footprint cell and re-derived by later structures' priority scans,
+///
 /// so memoizing per grid cell collapses that repeated hashing (and all terrain sampling) to O(1).
 /// Pure function of (cell, seed): the per-entry seed check self-invalidates on reseed, so no explicit clear.
-const STRUCT_CACHE_SLOTS = 1024;
-var struct_cache: [structures.len][STRUCT_CACHE_SLOTS]StructCacheEntry = @splat(@splat(.{}));
+const STRUCT_CACHE_SLOTS = STRUCT_CACHE_TILE * STRUCT_CACHE_TILE;
+pub var struct_cache: [structures.len][STRUCT_CACHE_SLOTS]StructCacheEntry = @splat(@splat(.{}));
 
 /// Returns the (populated) cache entry for structure `kind` at grid cell (`cx`, `cy`), computing bounds on miss.
 inline fn structCacheSlot(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) *StructCacheEntry {
-    const ux: u64 = @bitCast(@as(i64, cx));
-    const uy: u64 = @bitCast(@as(i64, cy));
-    const h = (ux *% 0x9E3779B97F4A7C15) ^ (uy *% 0x85EBCA77C2B2AE63);
-    const e = &struct_cache[kind][@as(usize, @intCast((h >> 32) & (STRUCT_CACHE_SLOTS - 1)))];
+    const e = &struct_cache[kind][dw.utils.tileIndex(STRUCT_CACHE_TILE, STRUCT_CACHE_TILE, cx, cy)];
     if (!(e.occupied and e.cx == cx and e.cy == cy and @reduce(.And, e.seed == struct_seed))) {
         e.* = .{
             .cx = cx,
@@ -802,17 +804,17 @@ const ChunkCandidates = struct {
     list: [structures.len][MAX_CHUNK_CANDIDATES]Candidate = undefined,
 };
 
-/// Direct-mapped context cache (slots must be a power of two).
-/// Sized so a chunk AND its neighbors stay resident: the edge-flag halo walks a chunk's border cell by cell,
-/// alternating between the left and right neighbor chunk on every row, so a single-entry memo would thrash.
-const CHUNK_CTX_SLOTS = 64;
+/// Chunk window one full sweep of the context cache covers (see `dw.utils.tileIndex()`).
+/// Tiled, so a chunk and its 8 neighbors land in 9 distinct slots ALWAYS.
+/// That is the property this cache exists for: the edge-flag halo walks a chunk's border cell by cell,
+/// alternating between the left and right neighbor on every row,
+/// and a hashed index collides somewhere in a 3x3 about half the time at 64 slots, which is exactly the thrash it was sized to avoid.
+const CHUNK_CTX_TILE = 8;
+const CHUNK_CTX_SLOTS = CHUNK_CTX_TILE * CHUNK_CTX_TILE;
 var chunk_ctx: [CHUNK_CTX_SLOTS]ChunkCandidates = @splat(.{});
 
 inline fn chunkCtxIndex(chunk_x: i32, chunk_y: i32) usize {
-    const ux: u64 = @bitCast(@as(i64, chunk_x));
-    const uy: u64 = @bitCast(@as(i64, chunk_y));
-    const h = (ux *% 0x9E3779B97F4A7C15) ^ (uy *% 0x85EBCA77C2B2AE63);
-    return @intCast((h >> 32) & (CHUNK_CTX_SLOTS - 1));
+    return dw.utils.tileIndex(CHUNK_CTX_TILE, CHUNK_CTX_TILE, chunk_x, chunk_y);
 }
 
 /// Resolves every kind's candidates for one chunk. Safe to hold `ctx` across: nothing reachable from here
@@ -834,8 +836,18 @@ fn buildChunkCandidates(ctx: *ChunkCandidates, chunk_x: i32, chunk_y: i32, struc
 
     inline for (0..structures.len) |kind| {
         const area = @as(i32, @intCast(Configs[kind].spawn_area));
-        const xs = cellRange(area, @intCast(Configs[kind].max_w), x0, x0 + dw.CHUNK_SIZE - 1);
-        const ys = cellRange(area, @intCast(Configs[kind].max_h), y0, y0 + dw.CHUNK_SIZE - 1);
+        const xs = cellRange(
+            area,
+            @intCast(Configs[kind].max_w),
+            x0,
+            x0 + dw.CHUNK_SIZE - 1,
+        );
+        const ys = cellRange(
+            area,
+            @intCast(Configs[kind].max_h),
+            y0,
+            y0 + dw.CHUNK_SIZE - 1,
+        );
 
         var n: usize = 0;
         var cy = ys.lo;

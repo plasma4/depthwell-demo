@@ -32,7 +32,6 @@ const MAX_TRACKED_SPRITES = 64;
 ///
 /// Do note that this code WILL run faster in release!
 pub fn sampleWorldAroundPlayer() void {
-    @setRuntimeSafety(false);
     if (!dw.is_debug) return;
 
     const coord = memory.game.getPlayerCoord();
@@ -51,6 +50,9 @@ pub fn sampleWorldAroundPlayer() void {
 /// Samples the `span`-by-`span` block region whose corner is (`x0`, `y0`) and logs tallied information.
 pub fn run(x0: i32, y0: i32, span: i32) void {
     if (!dw.is_debug) return;
+    if (memory.game.depth != dw.startup.STARTING_ZOOM_TIMES) {
+        logger.info(@src(), "can't run this when not at base depth!", .{});
+    }
 
     const seed = memory.game.getHashSeed(.structures);
     const blocks: f64 = @floatFromInt(@as(i64, span) * @as(i64, span));

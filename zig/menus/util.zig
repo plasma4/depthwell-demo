@@ -25,7 +25,7 @@ pub fn panelHitbox(pos: Vec2f32, size: Vec2f32) dw.geometry.Shape {
 }
 
 /// Whether the cursor is over the panel; `open` short-circuits so a closed menu never claims hover.
-/// Used by `mouse.processDownCaptures()` to keep pointerdown from falling through to the world.
+/// Used by `mouse.processDownCaptures()` to keep pointerdown from "falling through" to modify world blocks.
 pub fn isHovering(open: bool, pos: Vec2f32, size: Vec2f32) bool {
     if (!open) return false;
     return panelHitbox(pos, size).contains(mousePx());

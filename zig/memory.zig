@@ -26,12 +26,18 @@ const CHUNK_SIZE_SQ = dw.CHUNK_SIZE_SQ;
 const ZOOM_FACTOR = dw.ZOOM_FACTOR;
 
 /// Represents a specific category a `[2]u64` slice of `memory.game.seed2` represents.
-/// Use `memory.game.getHashSeed()` to request said slice.
+/// Use `memory.game.getHashSeed()` to request said slice (`seed2` automatically resizes at comptime).
 pub const SeedType = enum(u4) {
-    /// Determines the moisture property at base depth for terrain.
+    /// Terrain (procedural) property.
+    cutoff,
+    /// Terrain (procedural) property.
     moisture,
-    /// Determines the density property at base depth for terrain.
+    /// Terrain (procedural) property.
     density,
+    /// Terrain (procedural) property.
+    ore_density,
+    /// Terrain (procedural) property.
+    weirdness,
     /// Hash used for structure data at base depth for terrain.
     structures,
     /// Seed type that should EXCLUSIVELY be used for PRNG that does not affect gameplay/terrain generation.
@@ -473,10 +479,14 @@ pub const BlockSpec = struct {
     base_id: Sprite = .none,
     /// Uses the BOTTOM 32 bits when compiled into `Block.seed`.
     seed: u64 = 0,
-    /// Starting water volume (0-15) for a waterloggable cell generated inside a pool.
-    /// Ignored for liquids (`makeBasicBlock()` already fills them to `MAX_HP`) and meaningless for solids,
+    /// Starting water volume (0-15) for a waterloggable cell generated inside a pool,
+    /// or for a liquid cell that is only partly full. Meaningless for solids,
     /// whose `hp` is mining progress and always generates at 0.
-    /// A waterloggable cell generated dry inside full water is NOT at equilibrium: the sim floods it on the
+    ///
+    /// Zero on a LIQUID means "unspecified", and fills the cell to `MAX_HP` as `makeBasicBlock()` does;
+    /// Only a "partial" liquid has to specify, which is why the default suits every caller that has no volume to state.
+    ///
+    /// A cell generated at the wrong volume is NOT at equilibrium: the sim corrects it on the chunk's
     /// first tick, which dirties the chunk and creates a modification entry with no player involvement.
     water_volume: u4 = 0,
 
@@ -484,7 +494,9 @@ pub const BlockSpec = struct {
     pub inline fn compile(self: @This()) Block {
         var block: Block = .makeBasicBlock(self.id, self.seed);
         block.base_id = self.base_id;
-        if (!self.id.isLiquid() and self.id.isWaterloggable()) block.hp = self.water_volume;
+        if (self.id.isLiquid()) {
+            if (self.water_volume != 0) block.hp = self.water_volume;
+        } else if (self.id.isWaterloggable()) block.hp = self.water_volume;
         return block;
     }
 };
