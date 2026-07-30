@@ -1817,9 +1817,19 @@ pub const QuadCache = struct {
     }
 
     /// Returns the 512-bit seed of a specified quadrant (or the global seed if the current depth is <= HORIZON_DEPTH).
+    ///
+    /// A depth is reached by exactly one of the three branches below depending on where the player
+    /// happens to be standing, so ALL of them have to answer the same thing for the same depth, or a
+    /// block would generate differently depending on the route the player took to look at it.
+    /// Below the horizon that is the world seed, and above it the recorded rebase path (see
+    /// `computeLayer()`, which only steps `path_hashes` past `HORIZON_DEPTH`).
     pub inline fn getQuadrantSeed(self: *const @This(), quadrant: u2, depth: u64) seeding.Seed {
         std.debug.assert(memory.game.depth > HORIZON_DEPTH or quadrant == 0);
         if (depth == memory.game.depth) {
+            // Enforces exactly that agreement for the branch below; there is no cheap way to state it
+            // for the historical branch, so `historical_seeds` is written by `commitLayer()` alone.
+            if (depth <= dw.HORIZON_DEPTH)
+                std.debug.assert(std.mem.eql(u64, &self.path_hashes.value[quadrant].value, &memory.game.seed.value));
             return self.path_hashes.value[quadrant];
         }
 
@@ -2298,12 +2308,63 @@ inline fn isBothLiquid(sprite_a: Sprite, sprite_b: Sprite) bool {
     return sprite_a.isLiquid() and sprite_b.isLiquid();
 }
 
+/// The cell one to the right of `bx`, crossing into the next chunk when it has to.
+/// Null at the world edge, where there is nowhere for a pair's other half to go.
+const RightCell = struct { coord: Coordinate, bx: u4 };
+inline fn rightNeighborCell(coord: Coordinate, bx: u4) ?RightCell {
+    if (bx < CHUNK_SIZE - 1) return .{ .coord = coord, .bx = bx + 1 };
+    return .{ .coord = coord.move(.{ 1, 0 }) orelse return null, .bx = 0 };
+}
+
 /// Applies a block modification, changing the `Sprite` type and resetting `hp`. Mutates `mod_store` and caches in-place.
 /// Returns whether `update_local_edge_flags` instantly removed the current block due to being in an invalid position.
 ///
 /// `prev_block` is the block that occupied this cell BEFORE this action began.
 /// The caller must pass the original block (for example, mining reads it before deleting).
 pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, prev_block: Block) bool {
+    // a block that spans two cells includes its right half
+    var cell: struct { Coordinate, u4 } = .{ coord, bx };
+    var sprite = new_sprite;
+    var prev = prev_block;
+    var second_cell: ?struct { Coordinate, u4 } = null;
+
+    while (true) {
+        const partner = sprite.pairedRight();
+        writeBlockType(cell[0], cell[1], by, sprite, prev);
+        if (partner == .none) break;
+
+        const right = rightNeighborCell(cell[0], cell[1]) orelse break;
+
+        // stop placement if the right cell is not empty in non-creative
+        const right_block = getBlockAt(right.coord, right.bx, by, memory.game.depth);
+        if (!dw.inventory.isInCreative() and !right_block.isEmpty()) break;
+
+        // only place the right half if the block underneath it is solid
+        const ny = @as(i32, by) + 1;
+        const under_coord = if (ny >= CHUNK_SIZE) right.coord.moveY(1) else right.coord;
+        if (under_coord) |uc| {
+            const under_by: u4 = @intCast(@mod(ny, CHUNK_SIZE));
+            const under_block = getBlockAt(uc, right.bx, under_by, memory.game.depth);
+            if (!under_block.isSolid()) break;
+        } else break;
+
+        cell = .{ right.coord, right.bx };
+        second_cell = cell;
+        sprite = partner;
+        prev = .empty;
+    }
+
+    // Update edge flags for both cells when a two-cell block is placed.
+    if (second_cell) |c2| {
+        _ = updateLocalEdgeFlags(c2[0], c2[1], by);
+    }
+    return updateLocalEdgeFlags(coord, bx, by);
+}
+
+/// The write half of `modifyBlockType()`: updates `mod_store` and every live cache, WITHOUT validating
+/// the result. Only `modifyBlockType()` should call this, and it must always follow up with
+/// `updateLocalEdgeFlags()`, or an unsupported block stays in the world until something else touches it.
+fn writeBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, prev_block: Block) void {
     const key = DepthCoordinate.from(coord);
     const idx: u8 = @intCast(@as(usize, by) * CHUNK_SIZE + bx);
 
@@ -2359,12 +2420,12 @@ pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
         block.id_edge_flags = 0xFF;
         block.waterlogged = 0;
     }
-
-    return updateLocalEdgeFlags(coord, bx, by);
 }
 
 /// Resets one block's fields to the "empty cell" sentinels (id + underlay + hp + edge/waterlog).
-/// Leaves `seed` alone: it is a property of the cell, not of what occupies it.
+/// Leaves `seed` and `tag` alone: both are properties of the CELL, not of what occupies it, and
+/// `materializeChunk()` likewise keeps the generated ones when it replays an edit over them.
+/// A cell's provenance therefore never depends on whether the player has touched it.
 ///
 /// Must agree field-for-field with the `ModCell` `internalClearBlock()` stores, so a cleared cell reads
 /// the same whether it comes from a live cache or from `materializeChunk()`.
@@ -4130,6 +4191,228 @@ test "ModificationStore: remove drops the chunk and recycles its slot" {
     try testing.expectEqual(@as(usize, 1), mod_store.entries.len);
     try testing.expectEqual(testCell(20), mod_store.getCell(b, 20).?);
     try testing.expectEqual(@as(?ModCell, null), mod_store.getCell(b, 10));
+}
+
+/// Fields of a `Block` that generation is authoritative for: what the world IS, rather than what a
+/// pass later derives from its neighbors (edge/waterlog flags) or what the renderer overwrites (light).
+const AuthoritativeCell = struct {
+    id: Sprite,
+    base_id: Sprite,
+    hp: u4,
+    seed: u28,
+    tag: dw.refine.RefinedTag,
+
+    fn of(b: Block) AuthoritativeCell {
+        return .{ .id = b.id, .base_id = b.base_id, .hp = b.hp, .seed = b.seed, .tag = b.tag };
+    }
+};
+
+test "coordinate consistency: a block is the same whatever route reached it" {
+    // The world is a pure function of (seed, Coordinate, depth, block). The player can arrive at one
+    // block by generating its chunk outright, by asking for that single cell through the ancestry, or by
+    // standing one depth below and looking up at it, and all three have to agree exactly: they read
+    // different caches, different seed branches (`getQuadrantSeed()`), and different amounts of the
+    // parent neighborhood. A disagreement is a world that changes shape depending on how it was reached.
+    const saved_game = memory.game;
+    const saved_suffix = max_possible_suffix;
+    defer {
+        memory.game = saved_game;
+        max_possible_suffix = saved_suffix;
+        clearCaches(true);
+    }
+
+    memory.game = .{};
+    var rng = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, .seed2_init));
+    for (&memory.game.seed2) |*v| v.* = rng.next();
+    quad_cache.path_hashes.value[0] = memory.game.seed;
+
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+
+    // Two depths of refinement above the base, so the ancestry is a chain rather than a single step.
+    const depth = STARTING_ZOOM_TIMES + 2;
+    memory.game.depth = depth;
+    max_possible_suffix = getMaxSuffixAtDepth(depth);
+    clearCaches(true);
+
+    const coord: Coordinate = .{ .suffix = .{ 37, 52 }, .quadrant = 0 };
+    const key = coord.asDepthCoordinate(depth);
+
+    // Route A: the whole chunk at once, from a 6x6 parent neighborhood.
+    var whole: Chunk = undefined;
+    generateChunk(&whole, key);
+
+    // Route B: one cell at a time up the ancestry, every cache dropped between cells so no lookup can
+    // be answered by something an earlier route left behind.
+    for (0..CHUNK_SIZE) |by| {
+        for (0..CHUNK_SIZE) |bx| {
+            clearCaches(true);
+            const cell = dw.ancestor.getInheritedMaterial(key, @intCast(bx), @intCast(by));
+            try testing.expectEqual(
+                AuthoritativeCell.of(whole.blocks[by * CHUNK_SIZE + bx]),
+                AuthoritativeCell.of(cell),
+            );
+        }
+    }
+
+    // Route C: the same chunk seen from one depth deeper, where it is somebody's ancestor rather than
+    // the live layer. This is the branch switch in `getQuadrantSeed()`, and the flag passes run too, so
+    // the whole block (derived fields included) has to match.
+    memory.game.depth = depth + 1;
+    max_possible_suffix = getMaxSuffixAtDepth(depth + 1);
+    clearCaches(true);
+    const as_ancestor = dw.ancestor.getAncestorChunk(key);
+    for (0..CHUNK_SIZE_SQ) |i| {
+        try testing.expectEqual(whole.blocks[i], as_ancestor.blocks[i]);
+    }
+
+    // ...and again with an edit in the ANCESTRY, since the two routes replay `mod_store` at different
+    // points: route A through its parent chunk's materialization, route B cell by cell as it recurses.
+    memory.game.depth = depth;
+    max_possible_suffix = getMaxSuffixAtDepth(depth);
+    const parent_key = key.getParent().asCoord().asDepthCoordinate(depth - 1);
+    mod_store.beginWrite(parent_key).setCell(37, .{ .id = .lava_stone, .base_id = .none, .hp = 0 });
+    mod_store.beginWrite(parent_key).setCell(38, .{ .id = .none, .base_id = .none, .hp = 0 });
+    clearCaches(true);
+
+    var edited: Chunk = undefined;
+    generateChunk(&edited, key);
+    for (0..CHUNK_SIZE) |by| {
+        for (0..CHUNK_SIZE) |bx| {
+            clearCaches(true);
+            const cell = dw.ancestor.getInheritedMaterial(key, @intCast(bx), @intCast(by));
+            try testing.expectEqual(
+                AuthoritativeCell.of(edited.blocks[by * CHUNK_SIZE + bx]),
+                AuthoritativeCell.of(cell),
+            );
+        }
+    }
+}
+
+test "a 2x1 pair is placed and validated as one unit" {
+    const saved_game = memory.game;
+    const saved_suffix = max_possible_suffix;
+    defer {
+        memory.game = saved_game;
+        max_possible_suffix = saved_suffix;
+        clearCaches(true);
+    }
+
+    memory.game = .{};
+    var rng = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, .seed2_init));
+    for (&memory.game.seed2) |*v| v.* = rng.next();
+    quad_cache.path_hashes.value[0] = memory.game.seed;
+    memory.game.depth = STARTING_ZOOM_TIMES;
+    max_possible_suffix = getMaxSuffixAtDepth(memory.game.depth);
+
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+    flag_worklist = try std.ArrayList(UpdateItem).initCapacity(testing.allocator, 256);
+    defer {
+        flag_worklist.deinit(testing.allocator);
+        flag_worklist = .empty;
+    }
+    clearCaches(true);
+
+    // Hunt for somewhere with room for both halves and ground under both of them.
+    var chunk: Chunk = undefined;
+    var coord: Coordinate = undefined;
+    var key: DepthCoordinate = undefined;
+    var spot: ?struct { bx: u4, by: u4 } = null;
+    var search: u64 = 40;
+    while (search < 60 and spot == null) : (search += 1) {
+        coord = .{ .suffix = .{ search, 40 }, .quadrant = 0 };
+        key = coord.asDepthCoordinate(memory.game.depth);
+        materializeChunk(&chunk, key);
+
+        for (0..CHUNK_SIZE - 1) |by| {
+            for (0..CHUNK_SIZE - 1) |bx| {
+                const here = chunk.blocks[by * CHUNK_SIZE + bx];
+                const right = chunk.blocks[by * CHUNK_SIZE + bx + 1];
+                const under = chunk.blocks[(by + 1) * CHUNK_SIZE + bx];
+                const under_right = chunk.blocks[(by + 1) * CHUNK_SIZE + bx + 1];
+                if (here.isEmpty() and right.isEmpty() and under.isSolid() and under_right.isSolid()) {
+                    spot = .{ .bx = @intCast(bx), .by = @intCast(by) };
+                    break;
+                }
+            }
+            if (spot != null) break;
+        }
+    }
+    const at = spot orelse return error.TestUnexpectedResult; // 20 chunks with no ledge at all is a bug
+
+    // Placing the left half alone must leave BOTH halves standing: each demands the other, so a pass
+    // that validated the first before writing the second would clear the pair right back out.
+    try testing.expect(!modifyBlockType(coord, at.bx, at.by, .moss_shrub1, .empty));
+
+    const idx: u8 = @intCast(@as(usize, at.by) * CHUNK_SIZE + at.bx);
+    const entry = mod_store.get(key) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(Sprite.moss_shrub1, (entry.get(idx) orelse return error.TestUnexpectedResult).id);
+    try testing.expectEqual(Sprite.moss_shrub1_right, (entry.get(idx + 1) orelse return error.TestUnexpectedResult).id);
+
+    // And the world agrees, not just the store.
+    materializeChunk(&chunk, key);
+    try testing.expectEqual(Sprite.moss_shrub1, chunk.blocks[idx].id);
+    try testing.expectEqual(Sprite.moss_shrub1_right, chunk.blocks[idx + 1].id);
+}
+
+test "the right half of a pair is never offered on its own" {
+    // What makes the pair placeable at all: the palette hides the half that cannot stand alone, and the
+    // pairing is read out of the `requires` table rather than listed a second time.
+    try testing.expectEqual(Sprite.moss_shrub1_right, Sprite.moss_shrub1.pairedRight());
+    try testing.expectEqual(Sprite.moss_shrub2_right, Sprite.moss_shrub2.pairedRight());
+    try testing.expect(Sprite.moss_shrub1_right.isPairedRight());
+    try testing.expect(Sprite.moss_shrub2_right.isPairedRight());
+
+    // A left half is offered, and an unpaired block is unaffected by any of this.
+    try testing.expect(!Sprite.moss_shrub1.isPairedRight());
+    try testing.expectEqual(Sprite.none, Sprite.moss_shrub1_right.pairedRight());
+    try testing.expectEqual(Sprite.none, Sprite.bush.pairedRight());
+    try testing.expect(!Sprite.bush.isPairedRight());
+}
+
+test "coordinate consistency: refinement reads a coordinate, not a route" {
+    // Route independence rests on `applyAncestorLogic()` being a pure function of its arguments, so the
+    // same (parent, neighbors, coordinate, cell) must give the same block no matter what ran before it.
+    // Anything that reached for live state (the player's depth, a cache, the previous call) would break
+    // the property in a way the chunk-level test above can only catch by luck.
+    const saved_game = memory.game;
+    defer memory.game = saved_game;
+
+    memory.game = .{};
+    var rng = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, .seed2_init));
+    for (&memory.game.seed2) |*v| v.* = rng.next();
+    quad_cache.path_hashes.value[0] = memory.game.seed;
+    memory.game.depth = STARTING_ZOOM_TIMES + 1;
+
+    // A decoration on a floor, which is the case that reads the most context: the plan hashes the
+    // parent's cell, and the terrain beneath it protects the cells the plan claims.
+    const parent: Block = .makeBasicBlock(.bush, 1234);
+    var neighbors: [8]Block = @splat(.empty);
+    neighbors[6] = .makeBasicBlock(.stone, 5678);
+    neighbors[7] = .makeBasicBlock(.stone, 91011);
+
+    const key = (Coordinate{ .suffix = .{ 9, 14 }, .quadrant = 0 }).asDepthCoordinate(memory.game.depth);
+    var first: [CHUNK_SIZE_SQ]Block = undefined;
+    for (0..CHUNK_SIZE) |by| {
+        for (0..CHUNK_SIZE) |bx| {
+            first[by * CHUNK_SIZE + bx] =
+                dw.ancestor.applyAncestorLogic(parent, neighbors, key, @intCast(bx), @intCast(by)).compile();
+        }
+    }
+
+    // Same inputs, walked backwards and with the caches dropped: the answers cannot move.
+    clearCaches(true);
+    var by: usize = CHUNK_SIZE;
+    while (by > 0) {
+        by -= 1;
+        var bx: usize = CHUNK_SIZE;
+        while (bx > 0) {
+            bx -= 1;
+            const again = dw.ancestor.applyAncestorLogic(parent, neighbors, key, @intCast(bx), @intCast(by)).compile();
+            try testing.expectEqual(first[by * CHUNK_SIZE + bx], again);
+        }
+    }
 }
 
 test "QuadCache: historical seed reads back the depth it was written for" {

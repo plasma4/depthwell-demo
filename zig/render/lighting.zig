@@ -64,7 +64,9 @@ inline fn blockEmission(id: Sprite) u16 {
         .portal, .invportal => PORTAL_LIGHT,
         .white_plate => PLATE_LIGHT,
         .twinklemoss => TWINKLEVINE_LIGHT,
-        .lava_stone => LAVA_LIGHT,
+        .lava_stone,
+        .molten_stone,
+        => LAVA_LIGHT,
         else => 0,
     };
 }

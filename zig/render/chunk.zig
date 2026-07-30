@@ -270,6 +270,7 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
                         continue;
                     },
                 }
+
                 for (0..CHUNK_SIZE) |ly| {
                     const row_start = (gy * CHUNK_SIZE + ly) * wb + gx * CHUNK_SIZE;
                     const chunk_row_start = ly * CHUNK_SIZE;
@@ -283,9 +284,9 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
                             block.edge_flags = 0xFF;
                             block.id_edge_flags = 0xFF;
                         }
-                        // Sprite variation (2x2 stone, liquid surfaces, seed picks, campfire animation)
-                        // is applied AFTER lighting; see `applyVariation` below. Lighting queries sprite
-                        // properties by ID, so it must run on the base (unvaried) IDs first.
+                        // sprite variation (2x2 stone, liquid surfaces, seed picks, campfire animation)
+                        // is applied AFTER lighting; see applyVariation() below.
+                        // Lighting queries sprite properties by ID, so it must run on the base (unvaried) IDs first.
                         out[row_start + lx] = block;
                     }
                 }
@@ -306,7 +307,6 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
     dw.lighting.applyLighting(out, wb, hb, player_bx, player_by);
 
     applyVariation(out, wb, game.frame);
-
     updateRenderProperties(pass, interp_cam_x, interp_cam_y, wb, hb, min_cx, min_cy, effective_zoom, interpolated_zoom);
 }
 
@@ -321,7 +321,14 @@ inline fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
         block.id = dw.variation.resolveVariant(block.*, i % wb, i / wb, frame);
         // Underlay sprites (ore/gem backgrounds) get the same variation treatment, so plain stone tiles for example.
         if (block.base_id != .none) {
-            block.base_id = dw.variation.resolveSpriteVariant(block.base_id, block.seed, block.edge_flags, i % wb, i / wb, frame);
+            block.base_id = dw.variation.resolveSpriteVariant(
+                block.base_id,
+                block.seed,
+                block.edge_flags,
+                i % wb,
+                i / wb,
+                frame,
+            );
         }
     }
 }

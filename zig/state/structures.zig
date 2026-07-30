@@ -678,7 +678,9 @@ inline fn cellRank(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) u
 /// Collapses what used to be two separate rules into one scan, because both ask the same question:
 /// - a higher-priority KIND always wins (that ordering is the point of the tuple)
 /// - two placements of the SAME kind (which overhang makes possible) are settled by `cellRank()`
-fn isBeaten(comptime kind: usize, cx: i32, cy: i32, bounds: Rect, struct_seed: Vec2u) bool {
+inline fn isBeaten(comptime kind: usize, cx: i32, cy: i32, bounds: Rect, struct_seed: Vec2u) bool {
+    // (inlining this has been tested to improve perf;
+    // also comptime kind forces multiple function signatures anyway)
     const my_rank = cellRank(kind, cx, cy, struct_seed);
 
     inline for (0..kind + 1) |other| {

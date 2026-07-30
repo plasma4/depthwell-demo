@@ -1,4 +1,5 @@
 //! Root file. Imports various other codebase files for easy access and handles exporting functions to WASM.
+//!
 //! All functions here (excluding internal ones like panic) should be `pub` to expose functions to `generate_types.zig`,
 //! and `extern` for WASM (with no other exported functions within other Zig files).
 const std = @import("std");
@@ -93,6 +94,7 @@ pub const seeding = @import("state/seeding.zig");
 pub const procedural = @import("state/procedural.zig");
 pub const structures = @import("state/structures.zig");
 pub const decorations = @import("state/decorations.zig");
+pub const refine = @import("state/refine.zig");
 pub const player = @import("state/player.zig");
 pub const world = @import("state/world.zig");
 pub const ancestor = @import("state/ancestor.zig");

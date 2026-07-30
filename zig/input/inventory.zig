@@ -348,6 +348,22 @@ pub fn removeFromInventory(id: Sprite) bool {
     return true;
 }
 
+/// Whether `s` occupies a slot right now: the single predicate every slot walk shares, so the palette,
+/// the selection index, and the hover test can never disagree about which slot is which.
+inline fn hasSlot(s: Sprite) bool {
+    if (s.isEmpty()) return false;
+    // The right half of a 2x1 pair is placed BY its left half, never chosen;
+    // showing it would offer a block that deletes itself the moment it lands (see `world.modifyBlockType()`).
+    if (s.isPairedRight()) return false;
+
+    // if we're showing all items, is this item actually placeable?
+    if (shouldShowAllItems()) return s.isInWorld();
+    // we're not showing all items, does the player have at least one of these?
+    // water is stored at x15 internally, so a full block's worth is the minimum that can be placed
+    const owned = inventory_counts[@intFromEnum(s)];
+    return owned > 0 and (s != .water or owned >= memory.Block.MAX_HP);
+}
+
 /// Helper to get the list of sprites currently in the inventory. Creates a temporary buffer in the stack.
 /// Always starts with .none, followed by owned foundation sprites sorted by ID.
 /// Requires a buffer to prevent dangling pointer (from local array) issues.
@@ -356,15 +372,11 @@ pub fn getSpritesInInventory(buffer: *SlotBuffer) []Sprite {
     buffer[0] = .none; // slot 0 (pickaxe) must always exist
 
     // foundation_sprites is already sorted by enum ID because of how it's generated in types/sprite.zig
+    // `if`, not a `continue`: leaving an unrolled iteration early is comptime control flow.
     inline for (sprite.possible_item_sprites) |s| {
-        if (s.isEmpty()) continue;
-        if ((shouldShowAllItems() and s.isInWorld()) or // if we're showing all items, is this item actually placeable?
-            (!shouldShowAllItems() and inventory_counts[@intFromEnum(s)] > 0 and // we're not showing all items, does the player have at least one of these
-                (s != .water or inventory_counts[@intFromEnum(s)] >= memory.Block.MAX_HP))) // if it's water, does the player have at least 15 (since the actual amount is x15 internally?)
-        {
+        if (hasSlot(s)) {
             buffer[count] = s;
             count += 1;
-            // logger.quick(.{ s, buffer.len, sprite.max_sprite_value });
         }
     }
 
@@ -376,11 +388,7 @@ pub fn getSelectedIndex() u16 {
     if (selected_sprite.isEmpty() or selected_sprite == .unselected) return 0;
     var count: usize = 1;
     inline for (sprite.possible_item_sprites) |s| {
-        if (s.isEmpty()) continue;
-        if ((shouldShowAllItems() and s.isInWorld()) or // if we're showing all items, is this item actually placeable?
-            (!shouldShowAllItems() and inventory_counts[@intFromEnum(s)] > 0 and // we're not showing all items, does the player have at least one of these
-                (s != .water or inventory_counts[@intFromEnum(s)] >= memory.Block.MAX_HP))) // if it's water, does the player have at least 15 (since the actual amount is x15 internally?)
-        {
+        if (hasSlot(s)) {
             if (s == selected_sprite) return @intCast(count);
             count += 1;
         }

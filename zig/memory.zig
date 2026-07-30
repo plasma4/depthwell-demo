@@ -27,13 +27,17 @@ const ZOOM_FACTOR = dw.ZOOM_FACTOR;
 
 /// Represents a specific category a `[2]u64` slice of `memory.game.seed2` represents.
 /// Use `memory.game.getHashSeed()` to request said slice (`seed2` automatically resizes at comptime).
-pub const SeedType = enum(u4) {
+///
+/// NOTE: updating this currently WILL result in all previous save data becoming invalid!
+pub const SeedType = enum {
     /// Terrain (procedural) property.
     cutoff,
     /// Terrain (procedural) property.
     moisture,
     /// Terrain (procedural) property.
     density,
+    /// Terrain (procedural) property.
+    density2,
     /// Terrain (procedural) property.
     ore_density,
     /// Terrain (procedural) property.
@@ -369,8 +373,16 @@ pub const Block = packed struct(u128) {
     /// `variation.resolveVariant()` draws it as `.inventory_selected_orange` while leaving `id` alone,
     /// so the ancestor chain never inherits the marker as if it were terrain.
     descendant_mods: bool = false,
+    /// What this block was refined out of, once its own `id` no longer says so: the canopy of a shrub
+    /// that is now leaf stone, or how far a vine cell hangs below its ceiling. See `refine.RefinedTag`.
+    ///
+    /// Derived, like the flag fields: regeneration rebuilds it, `ModCell` does not store it, and a
+    /// cell the player edits keeps the edit and loses the tag.
+    /// The shader reads `word3` as `extractBits(word3, 0, 12)`, so everything above `waterlogged`
+    /// (this field included) is invisible to it.
+    tag: dw.refine.RefinedTag = .{},
     /// Unused portion of block data.
-    _pad: u19 = 0,
+    _pad: u9 = 0,
 
     /// Makes a simple block of a certain type, with max light and no edge flags and mine level.
     /// Uses the BOTTOM 32 bits from `seed_bits` to place into `seed`.
@@ -489,11 +501,14 @@ pub const BlockSpec = struct {
     /// A cell generated at the wrong volume is NOT at equilibrium: the sim corrects it on the chunk's
     /// first tick, which dirties the chunk and creates a modification entry with no player involvement.
     water_volume: u4 = 0,
+    /// Provenance to carry into the block; see `Block.tag`.
+    tag: dw.refine.RefinedTag = .{},
 
     /// Compiles the spec into a packed `Block` (max light, no edge flags or mine level, matching `makeBasicBlock()`).
     pub inline fn compile(self: @This()) Block {
         var block: Block = .makeBasicBlock(self.id, self.seed);
         block.base_id = self.base_id;
+        block.tag = self.tag;
         if (self.id.isLiquid()) {
             if (self.water_volume != 0) block.hp = self.water_volume;
         } else if (self.id.isWaterloggable()) block.hp = self.water_volume;
