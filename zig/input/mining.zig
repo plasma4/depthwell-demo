@@ -128,6 +128,24 @@ pub fn canMine(tool_type: Tools, target_sprite: Sprite) bool {
     return pickaxe.capabilities.satisfies(block_props.required_capabilities);
 }
 
+/// Least player-lit a block may be and still be mineable, on the same 0-255 scale as `Block.light`.
+/// Deliberately measured against the player's own light ALONE (see `lighting.miningLightAt()`):
+/// a campfire burning across the cavern lights the wall for the eye, but the player is not standing there,
+/// so the wall stays out of reach until they bring their own light to it.
+pub const MIN_MINING_LIGHT: u8 = 16;
+
+/// Whether the block the mouse is over is lit well enough by the player to be mined.
+/// A block outside the lit window has no answer, and an unanswered block is a dark one.
+fn isLitForMining() bool {
+    const light = dw.lighting.miningLightAt(
+        mouse.mouse_chunk_offset[0],
+        mouse.mouse_chunk_offset[1],
+        mouse.mouse_block_x,
+        mouse.mouse_block_y,
+    ) orelse return false;
+    return light >= MIN_MINING_LIGHT;
+}
+
 /// Whether the player holds a special tool that can remove otherwise-unmineable installations
 /// (crafters, strength `UNMINEABLE_STRENGTH`) and the block structures rest on.
 ///
@@ -196,7 +214,8 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
             if (has_structure_tool and isToolBreakable(block.id)) strength = STRUCTURE_STRENGTH;
 
             // If the pickaxe lacks the qualifications to mine the block, make it unmineable.
-            if (!can_mine_block) {
+            // Darkness gates the same way: the swing is refused rather than merely slowed.
+            if (!can_mine_block or (!in_creative and !isLitForMining())) {
                 strength = std.math.maxInt(u64);
             }
 
@@ -205,21 +224,18 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
             // Chip particles and play sounds while actively mining
             if (!block.isEmpty() and strength > 0) {
                 {
-                    if (mouse.getMouseBlockCenterPx()) |center| {
+                    // Chips are the block coming apart, so a block that will not come apart makes none:
+                    // the sound alone says the swing was refused.
+                    if (!unmineable) if (mouse.getMouseBlockCenterPx()) |center| {
                         const power: f32 = @floatFromInt(@intFromEnum(pickaxe_type));
                         // better pickaxes chip more often and in bigger "clusters" in terms of particle FX!
                         dw.particles.maybeSpawnSpriteBurst(
                             0.15 + 0.06 * power,
                             block.id,
                             center,
-                            .{
-                                .count = if (unmineable)
-                                    1
-                                else
-                                    5 + @as(usize, @intFromEnum(pickaxe_type)) * 2,
-                            },
+                            .{ .count = 5 + @as(usize, @intFromEnum(pickaxe_type)) * 2 },
                         );
-                    }
+                    };
                 }
 
                 {
@@ -344,7 +360,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
 }
 
 /// Returns how "strong" a `Sprite` is; how much mining_progress must be contributed to increase `hp` of a block.
-inline fn getSpriteStrength(s: Sprite) ?u64 {
+fn getSpriteStrength(s: Sprite) ?u64 {
     const props = sprite.getSpriteProps(s);
     if (!props.in_world) return null;
     // Unmineable installations (crafters) are honored BEFORE the solidity check so a non-solid

@@ -286,7 +286,7 @@ pub fn maybeSpawnSpriteBurst(chance: f32, s: Sprite, origin: Vec2f32, config: Bu
 
 /// This particle's acceleration toward its attractor, or zero when it has none.
 /// Shared by `tick()` and `draw()` so the drawn path is the one actually being simulated.
-inline fn accelOf(p: *const Particle) Vec2f32 {
+fn accelOf(p: *const Particle) Vec2f32 {
     if (p.pull == 0.0) return .{ 0.0, 0.0 };
     const offset = p.attractor - p.position;
     const distance_sq = offset[0] * offset[0] + offset[1] * offset[1];

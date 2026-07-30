@@ -28,7 +28,7 @@ const STARTING_ZOOM_TIMES = dw.startup.STARTING_ZOOM_TIMES;
 
 /// Returns true if discrete coordinates are no longer tracked at this depth,
 /// (if so, the background `quad_cache` begins to be used).
-pub inline fn isHorizonDepth(depth: u64) bool {
+pub fn isHorizonDepth(depth: u64) bool {
     // The floor is NEVER a horizon depth.
     if (depth <= STARTING_ZOOM_TIMES) return false;
 
@@ -326,7 +326,7 @@ inline fn isParentCore(lx: u4, ly: u4) bool {
 
 /// Whether a child cell can't be carved; true if the block is the 2x2 core,
 /// OR if we want horizonta/vertical arms.
-inline fn isProtectedCell(n: [8]Block, lx: u4, ly: u4) bool {
+fn isProtectedCell(n: [8]Block, lx: u4, ly: u4) bool {
     const core_x = lx >= CORE_MIN and lx <= CORE_MAX;
     const core_y = ly >= CORE_MIN and ly <= CORE_MAX;
 
@@ -350,7 +350,7 @@ comptime {
 }
 
 /// Determines whether a specified ore/gem deposit should remain.
-inline fn keepsInheritedOverlay(
+fn keepsInheritedOverlay(
     noise_seed: dw.utils.Vec2u,
     wx: WorldCoord,
     wy: WorldCoord,
@@ -527,7 +527,7 @@ fn warpedMaterial(parent_block: Block, n: [8]Block, warp: dw.utils.Vec2f32, lx: 
 /// 4 4 4 4
 /// 4 4 4 4
 /// ```
-inline fn inheritedLiquidVolume(parent_volume: u4, ly: u4) u4 {
+fn inheritedLiquidVolume(parent_volume: u4, ly: u4) u4 {
     if (parent_volume >= dw.water.RESTING_VOLUME) return memory.Block.MAX_HP;
 
     const max: u32 = memory.Block.MAX_HP;

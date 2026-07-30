@@ -70,7 +70,7 @@ test "basic usage example" {
 }
 
 // /// A fast 64-bit to 64-bit generator for avalanching the X/Y offsets.
-// inline fn splitMix64(state: *u64) u64 {
+// fn splitMix64(state: *u64) u64 {
 //     state.* +%= 0x9E3779B97F4A7C15;
 //     var z = state.*;
 //     z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
@@ -96,7 +96,7 @@ pub const SeedStream = enum(u64) {
 /// Since BLAKE3 is cryptographic, this will yield high-quality mixing.
 ///
 /// For better performance, consider using a custom nonce with `ChaCha12` instead.
-pub inline fn mixBaseSeed(layer_seed: Seed, number: SeedStream) Seed {
+pub fn mixBaseSeed(layer_seed: Seed, number: SeedStream) Seed {
     // Using packed here is disallowed (due to including an array).
     // This struct be extern or else asBytes will recieve garbage data.
     const PackedInput = extern struct { // temporary struct for faster mixing :)
@@ -115,7 +115,7 @@ pub inline fn mixBaseSeed(layer_seed: Seed, number: SeedStream) Seed {
 
 /// Mixes in the layer seed with X/Y values and depth using BLAKE3.
 /// Used when appending on part of a seed to a quadrant.
-pub inline fn mixCoordinateSeed(layer_seed: Seed, x: u64, y: u64, depth: u64) Seed {
+pub fn mixCoordinateSeed(layer_seed: Seed, x: u64, y: u64, depth: u64) Seed {
     const PackedInput = extern struct { // temporary struct for faster mixing :)
         seed: [8]u64,
         x: u64,
@@ -135,7 +135,7 @@ pub inline fn mixCoordinateSeed(layer_seed: Seed, x: u64, y: u64, depth: u64) Se
 }
 
 /// Generates 4 sets of seeds for every chunk when combining X/Y active suffix coordinates with the seed of a quadrant.
-pub inline fn mixChunkSeeds(quadrant_seed: Seed, coord_vector: Vec2u, depth: u64) ChunkSeeds {
+pub fn mixChunkSeeds(quadrant_seed: Seed, coord_vector: Vec2u, depth: u64) ChunkSeeds {
     const PackedInput = extern struct { // do the packing thing again
         seed: [8]u64,
         c1: u64,
@@ -192,7 +192,7 @@ pub const HashState = struct {
     bits_left: u8 = 0,
 
     /// Gets a power of two and increments the hash state.
-    pub inline fn get(self: *HashState, T: type, modulo: comptime_int) T {
+    pub fn get(self: *HashState, T: type, modulo: comptime_int) T {
         comptime {
             if (!std.math.isPowerOfTwo(modulo)) {
                 @compileError("Modulo must be a power of two for mask bitwise AND to be correct.");
@@ -224,7 +224,7 @@ pub const HashState = struct {
     /// If a completely unused 64-bit word is available in the pool, it consumes and returns it.
     /// Otherwise, it increments `y` to pull a new 64-bit word,
     /// leaving the existing partial entropy pool untouched for future `get()`s.
-    pub inline fn getRaw(self: *HashState) u64 {
+    pub fn getRaw(self: *HashState) u64 {
         if (self.bits_left == 64) {
             self.bits_left = 0;
             return self.value;
@@ -240,7 +240,7 @@ pub const HashState = struct {
     /// The chance is rounded at compile-time to the nearest fraction `n / 2^k` within `GET_CHANCE_MARGIN`,
     /// using the smallest such `k` so only `k` bits of entropy are consumed via `get()`
     /// (1 bit for 0.5, 2 bits for 0.25, and so on) rather than a full 64-bit word.
-    pub inline fn getChance(self: *HashState, comptime chance: comptime_float) bool {
+    pub fn getChance(self: *HashState, comptime chance: comptime_float) bool {
         const opt = comptime find_opt: {
             if (chance < 0.0 or chance > 1.0) {
                 @compileError("Chance must be in the range [0.0, 1.0]");
@@ -268,7 +268,7 @@ pub const HashState = struct {
 
     /// Performs a 64x64-bit widening multiplication returning a 128-bit product split into low and high halves.
     /// This executes using only native 64-bit instructions, completely avoiding slow `__multi3` (128-bit multiplication).
-    inline fn mul64x64To128(a: u64, b: u64) struct { lo: u64, hi: u64 } {
+    fn mul64x64To128(a: u64, b: u64) struct { lo: u64, hi: u64 } {
         const mask = 0xffffffff;
         const a0 = a & mask;
         const a1 = a >> 32;
@@ -293,7 +293,7 @@ pub const HashState = struct {
     /// Uses a branch-free, division-free multiplicative method with guaranteed termination.
     ///
     /// Precondition: `T` is a 64-bit integer or smaller, and `limit` is positive.
-    pub inline fn getLimit(self: *HashState, T: type, limit: T) T {
+    pub fn getLimit(self: *HashState, T: type, limit: T) T {
         if (limit <= 1) return 0;
 
         const limit_u64 = @as(u64, @intCast(limit));
@@ -334,7 +334,7 @@ pub const NoiseMix = struct {
     }
 
     /// One lane of a noise seed: `base` avalanched together with `value`.
-    pub inline fn lane(base: u64, value: u64) u64 {
+    pub fn lane(base: u64, value: u64) u64 {
         var x = base +% (value *% A);
         x ^= x >> 32;
         x *%= B;
@@ -362,7 +362,7 @@ pub const FastHash = struct {
 
     /// A pure 64-bit platform-independent mixer.
     /// Combines inputs additively to avoid a zero-sink.
-    inline fn mix(a: u64, b: u64) u64 {
+    fn mix(a: u64, b: u64) u64 {
         var x = a +% b;
         x ^= x >> 30;
         x *%= 0xbf58476d1ce4e5b9;
@@ -378,7 +378,7 @@ pub const FastHash = struct {
     }
 
     /// Returns a 64-bit hash value, assuming `seed_vector` is securely generated from BLAKE3 already.
-    pub inline fn hash2d(seed_vector: Vec2u, x: u64, y: u64) u64 {
+    pub fn hash2d(seed_vector: Vec2u, x: u64, y: u64) u64 {
         var h1 = x ^ seed_vector[0];
         var h2 = y ^ seed_vector[1];
 
@@ -419,7 +419,7 @@ pub const FastHash = struct {
 
     /// Exact vectorized 4-lane version of `hash2d()`, hashing 4 coordinates in parallel (using SIMD).
     /// Each lane `i` equals `hash2d(seed_vector, vx[i], vy[i])`.
-    pub inline fn hash2d_4x(seed_vector: Vec2u, vx: Vec4u, vy: Vec4u) Vec4u {
+    pub fn hash2d_4x(seed_vector: Vec2u, vx: Vec4u, vy: Vec4u) Vec4u {
         const h1 = (vx ^ @as(Vec4u, @splat(seed_vector[0]))) *% @as(Vec4u, @splat(0xa0761d6478bd642f));
         const h2 = (vy ^ @as(Vec4u, @splat(seed_vector[1]))) *% @as(Vec4u, @splat(0xe7037ed1a0b428db));
 
@@ -721,7 +721,7 @@ pub const ChaCha12 = struct {
         return @as(u64, v[lo]) | (@as(u64, v[hi]) << 32);
     }
 
-    inline fn quarterRound(a: *u32, b: *u32, c: *u32, d: *u32) void {
+    fn quarterRound(a: *u32, b: *u32, c: *u32, d: *u32) void {
         a.* +%= b.*;
         d.* ^= a.*;
         d.* = std.math.rotl(u32, d.*, 16);
@@ -830,7 +830,7 @@ pub const Xoshiro512 = struct {
     state: [8]u64 align(16),
 
     /// Creates a new instance with seed data.
-    pub inline fn init(seed_data: *const Seed) Xoshiro512 {
+    pub fn init(seed_data: *const Seed) Xoshiro512 {
         var val: [8]u64 align(16) = seed_data.value; // copy
         if (val[0] == 0) {
             @branchHint(.unlikely);

@@ -40,7 +40,7 @@ pub inline fn getTime() f64 {
 }
 
 // Sends a message (with pointer and length, as well as a message type) to either std.log with the appropriate category or JS.
-inline fn message(ptr: [*]const u8, len: usize, message_type: LogCategory) void {
+fn message(ptr: [*]const u8, len: usize, message_type: LogCategory) void {
     if (dw.is_wasm) {
         dw.jsMessage(ptr, len, message_type);
     } else {
@@ -96,7 +96,7 @@ pub inline fn testLogs(skipError: bool) void {
     const logger = @import("logger.zig");
     logger.log(@src(), "This is a {s}.", .{"normal log"});
     logger.info(@src(), "This is an info log.", .{});
-    logger.warn(@src(), "This is a warning. You should see this when running tests in Zig, or in the console in JS.", .{});
+    logger.warn(@src(), "This is a warning. You should see this when running tests in Zig, or in the console in JS after running testLogs().", .{});
     if (skipError) {
         logger.err(@src(), "This is an error. Should create an alert() popup if CONFIG.noAlertOnError is false and building for WASM.", .{});
     } else {
@@ -392,7 +392,7 @@ fn writerTruncate(writer: *std.Io.Writer, args: anytype) bool {
 }
 
 /// Clears the text from a specific UI buffer (id 0-3). No-op in release modes.
-pub inline fn clear(id: u2) void {
+pub fn clear(id: u2) void {
     if (!is_debug) return;
     text_lengths[id] = 0;
     if (dw.is_wasm) {

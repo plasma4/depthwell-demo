@@ -64,7 +64,7 @@ pub const constraints = [_]structures.Constraint{
 
 /// Whether a footprint-local block is part of the vestibule at all.
 /// Blocks outside it are declined so the surrounding terrain shows through the chamfered corners.
-inline fn inShape(x: i32, y: i32) bool {
+fn inShape(x: i32, y: i32) bool {
     if (x < 0 or y < 0 or x >= size_x or y >= size_y) return false;
     // Distance to the nearest vertical and horizontal edge; both are 0 at a corner.
     const edge_x = @min(x, size_x - 1 - x);

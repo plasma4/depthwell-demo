@@ -47,7 +47,7 @@ pub fn Template(comptime art: []const u8, comptime legend: []const Entry) type {
         pub const height: i32 = parsed.height;
 
         /// The `Cell` at template-local (`lx`, `ly`), or null when outside the grid.
-        pub inline fn at(lx: i32, ly: i32) ?Cell {
+        pub fn at(lx: i32, ly: i32) ?Cell {
             if (lx < 0 or ly < 0 or lx >= width or ly >= height) return null;
             const ch = parsed.grid[@intCast(ly * width + lx)];
             // legend is comptime and tiny, so this lowers to a jump table.
@@ -65,7 +65,7 @@ pub fn Template(comptime art: []const u8, comptime legend: []const Entry) type {
         }
 
         /// The `StructureResult` for template-local (`lx`, `ly`), or null to defer to the fallback/terrain.
-        pub inline fn resolve(lx: i32, ly: i32) ?StructureResult {
+        pub fn resolve(lx: i32, ly: i32) ?StructureResult {
             const cell = at(lx, ly) orelse return null;
             return switch (cell) {
                 .skip => null,
