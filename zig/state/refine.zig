@@ -13,7 +13,7 @@
 //! - `.stamp`: a hard-coded macro shape spanning one or more parents (the 2x1 moss shrub becomes a little tree).
 //!   Used for anything the three other generic options can't specify!
 //!
-//! Three properties hold for every plan to keep things procedurally interesting:
+//! Three properties hold to keep things procedurally interesting:
 //! 1. AT LEAST ONE copy survives (`.scatter` will draw from 1),
 //!    so a decoration never silently disappears as the player descends.
 //! 2. Copies stand ON the surface the parent was anchored to. The plan places them against the region's floor/ceiling row,
@@ -136,7 +136,7 @@ pub const Single = struct {
 /// A copy in every column of a fixed set: no hash, no count, the same shape in every region.
 /// For a kind whose refined form IS a specific arrangement rather than a scattering of copies.
 pub const Fixed = struct {
-    /// Columns to fill. `.any` has no fixed meaning, so it is rejected at compile time.
+    /// Columns to fill. `.any` has no fixed meaning, so it is rejected at compile-time.
     columns: Columns,
     /// Cells of one copy, as in `Single.stack`.
     stack: []const Sprite = &.{},
@@ -536,8 +536,8 @@ inline fn surfaceMet(rule: Rule, ctx: Context) bool {
 pub const Columns = enum {
     /// Any of the region's columns, drawn from the parent's hash.
     any,
-    /// ONE of the two center columns, drawn from the parent's hash: half of the 2x1 area a portal
-    /// descent lands the player on.
+    /// ONE of the two center columns, drawn from the parent's hash:
+    /// half of the 2x1 area a portal descent lands the player on.
     center_one,
     /// BOTH center columns, always.
     center_both,
@@ -608,7 +608,7 @@ inline fn drawCount(h: u64, copies: Count) u4 {
 ///
 /// A partial Fisher-Yates shuffle: distinct by construction, and unbiased enough that a column never
 /// reads as favored (`h` is a finalized hash, so the modulo's bias is on the order of 2^-60).
-inline fn drawColumns(h: u64, n: u4, columns: Columns) ColumnMask {
+fn drawColumns(h: u64, n: u4, columns: Columns) ColumnMask {
     if (columns.fixedMask()) |mask| return mask;
     if (columns == .center_one) {
         // One 2x1 landing area, so the choice is only ever which of its two columns.
@@ -616,6 +616,7 @@ inline fn drawColumns(h: u64, n: u4, columns: Columns) ColumnMask {
         return @as(ColumnMask, 1) << (if (h & 1 == 0) CENTER_LEFT else CENTER_RIGHT);
     }
 
+    // fancy compile-time type stuff!
     const ColumnIndex = std.math.Log2Int(ColumnMask);
     var pool: [BLOCKS_PER_PARENT]ColumnIndex = undefined;
     for (&pool, 0..) |*c, i| c.* = @intCast(i);
@@ -646,7 +647,7 @@ comptime {
 /// A pure function of the parent's cell, its plan, and its tag.
 fn surfaceColumns(rule: Rule, parent: Block, noise_seed: Vec2u, px: WorldCoord, py: WorldCoord) ColumnMask {
     switch (rule.plan) {
-        .fixed => |f| return f.columns.fixedMask().?, // `.any` is rejected at compile time
+        .fixed => |f| return f.columns.fixedMask().?, // `.any` is rejected at compile-time
         .single => |s| return drawColumns(regionHash(noise_seed, px, py, .layout), 1, s.columns),
         .scatter => |s| {
             const h = regionHash(noise_seed, px, py, .layout);
@@ -688,7 +689,7 @@ pub fn refineChild(rule: Rule, ctx: Context) BlockSpec {
 }
 
 /// Writes the cell of a `.single`/`.scatter` copy that lands here, if one does.
-inline fn placeStack(rule: Rule, stack: []const Sprite, mask: ColumnMask, ctx: Context) BlockSpec {
+fn placeStack(rule: Rule, stack: []const Sprite, mask: ColumnMask, ctx: Context) BlockSpec {
     if (!claimsColumn(mask, ctx.lx)) return .{};
 
     const index = rule.surface.stackIndex(ctx.ly);
@@ -715,7 +716,7 @@ inline fn spec(id: Sprite, ctx: Context, tag: RefinedTag) BlockSpec {
 ///
 /// Uses a primary strand anchor and distance-based mutation falloff to produce organic,
 /// stepped vine curtains (e.g. main strand of 24, side strands of 14, 10, 5).
-inline fn columnReach(c: Chain, noise_seed: Vec2u, px: WorldCoord, ceiling_y: WorldCoord, lx: u4) u64 {
+fn columnReach(c: Chain, noise_seed: Vec2u, px: WorldCoord, ceiling_y: WorldCoord, lx: u4) u64 {
     if (c.max_length == 0) return 0;
     if (c.max_length <= c.min_length) return c.min_length;
 
@@ -744,9 +745,10 @@ inline fn columnReach(c: Chain, noise_seed: Vec2u, px: WorldCoord, ceiling_y: Wo
 
 /// One cell of a hanging chain.
 ///
-/// The run index shows the distance from the ceiling. A parent cell at distance `r`
-/// covers child runs `4(r-1) + 1` to `4r`. This gives the ceiling position and the
-/// child position without a search. Hashing the ceiling position keeps the columns aligned.
+/// The run index shows the distance from the ceiling.
+/// A parent cell at distance `r` covers child runs `4(r-1) + 1` to `4r`.
+/// This gives the ceiling position and the child position without a search.
+/// Hashing the ceiling position keeps the columns aligned.
 fn chainChild(c: Chain, rule: Rule, ctx: Context) BlockSpec {
     // a generated chain cell always carries its run, but a cell that never grew as one does not:
     // mossy_stone EVOLVES into vine, AND the player can place vine outright.
@@ -1020,7 +1022,7 @@ test "the terrain only pushes up under the cells a decoration really lands on" {
     }
     try testing.expect(protected_total > 0);
 
-    // Plain terrain above and below protects nothing at all.
+    // plain terrain above and below protects nothing at all
     const plain: [8]Block = @splat(.makeBasicBlock(.stone, 3));
     for (0..BLOCKS_PER_PARENT) |lx| {
         for (0..BLOCKS_PER_PARENT) |ly| {
@@ -1048,7 +1050,7 @@ test "the shrub's two halves draw one coherent tree" {
     try testing.expectEqual(expected_left, left.filled);
     try testing.expectEqual(expected_right, right.filled);
 
-    // Its canopy is tagged, which is what keeps ore out of the tree for the next two depths.
+    // Its canopy is tagged; tree should have no ore for the next two depths
     const rule = ruleFor(.moss_shrub1).?;
     const canopy = refineChild(rule, .{
         .parent = .makeBasicBlock(.moss_shrub1, 4),
