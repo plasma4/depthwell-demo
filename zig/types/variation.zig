@@ -132,6 +132,13 @@ pub fn resolveVariant(block: Block, tx: u64, ty: u64, frame: u32) Sprite {
         id = .campfire_water;
     }
 
+    // override rule: use top variant based on edge flags
+    if (block.id == .dirt) {
+        if (block.edge_flags & dw.types.EdgeFlags.getFlagBit(0, -1) == 0) {
+            return .dirt_top;
+        }
+    }
+
     return resolveSpriteVariant(
         id,
         block.seed,

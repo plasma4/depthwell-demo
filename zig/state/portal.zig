@@ -116,14 +116,12 @@ comptime {
 /// Ring extent in world scale (viewport pixels at 1x zoom), multiplied by the live zoom at spawn.
 /// The inner edge sits INSIDE the portal's mouth (a block is `CHUNK_SIZE` px at 1x),
 /// so the swirl crosses the spot the player is drawn into rather than ringing politely around it.
-const INTAKE_RADIUS_MIN: f32 = 1.5;
+const INTAKE_RADIUS_MIN: f32 = 2.5;
 const INTAKE_RADIUS_MAX: f32 = 30.0;
 
-/// Particle size in world scale. Scaled by the square root of the zoom rather than the zoom itself:
-/// tracking it exactly turns fine dust into chunky blocks by the time the descent lands,
-/// and the mouth is where detail is wanted most.
+/// Particle size in world scale.Scaled by the square root of the zoom rather than the zoom itself.
 const INTAKE_SIZE_MIN: f32 = 0.7;
-const INTAKE_SIZE_MAX: f32 = 2.2;
+const INTAKE_SIZE_MAX: f32 = 2.3;
 
 /// LCHA colors for a descent's intake particles (violet, magenta, and gold here)!
 /// Ordered dimmest first, as `spawnOrbitRing()` requires: it picks by spawn radius,
@@ -698,6 +696,7 @@ fn freeBuffers() void {
 /// Read-only with respect to the world: these are decorative copies, and no modification is written.
 /// Everything is drawn from a seeded generator so a reload lays out the identical descent.
 fn collectDebris() void {
+    @setFloatMode(.optimized);
     const g = &memory.game;
 
     // Sample the surrounding block types. Only the set of types matters; where each one sat does not,
@@ -752,8 +751,7 @@ fn collectDebris() void {
             .sprite = palette[@intCast(rng.next() % palette_len)],
             .angle = @floatCast(rng.float(f64) * std.math.tau),
             .radius = SHARD_RADIUS_MIN + (SHARD_RADIUS_MAX - SHARD_RADIUS_MIN) * rng.float(f32),
-            // Biased small: the same count of finer rubble reads as a flow into the mouth,
-            // where a field of half-block slabs just reads as clutter over the terrain.
+            // biased to be smaller!
             .size = SHARD_SIZE * (0.35 + 0.75 * rng.float(f32) * rng.float(f32)),
             .spin = (rng.float(f32) - 0.5) * 6.0,
             .start_frame = @intFromFloat(when * span),

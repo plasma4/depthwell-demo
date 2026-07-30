@@ -519,44 +519,6 @@ fn warpedMaterial(parent_block: Block, n: [8]Block, warp: dw.utils.Vec2f32, lx: 
     return if (source.isFoundation()) source else parent_block;
 }
 
-// for whether the portal is at the left or right
-const PORTAL_COLUMN_LEFT: u4 = dw.BLOCKS_PER_PARENT / 2 - 1;
-const PORTAL_COLUMN_RIGHT: u4 = dw.BLOCKS_PER_PARENT / 2;
-
-comptime {
-    if (PORTAL_COLUMN_RIGHT != PORTAL_COLUMN_LEFT + 1)
-        @compileError("The portal's two columns must be adjacent, since they are one 2x1 landing area.");
-    if (dw.BLOCKS_PER_PARENT < 4) @compileError("A portal's child region needs a center column pair and a row to stand on.");
-}
-
-/// One child of a `.portal`/`.invportal` parent. These "de-duplicate" into one instance instead of a 4x4.
-/// TODO: DRY this logic to instead let you arbitrarily dedupe children (such as mushrooms/some decor).
-fn portalChild(
-    parent_sprite: Sprite,
-    noise_seed: dw.utils.Vec2u,
-    wx: WorldCoord,
-    wy: WorldCoord,
-    lx: u4,
-    ly: u4,
-    seed: u64,
-    inherited_water: u4,
-) memory.BlockSpec {
-    const row: u4 = if (parent_sprite == .invportal) 0 else dw.BLOCKS_PER_PARENT - 1;
-    if (ly != row) return .{};
-
-    // Hashed on the PARENT's world block, so every cell of the region agrees on the answer.
-    // One bit of a finalized hash is an even split, which is exactly the 50/50 alignment wanted here.
-    const parent_hash = seeding.FastHash.hash2dWorld(
-        noise_seed,
-        wx / dw.BLOCKS_PER_PARENT,
-        wy / dw.BLOCKS_PER_PARENT,
-    );
-    const column: u4 = if (parent_hash & 1 == 0) PORTAL_COLUMN_LEFT else PORTAL_COLUMN_RIGHT;
-    if (lx != column) return .{};
-
-    return .{ .id = parent_sprite, .seed = seed, .water_volume = inherited_water };
-}
-
 /// A liquid parent's level as seen by the child at row `ly` of its region.
 /// For example, a block of water at HP = 11 would turn into the following HP water values at D+1:
 /// ```
@@ -607,19 +569,6 @@ pub fn applyAncestorLogic(
     // A submerged waterloggable parent must stay submerged in its children!
     const inherited_water: u4 = if (parent_sprite.isWaterloggable()) parent_block.hp else 0;
 
-    // Inherit plant still!
-    if (parent_sprite == .spiralvine)
-        return .{ .id = .spiralvine, .seed = noise_hash_2, .water_volume = inherited_water };
-
-    if (parent_sprite == .mushroom) {
-        // Only make specific sub-blocks of a mushroom parent become big mushrooms!
-        // TODO: DRY here (maybe similar to portal where there's a comptime odds list)
-        return if ((bx % 4 == 1 or bx % 4 == 2) and by % 4 == 3)
-            .{ .id = .big_mushroom, .seed = noise_hash_2, .water_volume = inherited_water }
-        else
-            .{}; // bypass edges logic too
-    }
-
     const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
     const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
     const quadrant_seed = world.quad_cache.getQuadrantSeed(@intCast(key.quadrant), key.depth);
@@ -630,8 +579,20 @@ pub fn applyAncestorLogic(
     const wx = worldBlock(@intCast(key.quadrant % 2), key.suffix[0], bx);
     const wy = worldBlock(@intCast(key.quadrant / 2), key.suffix[1], by);
 
-    if (parent_sprite == .portal or parent_sprite == .invportal) {
-        return portalChild(parent_sprite, noise_seed, wx, wy, lx, ly, noise_hash_2, inherited_water);
+    // A macro block (decoration, installation, vine) states a plan for its whole region instead of
+    // filling it, so that one bush does not become sixteen. See `refine.zig`.
+    if (dw.refine.ruleFor(parent_sprite)) |rule| {
+        return dw.refine.refineChild(rule, .{
+            .parent = parent_block,
+            .neighbors = parent_neighbors,
+            .noise_seed = noise_seed,
+            .wx = wx,
+            .wy = wy,
+            .lx = lx,
+            .ly = ly,
+            .seed = noise_hash_2,
+            .water = inherited_water,
+        });
     }
 
     if (parent_sprite.isLiquid()) {
@@ -660,12 +621,21 @@ pub fn applyAncestorLogic(
     // Geometry FIRST!
     // A portal's anchor is the one surface the carve may not touch: a descent lands its player standing on
     // the floor of the portal block's child region, and eroding that floor drops them straight through it.
+    //
+    // Every other refined decoration makes the same demand of the individual CELLS its own children
+    // land on (`refine.protectsSurfaceCell()`), rather than of a whole row: a region holds one or two
+    // copies, so everything else here still erodes normally.
     if (!anchorsPortal(parent_neighbors) and
+        !dw.refine.protectsSurfaceCell(parent_neighbors, noise_seed, wx, wy, lx, ly) and
         carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
 
     // Now, resolve material domain warping for solid cells.
     const warp = warpField(noise_seed, wx, wy);
     const source = warpedMaterial(parent_block, parent_neighbors, warp, lx, ly);
+
+    // Provenance travels with the material the warp picked, and counts down as it goes: a shrub's
+    // canopy still reads as canopy for a couple of depths after its sprite became plain leaf stone.
+    const tag = source.tag.aged();
 
     // Evaluate overlay retention on confirmed solid terrain
     const is_overlay = source.id.isOverlay() or parent_sprite.isOverlay();
@@ -682,17 +652,32 @@ pub fn applyAncestorLogic(
             .stone;
 
         if (!keepsInheritedOverlay(noise_seed, wx, wy, lx, ly)) {
-            return .{ .id = base_id, .seed = noise_hash_2, .water_volume = inherited_water };
+            return .{ .id = base_id, .seed = noise_hash_2, .water_volume = inherited_water, .tag = tag };
         }
         return .{
             .id = overlay_id,
             .base_id = base_id,
             .seed = noise_hash_2,
             .water_volume = inherited_water,
+            .tag = tag,
         };
     }
 
     var evolved_sprite: Sprite = source.id.evolvesTo();
+    var child_tag = tag;
+
+    // An evolution can hand a terrain cell a MACRO block (`mossy_stone` becomes vine), and terrain fills
+    // its whole region. Such a sprite has to obey its anchor exactly as a refined one does, or a vein of
+    // mossy stone becomes a wall of vine hanging off nothing, and a line of it once the rock beside it
+    // erodes. A cell that cannot hold it keeps the material it grew from instead.
+    if (evolved_sprite != source.id and dw.refine.ruleFor(evolved_sprite) != null) {
+        if (dw.refine.canEvolveInto(evolved_sprite, parent_neighbors, ly)) {
+            // A fresh chain starts at run 1, so the next depth can continue and cap it from here.
+            if (dw.refine.startsChain(evolved_sprite)) child_tag = .make(.chain_run, 1);
+        } else {
+            evolved_sprite = source.id;
+        }
+    }
 
     if (source.id.isStone()) {
         const ore_density = procedural.getDualValueNoiseFixed(
@@ -708,6 +693,7 @@ pub fn applyAncestorLogic(
             wy,
             key.depth,
             noise_seed,
+            tag,
         )) |ore| {
             evolved_sprite = ore;
         }
@@ -721,8 +707,8 @@ pub fn applyAncestorLogic(
     else
         .none;
 
-    // done! pass down the noise hash as well.
-    return .{ .id = evolved_sprite, .base_id = base_id, .seed = noise_hash_2 };
+    // done! pass down the noise hash and the provenance as well.
+    return .{ .id = evolved_sprite, .base_id = base_id, .seed = noise_hash_2, .tag = child_tag };
 }
 
 /// Recursively traces the lineage of a single block type up to parent depths, overlaying player modifications.
