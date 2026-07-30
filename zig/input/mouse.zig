@@ -96,6 +96,9 @@ pub var mouse_block_x: u4 = 0;
 /// Y block location the mouse is on (within the chunk).
 /// Assume to be invalid if `mouse_chunk` or `mouse_subpixel` are null.
 pub var mouse_block_y: u4 = 0;
+/// How many chunks the mouse sits from the player's own chunk, on each axis.
+/// Assume to be invalid if `mouse_chunk_coord` is null.
+pub var mouse_chunk_offset: [2]i64 = .{ 0, 0 };
 /// Whether the mouse's block position changed. If coordinate is out of bounds, then set to true.
 /// Is reset in `handleMining()`, called from `handleTick()`.
 pub var block_position_changed = true;
@@ -116,7 +119,7 @@ pub fn requestCursorType(new_type: CursorType) void {
 /// Only sets `click_focus` if a pointerdown event was just fired and `is_hovered` is true.
 ///
 /// Returns whether the "capture" was successful.
-pub inline fn tryCaptureDown(category: ClickFocus, is_hovered: bool) bool {
+pub fn tryCaptureDown(category: ClickFocus, is_hovered: bool) bool {
     if (just_mouse_down and is_hovered) {
         if (click_focus == .none or click_focus == .canvas or click_focus == category) {
             click_focus = category;
@@ -128,7 +131,7 @@ pub inline fn tryCaptureDown(category: ClickFocus, is_hovered: bool) bool {
 
 /// Helper to check if a valid, click-up sequence finished on a specific UI element.
 /// Verifies the click both started and ended on the specified category.
-pub inline fn isClicked(category: ClickFocus, is_hovered: bool) bool {
+pub fn isClicked(category: ClickFocus, is_hovered: bool) bool {
     return just_mouse_up and released_focus == category and is_hovered;
 }
 
@@ -211,6 +214,7 @@ pub fn updateMouseLocation() void {
     const player_coord = game.getPlayerCoord();
     if (player_coord.move(.{ chunk_offset_x, chunk_offset_y })) |coord| {
         mouse_chunk_coord = coord;
+        mouse_chunk_offset = .{ chunk_offset_x, chunk_offset_y };
 
         const lx = @mod(target_sx, dw.SUBPIXELS_IN_CHUNK); // no need to use % trick, @mod optimizes down to & instruction
         const ly = @mod(target_sy, dw.SUBPIXELS_IN_CHUNK);
@@ -264,14 +268,18 @@ pub fn getMouseBlock() ?memory.Block {
 
         const hitbox = s.props().hitbox;
         // create smaller hitboxes for some decor sprites (with a little bit of leniency involved still)
-        if (hitbox == .large_bottom_decor and loc[1] <= 5) {
-            // same as mushroom but greater valid area, such as for bushes
+        if (hitbox == .square_bottom_decor and (loc[0] < 3 or loc[0] >= 13 or loc[1] <= 3)) {
+            // some sprites small tree don't take up full horizontal space
             return null;
         } else if (hitbox == .small_bottom_decor and loc[1] <= 9) {
-            // If your mouse is over the TOP PART of the mushroom block then that's not part of its "hitbox"
+            // if your mouse is over the TOP PART of the mushroom block then that's not part of its "hitbox"
+            return null;
+        }
+        if (hitbox == .large_bottom_decor and loc[1] <= 5) {
+            // similar to mushroom but greater valid area, such as for bushes
             return null;
         } else if (hitbox == .ceiling_decor and loc[1] >= 9) {
-            // for ceiling flower, it's invalid if your mouse is over the BOTTOM PART
+            // for ceiling flower, it's invalid if your mouse is over the BOTTOM PART instead
             return null;
         } else if (hitbox == .thin_strip and (loc[0] < 4 or loc[0] >= 12)) {
             // plant is fully vertical

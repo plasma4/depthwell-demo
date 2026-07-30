@@ -14,10 +14,36 @@ const Rect = structures.Rect;
 pub const spawn_area: u32 = 64;
 pub const max_w: u32 = 30;
 pub const max_h: u32 = 20;
-pub const target_chance: f64 = 0.36;
+pub const target_chance: f64 = 0.28;
+pub const attempts: u32 = 6;
 
 /// Ring of empty blocks the ellipse is inset by, so the shell never touches the bounding box.
 const padding = 3;
+
+/// Check if coordinate is inside ellipse footprint!
+fn covers(wx: i32, wy: i32, bounds: Rect) bool {
+    const size_x = bounds.x_end - bounds.x_start;
+    const size_y = bounds.y_end - bounds.y_start;
+    const rx = (size_x >> 1) - padding;
+    const ry = (size_y >> 1) - padding;
+    if (rx <= 0 or ry <= 0) return false;
+
+    const center_x = bounds.x_start + (size_x >> 1);
+    const center_y = bounds.y_start + (size_y >> 1);
+    const dx = wx - center_x;
+    const dy = wy - center_y;
+
+    return (dx * dx * ry * ry) + (dy * dy * rx * rx) <= rx * rx * ry * ry;
+}
+
+/// Just the encase constraint: this structure should be fully buried!
+pub const constraints = [_]structures.Constraint{
+    .{ .encase = .{
+        .covers = covers,
+        .min_open = 0.00,
+        .max_open = 0.00,
+    } },
+};
 
 pub fn getBounds(state: *HashState, cx: i32, cy: i32) ?Rect {
     const base_radius_x = state.getRange(i32, 6, 12);

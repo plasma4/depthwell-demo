@@ -1,4 +1,4 @@
-//! Portal vestibule: a rounded-rect chamber standing on flat ground, with the portal on the floor inside.
+//! Portal chamber: a rounded-rect-ish shape on flat ground, with the portal inside.
 //! TODO: add all the items required to make portal "unlocking" a req
 //!
 //!   #######
@@ -8,7 +8,6 @@
 //! #....P....#
 //! ###########
 //!
-//! The corners are chamfered so the shell reads as rounded rather than as another box.
 //! `#` is shell, `.` is carved-out air, `P` is the portal.
 const std = @import("std");
 const dw = @import("../../root.zig");
@@ -18,13 +17,13 @@ const Sprite = dw.Sprite;
 const structures = @import("../structures.zig");
 const Rect = structures.Rect;
 
+/// high chance+attempts=likely to appear regularly; intentional behavior!
 pub const spawn_area: u32 = 64;
 pub const max_w: u32 = size_x;
 /// Footprint height only. `structures.zig` adds `seat.max_drop` when it computes the vertical reach.
 pub const max_h: u32 = size_y;
 
-/// Flat ground wide enough for the vestibule is rare, so nearly every roll dies on the seating stage.
-/// This sits at the ceiling and lets seating do the thinning; see `attempts`.
+/// Flat ground wide enough for the chamber is rare, so nearly every roll dies on the seating stage.
 pub const target_chance: f64 = 1.0;
 
 /// Flat ground is rare enough that one jitter draw per cell would waste almost every cell.
@@ -34,12 +33,12 @@ pub const attempts: u32 = 30;
 const size_x: i32 = 11;
 const size_y: i32 = 6;
 
-/// Depth of the diagonal chamfer taken out of each corner.
+/// Depth of the diagonal roof taken out of each corner.
 /// A block is outside the shell when its distance to the two nearest edges sums to less than this,
 /// which cuts a clean 45-degree bevel without any per-block distance math.
 const CORNER: i32 = 3;
 
-/// Stands the vestibule on flat ground, sliding it down up to 6 rows to meet the surface.
+/// Stands the chamber on flat ground, sliding it down up to 6 rows to meet the surface.
 /// Seating also guarantees the floor row has terrain beneath it,
 /// so no explicit "my base rests on solid ground" constraint is needed.
 ///
@@ -50,10 +49,10 @@ const CORNER: i32 = 3;
 pub const seat: structures.Seat = .{ .max_drop = 6, .max_slope = 2 };
 
 /// Terrain rules! Evaluated by `structures.zig` cheapest-first; result is cached on a grid-cell level.
-/// Terrain INSIDE the footprint is deliberately unconstrained: the vestibule carves out whatever it lands on.
+/// Terrain INSIDE the footprint is deliberately unconstrained: the chamber carves out whatever it lands on.
 pub const constraints = [_]structures.Constraint{
-    // A roof pressed into rock reads as a wall, so the row above the vestibule must be open.
-    // The chamfer means the top row is narrower than the footprint, so only that span is checked.
+    // A roof pressed into rock reads as a wall, so the row above the chamber must be open.
+    // The angled ceiling means the top row is narrower than the footprint, so only that span is checked.
     .{ .empty = .{
         .x0 = .{ .at = .start, .off = CORNER },
         .x1 = .{ .at = .end, .off = -CORNER },
@@ -62,8 +61,7 @@ pub const constraints = [_]structures.Constraint{
     } },
 };
 
-/// Whether a footprint-local block is part of the vestibule at all.
-/// Blocks outside it are declined so the surrounding terrain shows through the chamfered corners.
+/// Whether a footprint-local block is part of the chamber at all.
 inline fn inShape(x: i32, y: i32) bool {
     if (x < 0 or y < 0 or x >= size_x or y >= size_y) return false;
     // Distance to the nearest vertical and horizontal edge; both are 0 at a corner.
@@ -73,7 +71,7 @@ inline fn inShape(x: i32, y: i32) bool {
 }
 
 /// Whether a block is on the shell: inside the shape, but with at least one neighbor outside it.
-/// Deriving the shell from `inShape()` rather than testing for the footprint's edges keeps the wall exactly one block thick all the way around the chamfer,
+/// Deriving the shell from `inShape()` keeps the wall exactly one block thick all the way around the ceiling,
 /// with no special-casing per corner.
 inline fn isShell(x: i32, y: i32) bool {
     return inShape(x, y) and

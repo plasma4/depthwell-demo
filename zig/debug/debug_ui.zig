@@ -213,10 +213,14 @@ fn teleportRandomly() void {
     );
     teleport_rand -%= 0xFFFF;
 
+    // Derived from the depth rather than read out of `world.max_possible_suffix`: a mask that does not
+    // match the depth in play drops the player onto a chunk the world has no room for, and every
+    // coordinate walked from there (the render window, the SimBuffer origin) is off the world with it.
+    const max_suffix = world.getMaxSuffixAtDepth(game.depth);
     game.teleport(
         .{ .quadrant = 0, .suffix = .{
-            h1 & world.max_possible_suffix,
-            h2 & world.max_possible_suffix,
+            h1 & max_suffix,
+            h2 & max_suffix,
         } },
         .{ 2048, 2048 },
     );

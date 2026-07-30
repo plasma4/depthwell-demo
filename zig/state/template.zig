@@ -3,7 +3,7 @@
 //! A structure draws its footprint as a multiline string and hands over a legend mapping each character to what it places.
 //! The whole thing is parsed and validated at compile-time!
 //!
-//! This is for shapes where placement is intentional (a room, a vestibule, a chest alcove).
+//! This is for shapes where placement is intentional (a room, a chamber, a chest alcove).
 //! Organic or size-varying shapes (a geode's rolled disc) stay as math in `generate()`; the two coexist.
 //!
 //! Conventions:
@@ -47,7 +47,7 @@ pub fn Template(comptime art: []const u8, comptime legend: []const Entry) type {
         pub const height: i32 = parsed.height;
 
         /// The `Cell` at template-local (`lx`, `ly`), or null when outside the grid.
-        pub inline fn at(lx: i32, ly: i32) ?Cell {
+        pub fn at(lx: i32, ly: i32) ?Cell {
             if (lx < 0 or ly < 0 or lx >= width or ly >= height) return null;
             const ch = parsed.grid[@intCast(ly * width + lx)];
             // legend is comptime and tiny, so this lowers to a jump table.
