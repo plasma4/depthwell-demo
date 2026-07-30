@@ -152,8 +152,8 @@ export async function create(
                 jsGetTime: () => performance.now(),
                 jsHandleVisibleChunks: (
                     opacity: number,
-                    wireframeOpacity: number,
-                ) => engine!.handleVisibleChunks(opacity, wireframeOpacity),
+                    wireframeBrightness: number,
+                ) => engine!.handleVisibleChunks(opacity, wireframeBrightness),
                 jsHandleVisibleEntities: () => engine!.handleVisibleEntities(),
                 jsDrawBackground: (opacity: number) =>
                     engine!.drawBackground(opacity),
