@@ -41,7 +41,7 @@ Run:
 
 See `build.zig` for more options on compiling a final version! It's enormously helpful to use the Zig Language Server in VSCode/VSCodium and set it to "watch" mode, which automatically builds the WASM while providing highlighting any errors as well as "Go to Definition" quality-of-life.
 
-Useful variables to customize include `CONFIG` in `src/main.ts`, `engine.wireframeOpacity`, `engine.baseSpeed`, and `zig/state/player.zig` config options.
+Useful variables to customize include `CONFIG` in `src/main.ts`, `engine.wireframeBrightness`, `engine.baseSpeed`, and `zig/state/player.zig` config options.
 
 When building for production with Vite (using `npm run build` instead of `npm run dev`), use `zig build -Dgen-enums -Dwasm-opt` (with WASM optimizations from Binaryen).
 Alternatively, use and modify `.githooks/pre-commit`.
@@ -77,10 +77,10 @@ Before the specifics, here's the fixed pipeline a chunk runs through. Every stag
 
 1. **Base terrain** sets up the world! Each cell samples moisture and density noise to pick its foundation block (a stone variation, lava stone, air for caves, water in pools). This is the "raw" world with no features yet.
 2. **Ores and gems** get added to the terrain. A second noise pass overlays ore "veins" onto these terrain blocks. Ores/gems record the stone visually beneath them as `base_id`.
-3. **Structures.** Larger, terrain-gated features (chambers, pillars, geodes, trees) are placed by a prioritized, collision-resolved planner. This uses hashing, attempts to minimize biases, and decides _whether and where_ a structure exists at all.
+3. **Structures** that are terrain-gated features (chambers, pillars, geodes, trees) are placed by a prioritized, collision-resolved planner. This uses hashing, attempts to minimize biases, and decides _whether and where_ a structure exists at all.
 4. **Decorations** appear after, which are context-aware plants (mushrooms, flowers, vines, shrubs) that only check local terrain (whether there's a solid block above and below, for example).
 5. **Modifications** then get applied, which are any player edits (or water flowing changes) recorded in the `ModificationStore`. These are "replayed" over the freshly generated chunk, overriding whatever generation produced. This is the only stage that isn't purely procedural, and it, of course, has the highest priority.
-6. **Derived passes.** Finally, edge flags and waterlogging are (re-)computed again after modifications, from the settled block ids/neighbors, and a lighting value pass occurs right before sending data to WGSL. These are render/simulation state so they're re-calculated rather than stored.
+6. **Derived passes** finish up, with edge flags and waterlogging getting (re-)computed again after modifications, from the settled block ids/neighbors. Then a lighting value pass occurs right before sending data to WGSL. These are render/simulation state so they're re-calculated rather than stored.
 
 Note that when the player tries to modify part of the world, min(e?)ability is checked based on the tool, and adjacent blocks are removed according to a set of rules (edge flag logic or multi-block data).
 
@@ -248,28 +248,22 @@ In the earlier sections, I mentioned `ChaCha12` for its cryptographic strength. 
 
 By using `Vec2f` vectors and bit-folding, `FastHash.hash2d()` provides enough variance for smooth terrain while being significantly faster than a standard PRNG.
 
-#### Terrain and biomes
+#### Terrain, biomes, and ores/gems
 
-The first pass of the terrain logic determines the "flavor" of the chunk. We calculate two main values: **moisture** and **density**.
+The first pass of the terrain logic evaluates procedural values for each block coordinate to determine the "flavor" and block type of the chunk. Generation evaluates up to six noise values, with larger cell sizes meaning the noise "fluctuates" less rapidly:
 
-Instead of standard Perlin noise, there's multiple algorithms being used simultaneously:
+- **Density** that controls primary cave structures and wall cutouts (medium cell size).
+- **Cutoff** that multiplies density to dynamically expand or contract cave openings. Also used in place of secondary density occasionally (small cell size).
+- **Moisture** that acts as a large-scale macro-biome selector across chunks (largest cell size).
+- **Weirdness** that controls rarer, exotic stone biomes (such as lava or molten stone).
+- **Secondary density** that varies specific stone types.
+- **Ore density** that controls the distribution of ores and gems across host stone blocks.
 
-- Basic value noise is used for large terrain details and a starting point for a few other ones.
-- Worley noise (or cellular/Voronoi noise) that creates sharp, jagged ("crisp") noise. Specifically, F2-F1 Worley noise is being used.
-- To create a more varied texture, the code uses fractal brownian motion (FBM) to warp the input coordinates.
+These are mostly arbitrary property names, but based on the moisture and density values, a specific block type can be chosen such as normal, blue, or lava stone. Some noise values use FBM+tuned Worley noise, others use FBM+Perlin, others use Billow noise...but the point of all these varying cell sizes and algorithms is to produce varied but visually correlated output.
 
-Large cells (scale/cell size of 425.0) determine moisture. Smaller cells (scale of 80.0) determine density. These are mostly arbitrary properties; density determines the cave shape while moisture determines some extra "flavor" details like blue/purple `strange_stone` or different stone block variations.
+Ore and gem dispersal across the base stone blocks is driven by a data-driven rule palette (`ORE_DISPERSALS`, but don't let the name fool you, since this deals with both gems and ores) evaluated mostly at compile-time. Instead of executing dynamic rule evaluation at runtime, the compiler bakes noise parameters and rule constraints directly into generated WASM instructions.
 
-Based on the moisture and density values, a specific block type is chosen such as normal, blue, or lava stone.
-
-#### Dispersing ores
-
-Once the stone is placed, the generator makes a second pass to seed ores. This pass only triggers for "foundation" blocks (stone variations). We run another Worley pass with much smaller cells to create "veins."
-
-Using the `selectSprite()` helper, we branch the logic:
-
-- First, copper, iron, silver, and gold are dispersed based on the density of the specific Worley cell.
-- The amethyst, sapphire, emerald, and ruby gems use a third `FastHash` pass to check against `base_gem_odds`. If the odds hit, a specific gem is selected based on a third Worley value.
+Specific values and comptime logic for everything may be found in `zig/state/procedural.zig`.
 
 #### Decoration pass
 
@@ -394,7 +388,7 @@ You can see how because the entities are _ordered_, it's easy to add a shadow. A
 An `id` in a `Block` is only the _base_/default tile, so the tile actually drawn is resolved once per visible block per frame by `resolveVariant()` in `zig/types/variation.zig`, on the CPU right after lighting and before upload. While a lot of sprites simply resolve to themselves, some decorations and the plain stone type, for example, have multiple variants. It's a data-driven table: each sprite maps to at most one `VariantRule`, and all visual variants are stored consecutively, which a comptime check enforces. The kinds cover the common needs:
 
 - `grid_2x2` / `checkerboard` tile by tile-coordinate parity, so plain stone reads like a 32x32 texture instead of an obvious grid.
-- `seed_pick` chooses a frame from the block's seed (biased toward the base), giving mushrooms and bushes silent variety. (Mostly here because the old shader biased towards the first sprite.)
+- `random` chooses a frame from the block's seed (biased toward the base), giving mushrooms and bushes silent variety. (Mostly here because the old shader biased towards the first sprite.)
 - `animate` cycles frames on a fixed `period_frames` cadence (campfires, hovering cores).
 - `water_top` swaps to the surface sprite when nothing covers the block above.
 
@@ -576,8 +570,7 @@ The algorithm does this each frame (with a default budget of 2; budget increases
 1. The player's current velocity creates a "leading edge." This algorithm tracks your player's current speed and direction. It prioritizes generating chunks immediately in front of you (your "leading edge") before looking at side or diagonal directions.
 2. The engine quietly spends its frame budget generating a 68-chunk "ring" just outside your visible screen. By the time you walk or fall into a new area, the chunks are already generated and waiting in memory.
 3. Finally, the `ChunkCache` provides a "second chance" that stores recently visited chunks. This uses a 4-way set-associative cache (which is effectively O(1) in more cases than a `HashMap`); implementation details can be seen in `zig/state/world.zig`.
-    - Technical info: if a chunk has been accessed recently, its reference bit is kept.
-    - If the cache fills up, older chunks with cleared reference bits are evicted, eliminating memory allocation or garbage collection overhead.
+    - Technical info: if a chunk has been accessed recently, its reference bit is kept. If the cache fills up, older chunks with cleared reference bits are evicted, eliminating any allocation/GC!
 
 This system prevents frame spikes (as you may normally have to generate a whole 16 chunks/frame to keep `SimBuffer` happy)! Note that this logic doesn't at all change the _logic_: the player could still teleport trillions of chunks away in a frame: these would just get gradually neglected by the `ChunkCache` naturally.
 
@@ -586,6 +579,8 @@ Chunks that get accessed from the `SimBuffer` do not update the `ChunkCache`, al
 #### Light system
 
 Lighting is computed on the CPU every frame in `zig/render/lighting.zig`, right after the visible block buffer is assembled and before it is handed to the GPU. Every block receives a `light` value from 0 to 255, and the WGSL shader multiplies that block's OKLAB lightness by `light / 255` (so 0 is pitch black and 255 is full brightness). A companion field, `lighting_color`, records whether the "winning" (strongest) light is warm/orange (fire) or neutral white.
+
+This is not only used before rendering, but a version with _just_ the player is used to prevent the player from modifying blocks too far away!
 
 Instead of an additive light map or a naive FIFO queue, Depthwell uses an inverted **Dial's algorithm** (bucketed Dijkstra) to propagate light. The system maintains a "gravity shelf" of bucket lists, one for each possible brightness level from the maximum source strength down to ambient (0).
 By processing these buckets in strictly descending order (brightest to dimmest), the flood guarantees that each cell is finalized at its brightest possible value on its first visit.
