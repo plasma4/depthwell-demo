@@ -235,7 +235,6 @@ pub fn move(logic_speed: f64) void {
     subpixel_accum -= @as(Vec2f, @floatFromInt(total_move));
 
     game.last_player_pos = game.player_pos;
-    var total_chunk_shift: Vec2i = .{ 0, 0 };
 
     // vertical CCD
     is_grounded = false;
@@ -245,7 +244,7 @@ pub fn move(logic_speed: f64) void {
         const move_now = @min(rem_y, CCD_STEP_SIZE);
         if (!isColliding(game.player_pos[0], game.player_pos[1] + (step_y * move_now))) {
             game.player_pos[1] += step_y * move_now;
-            total_chunk_shift[1] += handleLocalWrap(1);
+            if (handleLocalWrap(1)) break;
             rem_y -= move_now;
         } else {
             // Perfect snap: Move 1 pixel at a time until contact
@@ -253,7 +252,7 @@ pub fn move(logic_speed: f64) void {
             while (sub_steps > 0) : (sub_steps -= 1) {
                 if (!isColliding(game.player_pos[0], game.player_pos[1] + step_y)) {
                     game.player_pos[1] += step_y;
-                    total_chunk_shift[1] += handleLocalWrap(1);
+                    if (handleLocalWrap(1)) break;
                 } else break;
             }
             if (step_y > 0) is_grounded = true;
@@ -276,14 +275,14 @@ pub fn move(logic_speed: f64) void {
         const move_now = @min(rem_x, CCD_STEP_SIZE);
         if (!isColliding(game.player_pos[0] + (step_x * move_now), game.player_pos[1])) {
             game.player_pos[0] += step_x * move_now;
-            total_chunk_shift[0] += handleLocalWrap(0);
+            if (handleLocalWrap(0)) break;
             rem_x -= move_now;
         } else {
             var sub_steps = move_now;
             while (sub_steps > 0) : (sub_steps -= 1) {
                 if (!isColliding(game.player_pos[0] + step_x, game.player_pos[1])) {
                     game.player_pos[0] += step_x;
-                    total_chunk_shift[0] += handleLocalWrap(0);
+                    if (handleLocalWrap(0)) break;
                 } else break;
             }
             game.player_velocity[0] = 0;
@@ -293,13 +292,18 @@ pub fn move(logic_speed: f64) void {
     }
 
     // Finally, tell SimBuffer and the camera to update.
-    world.SimBuffer.sync(game.getPlayerCoord(), total_chunk_shift);
+    world.SimBuffer.sync(game.getPlayerCoord());
     updateCamera(dt);
 }
 
-/// Updates the player_chunk and returns the chunk carry (displacement).
-/// This keeps `game.player_pos` normalized and updates fractal quadrant logic.
-fn handleLocalWrap(comptime axis: u1) i64 {
+/// Carries `game.player_pos` into the neighboring chunk once it leaves `[0, SUBPIXELS_IN_CHUNK)`,
+/// keeping the position normalized and the fractal quadrant up to date.
+///
+/// Returns whether the world edge refused the carry.
+/// The edge is a wall like any other, so the momentum that ran into it dies here:
+/// leaving it alive lets a player pinned against the edge keep accelerating into it,
+/// which costs a full CCD sweep every tick and never moves them anywhere.
+fn handleLocalWrap(comptime axis: u1) bool {
     const game = &memory.game;
     const val = game.player_pos[axis];
     if (val < 0 or val >= dw.SUBPIXELS_IN_CHUNK) {
@@ -320,13 +324,16 @@ fn handleLocalWrap(comptime axis: u1) i64 {
             const subpixel_offset = carry * dw.SUBPIXELS_IN_CHUNK;
             game.last_player_pos[axis] -= subpixel_offset;
             game.camera_pos[axis] -= subpixel_offset;
-            return carry;
+            return false;
         } else {
-            // World edge was hit! snap back
+            // World edge was hit! snap back, and drop the momentum that was carrying us into it
             game.player_pos[axis] = if (val < 0) 0 else dw.SUBPIXELS_IN_CHUNK - 1;
+            game.player_velocity[axis] = 0;
+            subpixel_accum[axis] = 0;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 
 /// Performs an AABB check (for the player's position) against the world grid.
@@ -345,21 +352,25 @@ pub fn isColliding(px: i64, py: i64) bool {
 
     const player_coord = game.getPlayerCoord();
     var last_coord: ?world.Coordinate = null;
-    var cached_chunk: memory.Chunk = undefined;
+    // Borrowed for the length of this loop only, which generates nothing (see `getChunkPtr()`).
+    var chunk: *const memory.Chunk = undefined;
 
     for (corners) |c| {
         const cx_shift = @divFloor(c[0], SUBPIXELS_IN_CHUNK);
         const cy_shift = @divFloor(c[1], SUBPIXELS_IN_CHUNK);
+        // Past the world edge reads as solid: there is nothing there to walk into.
         const target_coord = player_coord.move(.{ cx_shift, cy_shift }) orelse return true;
 
+        // The four corners nearly always share a chunk, and a hitbox can only ever span two;
+        // holding the pointer keeps this to one lookup and no chunk copy at all.
         if (last_coord == null or !target_coord.eql(last_coord.?)) {
-            cached_chunk = world.getChunk(target_coord);
+            chunk = world.getChunkPtr(target_coord);
             last_coord = target_coord;
         }
 
         const lx: u4 = @intCast(@as(u64, @bitCast(@divFloor(@mod(c[0], SUBPIXELS_IN_CHUNK), dw.CHUNK_SIZE_SQ))));
         const ly: u4 = @intCast(@as(u64, @bitCast(@divFloor(@mod(c[1], SUBPIXELS_IN_CHUNK), dw.CHUNK_SIZE_SQ))));
-        if (cached_chunk.blocks[@as(usize, ly) * CHUNK_SIZE + @as(usize, lx)].isSolid()) return true;
+        if (chunk.blocks[@as(usize, ly) * CHUNK_SIZE + @as(usize, lx)].isSolid()) return true;
     }
     return false;
 }

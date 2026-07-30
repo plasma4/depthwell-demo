@@ -17,9 +17,9 @@ const DropHandlers = dw.drops.DropHandlers;
 pub const UNMINEABLE_STRENGTH: u64 = std.math.maxInt(u64);
 
 /// Index where stone-like sprites begin.
-pub const STONE_START = 14;
+pub const STONE_START = 20;
 /// Index where stone-like sprites end.
-const STONE_END = STONE_START + 22;
+const STONE_END = STONE_START + 23;
 
 /// Index where smelted bar sprites begin.
 const BAR_START = STONE_END + 4;
@@ -56,7 +56,7 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 298) {
+    if (max_sprite_value != 305) {
         var buf: [64]u8 = undefined;
         @compileError("Max sprite value of " ++
             (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
@@ -82,13 +82,14 @@ pub const Sprite = enum(u16) {
     black_plate,
     white_plate,
     leaves,
-    dirt,
-    dirt_top,
+    dirt = 12, // bottom dirt, center dirt, 2 top dirt sprites
+    red_dirt = 16, // same as normal dirt
 
     // stone types!
     blue_strange_stone = STONE_START,
     purple_strange_stone,
     mossy_stone,
+    more_mossy_stone,
     lime_stone,
     green_stone,
     seagreen_stone,
@@ -364,16 +365,14 @@ pub const Sprite = enum(u16) {
         return is_debug and id >= 65000 and id <= 65256;
     }
 
-    /// Extracts the evolved form of this sprite at compile-time.
-    /// If it doesn't evolve, returns itself!
-    pub inline fn evolvesTo(self: Sprite) Sprite {
+    /// What this sprite becomes at increased depth and how often, or null when it stays as it is.
+    ///
+    /// This is the ODDS, not the outcome: resolve it with `refine.evolve()`, which rolls the cell and
+    /// applies the anchor gate. Reading `.into` directly skips both and evolves every cell always.
+    pub inline fn evolution(self: Sprite) ?Evolution {
         const val = @intFromEnum(self);
-        if (val < MAX_SPRITE_ID) {
-            if (dense_props_table[val].evolves_to) |evolution| {
-                return evolution;
-            }
-        }
-        return self;
+        if (val < MAX_SPRITE_ID) return dense_props_table[val].evolution;
+        return null;
     }
 
     /// Returns whether a block is empty (air), a liquid, or a waterloggable block (decor/crafter).
@@ -404,7 +403,7 @@ pub const Sprite = enum(u16) {
     }
 
     /// Converts a sprite into an entity ID, handling atlas ID remaps.
-    pub inline fn asEntity(self: Sprite) u16 {
+    pub fn asEntity(self: Sprite) u16 {
         const id = @intFromEnum(self);
         return if (id >= GEM_START and id < GEM_START + GEM_COUNT)
             id + GEM_COUNT
@@ -432,6 +431,7 @@ const rules = [_]SpriteRule{
             .black_plate,
             .white_plate,
             .dirt,
+            .red_dirt,
         } },
         .{
             .in_world = true,
@@ -539,7 +539,7 @@ const rules = [_]SpriteRule{
     // Ore/gem strengths & capability requirements
     .{
         .{ .single = .copper },
-        .{ .required_capabilities = .t0 },
+        .{ .strength = 20, .required_capabilities = .t0 },
     },
     .{
         .{ .single = .iron },
@@ -547,7 +547,7 @@ const rules = [_]SpriteRule{
     },
     .{
         .{ .single = .silver },
-        .{ .strength = 45, .required_capabilities = .t1 },
+        .{ .strength = 50, .required_capabilities = .t1 },
     },
     .{
         .{ .single = .gold },
@@ -555,19 +555,19 @@ const rules = [_]SpriteRule{
     },
     .{
         .{ .single = .nickel },
-        .{ .strength = 70, .required_capabilities = .t2 },
+        .{ .strength = 80, .required_capabilities = .t2 },
     },
     .{
         .{ .single = .cobalt },
-        .{ .strength = 90, .required_capabilities = .t3 },
+        .{ .strength = 100, .required_capabilities = .t3 },
     },
     .{
         .{ .single = .quartz },
-        .{ .required_capabilities = .t1 },
+        .{ .strength = 30, .required_capabilities = .t1 },
     },
     .{
         .{ .single = .amethyst },
-        .{ .strength = 75, .required_capabilities = .t2 },
+        .{ .strength = 65, .required_capabilities = .t1 },
     },
     .{
         .{ .single = .sapphire },
@@ -590,26 +590,72 @@ const rules = [_]SpriteRule{
         .{ .strength = 130, .required_capabilities = .t3 },
     },
 
-    // Evolution rules on depth increase
+    // hitbox sizes!
     .{
-        .{ .single = .mushroom },
+        .{ .list = &[_]Sprite{
+            .ceiling_flower,
+        } },
+        .{ .hitbox = .ceiling_decor },
+    },
+    .{
+        .{ .list = &[_]Sprite{
+            .mushroom,
+            .plant_haft,
+        } },
         .{ .hitbox = .small_bottom_decor },
     },
     .{
+        .{ .list = &[_]Sprite{
+            .small_tree,
+            .cornflower,
+        } },
+        .{ .hitbox = .square_bottom_decor },
+    },
+    .{
+        .{ .list = &[_]Sprite{
+            .rock,
+            .purple_rock,
+            .flint,
+            .bush,
+        } },
+        .{ .hitbox = .large_bottom_decor },
+    },
+    .{
+        .{ .list = &[_]Sprite{
+            .twinklemoss,
+            .spiralvine,
+            .plant_stem,
+        } },
+        .{ .hitbox = .thin_strip },
+    },
+
+    // evolution rules on depth increase!
+    // moss spreads rather than converts: 40% of it is still plain moss one depth down
+    .{
         .{ .single = .mossy_stone },
-        .{ .evolves_to = .spiralvine },
+        .{ .evolution = .{ .into = .more_mossy_stone, .chance = 0.6 } },
+    },
+    // No odds needed here: `spiralvine` hangs, so the anchor gate already refuses every cell that is
+    // not a ceiling with rock above it, and the rest of the vein simply stays moss.
+    .{
+        .{ .single = .more_mossy_stone },
+        .{ .evolution = .{ .into = .spiralvine } },
     },
     .{
         .{ .single = .purple_strange_stone },
-        .{ .evolves_to = .bright_red_stone },
+        .{ .evolution = .{ .into = .bright_red_stone } },
     },
     .{
         .{ .single = .bright_red_stone },
-        .{ .evolves_to = .lava_stone },
+        .{ .evolution = .{ .into = .lava_stone } },
+    },
+    // Molten pockets inside lava stone: a fifth of it turns "molten" in blobs
+    .{
+        .{ .single = .lava_stone },
+        .{ .evolution = .{ .into = .molten_stone, .chance = 0.2, .blob = 9 } },
     },
 
-    // 2x1 big trees. Each half pins the other through `requires`, so the cascade breaks the pair as a unit
-    // whichever half goes first; only the base half drops, keeping one `small_tree` per tree.
+    // 2x1 big trees. Each half pins the other through requires config, and only the left half drops the small_tree.
     .{
         .{ .list = &[_]Sprite{
             .moss_shrub1,
@@ -708,7 +754,6 @@ const rules = [_]SpriteRule{
     // Floor anchor rule requirement above
     .{
         .{ .list = &[_]Sprite{
-            .campfire,
             .forest_furnace,
             .lava_furnace,
             .basic_core,
@@ -777,6 +822,7 @@ const rules = [_]SpriteRule{
 /// Hitbox geometry variants for various block shapes.
 pub const HitboxKind = enum(u3) {
     full,
+    square_bottom_decor,
     small_bottom_decor,
     large_bottom_decor,
     ceiling_decor,
@@ -845,6 +891,26 @@ pub const Category = enum(u3) {
     interactive,
 };
 
+/// What one sprite turns into as depth increases, and how often.
+///
+/// Declarative on purpose: this states the ODDS, and `refine.evolve()` is the only thing that resolves
+/// them, so a kind's rule lives here rather than in the generator.
+/// Everything is a pure function of the child cell's world position,
+/// which is what keeps a cell's fate identical across regeneration.
+pub const Evolution = struct {
+    /// What the sprite becomes.
+    into: Sprite,
+    /// Fraction of cells that take the evolution, in `(0, 1]`.
+    /// The rest keep the sprite they already are, so `0.6` reads as "40% stays put".
+    /// The anchor gate can still refuse an evolution that rolled through
+    /// (see `refine.canEvolveInto()`), which is what keeps a vine off a wall it cannot hang from.
+    chance: f32 = 1.0,
+    /// Diameter, in child blocks, of the patches the roll gathers into.
+    /// 0 rolls every cell on its own (visually uncorrelated),
+    /// while a positive size keeps the same `chance` but arranges it as soft patches instead.
+    blob: f32 = 0,
+};
+
 /// Consolidated properties of each sprite.
 pub const SpriteProps = struct {
     /// Backs `Sprite.isInWorld()`: whether this sprite is a valid block that could exist in any chunk.
@@ -881,15 +947,15 @@ pub const SpriteProps = struct {
     requires: []const Support = &.{},
     /// What item(s) this sprite drops when mined; see `DropConfig`.
     drops: DropConfig = .{ .strategy = .self },
-    /// If set, the sprite this evolves into at increased depth. See `Sprite.evolvesTo()`.
-    evolves_to: ?Sprite = null,
+    /// If set, what this sprite becomes at increased depth. See `Sprite.evolution()`.
+    evolution: ?Evolution = null,
     /// Conditions that must be satisfied to mine this block.
     required_capabilities: dw.mining.MiningCapabilities = .t0,
 };
 
 /// Tightly packed 16-bit struct for high-performance, cache-friendly lookups.
 /// Mirrors the boolean/enum fields of `SpriteProps` (see those doc comments),
-/// minus `strength`, `instant_mine`, `drops`, and `evolves_to`, which are only needed off the hot path.
+/// minus `strength`, `instant_mine`, `drops`, and `evolution`, which are only needed off the hot path.
 pub const SpriteFlags = packed struct(u16) {
     in_world: bool = false,
     item: bool = false,
@@ -955,7 +1021,7 @@ fn mergeProps(dest: *SpriteProps, src: SpriteProps) void {
     if (src.drops.strategy != .self or src.drops.static_items.len != 0 or src.drops.dynamic_fn != null) {
         dest.drops = src.drops;
     }
-    if (src.evolves_to != null) dest.evolves_to = src.evolves_to;
+    if (src.evolution != null) dest.evolution = src.evolution;
 
     // Merge required capabilities if they deviate from the default (.t0)
     const default_caps: dw.mining.MiningCapabilities = .t0;
@@ -1027,9 +1093,23 @@ const dense_props_table: [MAX_SPRITE_ID]SpriteProps = blk: {
         }
 
         table[i] = getPropsForSprite(@enumFromInt(i));
+        if (table[i].evolution) |ev| validateEvolution(@enumFromInt(i), ev);
     }
     break :blk table;
 };
+
+/// Rejects an `Evolution` the roll could not honor.
+///
+/// `chance` of 0 is a rule that does nothing (drop the field instead, so the table stays readable),
+/// and a `blob` under one block is smaller than the cells it is meant to gather.
+fn validateEvolution(comptime s: Sprite, comptime ev: Evolution) void {
+    if (ev.chance <= 0.0 or ev.chance > 1.0)
+        @compileError("Sprite `" ++ @tagName(s) ++ "`: evolution chance must be within (0, 1].");
+    if (ev.blob != 0 and ev.blob < 1.0)
+        @compileError("Sprite `" ++ @tagName(s) ++ "`: evolution blob size must be 0 (per cell) or at least one block.");
+    if (ev.into == s)
+        @compileError("Sprite `" ++ @tagName(s) ++ "`: evolving into itself; drop the rule instead.");
+}
 
 /// Precomputed compact `SpriteFlags` LUT.
 const dense_flags_table: [MAX_SPRITE_ID]SpriteFlags = blk: {

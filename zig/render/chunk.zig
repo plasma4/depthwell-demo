@@ -238,7 +238,6 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
     const out = memory.scratchAllocSlice(memory.Block, wb * hb);
     const player_coord = pass.origin;
 
-    var chunk: memory.Chunk align(memory.MAIN_ALIGN_BYTES) = undefined;
     for (0..ch) |gy| {
         const offset_y = @as(i64, @intCast(min_cy)) + @as(i64, @intCast(gy));
 
@@ -256,20 +255,19 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
                     }
                 }
 
-                switch (pass.source) {
-                    .live => world.writeChunk(&chunk, target_coord),
+                // read in-place
+                const chunk: *const memory.Chunk = switch (pass.source) {
+                    .live => world.getChunkPtr(target_coord),
                     // A preview slot that has not been generated yet reads as empty space. That can only
                     // happen while the overlay is still fully transparent, so it is never visible.
-                    .preview => if (dw.portal.previewChunk(target_coord)) |ready| {
-                        chunk = ready.*;
-                    } else {
+                    .preview => dw.portal.previewChunk(target_coord) orelse {
                         for (0..CHUNK_SIZE) |ly| {
                             const row_start = (gy * CHUNK_SIZE + ly) * wb + gx * CHUNK_SIZE;
                             @memset(out[row_start .. row_start + CHUNK_SIZE], memory.Block.empty);
                         }
                         continue;
                     },
-                }
+                };
 
                 for (0..CHUNK_SIZE) |ly| {
                     const row_start = (gy * CHUNK_SIZE + ly) * wb + gx * CHUNK_SIZE;
@@ -316,25 +314,34 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
 /// Uses grid-relative tile coordinates (`i % wb`, `i / wb`); because the grid origin is chunk-aligned (an even tile offset),
 /// their parity matches absolute tile parity, so positional variants (2x2 stone, checkerboard edge stone)
 /// are seamless across the world exactly as the old shader was.
-inline fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
-    for (out, 0..) |*block, i| {
-        block.id = dw.variation.resolveVariant(block.*, i % wb, i / wb, frame);
-        // Underlay sprites (ore/gem backgrounds) get the same variation treatment, so plain stone tiles for example.
-        if (block.base_id != .none) {
-            block.base_id = dw.variation.resolveSpriteVariant(
-                block.base_id,
-                block.seed,
-                block.edge_flags,
-                i % wb,
-                i / wb,
-                frame,
-            );
+fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
+    // Walked row by row rather than by flat index: the tile coordinates are the only thing the index was ever for,
+    // and recovering them per block costs a divide and a modulo on every cell of the screen.
+    var row_start: usize = 0;
+    var ty: usize = 0;
+    while (row_start < out.len) : ({
+        row_start += wb;
+        ty += 1;
+    }) {
+        for (out[row_start..][0..wb], 0..) |*block, tx| {
+            block.id = dw.variation.resolveVariant(block.*, tx, ty, frame);
+            // Underlay sprites (ore/gem backgrounds) get the same variation treatment, so plain stone tiles for example.
+            if (block.base_id != .none) {
+                block.base_id = dw.variation.resolveSpriteVariant(
+                    block.base_id,
+                    block.seed,
+                    block.edge_flags,
+                    tx,
+                    ty,
+                    frame,
+                );
+            }
         }
     }
 }
 
 /// Sets scratch properties containing information to TypeScript for renderFrame.
-inline fn updateRenderProperties(
+fn updateRenderProperties(
     pass: LayerPass,
     interp_cam_x: f64,
     interp_cam_y: f64,

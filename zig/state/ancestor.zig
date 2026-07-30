@@ -460,8 +460,13 @@ fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx:
     );
     const weights: @Vector(4, f32) = .{ (1 - u) * (1 - v), u * (1 - v), (1 - u) * v, u * v };
 
-    // Continuous noise jitter breaks discrete corner density steps (16, 32, 48)
-    const jitter = (procedural.getDualValueNoiseFixed(noise_seed, wx, wy, 1.0 / 7.0)[0] - 0.5) * (0.8 * CORNER_UNIT);
+    // Continuous noise jitter!
+    const jitter = (procedural.getDualValueNoiseFixed(
+        noise_seed,
+        wx,
+        wy,
+        1.0 / 7.0,
+    )[0] - 0.5) * (0.8 * CORNER_UNIT);
 
     // horizontal/vertical groups of blocks on their own look lonely so we give them "supports" if you will
     const support = @reduce(.Add, corners) * 0.25;
@@ -527,7 +532,7 @@ fn warpedMaterial(parent_block: Block, n: [8]Block, warp: dw.utils.Vec2f32, lx: 
 /// 4 4 4 4
 /// 4 4 4 4
 /// ```
-inline fn inheritedLiquidVolume(parent_volume: u4, ly: u4) u4 {
+fn inheritedLiquidVolume(parent_volume: u4, ly: u4) u4 {
     if (parent_volume >= dw.water.RESTING_VOLUME) return memory.Block.MAX_HP;
 
     const max: u32 = memory.Block.MAX_HP;
@@ -579,27 +584,31 @@ pub fn applyAncestorLogic(
     const wx = worldBlock(@intCast(key.quadrant % 2), key.suffix[0], bx);
     const wy = worldBlock(@intCast(key.quadrant / 2), key.suffix[1], by);
 
+    // Everything one child cell needs to be answered, built once: the plan below refines from it,
+    // and every evolution on the way down rolls its odds against it (see `refine.evolve()`).
+    const cell: dw.refine.Context = .{
+        .parent = parent_block,
+        .neighbors = parent_neighbors,
+        .noise_seed = noise_seed,
+        .wx = wx,
+        .wy = wy,
+        .lx = lx,
+        .ly = ly,
+        .seed = noise_hash_2,
+        .water = inherited_water,
+    };
+
     // A macro block (decoration, installation, vine) states a plan for its whole region instead of
     // filling it, so that one bush does not become sixteen. See `refine.zig`.
     if (dw.refine.ruleFor(parent_sprite)) |rule| {
-        return dw.refine.refineChild(rule, .{
-            .parent = parent_block,
-            .neighbors = parent_neighbors,
-            .noise_seed = noise_seed,
-            .wx = wx,
-            .wy = wy,
-            .lx = lx,
-            .ly = ly,
-            .seed = noise_hash_2,
-            .water = inherited_water,
-        });
+        return dw.refine.refineChild(rule, cell);
     }
 
     if (parent_sprite.isLiquid()) {
         // split the water
         if (parent_neighbors[1].id.isLiquid()) {
             return .{
-                .id = parent_sprite.evolvesTo(),
+                .id = dw.refine.evolve(parent_sprite, cell).id,
                 .seed = noise_hash_2,
                 .water_volume = memory.Block.MAX_HP,
             };
@@ -607,12 +616,16 @@ pub fn applyAncestorLogic(
 
         const volume = inheritedLiquidVolume(parent_block.hp, ly);
         if (volume == 0) return .{};
-        return .{ .id = parent_sprite.evolvesTo(), .seed = noise_hash_2, .water_volume = volume };
+        return .{ .id = dw.refine.evolve(parent_sprite, cell).id, .seed = noise_hash_2, .water_volume = volume };
     }
 
     // fallback for all other non-foundation blocks (decorations, chests, furnaces, liquids, etc.)
     if (!parent_sprite.isFoundation()) {
-        return .{ .id = parent_sprite.evolvesTo(), .seed = noise_hash_2, .water_volume = inherited_water };
+        return .{
+            .id = dw.refine.evolve(parent_sprite, cell).id,
+            .seed = noise_hash_2,
+            .water_volume = inherited_water,
+        };
     }
 
     // Foundations from here on: only they carry a surface for the carve to shape.
@@ -652,7 +665,12 @@ pub fn applyAncestorLogic(
             .stone;
 
         if (!keepsInheritedOverlay(noise_seed, wx, wy, lx, ly)) {
-            return .{ .id = base_id, .seed = noise_hash_2, .water_volume = inherited_water, .tag = tag };
+            return .{
+                .id = base_id,
+                .seed = noise_hash_2,
+                .water_volume = inherited_water,
+                .tag = tag,
+            };
         }
         return .{
             .id = overlay_id,
@@ -663,21 +681,13 @@ pub fn applyAncestorLogic(
         };
     }
 
-    var evolved_sprite: Sprite = source.id.evolvesTo();
+    // The odds and the anchor rules (a vine needs a ceiling, moss mostly stays moss) both live in
+    // `refine.evolve()`; the warped material is what evolves here, not the parent's own sprite.
+    const evolution = dw.refine.evolve(source.id, cell);
+    var evolved_sprite: Sprite = evolution.id;
     var child_tag = tag;
-
-    // An evolution can hand a terrain cell a MACRO block (`mossy_stone` becomes vine), and terrain fills
-    // its whole region. Such a sprite has to obey its anchor exactly as a refined one does, or a vein of
-    // mossy stone becomes a wall of vine hanging off nothing, and a line of it once the rock beside it
-    // erodes. A cell that cannot hold it keeps the material it grew from instead.
-    if (evolved_sprite != source.id and dw.refine.ruleFor(evolved_sprite) != null) {
-        if (dw.refine.canEvolveInto(evolved_sprite, parent_neighbors, ly)) {
-            // A fresh chain starts at run 1, so the next depth can continue and cap it from here.
-            if (dw.refine.startsChain(evolved_sprite)) child_tag = .make(.chain_run, 1);
-        } else {
-            evolved_sprite = source.id;
-        }
-    }
+    // A fresh chain starts at run 1, so the next depth can continue and cap it from here.
+    if (evolution.starts_chain) child_tag = .make(.chain_run, 1);
 
     if (source.id.isStone()) {
         const ore_density = procedural.getDualValueNoiseFixed(
@@ -708,7 +718,12 @@ pub fn applyAncestorLogic(
         .none;
 
     // done! pass down the noise hash and the provenance as well.
-    return .{ .id = evolved_sprite, .base_id = base_id, .seed = noise_hash_2, .tag = child_tag };
+    return .{
+        .id = evolved_sprite,
+        .base_id = base_id,
+        .seed = noise_hash_2,
+        .tag = child_tag,
+    };
 }
 
 /// Recursively traces the lineage of a single block type up to parent depths, overlaying player modifications.
@@ -718,12 +733,17 @@ pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
     const block_idx = (@as(usize, by) << dw.CHUNK_SIZE_LOG2) | bx;
 
     if (target_depth == memory.game.depth) {
-        // Current depth is SimBuffer's job.
+        // current depth is SimBuffer's job
         if (world.getCachedChunk(key)) |chunk| return chunk.blocks[block_idx];
     } else {
-        // isHorizonDepth() is false at the base depth, so the base branch below still owns it.
-        if (isHorizonDepth(target_depth)) return world.getBlockAt(key.asCoord(), bx, by, target_depth);
-        // Cache hit; no need to check mod_store or elsewhere.
+        // isHorizonDepth() is false at the base depth, so the base branch below still owns it
+        if (isHorizonDepth(target_depth)) return world.getBlockAt(
+            key.asCoord(),
+            bx,
+            by,
+            target_depth,
+        );
+        // cache hit! no need to check mod_store or elsewhere
         if (ancestor_cache.get(key)) |cached| return cached.blocks[block_idx];
     }
 
@@ -752,8 +772,8 @@ pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
             const chunk_off_x = @divFloor(lx, dw.CHUNK_SIZE);
             const chunk_off_y = @divFloor(ly, dw.CHUNK_SIZE);
 
-            // `moveAtDepth()` returns null only at the world border, where bedrock is the truthful
-            // answer; see `world.world_edge_block` for why air here would be corrosive.
+            // moveAtDepth() returns null only at the world border, where it should be edge_stone
+            // (see world.world_edge_block for why air here would be corrosive)
             const target_nc = p.coord.moveAtDepth(
                 .{ chunk_off_x, chunk_off_y },
                 target_depth - 1,

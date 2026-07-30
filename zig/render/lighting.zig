@@ -29,15 +29,16 @@ pub const AMBIENT_LIGHT_DEBUG: u8 = 192;
 pub var IS_LIGHT_GLOBAL = false;
 
 // Light strength values for various sources:
-pub var PLAYER_LIGHT: u16 = 300;
+pub var PLAYER_LIGHT: u16 = 255;
 pub const MAX_PLAYER_LIGHT: u16 = 400;
-// ---
+// ----
 pub const CAMPFIRE_LIGHT: u16 = 240;
 pub const FURNACE_LIGHT: u16 = AMBIENT_LIGHT;
 pub const LAVA_LIGHT: u16 = 60;
-// ---
+// ----
 pub const PORTAL_LIGHT: u16 = 200;
 pub const PLATE_LIGHT: u16 = 160;
+pub const ORE_GEM_LIGHT: u16 = 100; // some ores may glow
 pub const TWINKLEVINE_LIGHT: u16 = 80;
 
 // Orthogonal decay rates per block type. Air should always be the lowest (decays slowest)!
@@ -52,27 +53,27 @@ const MAX_SOURCE: u16 = @max(
     FURNACE_LIGHT,
     PORTAL_LIGHT,
     PLATE_LIGHT,
+    ORE_GEM_LIGHT,
     TWINKLEVINE_LIGHT,
     LAVA_LIGHT,
 );
 const NUM_BUCKETS: usize = MAX_SOURCE + 1;
 
-inline fn blockEmission(id: Sprite) u16 {
+fn blockEmission(id: Sprite) u16 {
     return switch (id) {
         .campfire => CAMPFIRE_LIGHT,
         .forest_furnace, .lava_furnace => FURNACE_LIGHT,
         .portal, .invportal => PORTAL_LIGHT,
         .white_plate => PLATE_LIGHT,
+        .aquashard, .electrit => ORE_GEM_LIGHT,
         .twinklemoss => TWINKLEVINE_LIGHT,
-        .lava_stone,
-        .molten_stone,
-        => LAVA_LIGHT,
+        .lava_stone, .molten_stone => LAVA_LIGHT,
         else => 0,
     };
 }
 
 /// Returns true if the block is a warm light source, which creates an orange light glow in the shader.
-inline fn isOrangeSource(id: Sprite) bool {
+fn isOrangeSource(id: Sprite) bool {
     return switch (id) {
         .campfire => true,
         .forest_furnace, .lava_furnace => true,
@@ -105,7 +106,7 @@ fn resetArena() void {
 
 /// Orthogonal per-step light cost for entering `block`. Fits in u8 (<= SOLID_FALLOFF).
 /// Diagonals are derived from this at flood time via the fast sqrt(2) approximation.
-inline fn orthoCost(block: Block) u8 {
+fn orthoCost(block: Block) u8 {
     if (block.isLiquid()) return @intCast(LIQUID_FALLOFF);
 
     // Treat empty/air blocks as hp = 16, solid blocks use their actual hp value (0..15).
@@ -174,16 +175,17 @@ inline fn unpackY(p: u32) u16 {
 
 /// Seeds a cell into a channel: raises its light to `val` and enqueues it into that value's bucket.
 /// No-op if `val` does not improve the cell or does not clear ambient.
-inline fn seed(light: []u16, buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, .@"16"), i: usize, x: u16, y: u16, val: u16, ambient: u16) void {
+inline fn seed(a: std.mem.Allocator, light: []u16, buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, .@"16"), i: usize, x: u16, y: u16, val: u16, ambient: u16) void {
     if (val > light[i] and val > ambient) {
         light[i] = val;
-        buckets[@as(usize, val)].append(alloc, packCoords(x, y)) catch memory.oom();
+        buckets[@as(usize, val)].append(a, packCoords(x, y)) catch memory.oom();
     }
 }
 
 /// Seeds the 2x2 cells surrounding the player using their continuous sub-pixel position.
 /// Light drops off similar to Euclidean distance through the cell's own medium cost.
-inline fn seedPlayerLight(
+fn seedPlayerLight(
+    a: std.mem.Allocator,
     cost: []const u8,
     light_white: []u16,
     buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, .@"16"),
@@ -209,7 +211,7 @@ inline fn seedPlayerLight(
                 const drop = @round(@sqrt(dx * dx + dy * dy) * falloff);
                 if (@as(f32, PLAYER_LIGHT) > drop) {
                     const val: u16 = @intFromFloat(@as(f32, PLAYER_LIGHT) - drop);
-                    seed(light_white, buckets, i, @intCast(cx), @intCast(cy), val, ambient);
+                    seed(a, light_white, buckets, i, @intCast(cx), @intCast(cy), val, ambient);
                 }
             }
         }
@@ -220,6 +222,7 @@ inline fn seedPlayerLight(
 /// Because we descend and edge costs are strictly positive, appends only ever target strictly-lower
 /// buckets, so each cell is finalized exactly once at its brightest value regardless of source count.
 fn floodChannel(
+    a: std.mem.Allocator,
     cost: []const u8,
     light: []u16,
     buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, .@"16"),
@@ -256,7 +259,7 @@ fn floodChannel(
                         const nl = b - c;
                         if (nl > light[ni]) {
                             light[ni] = nl;
-                            buckets[@as(usize, nl)].append(alloc, packCoords(
+                            buckets[@as(usize, nl)].append(a, packCoords(
                                 @intCast(nx),
                                 @intCast(ny),
                             )) catch memory.oom();
@@ -301,9 +304,9 @@ pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: 
         const emission = blockEmission(block.id);
         if (emission > ambient) {
             if (isOrangeSource(block.id)) {
-                seed(light_orange, &buckets_orange, i, sx, sy, emission, ambient);
+                seed(alloc, light_orange, &buckets_orange, i, sx, sy, emission, ambient);
             } else {
-                seed(light_white, &buckets_white, i, sx, sy, emission, ambient);
+                seed(alloc, light_white, &buckets_white, i, sx, sy, emission, ambient);
             }
         }
 
@@ -315,11 +318,13 @@ pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: 
     }
 
     // Seed the continuous player source into the white channel.
-    seedPlayerLight(cost_slice, light_white, &buckets_white, w, h, ambient, player_bx, player_by);
+    // This one is interpolated between logic ticks so the light does not snap block to block;
+    // anything that has to AGREE with the simulation reads `miningLightAt()` instead, never this.
+    seedPlayerLight(alloc, cost_slice, light_white, &buckets_white, w, h, ambient, player_bx, player_by);
 
     // Two independent floods over the shared cost grid for each color!
-    floodChannel(cost_slice, light_orange, &buckets_orange, w, h, ambient);
-    floodChannel(cost_slice, light_white, &buckets_white, w, h, ambient);
+    floodChannel(alloc, cost_slice, light_orange, &buckets_orange, w, h, ambient);
+    floodChannel(alloc, cost_slice, light_white, &buckets_white, w, h, ambient);
 
     // Combine channels and write final u8 values clamped to MAX_LIGHT.
     for (out, light_orange, light_white) |*block, orange, white| {
@@ -329,8 +334,187 @@ pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: 
         // this fixes an issue where orange light overtakes normal white light if ambient light is at max
         if (AMBIENT_LIGHT == 255 or (dw.is_debug and IS_LIGHT_GLOBAL and AMBIENT_LIGHT_DEBUG == 255)) continue;
 
-        // block is orange if it receives more orange light than white, or is in the core radius (>= 255).
+        // block is orange if it receives more orange light than white, or is in the core radius (>= 255)
         const is_orange = orange >= white or orange >= 255;
         block.lighting_color = @intFromBool(is_orange and max_light > ambient);
     }
+}
+
+// This is the end of render (visual-only) light logic.
+// ----
+// This is the start, now, of logic for the player's ability to mine.
+// Based on actual PLAYER_LIGHT and visual light decay values.
+
+/// Farthest a player-lit block can be, in blocks: the brightest possible player source (`MAX_PLAYER_LIGHT`)
+/// spending the cheapest possible cost per step (`AIR_FALLOFF`).
+const PLAYER_LIGHT_REACH: i32 = MAX_PLAYER_LIGHT / AIR_FALLOFF;
+/// Half-width of the flooded window: the reach, plus the one block the player's 2x2 seed straddles into.
+/// Nothing outside it can take any of the player's light, so clipping the flood at the window loses none:
+/// a path that leaves the window has already spent more than `MAX_PLAYER_LIGHT` getting there.
+const MINING_RADIUS: i32 = PLAYER_LIGHT_REACH + 1;
+/// Window edge in blocks, centered on the block the player stands in.
+const MINING_SPAN: usize = @intCast(2 * MINING_RADIUS + 1);
+
+/// Player-only light (no ambient, no other source) of the window around the player, clamped to `MAX_LIGHT`.
+/// Indexed by `miningIndex()`; only describes the world `mining_key` was recorded for.
+var mining_light: [MINING_SPAN * MINING_SPAN]u8 = @splat(0);
+/// Cost grid the window was flooded over, and the high-precision light it was flooded into.
+var mining_cost: [MINING_SPAN * MINING_SPAN]u8 = @splat(0);
+var mining_scratch: [MINING_SPAN * MINING_SPAN]u16 = @splat(0);
+
+/// Everything the flooded window is a function of, besides the blocks themselves.
+/// A query that does not match re-floods, so the window can never describe a place the player has left:
+/// the tick alone would not catch a teleport, which moves the player without advancing it.
+const MiningKey = struct {
+    frame: u32,
+    depth: u64,
+    coord: world.Coordinate,
+    bx: u4,
+    by: u4,
+
+    fn eql(a: MiningKey, b: MiningKey) bool {
+        return a.frame == b.frame and a.depth == b.depth and
+            a.bx == b.bx and a.by == b.by and a.coord.eql(b.coord);
+    }
+};
+
+/// What `mining_light` currently holds, or null when it holds nothing usable.
+var mining_key: ?MiningKey = null;
+
+/// The window `mining_light` would be flooded for right now.
+fn currentMiningKey() MiningKey {
+    const game = &memory.game;
+    return .{
+        .frame = game.frame,
+        .depth = game.depth,
+        .coord = game.getPlayerCoord(),
+        .bx = game.getBlockXInChunk(),
+        .by = game.getBlockYInChunk(),
+    };
+}
+
+/// Buckets and arena of the mining flood, kept apart from the render pass's so that neither can
+/// reset the allocator out from under the other, whatever order a frame and a tick land in.
+var mining_arena = memory.makeArena();
+var mining_alloc = mining_arena.allocator();
+var buckets_mining: [NUM_BUCKETS]std.array_list.Aligned(u32, .@"16") = undefined;
+
+/// Window index of the block (`dx`, `dy`) blocks from the one the player stands in, or null when that
+/// block is out of the window (which, per `MINING_RADIUS`, means the player's light cannot reach it).
+inline fn miningIndex(dx: i64, dy: i64) ?usize {
+    if (dx < -MINING_RADIUS or dx > MINING_RADIUS or dy < -MINING_RADIUS or dy > MINING_RADIUS) return null;
+    return @intCast((dy + MINING_RADIUS) * @as(i64, MINING_SPAN) + (dx + MINING_RADIUS));
+}
+
+/// Floods the player's own light over the window around them, from committed simulation state only:
+/// the block they stand in, their subpixel position within it, and the blocks currently in the world.
+/// No interpolation, no camera, no zoom, so every tick answers the same regardless of frame rate.
+fn floodMiningLight() void {
+    const game = &memory.game;
+    if (!mining_arena.reset(.retain_capacity)) memory.oom();
+    @memset(&buckets_mining, .empty);
+    @memset(&mining_scratch, 0);
+
+    // Fill the cost grid chunk by chunk rather than block by block, so a chunk is resolved once.
+    // An unreachable chunk (past the world edge) reads as solid, which is what the world edge is.
+    const player_coord = game.getPlayerCoord();
+    const base_bx: i32 = game.getBlockXInChunk();
+    const base_by: i32 = game.getBlockYInChunk();
+    const min_cx = @divFloor(base_bx - MINING_RADIUS, dw.CHUNK_SIZE);
+    const max_cx = @divFloor(base_bx + MINING_RADIUS, dw.CHUNK_SIZE);
+    const min_cy = @divFloor(base_by - MINING_RADIUS, dw.CHUNK_SIZE);
+    const max_cy = @divFloor(base_by + MINING_RADIUS, dw.CHUNK_SIZE);
+
+    var scratch_chunk: memory.Chunk align(memory.MAIN_ALIGN_BYTES) = undefined;
+    var cy = min_cy;
+    while (cy <= max_cy) : (cy += 1) {
+        var cx = min_cx;
+        while (cx <= max_cx) : (cx += 1) {
+            const chunk: ?*const memory.Chunk = blk: {
+                const coord = player_coord.move(.{ cx, cy }) orelse break :blk null;
+                if (world.SimBuffer.get(coord)) |loaded| break :blk loaded;
+                world.writeChunkSimless(&scratch_chunk, coord);
+                break :blk &scratch_chunk;
+            };
+
+            // Player-relative block offset of this chunk's own (0, 0), so only the part of the chunk
+            // that lands inside the window is walked. The corner chunks are mostly outside it.
+            const chunk_x0 = cx * dw.CHUNK_SIZE - base_bx;
+            const chunk_y0 = cy * dw.CHUNK_SIZE - base_by;
+            const lx_end = @min(dw.CHUNK_SIZE - 1, MINING_RADIUS - chunk_x0);
+            const ly_end = @min(dw.CHUNK_SIZE - 1, MINING_RADIUS - chunk_y0);
+
+            var ly = @max(0, -MINING_RADIUS - chunk_y0);
+            while (ly <= ly_end) : (ly += 1) {
+                var lx = @max(0, -MINING_RADIUS - chunk_x0);
+                while (lx <= lx_end) : (lx += 1) {
+                    // `.?` rather than a skip: the ranges above are exactly the in-window part.
+                    const i = miningIndex(chunk_x0 + lx, chunk_y0 + ly).?;
+                    mining_cost[i] = if (chunk) |c|
+                        orthoCost(c.blocks[@intCast((ly << dw.CHUNK_SIZE_LOG2) | lx)])
+                    else
+                        @intCast(SOLID_FALLOFF);
+                }
+            }
+        }
+    }
+
+    if (dw.is_debug) {
+        const probe_dx: i32 = 3;
+        const probe_dy: i32 = -5;
+        const abs_x = base_bx + probe_dx;
+        const abs_y = base_by + probe_dy;
+        if (player_coord.move(.{
+            @divFloor(abs_x, dw.CHUNK_SIZE),
+            @divFloor(abs_y, dw.CHUNK_SIZE),
+        })) |probe_coord| {
+            const probe = world.getBlockAt(
+                probe_coord,
+                @intCast(@mod(abs_x, dw.CHUNK_SIZE)),
+                @intCast(@mod(abs_y, dw.CHUNK_SIZE)),
+                game.depth,
+            );
+            std.debug.assert(mining_cost[miningIndex(probe_dx, probe_dy).?] == orthoCost(probe));
+        }
+    }
+
+    // The player's own position within their block, in window-cell units: the block they stand in sits at MINING_RADIUS,
+    // and the subpixel remainder places them continuously inside it.
+    const subpixels_per_block: f32 = @floatFromInt(dw.CHUNK_SIZE_SQ);
+    const frac_x = @as(f32, @floatFromInt(game.player_pos[0])) / subpixels_per_block - @as(f32, @floatFromInt(base_bx));
+    const frac_y = @as(f32, @floatFromInt(game.player_pos[1])) / subpixels_per_block - @as(f32, @floatFromInt(base_by));
+    const px = @as(f32, @floatFromInt(MINING_RADIUS)) + frac_x;
+    const py = @as(f32, @floatFromInt(MINING_RADIUS)) + frac_y;
+
+    const span: i32 = @intCast(MINING_SPAN);
+    seedPlayerLight(mining_alloc, &mining_cost, &mining_scratch, &buckets_mining, span, span, 0, px, py);
+    floodChannel(mining_alloc, &mining_cost, &mining_scratch, &buckets_mining, span, span, 0);
+
+    for (&mining_light, mining_scratch) |*dst, light| {
+        dst.* = @intCast(@min(light, @as(u16, MAX_LIGHT)));
+    }
+    mining_key = currentMiningKey();
+}
+
+/// How much of the player's OWN light reaches the block `chunk_dx`/`chunk_dy` chunks and (`bx`, `by`)
+/// blocks from the player's chunk, on the current logic tick. Zero past the window, where no light reaches.
+///
+/// Floods on demand and memoizes for the rest of the tick, so a tick that never asks never pays,
+/// and one that asks twice gets the same answer both times.
+/// Only valid to call from logic (`handleTick()`), where `game.frame` and the player position agree.
+pub fn miningLightAt(chunk_dx: i64, chunk_dy: i64, bx: u4, by: u4) u8 {
+    const key = currentMiningKey();
+    if (mining_key == null or !mining_key.?.eql(key)) floodMiningLight();
+
+    const dx = chunk_dx * dw.CHUNK_SIZE + bx - key.bx;
+    const dy = chunk_dy * dw.CHUNK_SIZE + by - key.by;
+    const i = miningIndex(dx, dy) orelse return 0;
+    return mining_light[i];
+}
+
+/// Drops the memoized mining light, forcing the next query to flood again.
+/// The key catches the player moving; this is for the world changing under a player who did not,
+/// which `world.clearCaches()` is the one thing that does.
+pub fn invalidateMiningLight() void {
+    mining_key = null;
 }

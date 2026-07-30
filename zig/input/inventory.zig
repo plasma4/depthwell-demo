@@ -372,8 +372,7 @@ pub fn getSpritesInInventory(buffer: *SlotBuffer) []Sprite {
     buffer[0] = .none; // slot 0 (pickaxe) must always exist
 
     // foundation_sprites is already sorted by enum ID because of how it's generated in types/sprite.zig
-    // `if`, not a `continue`: leaving an unrolled iteration early is comptime control flow.
-    inline for (sprite.possible_item_sprites) |s| {
+    for (sprite.possible_item_sprites) |s| {
         if (hasSlot(s)) {
             buffer[count] = s;
             count += 1;
@@ -387,7 +386,7 @@ pub fn getSpritesInInventory(buffer: *SlotBuffer) []Sprite {
 pub fn getSelectedIndex() u16 {
     if (selected_sprite.isEmpty() or selected_sprite == .unselected) return 0;
     var count: usize = 1;
-    inline for (sprite.possible_item_sprites) |s| {
+    for (sprite.possible_item_sprites) |s| {
         if (hasSlot(s)) {
             if (s == selected_sprite) return @intCast(count);
             count += 1;

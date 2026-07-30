@@ -214,9 +214,12 @@ pub const GameState = extern struct {
         player.resetMotionState();
         self.player_velocity = .{ 0.0, 0.0 };
         if (coord) |c| {
+            std.debug.assert(world.isInWorld(c, self.depth));
             self.player_quadrant = c.quadrant;
             self.player_chunk = c.suffix;
         }
+        std.debug.assert(new_position[0] >= 0 and new_position[0] < dw.SUBPIXELS_IN_CHUNK);
+        std.debug.assert(new_position[1] >= 0 and new_position[1] < dw.SUBPIXELS_IN_CHUNK);
         self.player_pos = new_position;
         self.last_player_pos = new_position;
         // Snap BOTH current and previous camera to the destination (preventing interpolation funnies).
@@ -450,12 +453,6 @@ pub const Block = packed struct(u128) {
     /// Determines if the block is a heatmap (types 65000-65256).
     pub inline fn isHeatmap(self: @This()) bool {
         return self.id.isHeatmap();
-    }
-
-    /// Extracts the evolved form of this block at compile-time.
-    /// If it doesn't evolve, returns the original sprite type!
-    pub inline fn evolvesTo(self: @This()) Sprite {
-        return self.id.evolvesTo();
     }
 
     /// Returns whether a block is empty (air), a liquid, or a waterloggable decoration.

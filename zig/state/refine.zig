@@ -13,7 +13,7 @@
 //! - `.stamp`: a hard-coded macro shape spanning one or more parents (the 2x1 moss shrub becomes a little tree).
 //!   Used for anything the three other generic options can't specify!
 //!
-//! Three properties hold for every plan to keep things procedurally interesting:
+//! Three properties hold to keep things procedurally interesting:
 //! 1. AT LEAST ONE copy survives (`.scatter` will draw from 1),
 //!    so a decoration never silently disappears as the player descends.
 //! 2. Copies stand ON the surface the parent was anchored to. The plan places them against the region's floor/ceiling row,
@@ -136,7 +136,7 @@ pub const Single = struct {
 /// A copy in every column of a fixed set: no hash, no count, the same shape in every region.
 /// For a kind whose refined form IS a specific arrangement rather than a scattering of copies.
 pub const Fixed = struct {
-    /// Columns to fill. `.any` has no fixed meaning, so it is rejected at compile time.
+    /// Columns to fill. `.any` has no fixed meaning, so it is rejected at compile-time.
     columns: Columns,
     /// Cells of one copy, as in `Single.stack`.
     stack: []const Sprite = &.{},
@@ -415,7 +415,7 @@ pub inline fn ruleFor(sprite: Sprite) ?Rule {
 /// Check whether a cell in region row `ly` can hold `sprite` based on the parent neighbors.
 ///
 /// Use this for a block that arrives by EVOLUTION, not by plan.
-/// `mossy_stone` changes to vine, and terrain fills the whole region.
+/// `more_mossy_stone` changes to vine, and terrain fills the whole region.
 /// Without this check, a vein can become a wall or a line of vine that hangs in the air.
 /// Only the row that touches the required surface may take the sprite, and only when that surface exists.
 ///
@@ -432,6 +432,60 @@ pub inline fn canEvolveInto(sprite: Sprite, n: [8]Block, ly: u4) bool {
 pub inline fn startsChain(sprite: Sprite) bool {
     const rule = ruleFor(sprite) orelse return false;
     return rule.plan == .chain;
+}
+
+/// What one cell of a refined region ends up holding, once the odds and the gate have both spoken.
+pub const Evolved = struct {
+    /// The sprite the cell takes: the evolution, or the sprite it started as.
+    id: Sprite,
+    /// Whether this cell is the top of a fresh hanging chain, so the caller can tag its run.
+    starts_chain: bool = false,
+};
+
+/// Resolves a sprite's `Evolution` for ONE child cell: roll the odds, then ask the anchor gate.
+///
+/// The single door every refinement path goes through, terrain and plan alike.
+/// Adding a kind's odds is then a table entry in `sprite.zig` and nothing else,
+/// and a rule that has to hold for every path (a vine needing a ceiling, a fresh chain starting its run at 1)
+/// is stated here once rather than at each caller.
+///
+/// A sprite with no `Evolution` comes back unchanged, so this is safe to call on anything.
+pub fn evolve(source: Sprite, ctx: Context) Evolved {
+    const ev = source.evolution() orelse return .{ .id = source };
+    if (!rollsEvolution(ev, ctx)) return .{ .id = source };
+    // The gate reads the PARENT's neighbors: what a hanging or standing sprite needs is a property of
+    // the region it lands in, not of the cell's own children.
+    if (!canEvolveInto(ev.into, ctx.neighbors, ctx.ly)) return .{ .id = source };
+    return .{ .id = ev.into, .starts_chain = startsChain(ev.into) };
+}
+
+/// Multiplier on the blob field before it biases the roll.
+/// Value noise piles up around its midpoint, so the raw field only nudges the odds;
+/// stretching it (and letting the ends clamp) is what turns that nudge into a patch with a soft edge.
+const BLOB_CONTRAST = 2.2;
+
+/// Whether this cell takes its sprite's evolution.
+///
+/// `chance` is honored exactly in expectation whether or not the cells clump:
+/// the blob field biases the roll symmetrically about its own midpoint,
+/// and the bias is bounded by how much the odds can absorb before reaching 0 or 1,
+/// so averaging the local odds over the world gives `chance` back.
+/// Only the ARRANGEMENT changes. That bound is why the field cannot make a patch fully solid:
+/// a `chance` of 0.2 varies between 0 and 0.4 across the field, never 0 and 1.
+fn rollsEvolution(ev: dw.sprite.Evolution, ctx: Context) bool {
+    if (ev.chance >= 1.0) return true;
+
+    const roll = FastHash.float2d_32(
+        ctx.noise_seed,
+        seeding.foldWorld(ctx.wx +% @intFromEnum(Salt.evolution)),
+        seeding.foldWorld(ctx.wy -% @intFromEnum(Salt.evolution)),
+    );
+    if (ev.blob == 0) return roll < ev.chance;
+
+    const field = dw.procedural.getDualValueNoise(ctx.noise_seed, ctx.wx, ctx.wy, 1.0 / ev.blob)[1];
+    const span = 2.0 * @min(ev.chance, 1.0 - ev.chance);
+    const bias = std.math.clamp((field - 0.5) * BLOB_CONTRAST, -0.5, 0.5) * span;
+    return roll < ev.chance - bias;
 }
 
 /// Whether this exact child cell is a surface a refined decoration is about to land on.
@@ -512,6 +566,9 @@ const Salt = enum(u64) {
     stamp = 0x9E3779B97F4A7C15,
     /// How far each column of a chain reaches.
     reach = 0xD1B54A32D192ED03,
+    /// Whether a cell takes its sprite's evolution. Per CELL, not per region: a mottled vein is the
+    /// point, and sharing the carve's stream would tie a cell's material to its shape.
+    evolution = 0x2545F4914F6CDD1D,
 };
 
 /// One region-wide hash: a pure function of the PARENT's cell, so no two cells of a region disagree.
@@ -536,8 +593,8 @@ inline fn surfaceMet(rule: Rule, ctx: Context) bool {
 pub const Columns = enum {
     /// Any of the region's columns, drawn from the parent's hash.
     any,
-    /// ONE of the two center columns, drawn from the parent's hash: half of the 2x1 area a portal
-    /// descent lands the player on.
+    /// ONE of the two center columns, drawn from the parent's hash:
+    /// half of the 2x1 area a portal descent lands the player on.
     center_one,
     /// BOTH center columns, always.
     center_both,
@@ -608,7 +665,7 @@ inline fn drawCount(h: u64, copies: Count) u4 {
 ///
 /// A partial Fisher-Yates shuffle: distinct by construction, and unbiased enough that a column never
 /// reads as favored (`h` is a finalized hash, so the modulo's bias is on the order of 2^-60).
-inline fn drawColumns(h: u64, n: u4, columns: Columns) ColumnMask {
+fn drawColumns(h: u64, n: u4, columns: Columns) ColumnMask {
     if (columns.fixedMask()) |mask| return mask;
     if (columns == .center_one) {
         // One 2x1 landing area, so the choice is only ever which of its two columns.
@@ -616,6 +673,7 @@ inline fn drawColumns(h: u64, n: u4, columns: Columns) ColumnMask {
         return @as(ColumnMask, 1) << (if (h & 1 == 0) CENTER_LEFT else CENTER_RIGHT);
     }
 
+    // fancy compile-time type stuff!
     const ColumnIndex = std.math.Log2Int(ColumnMask);
     var pool: [BLOCKS_PER_PARENT]ColumnIndex = undefined;
     for (&pool, 0..) |*c, i| c.* = @intCast(i);
@@ -646,7 +704,7 @@ comptime {
 /// A pure function of the parent's cell, its plan, and its tag.
 fn surfaceColumns(rule: Rule, parent: Block, noise_seed: Vec2u, px: WorldCoord, py: WorldCoord) ColumnMask {
     switch (rule.plan) {
-        .fixed => |f| return f.columns.fixedMask().?, // `.any` is rejected at compile time
+        .fixed => |f| return f.columns.fixedMask().?, // `.any` is rejected at compile-time
         .single => |s| return drawColumns(regionHash(noise_seed, px, py, .layout), 1, s.columns),
         .scatter => |s| {
             const h = regionHash(noise_seed, px, py, .layout);
@@ -688,14 +746,14 @@ pub fn refineChild(rule: Rule, ctx: Context) BlockSpec {
 }
 
 /// Writes the cell of a `.single`/`.scatter` copy that lands here, if one does.
-inline fn placeStack(rule: Rule, stack: []const Sprite, mask: ColumnMask, ctx: Context) BlockSpec {
+fn placeStack(rule: Rule, stack: []const Sprite, mask: ColumnMask, ctx: Context) BlockSpec {
     if (!claimsColumn(mask, ctx.lx)) return .{};
 
     const index = rule.surface.stackIndex(ctx.ly);
     // An empty stack means one cell of the parent's own evolved sprite.
     if (stack.len == 0) {
         if (index != 0) return .{};
-        return spec(ctx.parent.id.evolvesTo(), ctx, .{});
+        return spec(evolve(ctx.parent.id, ctx).id, ctx, .{});
     }
     if (index >= stack.len) return .{};
     return spec(stack[index], ctx, .{});
@@ -715,7 +773,7 @@ inline fn spec(id: Sprite, ctx: Context, tag: RefinedTag) BlockSpec {
 ///
 /// Uses a primary strand anchor and distance-based mutation falloff to produce organic,
 /// stepped vine curtains (e.g. main strand of 24, side strands of 14, 10, 5).
-inline fn columnReach(c: Chain, noise_seed: Vec2u, px: WorldCoord, ceiling_y: WorldCoord, lx: u4) u64 {
+fn columnReach(c: Chain, noise_seed: Vec2u, px: WorldCoord, ceiling_y: WorldCoord, lx: u4) u64 {
     if (c.max_length == 0) return 0;
     if (c.max_length <= c.min_length) return c.min_length;
 
@@ -744,12 +802,13 @@ inline fn columnReach(c: Chain, noise_seed: Vec2u, px: WorldCoord, ceiling_y: Wo
 
 /// One cell of a hanging chain.
 ///
-/// The run index shows the distance from the ceiling. A parent cell at distance `r`
-/// covers child runs `4(r-1) + 1` to `4r`. This gives the ceiling position and the
-/// child position without a search. Hashing the ceiling position keeps the columns aligned.
+/// The run index shows the distance from the ceiling.
+/// A parent cell at distance `r` covers child runs `4(r-1) + 1` to `4r`.
+/// This gives the ceiling position and the child position without a search.
+/// Hashing the ceiling position keeps the columns aligned.
 fn chainChild(c: Chain, rule: Rule, ctx: Context) BlockSpec {
     // a generated chain cell always carries its run, but a cell that never grew as one does not:
-    // mossy_stone EVOLVES into vine, AND the player can place vine outright.
+    // more_mossy_stone EVOLVES into vine, AND the player can place vine outright.
     // both are read as the top of a fresh chain, which lets the cap fire
     const parent_run: u64 = if (ctx.parent.tag.kind == .chain_run and ctx.parent.tag.data > 0)
         ctx.parent.tag.data
@@ -769,7 +828,8 @@ fn chainChild(c: Chain, rule: Rule, ctx: Context) BlockSpec {
     const run = (parent_run - 1) * BLOCKS_PER_PARENT + ctx.ly + 1;
     if (run > columnReach(c, ctx.noise_seed, px, py -% parent_run, ctx.lx)) return .{};
 
-    return spec(ctx.parent.id.evolvesTo(), ctx, .make(.chain_run, run));
+    // Already inside a chain, so the run below is authoritative over anything `evolve()` would start.
+    return spec(evolve(ctx.parent.id, ctx).id, ctx, .make(.chain_run, run));
 }
 
 /// One cell of a hard-coded macro shape.
@@ -888,7 +948,13 @@ test "only the flower's base rebuilds it, and it rebuilds the whole shaft" {
 
     // the stem and flower above the base sit on more plant, so they contribute nothing
     try testing.expectEqual(@as(usize, 0), sweepRegion(.plant_stem, base, on_stem, 8, 8).filled);
-    try testing.expectEqual(@as(usize, 0), sweepRegion(.cornflower, .makeBasicBlock(.cornflower, 6), on_stem, 8, 7).filled);
+    try testing.expectEqual(@as(usize, 0), sweepRegion(
+        .cornflower,
+        .makeBasicBlock(.cornflower, 6),
+        on_stem,
+        8,
+        7,
+    ).filled);
 }
 
 test "an installation is never duplicated" {
@@ -936,17 +1002,29 @@ test "a chain stays single-file, capped, and in the same columns the whole way d
         b.tag = .make(.chain_run, cap);
         break :blk b;
     };
-    try testing.expectEqual(@as(usize, 0), sweepRegion(.spiralvine, deep, under_vine, 5, 200).filled);
+    try testing.expectEqual(@as(usize, 0), sweepRegion(
+        .spiralvine,
+        deep,
+        under_vine,
+        5,
+        200,
+    ).filled);
 }
 
 test "a chain hangs from rock or not at all" {
     var under_vine: [8]Block = @splat(.empty);
     under_vine[1] = .makeBasicBlock(.spiralvine, 2);
 
-    // The top of a chain sitting under MORE chain is not anchored to anything: this is vine inherited from mossy_stone,
+    // The top of a chain sitting under MORE chain is not anchored to anything: this is vine inherited from more_mossy_stone,
     // and letting it through is what drew lines down the middle of open caves.
     const untagged: Block = .makeBasicBlock(.spiralvine, 4);
-    try testing.expectEqual(@as(usize, 0), sweepRegion(.spiralvine, untagged, under_vine, 5, 100).filled);
+    try testing.expectEqual(@as(usize, 0), sweepRegion(
+        .spiralvine,
+        untagged,
+        under_vine,
+        5,
+        100,
+    ).filled);
 
     // Nothing above at all is just as unanchored, whatever the run says.
     const nothing: [8]Block = @splat(.empty);
@@ -955,13 +1033,31 @@ test "a chain hangs from rock or not at all" {
         b.tag = .make(.chain_run, 3);
         break :blk b;
     };
-    try testing.expectEqual(@as(usize, 0), sweepRegion(.spiralvine, mid_chain, nothing, 5, 100).filled);
-    try testing.expectEqual(@as(usize, 0), sweepRegion(.spiralvine, untagged, nothing, 5, 100).filled);
+    try testing.expectEqual(@as(usize, 0), sweepRegion(
+        .spiralvine,
+        mid_chain,
+        nothing,
+        5,
+        100,
+    ).filled);
+    try testing.expectEqual(@as(usize, 0), sweepRegion(
+        .spiralvine,
+        untagged,
+        nothing,
+        5,
+        100,
+    ).filled);
 
     // ...and a floor is not a ceiling: a chain never stands on the ground.
     var on_floor: [8]Block = @splat(.empty);
     on_floor[6] = .makeBasicBlock(.stone, 1);
-    try testing.expectEqual(@as(usize, 0), sweepRegion(.spiralvine, untagged, on_floor, 5, 100).filled);
+    try testing.expectEqual(@as(usize, 0), sweepRegion(
+        .spiralvine,
+        untagged,
+        on_floor,
+        5,
+        100,
+    ).filled);
 }
 
 test "an evolution into a hanging block still needs a ceiling" {
@@ -988,6 +1084,62 @@ test "an evolution into a hanging block still needs a ceiling" {
     try testing.expect(!startsChain(.bush) and !startsChain(.lava_stone));
 }
 
+test "an evolution's odds hold over the world, and only its arrangement changes" {
+    const seed: Vec2u = .{ 0x9e3779b97f4a7c15, 0xbf58476d1ce4e5b9 };
+    const N = 400;
+
+    // Both kinds are terrain (no plan), so the anchor gate passes and only the roll is under test.
+    inline for (.{
+        .{ Sprite.lava_stone, 0.2 }, // blobbed
+        .{ Sprite.mossy_stone, 0.6 }, // per cell
+    }) |case| {
+        const src: Sprite = case[0];
+        var converted: usize = 0;
+        // Neighbor pairs, which is what separates a patch from static:
+        // for independent rolls the chance a converted cell's neighbor converted is just the conversion rate itself.
+        var pairs: usize = 0;
+        var prev_row: [N]bool = @splat(false);
+
+        for (0..N) |y| {
+            var left = false;
+            for (0..N) |x| {
+                const ctx: Context = .{
+                    .parent = .empty,
+                    .neighbors = @splat(.empty),
+                    .noise_seed = seed,
+                    .wx = @intCast(x),
+                    .wy = @intCast(y),
+                    .lx = 0,
+                    .ly = 0,
+                    .seed = 0,
+                    .water = 0,
+                };
+                const took = evolve(src, ctx).id != src;
+                if (took) {
+                    converted += 1;
+                    if (left) pairs += 1;
+                    if (prev_row[x]) pairs += 1;
+                }
+                left = took;
+                prev_row[x] = took;
+            }
+        }
+
+        const rate = @as(f64, @floatFromInt(converted)) / @as(f64, N * N);
+        const neighbor_rate = @as(f64, @floatFromInt(pairs)) / (2.0 * @as(f64, @floatFromInt(converted)));
+        const want: f64 = case[1];
+        try testing.expect(@abs(rate - want) < 0.01);
+
+        if (src.evolution().?.blob == 0) {
+            // Static: a converted cell says nothing about its neighbors.
+            try testing.expect(@abs(neighbor_rate - rate) < 0.02);
+        } else {
+            // Patches: converted cells find each other far more often than chance.
+            try testing.expect(neighbor_rate > rate * 1.3);
+        }
+    }
+}
+
 test "the terrain only pushes up under the cells a decoration really lands on" {
     const seed: Vec2u = .{ 0x243f6a8885a308d3, 0x13198a2e03707344 };
     var above_bush: [8]Block = @splat(.empty);
@@ -1004,7 +1156,14 @@ test "the terrain only pushes up under the cells a decoration really lands on" {
             if (protectsSurfaceCell(above_bush, seed, wx, wy, @intCast(lx), 0)) protected += 1;
             // rows that touch nothing are never protected
             for (1..BLOCKS_PER_PARENT) |ly| {
-                try testing.expect(!protectsSurfaceCell(above_bush, seed, wx, wy + ly, @intCast(lx), @intCast(ly)));
+                try testing.expect(!protectsSurfaceCell(
+                    above_bush,
+                    seed,
+                    wx,
+                    wy + ly,
+                    @intCast(lx),
+                    @intCast(ly),
+                ));
             }
         }
 
@@ -1020,11 +1179,18 @@ test "the terrain only pushes up under the cells a decoration really lands on" {
     }
     try testing.expect(protected_total > 0);
 
-    // Plain terrain above and below protects nothing at all.
+    // plain terrain above and below protects nothing at all
     const plain: [8]Block = @splat(.makeBasicBlock(.stone, 3));
     for (0..BLOCKS_PER_PARENT) |lx| {
         for (0..BLOCKS_PER_PARENT) |ly| {
-            try testing.expect(!protectsSurfaceCell(plain, seed, 40 + lx, 40 + ly, @intCast(lx), @intCast(ly)));
+            try testing.expect(!protectsSurfaceCell(
+                plain,
+                seed,
+                40 + lx,
+                40 + ly,
+                @intCast(lx),
+                @intCast(ly),
+            ));
         }
     }
 }
@@ -1048,7 +1214,7 @@ test "the shrub's two halves draw one coherent tree" {
     try testing.expectEqual(expected_left, left.filled);
     try testing.expectEqual(expected_right, right.filled);
 
-    // Its canopy is tagged, which is what keeps ore out of the tree for the next two depths.
+    // Its canopy is tagged; tree should have no ore for the next two depths
     const rule = ruleFor(.moss_shrub1).?;
     const canopy = refineChild(rule, .{
         .parent = .makeBasicBlock(.moss_shrub1, 4),
