@@ -146,7 +146,7 @@ pub fn build(b: *std.Build) void {
         } else {
             exe.root_module.single_threaded = true;
             // exe.root_module.stack_check = false;
-            exe.lto = .full;
+            if (optimize != .ReleaseSafe) exe.lto = .full;
         }
         exe.rdynamic = true;
         exe.stack_size = 8 * 65536;
