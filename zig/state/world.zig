@@ -42,9 +42,9 @@ const FoundationCacheEntry = struct {
 /// Block window one full sweep of the cache covers; matches `procedural`'s base terrain cache,
 /// since the two are walked by the same passes over the same cells.
 ///
-/// Shaped to the sweep that fills it rather than to the screen: `SimBuffer.fillMissing()` (and every
-/// other bulk pass) walks chunk rows left to right, so a tile exactly as wide as that sweep lets a whole
-/// row sit in the cache at once, and two chunk rows of height keep the row above alive underneath it.
+/// Shaped to the sweep that fills it rather than to the screen: `SimBuffer.fillMissing()` (and every other bulk pass)
+/// walks chunk rows left to right, so a tile exactly as wide as that sweep lets a whole row sit in the cache at once,
+/// and two chunk rows of height keep the row above alive underneath it.
 /// That row above is the entire point: `addEdgeFlags()` re-derives its halo through
 /// `resolveBaseFoundation()`, and a tile narrower than the sweep evicts every neighbor before the halo
 /// that shares it is asked for, which turns all 68 halo cells into full terrain evaluations per chunk.

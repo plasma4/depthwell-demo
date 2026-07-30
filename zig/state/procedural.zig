@@ -367,13 +367,15 @@ const BaseTerrainCacheEntry = struct {
 };
 
 /// Block window one full sweep of the cache covers, in blocks (see `dw.utils.tileIndex()`).
-/// Shaped to the chunk sweep that fills it, exactly like (and for the same reason as) the foundation
-/// cache in `world.zig`: one full sweep row wide, two chunk rows tall, so the edge-flag halo of a chunk
-/// still finds the neighbor row above it rather than re-deriving terrain for all of it.
+/// Shaped to the chunk sweep that fills it, exactly like (and for the same reason as) the foundation cache in `world.zig`:
+/// one full sweep row wide, two chunk rows tall,
+/// so the edge-flag halo of a chunk still finds the neighbor row above it rather than re-deriving terrain for all of it.
 const BASE_CACHE_TILE_W = dw.world.SIM_GRID_SIZE;
 const BASE_CACHE_TILE_H = dw.CHUNK_SIZE * 2;
 /// Direct-mapped cache of `computeBaseSpriteType()` results (a power of two by construction).
-/// The same cell is recomputed many times per chunk gen (pass 1, the edge-flag halo, the vine scan, and structure terrain gates all resample it, plus overlap across neighbors), so memoizing removes that FBM redundancy: the dominant generation cost.
+/// The same cell is recomputed many times per chunk gen (pass 1, the edge-flag halo, the vine scan,
+/// and structure terrain gates all resample it, plus overlap across neighbors),
+/// so memoizing removes FBM redundancy (the dominant generation cost).
 /// Release-only: in debug the `TuningFloat` sliders mutate FBM output live, so debug always recomputes.
 const BASE_CACHE_SLOTS = BASE_CACHE_TILE_W * BASE_CACHE_TILE_H;
 var base_terrain_cache: [BASE_CACHE_SLOTS]BaseTerrainCacheEntry = @splat(.{});
