@@ -787,7 +787,7 @@ pub fn finalizeLoad() void {
     _ = world.quad_cache.getMaterials(g.depth, &world.quad_cache.ancestor_materials);
 
     // repopulate the SimBuffer around the player using the newly loaded state
-    world.SimBuffer.sync(g.getPlayerCoord(), .{ 0, 0 });
+    world.SimBuffer.sync(g.getPlayerCoord());
 
     // A save taken mid-descent stores the world at D plus the frame counter; everything else the
     // animation needs (the D+1 transition and its preview buffer) is derived, so rebuild it here.

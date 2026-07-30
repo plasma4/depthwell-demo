@@ -96,7 +96,7 @@ pub inline fn testLogs(skipError: bool) void {
     const logger = @import("logger.zig");
     logger.log(@src(), "This is a {s}.", .{"normal log"});
     logger.info(@src(), "This is an info log.", .{});
-    logger.warn(@src(), "This is a warning. You should see this when running tests in Zig, or in the console in JS.", .{});
+    logger.warn(@src(), "This is a warning. You should see this when running tests in Zig, or in the console in JS after running testLogs().", .{});
     if (skipError) {
         logger.err(@src(), "This is an error. Should create an alert() popup if CONFIG.noAlertOnError is false and building for WASM.", .{});
     } else {
@@ -131,7 +131,7 @@ fn quickFmt(args: anytype, prefix: []const u8) usize {
 }
 
 /// Quickly logs a message for testing.
-/// Use .log() with proper arguments for non-temporary/internal test logging.
+/// Use `logger.log()` with proper arguments for non-temporary/internal test logging.
 pub inline fn quick(args: anytype) void {
     const prefix = if (dw.is_wasm) "]" else "";
     const written = quickFmt(args, prefix);
@@ -139,7 +139,7 @@ pub inline fn quick(args: anytype) void {
 }
 
 /// Quickly warns a message for testing.
-/// Use .log() with proper arguments for non-temporary/internal test logging.
+/// Use `logger.log()` with proper arguments for non-temporary/internal test logging.
 pub inline fn quickWarn(args: anytype) void {
     const written = quickFmt(args, "");
     message(&logging_buffer, written, .warn);
@@ -392,7 +392,7 @@ fn writerTruncate(writer: *std.Io.Writer, args: anytype) bool {
 }
 
 /// Clears the text from a specific UI buffer (id 0-3). No-op in release modes.
-pub inline fn clear(id: u2) void {
+pub fn clear(id: u2) void {
     if (!is_debug) return;
     text_lengths[id] = 0;
     if (dw.is_wasm) {

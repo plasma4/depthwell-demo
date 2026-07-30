@@ -155,9 +155,9 @@ pub const ColorRgba = extern union {
 
     /// Inverts RGB while keeping alpha.
     pub fn invert(self: ColorRgba) ColorRgba {
-        var res: ColorRgba = .{ .v = @as(@Vector(4, u8), @splat(255)) - self.v };
-        res.channels.a = self.channels.a;
-        return res;
+        var result: ColorRgba = .{ .v = @as(@Vector(4, u8), @splat(255)) - self.v };
+        result.channels.a = self.channels.a;
+        return result;
     }
 
     /// Convert to grayscale using luminance while keeping alpha.
