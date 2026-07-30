@@ -344,7 +344,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
 }
 
 /// Returns how "strong" a `Sprite` is; how much mining_progress must be contributed to increase `hp` of a block.
-inline fn getSpriteStrength(s: Sprite) ?u64 {
+fn getSpriteStrength(s: Sprite) ?u64 {
     const props = sprite.getSpriteProps(s);
     if (!props.in_world) return null;
     // Unmineable installations (crafters) are honored BEFORE the solidity check so a non-solid

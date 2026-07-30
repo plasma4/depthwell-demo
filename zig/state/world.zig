@@ -85,7 +85,7 @@ fn resolveBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
 }
 
 /// Uncached foundation evaluation. Call `resolveBaseFoundation()` instead outside of the cache itself.
-inline fn computeBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
+fn computeBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
     const max_suffix = getMaxSuffixAtDepth(STARTING_ZOOM_TIMES);
     const on_edge_x = (cx == 0 and bx < 2) or (cx == max_suffix and bx >= (CHUNK_SIZE - 2));
     const on_edge_y = (cy == 0 and by < 2) or (cy == max_suffix and by >= (CHUNK_SIZE - 2));
@@ -127,7 +127,7 @@ pub fn sampleBaseFoundation(wx: u32, wy: u32) Sprite {
 /// Returns whether the cell is a foundation (a vine anchor/ceiling), skipping work that cannot change that.
 ///
 /// No ore pass since they don't modify solidity/foundation property.
-inline fn resolveFoundationSolid(cx: u64, cy: u64, bx: u4, by: u4) bool {
+fn resolveFoundationSolid(cx: u64, cy: u64, bx: u4, by: u4) bool {
     const max_suffix = getMaxSuffixAtDepth(STARTING_ZOOM_TIMES);
     const on_edge_x = (cx == 0 and bx < 2) or (cx == max_suffix and bx >= (CHUNK_SIZE - 2));
     const on_edge_y = (cy == 0 and by < 2) or (cy == max_suffix and by >= (CHUNK_SIZE - 2));
@@ -147,7 +147,7 @@ inline fn resolveFoundationSolid(cx: u64, cy: u64, bx: u4, by: u4) bool {
 ///
 /// `valid` is false when that cell lies past the world edge, where nothing can anchor a feature.
 const ColumnCellBeyond = struct { suffix: Vec2u = .{ 0, 0 }, by: u4 = 0, valid: bool = false };
-inline fn columnCellBeyond(coord: Coordinate, r: u32, depth: u64, comptime dir: dw.decorations.GrowDir) ColumnCellBeyond {
+fn columnCellBeyond(coord: Coordinate, r: u32, depth: u64, comptime dir: dw.decorations.GrowDir) ColumnCellBeyond {
     switch (dir) {
         .down => {
             const chunks_up: i32 = @intCast((r + CHUNK_SIZE - 1) / CHUNK_SIZE);
@@ -317,7 +317,7 @@ pub const ModEntry = struct {
     count: u16 = 0,
 
     /// Number of modified cells below block index `i`, which is `i`'s position within `cells`.
-    inline fn rank(self: *const @This(), i: u8) u16 {
+    fn rank(self: *const @This(), i: u8) u16 {
         const word: usize = i >> 6;
         const bit: u6 = @truncate(i);
         var total: u16 = 0;
@@ -465,7 +465,7 @@ pub const ModificationStore = struct {
     }
 
     /// Completely wipes all user modifications. Should be followed by `world.clearCaches(true)`.
-    pub fn clear(self: *@This()) void {
+    pub inline fn clear(self: *@This()) void {
         var it = self.entries.iterator(0);
         while (it.next()) |e| {
             self.allocator.free(e.cells);
@@ -650,7 +650,7 @@ pub const Coordinate = struct {
     }
 
     /// Pure 64-bit stateless hash.
-    pub inline fn hash(self: @This()) u64 {
+    pub fn hash(self: @This()) u64 {
         const secret_0 = 0xa0761d6478bd642f;
         const secret_1 = 0xe7037ed1a0b428db;
 
@@ -686,7 +686,7 @@ pub const Coordinate = struct {
 
     /// Adds both an X and Y value, creating a new `Coordinate` and handling quadrants for a specific depth.
     /// Returns null if this change would exceed boundaries.
-    pub inline fn moveAtDepth(self: @This(), shift: Vec2i, depth: u64) ?Coordinate {
+    pub fn moveAtDepth(self: @This(), shift: Vec2i, depth: u64) ?Coordinate {
         const dx = shift[0];
         const dy = shift[1];
         if (dx == 0 and dy == 0) return self;
@@ -765,7 +765,7 @@ pub const DepthCoordinate = struct {
     quadrant: u32,
 
     /// Pure 64-bit stateless hash.
-    pub inline fn hash(self: @This()) u64 {
+    pub fn hash(self: @This()) u64 {
         const secret_0 = 0xa0761d6478bd642f;
         const secret_1 = 0xe7037ed1a0b428db;
         const secret_2 = 0x517cc1b727220a95;
@@ -793,7 +793,7 @@ pub const DepthCoordinate = struct {
     }
 
     /// Converts any `Coordinate` to a `DepthCoordinate` at the current depth.
-    pub inline fn from(coord: Coordinate) @This() {
+    pub fn from(coord: Coordinate) @This() {
         return .{
             .suffix = coord.suffix,
             .quadrant = @intCast(coord.quadrant),
@@ -811,7 +811,7 @@ pub const DepthCoordinate = struct {
 
     /// Gets the correct location of D-1, in a `DepthCoordinate` format.
     /// Handles depth decrement, acting as the `pushLayer()` "inverse" for a `DepthCoordinate`.
-    pub inline fn getParent(self: @This()) @This() {
+    pub fn getParent(self: @This()) @This() {
         const parent_depth = self.depth - 1;
         const threshold = if (memory.game.depth <= dw.HORIZON_DEPTH)
             dw.HORIZON_DEPTH
@@ -988,7 +988,7 @@ pub const SimBuffer = struct {
     }
 
     /// Clears the whole `SimBuffer`, invalidating previous data.
-    pub inline fn clear() void {
+    pub fn clear() void {
         @memset(&keys, null);
         has_water = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
         water_settled = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
@@ -1195,7 +1195,7 @@ pub const SimBuffer = struct {
 
     /// Synchronizes the buffer to center on the provided coordinate/position.
     /// Safely handles shifts exceeding 1 chunk per frame via `shift`.
-    pub inline fn sync(coord: Coordinate, shift: Vec2i) void {
+    pub fn sync(coord: Coordinate, shift: Vec2i) void {
         const half_width = @as(i64, SIM_BUFFER_WIDTH) / 2;
         const og = origin orelse {
             fullRefresh(getClampedMove(coord, -half_width, -half_width));
@@ -1428,7 +1428,7 @@ pub const SimBuffer = struct {
 
 /// Returns a pointer to a block in the active 256x256 SimBuffer grid.
 /// Treat out of bounds or inactive chunks as solid.
-pub inline fn getSimBlockPtr(x: i32, y: i32) ?*Block {
+pub fn getSimBlockPtr(x: i32, y: i32) ?*Block {
     if (x < 0 or x >= SIM_GRID_SIZE or y < 0 or y >= SIM_GRID_SIZE) return null;
     const ux: usize = @intCast(x);
     const uy: usize = @intCast(y);
@@ -1498,7 +1498,7 @@ pub const ChunkCache = struct {
 
     /// Finds the index of a `Coordinate` in the cache, marking it as "recently used."
     /// Returns null if non-existent.
-    pub inline fn findIndex(self: *@This(), coord: Coordinate) ?usize {
+    pub fn findIndex(self: *@This(), coord: Coordinate) ?usize {
         const h = coord.hash();
         const set_idx: usize = @intCast(h % CHUNK_CACHE_SETS);
 
@@ -1514,7 +1514,7 @@ pub const ChunkCache = struct {
     }
 
     /// Evicts an entry using the clock algorithm and returns the index for the new `Coordinate` inside the cache.
-    pub inline fn allocateIndex(self: *@This(), coord: Coordinate) usize {
+    pub fn allocateIndex(self: *@This(), coord: Coordinate) usize {
         const h = coord.hash();
         const set_idx: usize = @intCast(h % CHUNK_CACHE_SETS);
         var hand_val = self.hands[set_idx];
@@ -1792,7 +1792,7 @@ pub const QuadCache = struct {
     }
 
     /// Gets the rebase origin X for a given depth (which is asserted to be > `HORIZON_DEPTH`).
-    pub inline fn getOriginX(self: *const @This(), depth: u64) u64 {
+    pub fn getOriginX(self: *const @This(), depth: u64) u64 {
         std.debug.assert(depth > dw.HORIZON_DEPTH);
         const idx = depth - dw.HORIZON_DEPTH - 1;
         const slot: usize = @intCast(idx / 21);
@@ -1801,7 +1801,7 @@ pub const QuadCache = struct {
     }
 
     /// Gets the rebase origin Y for a given depth (which is asserted to be > `HORIZON_DEPTH`).
-    pub inline fn getOriginY(self: *const @This(), depth: u64) u64 {
+    pub fn getOriginY(self: *const @This(), depth: u64) u64 {
         std.debug.assert(depth > dw.HORIZON_DEPTH);
         const idx = depth - dw.HORIZON_DEPTH - 1;
         const slot: usize = @intCast(idx / 21);
@@ -1823,7 +1823,7 @@ pub const QuadCache = struct {
     /// block would generate differently depending on the route the player took to look at it.
     /// Below the horizon that is the world seed, and above it the recorded rebase path (see
     /// `computeLayer()`, which only steps `path_hashes` past `HORIZON_DEPTH`).
-    pub inline fn getQuadrantSeed(self: *const @This(), quadrant: u2, depth: u64) seeding.Seed {
+    pub fn getQuadrantSeed(self: *const @This(), quadrant: u2, depth: u64) seeding.Seed {
         std.debug.assert(memory.game.depth > HORIZON_DEPTH or quadrant == 0);
         if (depth == memory.game.depth) {
             // Enforces exactly that agreement for the branch below; there is no cheap way to state it
@@ -1883,7 +1883,7 @@ pub const QuadCache = struct {
     }
 
     /// Returns details on a specific quadrant and what "edges" of the world it touches.
-    pub inline fn getQuadrantEdgeDetails(self: *const @This(), quadrant: u2, depth: u64) QuadrantEdgeDetails {
+    pub fn getQuadrantEdgeDetails(self: *const @This(), quadrant: u2, depth: u64) QuadrantEdgeDetails {
         if (depth <= HORIZON_DEPTH) {
             return .{
                 .most_top = true,
@@ -2225,7 +2225,7 @@ fn addEdgeFlagsFractal(target_chunk: *Chunk, key: DepthCoordinate) void {
     }
 
     const getBlockHelper = struct {
-        inline fn func(k: DepthCoordinate, rx: i32, ry: i32) Block {
+        fn func(k: DepthCoordinate, rx: i32, ry: i32) Block {
             const ndx = @divFloor(rx, CHUNK_SIZE);
             const ndy = @divFloor(ry, CHUNK_SIZE);
             const lx: u4 = @intCast(@mod(rx, CHUNK_SIZE));
@@ -2429,7 +2429,7 @@ fn writeBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, prev_bl
 ///
 /// Must agree field-for-field with the `ModCell` `internalClearBlock()` stores, so a cleared cell reads
 /// the same whether it comes from a live cache or from `materializeChunk()`.
-inline fn clearBlockFields(b: *Block) void {
+fn clearBlockFields(b: *Block) void {
     b.id = .none;
     b.base_id = .none;
     b.hp = 0;

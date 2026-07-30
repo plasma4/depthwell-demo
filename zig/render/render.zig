@@ -14,7 +14,7 @@ const CHUNK_SIZE = dw.CHUNK_SIZE;
 const CHUNK_SIZE_FLOAT = dw.CHUNK_SIZE_FLOAT;
 
 /// Makes a call to `engine.handleVisibleChunks()` in JS.
-pub inline fn handleVisibleChunks(opacity: f64, wireframeOpacity: f64) void {
+pub fn handleVisibleChunks(opacity: f64, wireframeOpacity: f64) void {
     if (dw.is_wasm) {
         return dw.jsHandleVisibleChunks(opacity, wireframeOpacity);
     } else {
@@ -23,7 +23,7 @@ pub inline fn handleVisibleChunks(opacity: f64, wireframeOpacity: f64) void {
 }
 
 /// Makes a call to `engine.drawBackground()` in JS, using whatever scene the last chunk pass published.
-pub inline fn drawBackground(opacity: f64) void {
+pub fn drawBackground(opacity: f64) void {
     if (dw.is_wasm) {
         return dw.jsDrawBackground(opacity);
     } else {
@@ -32,7 +32,7 @@ pub inline fn drawBackground(opacity: f64) void {
 }
 
 /// Makes a call to `engine.handleVisibleChunks()` in JS.
-pub inline fn handleVisibleEntities() void {
+pub fn handleVisibleEntities() void {
     if (dw.is_wasm) {
         return dw.jsHandleVisibleEntities();
     } else {
@@ -41,7 +41,7 @@ pub inline fn handleVisibleEntities() void {
 }
 
 /// Sets the mouse type of the canvas in JS.
-pub inline fn dispatchMouseType() void {
+pub fn dispatchMouseType() void {
     if (dw.is_wasm) {
         dw.jsSetMouseType(dw.mouse.cursor_type);
     } else {

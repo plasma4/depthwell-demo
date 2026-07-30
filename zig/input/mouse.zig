@@ -116,7 +116,7 @@ pub fn requestCursorType(new_type: CursorType) void {
 /// Only sets `click_focus` if a pointerdown event was just fired and `is_hovered` is true.
 ///
 /// Returns whether the "capture" was successful.
-pub inline fn tryCaptureDown(category: ClickFocus, is_hovered: bool) bool {
+pub fn tryCaptureDown(category: ClickFocus, is_hovered: bool) bool {
     if (just_mouse_down and is_hovered) {
         if (click_focus == .none or click_focus == .canvas or click_focus == category) {
             click_focus = category;

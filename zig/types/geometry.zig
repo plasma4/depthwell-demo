@@ -22,7 +22,7 @@ pub const Shape = struct {
     r: f64 = 0.0,
 
     /// Circle shape constructor.
-    pub inline fn circle(center_point: Vec2f, radius: f64) Shape {
+    pub fn circle(center_point: Vec2f, radius: f64) Shape {
         return .{
             .start = center_point - @as(Vec2f, @splat(radius)),
             .w = radius * 2.0,
@@ -32,7 +32,7 @@ pub const Shape = struct {
     }
 
     /// Rectangle shape constructor (from a top-left position and uniform side length).
-    pub inline fn square(point: Vec2f, side: f64) Shape {
+    pub fn square(point: Vec2f, side: f64) Shape {
         return .{
             .start = point,
             .w = side,
@@ -42,7 +42,7 @@ pub const Shape = struct {
     }
 
     /// Rounded rectangle shape constructor (from a top-left position and uniform side length).
-    pub inline fn roundSquare(point: Vec2f, side: f64, radius: comptime_float) Shape {
+    pub fn roundSquare(point: Vec2f, side: f64, radius: comptime_float) Shape {
         return .{
             .start = point,
             .w = side,

@@ -29,7 +29,7 @@ pub const AMBIENT_LIGHT_DEBUG: u8 = 192;
 pub var IS_LIGHT_GLOBAL = false;
 
 // Light strength values for various sources:
-pub var PLAYER_LIGHT: u16 = 300;
+pub var PLAYER_LIGHT: u16 = 255;
 pub const MAX_PLAYER_LIGHT: u16 = 400;
 // ---
 pub const CAMPFIRE_LIGHT: u16 = 240;
@@ -57,7 +57,7 @@ const MAX_SOURCE: u16 = @max(
 );
 const NUM_BUCKETS: usize = MAX_SOURCE + 1;
 
-inline fn blockEmission(id: Sprite) u16 {
+fn blockEmission(id: Sprite) u16 {
     return switch (id) {
         .campfire => CAMPFIRE_LIGHT,
         .forest_furnace, .lava_furnace => FURNACE_LIGHT,
@@ -72,7 +72,7 @@ inline fn blockEmission(id: Sprite) u16 {
 }
 
 /// Returns true if the block is a warm light source, which creates an orange light glow in the shader.
-inline fn isOrangeSource(id: Sprite) bool {
+fn isOrangeSource(id: Sprite) bool {
     return switch (id) {
         .campfire => true,
         .forest_furnace, .lava_furnace => true,
@@ -105,7 +105,7 @@ fn resetArena() void {
 
 /// Orthogonal per-step light cost for entering `block`. Fits in u8 (<= SOLID_FALLOFF).
 /// Diagonals are derived from this at flood time via the fast sqrt(2) approximation.
-inline fn orthoCost(block: Block) u8 {
+fn orthoCost(block: Block) u8 {
     if (block.isLiquid()) return @intCast(LIQUID_FALLOFF);
 
     // Treat empty/air blocks as hp = 16, solid blocks use their actual hp value (0..15).
@@ -183,7 +183,7 @@ inline fn seed(light: []u16, buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, 
 
 /// Seeds the 2x2 cells surrounding the player using their continuous sub-pixel position.
 /// Light drops off similar to Euclidean distance through the cell's own medium cost.
-inline fn seedPlayerLight(
+fn seedPlayerLight(
     cost: []const u8,
     light_white: []u16,
     buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, .@"16"),
