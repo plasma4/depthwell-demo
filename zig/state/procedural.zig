@@ -51,7 +51,7 @@ const TerrainData = struct {
 /// Generates a block for seeding (based on previous procedural generation logic).
 /// The terms moisture/density are used extremely loosely here.
 /// Moisture is over a larger area, acting as the "biome" for structure logic.
-pub inline fn generateBaseProceduralSprite(d: *const TerrainData) Sprite {
+pub fn generateBaseProceduralSprite(d: *const TerrainData) Sprite {
     // check is_debug because these will always be off in non-dev
     // sprite IDs in this range create a heatmap
     if (dw.is_debug and USE_HEATMAP and !USE_ORE_HEATMAP)
@@ -72,7 +72,7 @@ pub inline fn generateBaseProceduralSprite(d: *const TerrainData) Sprite {
 
     if (d.weirdness >= 0.6 and d.weirdness <= 0.9 and
         (d.density2 >= 0.88 and d.density2 <= 0.915 or d.weirdness >= 0.88))
-        return if (d.weirdness >= 0.73) .molten_stone else .lava_stone;
+        return if (d.weirdness >= 0.73 or d.density2 >= 0.9) .molten_stone else .lava_stone;
     if (d.moisture >= 0.50 and d.density >= 0.53 and d.density <= 0.6)
         return if (d.weirdness >= 0.8) .lime_stone else .green_stone;
 
@@ -208,7 +208,7 @@ const LatticeAxis = struct {
 /// narrow mantissa and a shift; and a 69-bit coordinate split at `SPLIT_BIT` leaves two halves whose
 /// products with that mantissa each fit a `u64`. Recombining is exact because the high half's
 /// contribution is a multiple of `2^SPLIT_BIT` and the recombining shift never exceeds `SPLIT_BIT`.
-inline fn latticeAxis(v: WorldCoord, inv_scale: f32) LatticeAxis {
+fn latticeAxis(v: WorldCoord, inv_scale: f32) LatticeAxis {
     std.debug.assert(inv_scale > 0 and inv_scale <= MAX_INV_SCALE);
     // Rounded, so the lattice a caller asks for is reproduced to within one part in 2^32 per block.
     const step: u64 = @intFromFloat(@round(@as(f64, inv_scale) * (1 << LATTICE_FRAC_BITS)));
@@ -254,7 +254,7 @@ inline fn latticeAxis(v: WorldCoord, inv_scale: f32) LatticeAxis {
 
 /// Returns a struct with an a `value: f64` and `getF32()`.
 /// Allows for numbers to act like variables in Debug mode and constant-fold in all Release modes.
-inline fn TuningFloat(comptime default_value: f64) type {
+fn TuningFloat(comptime default_value: f64) type {
     if (dw.is_debug) {
         return struct {
             pub var value: f64 = default_value;
@@ -274,7 +274,7 @@ inline fn TuningFloat(comptime default_value: f64) type {
 
 /// Returns a struct with an a `value: bool`. (TODO: switch to using this instead of current USE_...heatmap logic.)
 /// Allows for booleans to act like variables in Debug mode and dead code elimination in all Release modes.
-inline fn TuningBool(comptime default_value: bool) type {
+fn TuningBool(comptime default_value: bool) type {
     if (dw.is_debug) {
         return struct {
             pub var value: bool = default_value;
@@ -349,7 +349,7 @@ const BASE_CACHE_TILE_H = 64;
 const BASE_CACHE_SLOTS = BASE_CACHE_TILE_W * BASE_CACHE_TILE_H;
 var base_terrain_cache: [BASE_CACHE_SLOTS]BaseTerrainCacheEntry = @splat(.{});
 /// Current seed the cache holds; a mismatch (reseed) invalidates every entry at once.
-var base_cache_key: u64 = 0;
+var base_cache_seed: Vec2u = 0;
 
 /// Identity of the terrain every cache downstream of it holds; a mismatch drops the cache.
 /// Release-only, like the caches themselves: debug recomputes, since the sliders mutate output live.
@@ -382,11 +382,10 @@ pub fn getBaseSpriteType(
     const wy = chunk_y * 16 + block_y;
 
     const seed = memory.game.getHashSeed(.moisture);
-    const key = seed[0] ^ seed[1];
-    if (key != base_cache_key) {
+    if (seed != base_cache_seed) {
         // @memset, not `= @splat(.{})`: an array this large would be built as a stack temporary first.
         @memset(&base_terrain_cache, .{});
-        base_cache_key = key;
+        base_cache_seed = seed;
     }
 
     const entry = &base_terrain_cache[baseCacheIndex(wx, wy)];
@@ -666,7 +665,7 @@ comptime {
 
 /// Comptime `rule`: every scale, weight, and octave count below then folds into its call site,
 /// including the lattice step split inside each noise sample (see `getDualValueNoiseFixed()`).
-inline fn oreField(seed: Vec2u, x: WorldCoord, y: WorldCoord, comptime lane: u3, comptime rule: OreDispersal) f32 {
+fn oreField(seed: Vec2u, x: WorldCoord, y: WorldCoord, comptime lane: u3, comptime rule: OreDispersal) f32 {
     const inv_scale = 1.0 / rule.scale;
     // fast domain warping
     const warp = getDualValueNoiseFixed(
@@ -913,7 +912,7 @@ const SpritePair = struct { Sprite, Sprite };
 /// // Returns iron if density is larger than 0.6 AND my_value is between 0.6 and 0.7 (inclusive), and stone otherwise.
 /// Sprite sprite = cw(.iron, my_density >= 0.6, my_value, 0.6, 0.7, .stone);
 /// ```
-pub inline fn selectSprite(sprites: SpritePair, condition: bool, range: ?ValueRange) Sprite {
+pub fn selectSprite(sprites: SpritePair, condition: bool, range: ?ValueRange) Sprite {
     const old_sprite = sprites[0];
     const new_sprite = sprites[1];
     if (range) |val| {
@@ -1120,7 +1119,7 @@ inline fn getDualValueNoiseTuned(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_
 }
 
 /// Shared body of both dual-value entry points; `inline` so a comptime `inv_scale` stays comptime.
-inline fn dualValueNoise(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) dw.utils.Vec2f32 {
+fn dualValueNoise(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) dw.utils.Vec2f32 {
     const ax = latticeAxis(x, inv_scale);
     const ay = latticeAxis(y, inv_scale);
 
@@ -1170,7 +1169,7 @@ inline fn hashToUnit(h: u64) f32 {
 
 /// 8-direction gradient dot product (classic Perlin gradient set). The low 3 hash bits select the direction;
 /// the 4 cardinal + 4 diagonal set is cheap and visually isotropic enough for 2D.
-inline fn grad2(h: u64, dx: f32, dy: f32) f32 {
+fn grad2(h: u64, dx: f32, dy: f32) f32 {
     return switch (@as(u3, @truncate(h))) {
         0 => dx + dy,
         1 => dx - dy,
@@ -1194,7 +1193,7 @@ const Lattice = struct {
     h: Vec4u,
 };
 
-inline fn lattice(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) Lattice {
+fn lattice(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) Lattice {
     const ax = latticeAxis(x, 1.0 / cell_size);
     const ay = latticeAxis(y, 1.0 / cell_size);
     const x0 = ax.corner(0);
@@ -1219,13 +1218,13 @@ inline fn lattice(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f
 ///
 /// Use for: organic, flowing hills/valleys.
 /// Prefer `getPerlinNoiseFixed()` whenever the cell size is a constant.
-pub fn getPerlinNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
+pub inline fn getPerlinNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
     return perlinNoise(seed_vector, x, y, cell_size);
 }
 
 /// `getPerlinNoise()` with the cell size fixed at compile time; see `getDualValueNoiseFixed()`
 /// for what that buys. Same field, same values.
-pub fn getPerlinNoiseFixed(
+pub inline fn getPerlinNoiseFixed(
     seed_vector: Vec2u,
     x: WorldCoord,
     y: WorldCoord,
@@ -1234,7 +1233,7 @@ pub fn getPerlinNoiseFixed(
     return perlinNoise(seed_vector, x, y, cell_size);
 }
 
-/// Shared body of both Perlin entry points; `inline` so a comptime `cell_size` stays comptime.
+/// Shared body of both Perlin entry points.
 inline fn perlinNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
     const l = lattice(seed_vector, x, y, cell_size);
     const n00 = grad2(l.h[0], l.tx, l.ty);
@@ -1353,7 +1352,7 @@ pub fn getSimplexNoise(seed_vector: Vec2u, x: u64, y: u64, cell_size: f32) f32 {
 /// `cell_size` is comptime so each octave's own size is too, which lets `noiseFn` be a `...Fixed()`
 /// variant (hence `anytype`, since a comptime parameter cannot be spelled in a function type).
 /// Halving is exact in binary floating point, so the octave sizes are the same numbers either way.
-pub inline fn fbm(
+pub fn fbm(
     comptime noiseFn: anytype,
     seed_vector: Vec2u,
     x: WorldCoord,

@@ -569,6 +569,7 @@ export class GameEngine {
                         `assets/place.mp3`,
                         `assets/furnace.mp3`,
                         `assets/unmineable.mp3`,
+                        `assets/toofaraway.mp3`,
                     ][id],
                 );
 

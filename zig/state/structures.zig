@@ -234,7 +234,7 @@ pub const MAX_WORLD_BLOCK: i32 = blk: {
 /// a seating scan reaches rows below it, and `isBeaten()` resolves the candidate in (`cx - 1`, `cy - 1`).
 ///
 /// Bounds being `i32` easily traps what would otherwise be an integer overflow (a bit hacky).
-pub inline fn baseSolid(wx: i32, wy: i32) bool {
+pub fn baseSolid(wx: i32, wy: i32) bool {
     if (wx < 0 or wy < 0 or wx > MAX_WORLD_BLOCK or wy > MAX_WORLD_BLOCK) return false;
 
     const uwx: u32 = @bitCast(wx);
@@ -270,7 +270,7 @@ pub fn surfaceYWith(comptime probe: anytype, wx: i32, y_from: i32, y_to: i32) ?i
 /// Anchors a `w`-by-`h` footprint uniformly anywhere in the grid cell (`cx`, `cy`), overhang included.
 /// Every structure's `getBounds()` should route through this: an origin drawn from `[0, spawn_area - w)`
 /// instead would blank out a band along each cell edge and make the spawn lattice visible.
-pub inline fn jitter(state: *HashState, cx: i32, cy: i32, area: u32, w: i32, h: i32) Rect {
+pub fn jitter(state: *HashState, cx: i32, cy: i32, area: u32, w: i32, h: i32) Rect {
     const i_area = @as(i32, @intCast(area));
     const x_start = cx * i_area + @as(i32, @intCast(state.getLimit(u32, area)));
     const y_start = cy * i_area + @as(i32, @intCast(state.getLimit(u32, area)));
@@ -283,7 +283,7 @@ pub inline fn jitter(state: *HashState, cx: i32, cy: i32, area: u32, w: i32, h: 
 }
 
 /// Runs one terrain rule against a candidate's bounds.
-fn checkConstraint(comptime probe: anytype, comptime c: Constraint, bounds: Rect) bool {
+inline fn checkConstraint(comptime probe: anytype, comptime c: Constraint, bounds: Rect) bool {
     switch (c) {
         .solid, .empty => |region| {
             const want_solid = c == .solid;
@@ -511,11 +511,12 @@ const STRUCT_CACHE_TILE = 32;
 ///
 /// so memoizing per grid cell collapses that repeated hashing (and all terrain sampling) to O(1).
 /// Pure function of (cell, seed): the per-entry seed check self-invalidates on reseed, so no explicit clear.
+/// The `i32` cx/cy size is okay because it's at base depth!
 const STRUCT_CACHE_SLOTS = STRUCT_CACHE_TILE * STRUCT_CACHE_TILE;
 pub var struct_cache: [structures.len][STRUCT_CACHE_SLOTS]StructCacheEntry = @splat(@splat(.{}));
 
 /// Returns the (populated) cache entry for structure `kind` at grid cell (`cx`, `cy`), computing bounds on miss.
-inline fn structCacheSlot(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) *StructCacheEntry {
+fn structCacheSlot(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) *StructCacheEntry {
     const e = &struct_cache[kind][dw.utils.tileIndex(STRUCT_CACHE_TILE, STRUCT_CACHE_TILE, cx, cy)];
     if (!(e.occupied and e.cx == cx and e.cy == cy and @reduce(.And, e.seed == struct_seed))) {
         e.* = .{
@@ -535,7 +536,7 @@ inline fn structCacheSlot(comptime kind: usize, cx: i32, cy: i32, struct_seed: V
 /// Terrain is settled HERE rather than in a later pass, because a rejected placement can then simply be
 /// retried (see `attempts`). It also means every `bounds` in the cache is one that would really be built,
 /// which is what lets the collision scan trust it.
-pub inline fn getStructureBounds(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) ?Rect {
+pub fn getStructureBounds(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) ?Rect {
     return structCacheSlot(kind, cx, cy, struct_seed).bounds;
 }
 
@@ -553,7 +554,7 @@ pub const CellResolution = struct { bounds: ?Rect, reached: Stage };
 
 /// The full ROLL -> ANCHOR -> SEAT -> GATE pipeline for one cell, uncached and side-effect-free.
 /// Backs both `computeStructureBounds()` (which keeps only `bounds`) and `audit.zig` (which keeps `reached`).
-inline fn resolveCell(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) CellResolution {
+fn resolveCell(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) CellResolution {
     @setEvalBranchQuota(20000); // `getChance()` comptime-searches for a rational approximation of the odds
     const S = structures[kind];
     var state = makeStructureHash(
@@ -597,12 +598,12 @@ inline fn resolveCell(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u
 }
 
 /// Uncached resolution backing the cache. Call `getStructureBounds()` instead elsewhere.
-inline fn computeStructureBounds(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) ?Rect {
+fn computeStructureBounds(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) ?Rect {
     return resolveCell(kind, cx, cy, struct_seed).bounds;
 }
 
 /// `resolveCell()` for `debug/audit.zig`'s funnel, which needs the stage rather than a cached box.
-pub inline fn resolveCellForAudit(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) CellResolution {
+pub fn resolveCellForAudit(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) CellResolution {
     return resolveCell(kind, cx, cy, struct_seed);
 }
 
@@ -616,7 +617,7 @@ inline fn cellOriginY(comptime kind: usize, cy: i32) u32 {
 
 /// Creates a `HashState` given a seed, (base depth) coordinates,
 /// and power-of-two area where a structure may appear within.
-pub inline fn makeStructureHash(
+pub fn makeStructureHash(
     struct_seed: Vec2u,
     wx: u32,
     wy: u32,
@@ -638,7 +639,7 @@ pub inline fn makeStructureHash(
 }
 
 /// Creates a `HashState` given a seed and (base depth) coordinates to a block, as well as a unique ID.
-pub inline fn makeBlockHash(
+pub fn makeBlockHash(
     struct_seed: Vec2u,
     wx: u32,
     wy: u32,
@@ -662,7 +663,7 @@ inline fn cellRange(comptime area: i32, comptime max: i32, from: i32, to: i32) s
 }
 
 /// A cell's tie-break rank against other cells of its own kind. Hash-derived, so no direction is favored.
-inline fn cellRank(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) u64 {
+fn cellRank(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) u64 {
     var state = makeStructureHash(
         struct_seed,
         cellOriginX(kind, cx),
@@ -678,7 +679,7 @@ inline fn cellRank(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) u
 /// Collapses what used to be two separate rules into one scan, because both ask the same question:
 /// - a higher-priority KIND always wins (that ordering is the point of the tuple)
 /// - two placements of the SAME kind (which overhang makes possible) are settled by `cellRank()`
-inline fn isBeaten(comptime kind: usize, cx: i32, cy: i32, bounds: Rect, struct_seed: Vec2u) bool {
+fn isBeaten(comptime kind: usize, cx: i32, cy: i32, bounds: Rect, struct_seed: Vec2u) bool {
     // (inlining this has been tested to improve perf;
     // also comptime kind forces multiple function signatures anyway)
     const my_rank = cellRank(kind, cx, cy, struct_seed);
@@ -724,7 +725,7 @@ inline fn isBeaten(comptime kind: usize, cx: i32, cy: i32, bounds: Rect, struct_
 ///
 /// Never holds a cache POINTER across the scan: `isBeaten()` re-enters `structCacheSlot()`
 /// for neighboring cells of this same kind, which share this bank and can evict this very slot.
-inline fn acceptedBounds(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) ?Rect {
+fn acceptedBounds(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) ?Rect {
     const bounds = structCacheSlot(kind, cx, cy, struct_seed).bounds orelse return null;
 
     const blocked = structCacheSlot(kind, cx, cy, struct_seed).blocked orelse blk: {
@@ -747,7 +748,7 @@ pub inline fn acceptedBoundsForAudit(comptime kind: usize, cx: i32, cy: i32, str
 ///
 /// The stream is INDEPENDENT of the one `computeStructureBounds()` drew from (a separate `unique_id` namespace).
 /// Stops a structure's own choices from correlating with its jitter offset and `attempts` complexity creating issues.
-inline fn generateFrom(
+fn generateFrom(
     comptime kind: usize,
     candidate: Candidate,
     starting_sprite: Sprite,

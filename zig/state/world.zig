@@ -85,7 +85,7 @@ fn resolveBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
 }
 
 /// Uncached foundation evaluation. Call `resolveBaseFoundation()` instead outside of the cache itself.
-inline fn computeBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
+fn computeBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
     const max_suffix = getMaxSuffixAtDepth(STARTING_ZOOM_TIMES);
     const on_edge_x = (cx == 0 and bx < 2) or (cx == max_suffix and bx >= (CHUNK_SIZE - 2));
     const on_edge_y = (cy == 0 and by < 2) or (cy == max_suffix and by >= (CHUNK_SIZE - 2));
@@ -127,7 +127,7 @@ pub fn sampleBaseFoundation(wx: u32, wy: u32) Sprite {
 /// Returns whether the cell is a foundation (a vine anchor/ceiling), skipping work that cannot change that.
 ///
 /// No ore pass since they don't modify solidity/foundation property.
-inline fn resolveFoundationSolid(cx: u64, cy: u64, bx: u4, by: u4) bool {
+fn resolveFoundationSolid(cx: u64, cy: u64, bx: u4, by: u4) bool {
     const max_suffix = getMaxSuffixAtDepth(STARTING_ZOOM_TIMES);
     const on_edge_x = (cx == 0 and bx < 2) or (cx == max_suffix and bx >= (CHUNK_SIZE - 2));
     const on_edge_y = (cy == 0 and by < 2) or (cy == max_suffix and by >= (CHUNK_SIZE - 2));
@@ -686,7 +686,7 @@ pub const Coordinate = struct {
 
     /// Adds both an X and Y value, creating a new `Coordinate` and handling quadrants for a specific depth.
     /// Returns null if this change would exceed boundaries.
-    pub inline fn moveAtDepth(self: @This(), shift: Vec2i, depth: u64) ?Coordinate {
+    pub fn moveAtDepth(self: @This(), shift: Vec2i, depth: u64) ?Coordinate {
         const dx = shift[0];
         const dy = shift[1];
         if (dx == 0 and dy == 0) return self;
@@ -765,7 +765,7 @@ pub const DepthCoordinate = struct {
     quadrant: u32,
 
     /// Pure 64-bit stateless hash.
-    pub inline fn hash(self: @This()) u64 {
+    pub fn hash(self: @This()) u64 {
         const secret_0 = 0xa0761d6478bd642f;
         const secret_1 = 0xe7037ed1a0b428db;
         const secret_2 = 0x517cc1b727220a95;
@@ -811,7 +811,7 @@ pub const DepthCoordinate = struct {
 
     /// Gets the correct location of D-1, in a `DepthCoordinate` format.
     /// Handles depth decrement, acting as the `pushLayer()` "inverse" for a `DepthCoordinate`.
-    pub inline fn getParent(self: @This()) @This() {
+    pub fn getParent(self: @This()) @This() {
         const parent_depth = self.depth - 1;
         const threshold = if (memory.game.depth <= dw.HORIZON_DEPTH)
             dw.HORIZON_DEPTH
@@ -988,7 +988,7 @@ pub const SimBuffer = struct {
     }
 
     /// Clears the whole `SimBuffer`, invalidating previous data.
-    pub inline fn clear() void {
+    pub fn clear() void {
         @memset(&keys, null);
         has_water = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
         water_settled = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
@@ -1195,18 +1195,14 @@ pub const SimBuffer = struct {
 
     /// Synchronizes the buffer to center on the provided coordinate/position.
     /// Safely handles shifts exceeding 1 chunk per frame via `shift`.
-    pub inline fn sync(coord: Coordinate, shift: Vec2i) void {
+    pub fn sync(coord: Coordinate, shift: Vec2i) void {
         const half_width = @as(i64, SIM_BUFFER_WIDTH) / 2;
         const og = origin orelse {
             fullRefresh(getClampedMove(coord, -half_width, -half_width));
             return;
         };
 
-        // Small shift: slide the window by `shift` without rebuilding it.
-        // incrementalRefresh() advances ring_x/ring_y by exactly `shift`, so it is only valid when the origin also advances by exactly `shift`.
-        // At a world edge (depth < HORIZON_DEPTH) the origin move clamps to fewer chunks, which would desync the ring from the origin and make get() map every resident chunk to the wrong slot
-        // (all lookups then miss) until the next fullRefresh(). Fall back to a full refresh in that case so the two never drift apart.
-        // TODO: is there a better way to do things?
+        // small shift: slide the window by shift without rebuilding it!
         if (@abs(shift[0]) < SIM_BUFFER_WIDTH and @abs(shift[1]) < SIM_BUFFER_WIDTH) {
             if (shift[0] != 0 or shift[1] != 0) {
                 if (og.move(shift) != null) {
@@ -1428,7 +1424,7 @@ pub const SimBuffer = struct {
 
 /// Returns a pointer to a block in the active 256x256 SimBuffer grid.
 /// Treat out of bounds or inactive chunks as solid.
-pub inline fn getSimBlockPtr(x: i32, y: i32) ?*Block {
+pub fn getSimBlockPtr(x: i32, y: i32) ?*Block {
     if (x < 0 or x >= SIM_GRID_SIZE or y < 0 or y >= SIM_GRID_SIZE) return null;
     const ux: usize = @intCast(x);
     const uy: usize = @intCast(y);
@@ -1498,7 +1494,7 @@ pub const ChunkCache = struct {
 
     /// Finds the index of a `Coordinate` in the cache, marking it as "recently used."
     /// Returns null if non-existent.
-    pub inline fn findIndex(self: *@This(), coord: Coordinate) ?usize {
+    pub fn findIndex(self: *@This(), coord: Coordinate) ?usize {
         const h = coord.hash();
         const set_idx: usize = @intCast(h % CHUNK_CACHE_SETS);
 
@@ -1514,7 +1510,7 @@ pub const ChunkCache = struct {
     }
 
     /// Evicts an entry using the clock algorithm and returns the index for the new `Coordinate` inside the cache.
-    pub inline fn allocateIndex(self: *@This(), coord: Coordinate) usize {
+    pub fn allocateIndex(self: *@This(), coord: Coordinate) usize {
         const h = coord.hash();
         const set_idx: usize = @intCast(h % CHUNK_CACHE_SETS);
         var hand_val = self.hands[set_idx];
@@ -2726,7 +2722,9 @@ pub fn modifyBlockHp(coord: Coordinate, bx: u4, by: u4, block: Block, hp_to_add:
     return false;
 }
 
-/// What a neighbor lookup yields once it leaves the world entirely, past the first or last chunk.
+/// Edge stone block type for the edge of the world. At `STARTING_ZOOM_TIMES`,
+/// the bordering 2 blocks of the world are edge stone.
+///
 /// This is ONLY for coordinates that genuinely have no chunk.
 /// Lookups that fail should use `panicUnresolvedAncestor()` instead of quietly becoming terrain.
 pub const world_edge_block: Block = .makeBasicBlock(.edge_stone, 0);
@@ -2812,9 +2810,13 @@ pub fn clearCaches(comptime clear_ancestors: bool) void {
     @memset(&quad_cache.seed_clock_bits, 0);
     @memset(&quad_cache.seed_hand, 0);
     @memset(&quad_cache.seed_cache_keys, @splat(DepthCoordinate.invalid));
-    // TODO: evaluate if we really need this: necessary at least when using debug UI, maybe not during reseed/teleport?
-    for (dw.structures.struct_cache[0..]) |*row| {
-        @memset(row, .{});
+    // debug-only: a structure placement is a pure function of its cell and the structure seed,
+    // which the per-entry seed check already invalidates on, so a reseed or a teleport has nothing to drop here.
+    // HOWEVER! in debug, there's sliders that change the terrain. so yeah, we need to reset here
+    if (dw.is_debug) {
+        for (dw.structures.struct_cache[0..]) |*row| {
+            @memset(row, .{});
+        }
     }
 
     if (clear_ancestors) dw.ancestor.ancestor_cache.clear();
