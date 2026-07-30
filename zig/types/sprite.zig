@@ -17,7 +17,7 @@ const DropHandlers = dw.drops.DropHandlers;
 pub const UNMINEABLE_STRENGTH: u64 = std.math.maxInt(u64);
 
 /// Index where stone-like sprites begin.
-pub const STONE_START = 14;
+pub const STONE_START = 20;
 /// Index where stone-like sprites end.
 const STONE_END = STONE_START + 22;
 
@@ -56,7 +56,7 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 298) {
+    if (max_sprite_value != 304) {
         var buf: [64]u8 = undefined;
         @compileError("Max sprite value of " ++
             (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
@@ -82,8 +82,8 @@ pub const Sprite = enum(u16) {
     black_plate,
     white_plate,
     leaves,
-    dirt,
-    dirt_top,
+    dirt = 12, // bottom dirt, center dirt, 2 top dirt sprites
+    red_dirt = 16, // same as normal dirt
 
     // stone types!
     blue_strange_stone = STONE_START,
@@ -404,7 +404,7 @@ pub const Sprite = enum(u16) {
     }
 
     /// Converts a sprite into an entity ID, handling atlas ID remaps.
-    pub inline fn asEntity(self: Sprite) u16 {
+    pub fn asEntity(self: Sprite) u16 {
         const id = @intFromEnum(self);
         return if (id >= GEM_START and id < GEM_START + GEM_COUNT)
             id + GEM_COUNT
@@ -432,6 +432,7 @@ const rules = [_]SpriteRule{
             .black_plate,
             .white_plate,
             .dirt,
+            .red_dirt,
         } },
         .{
             .in_world = true,

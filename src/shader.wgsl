@@ -10,12 +10,12 @@
 // Auto-generated from zig/types/sprite.zig by zig/generate_shader.zig (runs during `zig build`).
 // Do NOT edit values between the markers by hand; edit the Sprite enum instead.
 const TILES_PER_ROW: f32 = 16.0;
-const TILES_PER_COLUMN: f32 = 19.0;
-const STONE_START: u32 = 14u;
-const ORE_START: u32 = 46u;
-const GEM_START: u32 = 52u;
-const GEM_MASK_START: u32 = 66u;
-const WATER_START: u32 = 297u;
+const TILES_PER_COLUMN: f32 = 20.0;
+const STONE_START: u32 = 20u;
+const ORE_START: u32 = 52u;
+const GEM_START: u32 = 58u;
+const GEM_MASK_START: u32 = 72u;
+const WATER_START: u32 = 303u;
 // #CONSTANT REGION END#
 
 const PI = radians(180.0);
@@ -1244,7 +1244,7 @@ fn fs_entity(in: EntityOutput) -> @location(0) vec4f {
     let raw_mask = textureSampleLevel(sprite_atlas_mask, pixel_sampler, final_uv, 0.0);
 
     // make raw mask stronger
-    let tex_rgb = srgb_to_linear(raw_tex.rgb * raw_mask.rgb);
+    let tex_rgb = srgb_to_linear(raw_tex.rgb);
     let tex_a = raw_tex.a * raw_mask.a;
     // Early discard if the pixel is fully transparent (maybe)
     if tex_a <= 0.002 {
@@ -1259,7 +1259,9 @@ fn fs_entity(in: EntityOutput) -> @location(0) vec4f {
     lch.z += in.lcha.z; // add hue
 
     lab = oklch_to_oklab(lch);
-    let final_rgb = oklab_to_linear_srgb(lab);
+
+    // darken using the mask, after OKLCH transformations (non-linear)
+    let final_rgb = oklab_to_linear_srgb(lab) * raw_mask.rrr;
 
     // apply alpha after being back to RGB!
     let final_a = tex_a * in.lcha.w;
