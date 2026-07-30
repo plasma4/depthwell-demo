@@ -3,7 +3,7 @@
 //! P      P
 //! P      P
 //! P      P
-//! PLLLLLLP <- lava stone
+//! PLLLLLLP <- lava stone (50% chance molten)
 //! PPPPPPPP  <- base row: ground starts right beneath this
 //!
 //! NOTE: flat-enough ground gets rare fast as the room widens: widening makes this rarer!
@@ -61,8 +61,10 @@ pub fn generate(
     _ = starting_sprite;
     _ = cx;
     _ = cy;
-    _ = state;
     _ = struct_seed;
+    const is_molten = state.getChance(0.4);
+    const furnace_x = 1 + state.getLimit(u32, size_x - 2);
+
     const struct_x = @as(i32, @bitCast(wx)) - bounds.x_start;
     const struct_y = @as(i32, @bitCast(wy)) - bounds.y_start;
     if (struct_x < 0 or struct_y < 0 or struct_x >= size_x or struct_y >= size_y) return null;
@@ -70,6 +72,11 @@ pub fn generate(
     if (struct_x == 0 or struct_x == size_x - 1 or struct_y == 0 or struct_y == size_y - 1) {
         return .{ .id = .black_plate };
     }
-    if (struct_y == size_y - 2) return .{ .id = .lava_stone };
+    if (struct_y == size_y - 2) {
+        return .{ .id = if (is_molten) .molten_stone else .lava_stone };
+    }
+    if (struct_y == size_y - 3 and struct_x == furnace_x) {
+        return .{ .id = .lava_furnace };
+    }
     return .{ .id = .none };
 }

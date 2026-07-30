@@ -115,7 +115,7 @@ pub inline fn testLogs(skipError: bool) void {
     list.appendSlice(allocator, " World (using ArrayList, within an unnamed struct)!") catch memory.oom();
     logger.quick(.{ "{h}Quick log with header and 3 values", 12.34, "string", .{list} });
 
-    logger.log(@src(), "This log should be multiple lines.\n-----\nTesting logging with a truncated string below:", .{});
+    logger.log(@src(), "This log should be multiple lines.\n----\nTesting logging with a truncated string below:", .{});
     // Test truncation by taking a test hex string and making it longer than 4,096 bytes
     const long_data = ("0123456789abcdef" ** (5000 / 16 + 1))[0..5000];
     logger.log(@src(), "{s}", .{long_data});

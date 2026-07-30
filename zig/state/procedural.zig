@@ -38,8 +38,10 @@ const TerrainData = struct {
     cutoff: f32,
     /// Acts as a biome selector.
     moisture: f32,
-    /// Granular (smaller-scale) base sprite details!
+    /// Base sprite stone details.
     density: f32,
+    /// Even finer base sprite details!
+    density2: f32,
     /// Ore density.
     ore_density: f32,
     /// Controls whether certain rarer block types spawn.
@@ -53,7 +55,7 @@ pub inline fn generateBaseProceduralSprite(d: *const TerrainData) Sprite {
     // check is_debug because these will always be off in non-dev
     // sprite IDs in this range create a heatmap
     if (dw.is_debug and USE_HEATMAP and !USE_ORE_HEATMAP)
-        return @enumFromInt(65000 + @as(u20, @intFromFloat(d.weirdness * 256.0)));
+        return @enumFromInt(65000 + @as(u20, @intFromFloat(d.density * 256.0)));
 
     const cutoff_density = d.density * d.cutoff;
     if (cutoff_density <= density_min.getF32() or d.density >= density_max.getF32()) {
@@ -63,21 +65,26 @@ pub inline fn generateBaseProceduralSprite(d: *const TerrainData) Sprite {
         return .blue_strange_stone;
     }
 
-    if (d.moisture >= 0.995) return .stone;
-    if (d.moisture >= 0.98 and d.moisture < 0.995) return .ancient_stone;
-    if (d.moisture >= 0.93 and d.moisture <= 0.94) return .red_stone;
-    if (d.moisture >= 0.9) return .none;
+    if (d.moisture >= 0.98 and d.moisture <= 0.995)
+        return if (d.density >= 0.2 and d.density <= 0.3) .pale_ancient_stone else .ancient_stone;
+    if (d.moisture >= 0.93 and d.moisture <= 0.94) return .bright_red_stone;
+    if (d.moisture >= 0.97) return .none;
 
-    if (d.weirdness >= 0.6 and d.moisture >= 0.88 and d.moisture <= 0.94) return .lava_stone;
+    if (d.weirdness >= 0.6 and d.weirdness <= 0.9 and
+        (d.density2 >= 0.88 and d.density2 <= 0.915 or d.weirdness >= 0.88))
+        return if (d.weirdness >= 0.73) .molten_stone else .lava_stone;
     if (d.moisture >= 0.50 and d.density >= 0.53 and d.density <= 0.6)
-        return if (d.weirdness > 0.8) .lime_stone else .green_stone;
+        return if (d.weirdness >= 0.8) .lime_stone else .green_stone;
 
-    if (d.moisture >= 0.62 and d.density >= 0.83) return .seagreen_stone;
-    if (d.moisture <= 0.55 and d.density >= 0.60 and d.density <= 0.72) return .blue_stone;
-    if (d.weirdness < 0.1 and d.density >= 0.40 and d.density <= 0.55)
-        return if (d.moisture > 0.8) .gray_stone else .deep_blue_stone;
+    if (d.moisture >= 0.62 and d.density2 <= 0.03) return .seagreen_stone;
+    if (d.moisture <= 0.55 and d.density2 >= 0.60 and d.density2 <= 0.72) return .blue_stone;
+    if (d.weirdness <= 0.1 and d.density2 >= 0.40 and d.density2 <= 0.55)
+        return if (d.moisture >= 0.8) .pale_stone else .deep_blue_stone;
 
-    if (d.moisture >= 0.20 and d.moisture <= 0.26) return .mossy_stone;
+    if (d.moisture >= 0.20 and d.moisture <= 0.26)
+        return if (d.weirdness >= 0.82 and d.weirdness <= 0.92) .bright_green_stone else .mossy_stone;
+
+    if (d.density2 <= 0.1) return .dark_stone;
     return .stone;
 }
 
@@ -122,7 +129,17 @@ fn computeBaseSpriteType(
             wy,
             .{
                 .cell_size = 93.0, // smaller cells for cave terrain
-                .fbm_shift_size = 24.0,
+                .fbm_shift_size = 22.0,
+                .use_f2_f1 = true,
+            },
+        ),
+        .density2 = getFbmValue(
+            memory.game.getHashSeed(.density),
+            wx,
+            wy,
+            .{
+                .cell_size = 61.0, // smaller cells for cave terrain
+                .fbm_shift_size = 44.0,
                 .use_f2_f1 = true,
             },
         ),
@@ -268,6 +285,8 @@ inline fn TuningBool(comptime default_value: bool) type {
         };
     }
 }
+
+// When checking these heatmap values, ALWAYS add `dw.is_debug and USE_HEATMAP...` to the check.
 
 /// Determines whether to use a heatmap or not for terrain.
 /// Ignored if `dw.is_debug` is false; must also be true if `USE_ORE_HEATMAP` is true.
@@ -686,8 +705,21 @@ inline fn oreField(seed: Vec2u, x: WorldCoord, y: WorldCoord, comptime lane: u3,
 }
 
 /// Returns a newly formed ore, if the host and depth gate permit one.
-pub fn disperseOre(host: Sprite, density: f32, x: WorldCoord, y: WorldCoord, depth: u64, seed: Vec2u) ?Sprite {
+///
+/// `host_tag` is the host block's provenance (`refine.RefinedTag`): stone that is still standing in for
+/// something else, such as the canopy of a refined shrub, grows no ore for as long as the tag lasts.
+/// Base-depth callers have no provenance to state and pass `.{}`.
+pub fn disperseOre(
+    host: Sprite,
+    density: f32,
+    x: WorldCoord,
+    y: WorldCoord,
+    depth: u64,
+    seed: Vec2u,
+    host_tag: dw.refine.RefinedTag,
+) ?Sprite {
     if (!host.isStone()) return null;
+    if (host_tag.blocksOverlay()) return null;
 
     // fast global exit: no ore/gem rule exists outside density range [0.20, 0.90]
     if (density < 0.20 or density > 0.90) return null;
@@ -754,6 +786,7 @@ pub fn addOresAndGems(base_data: TerrainData, x: u32, y: u32) Sprite {
         y,
         dw.startup.STARTING_ZOOM_TIMES,
         memory.game.getHashSeed(.ores1),
+        .{}, // base-depth terrain has no provenance to stand in the way
     ) orelse base_data.sprite;
 }
 
@@ -764,11 +797,22 @@ test "ore dispersal produces deposits at base and recursive depths" {
 
     for (0..256) |y| {
         for (0..256) |x| {
-            if (disperseOre(.stone, 0.5, x, y, dw.startup.STARTING_ZOOM_TIMES, seed)) |ore| {
+            if (disperseOre(.stone, 0.5, x, y, dw.startup.STARTING_ZOOM_TIMES, seed, .{})) |ore| {
                 base_count += 1;
                 _ = ore;
             }
-            if (disperseOre(.stone, 0.5, x, y, dw.startup.STARTING_ZOOM_TIMES + 3, seed) != null) deep_count += 1;
+            if (disperseOre(.stone, 0.5, x, y, dw.startup.STARTING_ZOOM_TIMES + 3, seed, .{}) != null) deep_count += 1;
+
+            // A block still standing in for a shrub's canopy grows nothing, whatever the field says.
+            try std.testing.expect(disperseOre(
+                .stone,
+                0.5,
+                x,
+                y,
+                dw.startup.STARTING_ZOOM_TIMES + 3,
+                seed,
+                .make(.plant_leaf, 2),
+            ) == null);
         }
     }
 
