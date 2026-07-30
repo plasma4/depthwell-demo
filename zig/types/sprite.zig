@@ -366,7 +366,7 @@ pub const Sprite = enum(u16) {
 
     /// Extracts the evolved form of this sprite at compile-time.
     /// If it doesn't evolve, returns itself!
-    pub inline fn evolvesTo(self: Sprite) Sprite {
+    pub fn evolvesTo(self: Sprite) Sprite {
         const val = @intFromEnum(self);
         if (val < MAX_SPRITE_ID) {
             if (dense_props_table[val].evolves_to) |evolution| {
@@ -404,7 +404,7 @@ pub const Sprite = enum(u16) {
     }
 
     /// Converts a sprite into an entity ID, handling atlas ID remaps.
-    pub inline fn asEntity(self: Sprite) u16 {
+    pub fn asEntity(self: Sprite) u16 {
         const id = @intFromEnum(self);
         return if (id >= GEM_START and id < GEM_START + GEM_COUNT)
             id + GEM_COUNT

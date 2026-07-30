@@ -29,7 +29,7 @@ pub const AMBIENT_LIGHT_DEBUG: u8 = 192;
 pub var IS_LIGHT_GLOBAL = false;
 
 // Light strength values for various sources:
-pub var PLAYER_LIGHT: u16 = 300;
+pub var PLAYER_LIGHT: u16 = 255;
 pub const MAX_PLAYER_LIGHT: u16 = 400;
 // ---
 pub const CAMPFIRE_LIGHT: u16 = 240;
@@ -57,7 +57,7 @@ const MAX_SOURCE: u16 = @max(
 );
 const NUM_BUCKETS: usize = MAX_SOURCE + 1;
 
-inline fn blockEmission(id: Sprite) u16 {
+fn blockEmission(id: Sprite) u16 {
     return switch (id) {
         .campfire => CAMPFIRE_LIGHT,
         .forest_furnace, .lava_furnace => FURNACE_LIGHT,
@@ -72,7 +72,7 @@ inline fn blockEmission(id: Sprite) u16 {
 }
 
 /// Returns true if the block is a warm light source, which creates an orange light glow in the shader.
-inline fn isOrangeSource(id: Sprite) bool {
+fn isOrangeSource(id: Sprite) bool {
     return switch (id) {
         .campfire => true,
         .forest_furnace, .lava_furnace => true,
@@ -101,11 +101,12 @@ fn resetArena() void {
     cost_buffer = std.array_list.Aligned(u8, .@"16").initCapacity(alloc, 2048) catch memory.oom();
     orange_buffer = std.array_list.Aligned(u16, .@"16").initCapacity(alloc, 2048) catch memory.oom();
     white_buffer = std.array_list.Aligned(u16, .@"16").initCapacity(alloc, 2048) catch memory.oom();
+    player_buffer = std.array_list.Aligned(u16, .@"16").initCapacity(alloc, 2048) catch memory.oom();
 }
 
 /// Orthogonal per-step light cost for entering `block`. Fits in u8 (<= SOLID_FALLOFF).
 /// Diagonals are derived from this at flood time via the fast sqrt(2) approximation.
-inline fn orthoCost(block: Block) u8 {
+fn orthoCost(block: Block) u8 {
     if (block.isLiquid()) return @intCast(LIQUID_FALLOFF);
 
     // Treat empty/air blocks as hp = 16, solid blocks use their actual hp value (0..15).
@@ -155,6 +156,9 @@ var cost_buffer: std.array_list.Aligned(u8, .@"16") = undefined;
 var orange_buffer: std.array_list.Aligned(u16, .@"16") = undefined;
 /// High-precision per-cell light, white (player/plate) channel.
 var white_buffer: std.array_list.Aligned(u16, .@"16") = undefined;
+/// High-precision per-cell light of the player alone: no ambient, no other source.
+/// The white channel starts from this rather than from scratch, so isolating it costs no extra flood.
+var player_buffer: std.array_list.Aligned(u16, .@"16") = undefined;
 
 /// Dial buckets, one FIFO of packed coords per light level, for each channel.
 var buckets_orange: [NUM_BUCKETS]std.array_list.Aligned(u32, .@"16") = undefined;
@@ -183,7 +187,7 @@ inline fn seed(light: []u16, buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, 
 
 /// Seeds the 2x2 cells surrounding the player using their continuous sub-pixel position.
 /// Light drops off similar to Euclidean distance through the cell's own medium cost.
-inline fn seedPlayerLight(
+fn seedPlayerLight(
     cost: []const u8,
     light_white: []u16,
     buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, .@"16"),
@@ -282,29 +286,27 @@ pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: 
     cost_buffer.resize(alloc, out.len) catch memory.oom();
     orange_buffer.resize(alloc, out.len) catch memory.oom();
     white_buffer.resize(alloc, out.len) catch memory.oom();
+    player_buffer.resize(alloc, out.len) catch memory.oom();
 
     const cost_slice = cost_buffer.items;
     const light_orange = orange_buffer.items;
     const light_white = white_buffer.items;
+    const light_player = player_buffer.items;
 
     const ambient: u16 = if (dw.is_debug and IS_LIGHT_GLOBAL) AMBIENT_LIGHT_DEBUG else AMBIENT_LIGHT;
 
-    // Single reset pass: precompute per-cell cost, initialize both channels to ambient
-    // then, "seed" (add) light-emitting blocks into their channel's appropriate buckets.
+    // Single reset pass: precompute per-cell cost, initialize the orange channel to ambient
+    // and the player channel to full dark, then "seed" (add) the warm sources into their buckets.
     var sy: u16 = 0;
     var sx: u16 = 0;
     for (out, 0..) |block, i| {
         cost_slice[i] = orthoCost(block);
         light_orange[i] = ambient;
-        light_white[i] = ambient;
+        light_player[i] = 0;
 
         const emission = blockEmission(block.id);
-        if (emission > ambient) {
-            if (isOrangeSource(block.id)) {
-                seed(light_orange, &buckets_orange, i, sx, sy, emission, ambient);
-            } else {
-                seed(light_white, &buckets_white, i, sx, sy, emission, ambient);
-            }
+        if (emission > ambient and isOrangeSource(block.id)) {
+            seed(light_orange, &buckets_orange, i, sx, sy, emission, ambient);
         }
 
         sx += 1;
@@ -314,8 +316,32 @@ pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: 
         }
     }
 
-    // Seed the continuous player source into the white channel.
-    seedPlayerLight(cost_slice, light_white, &buckets_white, w, h, ambient, player_bx, player_by);
+    // The player alone, floored at zero rather than at ambient: mining reads this back to refuse
+    // blocks the player's own lamp does not reach (see `miningLightAt()`).
+    seedPlayerLight(cost_slice, light_player, &buckets_white, w, h, 0, player_bx, player_by);
+    floodChannel(cost_slice, light_player, &buckets_white, w, h, 0);
+
+    // The white flood resumes from the player's result instead of starting over.
+    // Dial finalizes a cell once, at its brightest value, having already relaxed its neighbors from it,
+    // so a cell the player flood settled needs no bucket entry here: only a brighter source can revisit it,
+    // and that source's own relaxation is what puts it back in a bucket.
+    for (light_white, light_player) |*white, player| white.* = @max(ambient, player);
+    for (&buckets_white) |*bk| bk.clearRetainingCapacity();
+
+    sy = 0;
+    sx = 0;
+    for (out, 0..) |block, i| {
+        const emission = blockEmission(block.id);
+        if (emission > ambient and !isOrangeSource(block.id)) {
+            seed(light_white, &buckets_white, i, sx, sy, emission, ambient);
+        }
+
+        sx += 1;
+        if (sx == wbw) {
+            sx = 0;
+            sy += 1;
+        }
+    }
 
     // Two independent floods over the shared cost grid for each color!
     floodChannel(cost_slice, light_orange, &buckets_orange, w, h, ambient);
@@ -334,3 +360,43 @@ pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: 
         block.lighting_color = @intFromBool(is_orange and max_light > ambient);
     }
 }
+
+/// Player-only light of the window the live layer last lit, clamped to `MAX_LIGHT`.
+/// Kept out of the lighting arena because the portal's preview pass floods that arena again
+/// after the live one, which would leave this holding the light of a depth the player is not in yet.
+var mining_light: std.ArrayList(u8) = .empty;
+/// Window `mining_light` covers: its size in blocks, and the chunk offsets of its
+/// top-left corner relative to the player's own chunk (`liveLayer()`'s origin).
+var mining_window_w: i64 = 0;
+var mining_window_h: i64 = 0;
+var mining_origin_cx: i64 = 0;
+var mining_origin_cy: i64 = 0;
+
+/// Records the player-only light of the window `applyLighting()` just flooded, for `miningLightAt()`.
+///
+/// `origin_cx`/`origin_cy` are the window's top-left chunk offsets from the player's chunk,
+/// which is the same frame of reference the mouse resolves its own block in.
+/// ONLY the live layer may call this; a preview layer's blocks are at another depth entirely.
+pub fn recordMiningLight(origin_cx: i64, origin_cy: i64, wb: u32, hb: u32) void {
+    std.debug.assert(player_buffer.items.len == wb * hb);
+    mining_light.resize(memory.main_allocator, wb * hb) catch memory.oom();
+    for (mining_light.items, player_buffer.items) |*dst, light| {
+        dst.* = @intCast(@min(light, @as(u16, MAX_LIGHT)));
+    }
+    mining_window_w = wb;
+    mining_window_h = hb;
+    mining_origin_cx = origin_cx;
+    mining_origin_cy = origin_cy;
+}
+
+/// How much of the last frame's player light reached the block `chunk_dx`/`chunk_dy` chunks and
+/// (`bx`, `by`) blocks from the player's own chunk. Null when that block was outside the lit window,
+/// which only happens off-screen (the window is padded by `CHUNK_MARGIN`) or before the first frame.
+pub fn miningLightAt(chunk_dx: i64, chunk_dy: i64, bx: u4, by: u4) ?u8 {
+    if (mining_light.items.len == 0) return null;
+    const x = (chunk_dx - mining_origin_cx) * dw.CHUNK_SIZE + bx;
+    const y = (chunk_dy - mining_origin_cy) * dw.CHUNK_SIZE + by;
+    if (x < 0 or x >= mining_window_w or y < 0 or y >= mining_window_h) return null;
+    return mining_light.items[@intCast(y * mining_window_w + x)];
+}
+

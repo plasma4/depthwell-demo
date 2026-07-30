@@ -13,7 +13,7 @@ pub inline fn intFromBool(comptime T: type, condition: bool) T {
 ///
 /// `x` and `y` may be signed; only their low bits are read, so a negative cell wraps like any other.
 /// The dimensions must be powers of two, and their product is the slot count.
-pub inline fn tileIndex(comptime width: u32, comptime height: u32, x: anytype, y: anytype) usize {
+pub fn tileIndex(comptime width: u32, comptime height: u32, x: anytype, y: anytype) usize {
     comptime {
         if (!std.math.isPowerOfTwo(width) or !std.math.isPowerOfTwo(height))
             @compileError("Tile dimensions must be powers of two, so wrapping a cell into one is a bitwise AND.");

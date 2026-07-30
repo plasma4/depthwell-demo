@@ -98,7 +98,7 @@ pub fn UnboundedFifo(comptime T: type) type {
 
         /// Iterates over every active element in the FIFO out-of-order.
         /// Passes a pointer to each item to the provided callback function.
-        pub inline fn forEach(self: *Self, context: anytype, comptime callback: fn (ctx: @TypeOf(context), item: *T) void) void {
+        pub fn forEach(self: *Self, context: anytype, comptime callback: fn (ctx: @TypeOf(context), item: *T) void) void {
             if (self.count == 0) return;
 
             if (self.head < self.tail) {

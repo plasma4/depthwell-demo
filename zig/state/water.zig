@@ -87,7 +87,7 @@ pub const RESTING_VOLUME: u4 = MAX_HP - 1;
 
 /// Helper to get the volume of a block (0 to 15 for water/waterlogged blocks, 0 otherwise).
 /// (Integer casting automatically enforces HP being within `u4` range.)
-pub inline fn getVolume(ptr: Block) u4 {
+pub fn getVolume(ptr: Block) u4 {
     if (ptr.isLiquid()) {
         return @intCast(ptr.hp);
     }
@@ -98,7 +98,7 @@ pub inline fn getVolume(ptr: Block) u4 {
 }
 
 /// Helper to set the volume (`hp`) of a block, modifying other properties as needed.
-pub inline fn setVolume(ptr: *Block, vol: u32) void {
+pub fn setVolume(ptr: *Block, vol: u32) void {
     const capped: u4 = @intCast(@min(vol, MAX_HP));
     if (vol == 0) {
         if (ptr.isWaterloggable()) {
@@ -126,7 +126,7 @@ pub inline fn setVolume(ptr: *Block, vol: u32) void {
 /// Every volume change inside `tickWater()` MUST go through this rather than `setVolume()`: a cell that
 /// moves without being recorded here is dropped from `mod_store` and reverts to its procedural volume the
 /// next time its chunk is materialized.
-inline fn setVolumeAt(ptr: *Block, vol: u32, grid_idx: usize) void {
+fn setVolumeAt(ptr: *Block, vol: u32, grid_idx: usize) void {
     setVolume(ptr, vol);
     cells_changed.set(grid_idx);
 }
@@ -160,7 +160,7 @@ pub const WaterloggedState = struct {
 };
 
 /// Computes the directional waterlogged flags and adjacent water volumes for a Block.
-pub inline fn getWaterFlags(
+pub fn getWaterFlags(
     top_nb: ?Block,
     bottom_nb: ?Block,
     left_nb: ?Block,
@@ -202,7 +202,7 @@ pub inline fn getWaterFlags(
 
 /// Sibling helper to compute waterlogged state for halo Sprites during base chunk generation.
 /// Procedural water blocks default to full HP, so adjacent volumes are stored as `MAX_HP`.
-pub inline fn getWaterloggedStateSprites(
+pub fn getWaterloggedStateSprites(
     top_nb: Sprite,
     bottom_nb: Sprite,
     left_nb: Sprite,
@@ -228,7 +228,7 @@ pub inline fn getWaterloggedStateSprites(
 
 /// Computes the water volume for a cell dynamically.
 /// Supports cross-chunk reads via horizontal offsets (`bx` of -1 or 16).
-inline fn getVolumeLocal(
+fn getVolumeLocal(
     curr: *Chunk,
     left: ?*Chunk,
     right: ?*Chunk,
@@ -247,14 +247,14 @@ inline fn getVolumeLocal(
 }
 
 /// Helper to quickly fetch a `Chunk` pointer from `SimBuffer` coordinates.
-inline fn getChunkPtr(cx: u4, cy: u4) ?*Chunk {
+fn getChunkPtr(cx: u4, cy: u4) ?*Chunk {
     const idx = world.SimBuffer.getIndex(cx, cy);
     if (world.SimBuffer.keys[idx] == null) return null;
     return &world.SimBuffer.sim_buffer_ptr[idx];
 }
 
 /// Gets pointer to a local block with center and orthogonal chunks.
-inline fn getLocalBlockPtr(
+fn getLocalBlockPtr(
     curr: ?*Chunk,
     left: ?*Chunk,
     right: ?*Chunk,
@@ -386,7 +386,7 @@ fn updateChunkWaterFlags(
 }
 
 /// Recalculates solid neighbor edge flags when water is created or destroyed.
-inline fn notifyNeighborEdgeFlags(rx: i32, ry: i32) void {
+fn notifyNeighborEdgeFlags(rx: i32, ry: i32) void {
     var dy: i32 = -1;
     while (dy <= 1) : (dy += 1) {
         var dx: i32 = -1;
