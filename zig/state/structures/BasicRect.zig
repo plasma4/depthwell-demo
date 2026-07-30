@@ -34,11 +34,10 @@ pub fn generate(
     _ = cx;
     _ = cy;
     _ = struct_seed;
-    const i_wx = @as(i32, @bitCast(wx));
-    const i_wy = @as(i32, @bitCast(wy));
-
     const chest_x = 1 + @as(i32, @intCast(state.getLimit(u32, size_x - 2)));
 
+    const i_wx = @as(i32, @bitCast(wx));
+    const i_wy = @as(i32, @bitCast(wy));
     const struct_x = i_wx - bounds.x_start;
     const struct_y = i_wy - bounds.y_start;
 

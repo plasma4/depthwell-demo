@@ -12,10 +12,10 @@
 const TILES_PER_ROW: f32 = 16.0;
 const TILES_PER_COLUMN: f32 = 19.0;
 const STONE_START: u32 = 12u;
-const ORE_START: u32 = 40u;
-const GEM_START: u32 = 46u;
-const GEM_MASK_START: u32 = 60u;
-const WATER_START: u32 = 291u;
+const ORE_START: u32 = 43u;
+const GEM_START: u32 = 49u;
+const GEM_MASK_START: u32 = 63u;
+const WATER_START: u32 = 294u;
 // #CONSTANT REGION END#
 
 const PI = radians(180.0);

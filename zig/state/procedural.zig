@@ -64,20 +64,23 @@ pub inline fn generateBaseProceduralSprite(d: *const TerrainData) Sprite {
     }
 
     if (d.moisture >= 0.995) return .stone;
-    if (d.moisture >= 0.98 and d.moisture < 0.995) return .ancient_stone;
-    if (d.moisture >= 0.93 and d.moisture <= 0.94) return .red_stone;
+    if (d.moisture >= 0.98 and d.moisture <= 0.995)
+        return if (d.density >= 0.2 and d.density <= 0.3) .pale_ancient_stone else .ancient_stone;
+    if (d.moisture >= 0.93 and d.moisture <= 0.94) return .bright_red_stone;
     if (d.moisture >= 0.9) return .none;
 
-    if (d.weirdness >= 0.6 and d.moisture >= 0.88 and d.moisture <= 0.94) return .lava_stone;
+    if (d.weirdness >= 0.6 and (d.moisture >= 0.88 and d.moisture <= 0.94 or d.weirdness <= 0.7))
+        return if (d.weirdness >= 0.8) .molten_stone else .lava_stone;
     if (d.moisture >= 0.50 and d.density >= 0.53 and d.density <= 0.6)
-        return if (d.weirdness > 0.8) .lime_stone else .green_stone;
+        return if (d.weirdness >= 0.8) .lime_stone else .green_stone;
 
     if (d.moisture >= 0.62 and d.density >= 0.83) return .seagreen_stone;
     if (d.moisture <= 0.55 and d.density >= 0.60 and d.density <= 0.72) return .blue_stone;
-    if (d.weirdness < 0.1 and d.density >= 0.40 and d.density <= 0.55)
-        return if (d.moisture > 0.8) .gray_stone else .deep_blue_stone;
+    if (d.weirdness <= 0.1 and d.density >= 0.40 and d.density <= 0.55)
+        return if (d.moisture >= 0.8) .pale_stone else .deep_blue_stone;
 
-    if (d.moisture >= 0.20 and d.moisture <= 0.26) return .mossy_stone;
+    if (d.moisture >= 0.20 and d.moisture <= 0.26)
+        return if (d.weirdness >= 0.82 and d.weirdness <= 0.92) .bright_green_stone else .mossy_stone;
     return .stone;
 }
 

@@ -30,7 +30,7 @@ pub const points = .{
     FloorDecor(.purple_rock, 0.002),
     FloorDecor(.flint, 0.005),
     FloorDecor(.small_tree, 0.013),
-    FloorDecor(.mushroom, 0.020),
+    FloorDecor(.mushroom, 0.030),
     FloorDecor(.forest_furnace, 0.006),
     FloorDecor(.lava_furnace, 0.004),
     FloorDecor(.basic_core, 0.012),

@@ -19,7 +19,7 @@ pub const UNMINEABLE_STRENGTH: u64 = std.math.maxInt(u64);
 /// Index where stone-like sprites begin.
 pub const STONE_START = 12;
 /// Index where stone-like sprites end.
-const STONE_END = STONE_START + 18;
+const STONE_END = STONE_START + 21;
 
 /// Index where smelted bar sprites begin.
 const BAR_START = STONE_END + 4;
@@ -56,7 +56,7 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 292) {
+    if (max_sprite_value != 295) {
         var buf: [64]u8 = undefined;
         @compileError("Max sprite value of " ++
             (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
@@ -86,19 +86,22 @@ pub const Sprite = enum(u16) {
     // stone types!
     blue_strange_stone = STONE_START,
     purple_strange_stone,
+    mossy_stone,
+    lime_stone,
+    green_stone,
+    seagreen_stone,
+    bright_green_stone,
     blue_stone,
     deep_blue_stone,
     pink_stone,
+    pale_stone,
     purple_stone,
-    red_stone,
-    bright_red_stone,
+    molten_stone,
     lava_stone,
-    mossy_stone,
-    seagreen_stone,
-    green_stone,
-    lime_stone,
-    gray_stone,
+    bright_red_stone,
     ancient_stone,
+    pale_ancient_stone,
+    brown_sulfuric_stone,
     sulfuric_stone,
     basalt,
     diorite,
@@ -577,10 +580,6 @@ const rules = [_]SpriteRule{
     },
     .{
         .{ .single = .purple_strange_stone },
-        .{ .evolves_to = .red_stone },
-    },
-    .{
-        .{ .single = .red_stone },
         .{ .evolves_to = .bright_red_stone },
     },
     .{
