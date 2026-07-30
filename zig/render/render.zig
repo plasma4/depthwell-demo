@@ -14,9 +14,9 @@ const CHUNK_SIZE = dw.CHUNK_SIZE;
 const CHUNK_SIZE_FLOAT = dw.CHUNK_SIZE_FLOAT;
 
 /// Makes a call to `engine.handleVisibleChunks()` in JS.
-pub inline fn handleVisibleChunks(opacity: f64, wireframeOpacity: f64) void {
+pub inline fn handleVisibleChunks(opacity: f64, wireframeBrightness: f64) void {
     if (dw.is_wasm) {
-        return dw.jsHandleVisibleChunks(opacity, wireframeOpacity);
+        return dw.jsHandleVisibleChunks(opacity, wireframeBrightness);
     } else {
         return; // no native impl yet
     }

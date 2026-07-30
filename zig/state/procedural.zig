@@ -18,7 +18,7 @@ const EdgeFlags = types.EdgeFlags;
 const oddsNum = seeding.oddsNum;
 const FastHash = seeding.FastHash;
 const Seed = seeding.Seed;
-const Vec2f = dw.utils.Vec2f;
+const Vec2f32 = dw.utils.Vec2f32;
 const Vec2u = dw.utils.Vec2u;
 const Vec4u = dw.utils.Vec4u;
 const WorldCoord = seeding.WorldCoord;
@@ -72,7 +72,7 @@ pub inline fn generateBaseProceduralSprite(d: *const TerrainData) Sprite {
 
     if (d.weirdness >= 0.6 and d.weirdness <= 0.9 and
         (d.density2 >= 0.88 and d.density2 <= 0.915 or d.weirdness >= 0.88))
-        return if (d.weirdness >= 0.73) .molten_stone else .lava_stone;
+        return if (d.weirdness >= 0.73 or d.density2 >= 0.9) .molten_stone else .lava_stone;
     if (d.moisture >= 0.50 and d.density >= 0.53 and d.density <= 0.6)
         return if (d.weirdness >= 0.8) .lime_stone else .green_stone;
 
@@ -82,13 +82,13 @@ pub inline fn generateBaseProceduralSprite(d: *const TerrainData) Sprite {
         return if (d.moisture >= 0.8) .pale_stone else .deep_blue_stone;
 
     if (d.moisture >= 0.20 and d.moisture <= 0.26)
-        return if (d.weirdness >= 0.82 and d.weirdness <= 0.92) .bright_green_stone else .mossy_stone;
+        return if (d.weirdness >= 0.72 and d.weirdness <= 0.92) .more_mossy_stone else .mossy_stone;
 
     if (d.density2 <= 0.1) return .dark_stone;
     return .stone;
 }
 
-/// Uncached base-terrain evaluation. Call `getBaseSpriteType()` instead outside of the cache itself.
+/// Uncached base-terrain evaluation with staged short-circuiting and domain warp sharing.
 fn computeBaseSpriteType(
     chunk_x: u32,
     chunk_y: u32,
@@ -98,64 +98,110 @@ fn computeBaseSpriteType(
     const wx = chunk_x * 16 + block_x;
     const wy = chunk_y * 16 + block_y;
 
-    var base_data: TerrainData = .{
-        // NOTE: use_f2_f1 is false here, so this takes fbm+getPerlinNoise.
-        .cutoff = 0.75 + 0.3 * getHybridNoise(
-            memory.game.getHashSeed(.cutoff),
-            wx,
-            wy,
-            20,
-        ),
-        .weirdness = getBillowNoise(
-            memory.game.getHashSeed(.weirdness),
-            wx,
-            wy,
-            140,
-        ),
+    const density_seed = memory.game.getHashSeed(.density);
 
-        .moisture = getFbmValue(
-            memory.game.getHashSeed(.moisture),
-            wx,
-            wy,
-            .{
-                .cell_size = 375.0, // very LARGE cells for biome generation
-                .fbm_shift_size = 0.0,
-                .use_f2_f1 = false,
-            },
-        ),
-        .density = getFbmValue(
-            memory.game.getHashSeed(.density),
-            wx,
-            wy,
-            .{
-                .cell_size = 93.0, // smaller cells for cave terrain
-                .fbm_shift_size = 22.0,
-                .use_f2_f1 = true,
-            },
-        ),
-        .density2 = getFbmValue(
-            memory.game.getHashSeed(.density),
-            wx,
-            wy,
-            .{
-                .cell_size = 61.0, // smaller cells for cave terrain
-                .fbm_shift_size = 44.0,
-                .use_f2_f1 = true,
-            },
-        ),
-        .ore_density = getFbmValue(
-            memory.game.getHashSeed(.ore_density),
-            wx,
-            wy,
-            .{
-                .cell_size = 122.0, // smaller cells for cave terrain
-                .fbm_shift_size = 0.0,
-                .use_f2_f1 = false,
-            },
-        ),
+    // Compute base density and capture domain warp vector for reuse
+    var warp_vec: dw.utils.Vec2f32 = .{ 0.0, 0.0 };
+    const density_val = getFbmValueWarp(
+        density_seed,
+        wx,
+        wy,
+        93.0,
+        22.0,
+        &warp_vec,
+    );
+
+    const cutoff_val = 0.75 + 0.3 * getHybridNoise(
+        memory.game.getHashSeed(.cutoff),
+        wx,
+        wy,
+        20.5,
+    );
+
+    const moisture_val = getFbmValue(
+        memory.game.getHashSeed(.moisture),
+        wx,
+        wy,
+        .{
+            .cell_size = 375.0,
+            .fbm_shift_size = 0.0,
+            .use_worley_hybrid = false,
+        },
+    );
+
+    var base_data: TerrainData = .{
+        .density = density_val,
+        .cutoff = cutoff_val,
+        .moisture = moisture_val,
+        .density2 = 0.0,
+        .weirdness = 0.0,
+        .ore_density = 0.0,
     };
 
+    if (dw.is_debug and USE_HEATMAP and !USE_ORE_HEATMAP) {
+        base_data.sprite = generateBaseProceduralSprite(&base_data);
+        return base_data;
+    }
+
+    // start with fast air and special stone exit
+    const cutoff_density = density_val * cutoff_val;
+    if (cutoff_density <= density_min.getF32() or density_val >= density_max.getF32()) {
+        if (moisture_val >= 0.93 and moisture_val <= 0.94) {
+            base_data.sprite = .purple_strange_stone;
+            return base_data;
+        }
+        base_data.sprite = .none;
+        return base_data;
+    } else if (density_val <= 0.04 and moisture_val >= 0.3 and moisture_val <= 0.4) {
+        base_data.sprite = .blue_strange_stone;
+        return base_data;
+    }
+
+    if (moisture_val >= 0.98 and moisture_val <= 0.995) {
+        base_data.sprite = if (cutoff_val >= 0.2 and cutoff_val <= 0.3) .pale_ancient_stone else .ancient_stone;
+        return base_data;
+    }
+    if (moisture_val >= 0.93 and moisture_val <= 0.955 and cutoff_val >= 0.6) {
+        base_data.sprite = .bright_red_stone;
+        return base_data;
+    }
+    if (moisture_val >= 0.97) {
+        base_data.sprite = .none;
+        return base_data;
+    }
+
+    // compute weirdness and density2 only when sprite selection requires them
+    base_data.weirdness = getBillowNoise(
+        memory.game.getHashSeed(.weirdness),
+        wx,
+        wy,
+        140.8,
+    );
+
+    // reuse domain warp from density (shift 44 is 2x density shift 22)
+    base_data.density2 = getFbmValuePrewarped(
+        density_seed,
+        wx,
+        wy,
+        61.3,
+        warp_vec[0] * 2.0,
+        warp_vec[1] * 2.0,
+    );
+
     base_data.sprite = generateBaseProceduralSprite(&base_data);
+
+    // compute ore_density now! base types are all stone so this is never wasteful
+    base_data.ore_density = getFbmValue(
+        memory.game.getHashSeed(.ore_density),
+        wx,
+        wy,
+        .{
+            .cell_size = 122.0,
+            .fbm_shift_size = 0.0,
+            .use_worley_hybrid = false,
+        },
+    );
+
     return base_data;
 }
 
@@ -295,26 +341,19 @@ pub var USE_HEATMAP = false;
 /// Ignored if `dw.is_debug` is false.
 pub var USE_ORE_HEATMAP = false;
 
-/// Configuration options passed to the FBM (Fractal Brownian Motion) and Worley
-/// noise generation algorithm (`getFbmValue()`).
+/// Configuration options passed to terrain noise generation (`getFbmValue()`).
 const TerrainOptions = struct {
-    /// Controls the scale of the primary noise grid cells.
-    /// Larger values stretch out the noise patterns.
+    /// Controls scale of primary noise grid cells.
     cell_size: comptime_float,
 
-    /// The maximum offset distance applied during the FBM domain warping step.
-    /// Higher values cause more severe "displacement" or squiggly distortion in the terrain.
-    /// Setting this to 0 eliminates any distortion.
+    /// Maximum offset applied during domain warping step.
     fbm_shift_size: comptime_float,
 
-    /// When true, stretches out the vertical sampling coordinates by a factor of 2 (horizontal stretching of 2x).
+    /// Stretches vertical sampling coordinates by factor of 2 when true.
     horizontally_wide: bool = false,
 
-    /// Determines whether the algorithm computes true Worley cellular noise metrics (F2 - F1 distance).
-    ///
-    /// - If true, performs an optimized 4-tap cellular distance check (essential for jagged cave walls or sharp ore veins).
-    /// - If false, bypasses cellular logic entirely and falls back to a much faster, basic bilinear value noise interpolation.
-    use_f2_f1: bool = true,
+    /// Uses a fast Worley-like cell distance check when true, or bilinear Perlin FBM when false.
+    use_worley_hybrid: bool = true,
 };
 
 /// Adds larger structures across multiple blocks in a deterministic fashion.
@@ -706,8 +745,8 @@ inline fn oreField(seed: Vec2u, x: WorldCoord, y: WorldCoord, comptime lane: u3,
 
 /// Returns a newly formed ore, if the host and depth gate permit one.
 ///
-/// `host_tag` is the host block's provenance (`refine.RefinedTag`): stone that is still standing in for
-/// something else, such as the canopy of a refined shrub, grows no ore for as long as the tag lasts.
+/// `host_tag` is the host block's provenance (`refine.RefinedTag`): stone that is still standing in for something else,
+/// such as the canopy of a refined shrub, grows no ore for as long as the tag lasts.
 /// Base-depth callers have no provenance to state and pass `.{}`.
 pub fn disperseOre(
     host: Sprite,
@@ -725,12 +764,10 @@ pub fn disperseOre(
     if (density < 0.20 or density > 0.90) return null;
 
     // The gem roll is shared by every gem rule, so it is computed AT MOST ONCE per block.
-    // The noise fields are NOT shareable: each rule warps and folds the domain with its own
-    // scale/weights, so a field is only ever read by the one rule that asked for it.
+    // The noise fields are NOT shareable: each rule warps and folds the domain with its own scale/weights,
+    // so a field is only ever read by the one rule that asked for it.
     var gem_roll_cache: ?f32 = null;
 
-    // `inline for` so each rule's scale, window, and octave count are constants at its call to
-    // `oreField()`; the reciprocal, the warp amount, and the whole lattice step split then fold away.
     inline for (ORE_DISPERSALS) |rule| {
         // A labeled block, not `continue`: leaving an unrolled iteration early is RUNTIME control
         // flow, which `continue` (comptime, it picks the next iteration to compile) cannot express.
@@ -834,8 +871,8 @@ test "noise resolves the whole world, not a 32-bit window of it" {
         try std.testing.expect(here[0] != away[0]);
     }
 
-    // ...and the field still varies block to block out there, rather than quantizing to one value
-    // per f64 step. A run this short lands in at most a couple of cells, so it is a lower bound.
+    // ...and the field still varies block to block out there, rather than quantizing to one value per f64 step.
+    // A run this short lands in at most a couple of cells, so it is a lower bound.
     var distinct: usize = 0;
     var previous: f32 = -1;
     for (0..16) |i| {
@@ -976,16 +1013,10 @@ fn getBilinearValueNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_
     return nx0 + v * (nx1 - nx0);
 }
 
-/// Returns a value between 0-1, used as a terrain starting point for the default depth of 3.
-/// Note that if F2-F1 calculations are not requested, `getPerlinNoise()` is called after FBM.
-/// If F2-F1 calculations are requested, then Worley noise is used instead.
-///
-/// Use for: terraced blocks, cellular clusters, and erosion basins.
-/// TODO: Make options less confusing, esp. with f2_f1 toggle
+/// Evaluates terrain noise value normalized to range [0, 1].
+/// Chooses FBM+perlin noise when `use_worley_hybrid` is false, and Worley-like (with some FBM+dual value noise mixed in).
 fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 {
-    // comptime gate here ONLY, not in options so we don't explode FBM value calls
-    if (comptime !options.use_f2_f1) {
-        // Excellent for sharp branching networks and rich ore veins
+    if (comptime !options.use_worley_hybrid) {
         return fbm(
             getPerlinNoiseFixed,
             seed_vector,
@@ -996,16 +1027,25 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
         );
     }
 
-    const fx: f32 = @floatFromInt(x);
-    const fy: f32 = @floatFromInt(if (options.horizontally_wide) y * 2 else y);
+    var unused_warp: dw.utils.Vec2f32 = .{ 0.0, 0.0 };
+    return getFbmValueWarp(seed_vector, x, y, options.cell_size, options.fbm_shift_size, &unused_warp);
+}
 
-    const h_stretch = 1.5;
+/// Evaluates Worley FBM noise and outputs the unscaled domain warp vector for reuse.
+fn getFbmValueWarp(
+    seed_vector: Vec2u,
+    x: u32,
+    y: u32,
+    comptime cell_size_base: f32,
+    fbm_shift_size: f32,
+    out_warp: *dw.utils.Vec2f32,
+) f32 {
     const fbm_octaves = 3;
     var warp_x: f32 = 0;
     var warp_y: f32 = 0;
 
     var freq: u64 = 1;
-    var amp: f32 = options.fbm_shift_size;
+    var amp: f32 = fbm_shift_size;
 
     const inv_fbm_scale = 1.0 / fbm_scale.getF32();
     const inv_dual_value_scale = 1.0 / dual_value_scale.getF32();
@@ -1021,20 +1061,36 @@ fn getFbmValue(seed_vector: Vec2u, x: u32, y: u32, options: TerrainOptions) f32 
             );
             warp_x += n[0] * amp;
             warp_y += n[1] * amp;
-            amp *= 0.55; // 55%, not 50%!
+            amp *= 0.55;
             freq *%= 2;
         }
+        out_warp.* = .{ warp_x / fbm_shift_size, warp_y / fbm_shift_size };
     }
 
-    const cell_size = options.cell_size * procedural_cell_size.getF32();
+    return getFbmValuePrewarped(seed_vector, x, y, cell_size_base, warp_x, warp_y);
+}
+
+/// Evaluates Worley cellular noise using an explicit domain warp offset.
+fn getFbmValuePrewarped(
+    seed_vector: Vec2u,
+    x: u32,
+    y: u32,
+    comptime cell_size_base: f32,
+    warp_x: f32,
+    warp_y: f32,
+) f32 {
+    const fx: f32 = @floatFromInt(x);
+    const fy: f32 = @floatFromInt(y);
+
+    const cell_size = cell_size_base * procedural_cell_size.getF32();
     const inv_cell_size = 1.0 / cell_size;
+    const h_stretch = 1.5;
     const cell_w = cell_size * h_stretch;
     const inv_cell_w = 1.0 / cell_w;
 
     const wx = fx + warp_x;
     const wy = fy + warp_y;
 
-    // Fast division-free float-to-int mapping
     const cx_f = @floor(wx * inv_cell_w);
     const cy_f = @floor(wy * inv_cell_size);
     const cx_i: i64 = @intFromFloat(cx_f);
@@ -1098,12 +1154,12 @@ pub fn getDualValueNoise(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f
     return dualValueNoise(seed, x, y, inv_scale);
 }
 
-/// `getDualValueNoise()` with the lattice scale fixed at compile time. Same field, same values.
+/// `getDualValueNoise()` with the lattice scale fixed at compile-time. Same field, same values.
 ///
 /// The difference is entirely in what survives: `latticeAxis()`'s step split, its three bounds
 /// asserts (live in `ReleaseSafe`), and the reciprocal all constant-fold, and that is most of the
 /// integer work in a sample. The runtime form stays for the debug sliders, which mutate a scale live.
-pub fn getDualValueNoiseFixed(
+pub inline fn getDualValueNoiseFixed(
     seed: Vec2u,
     x: WorldCoord,
     y: WorldCoord,
@@ -1219,13 +1275,13 @@ inline fn lattice(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f
 ///
 /// Use for: organic, flowing hills/valleys.
 /// Prefer `getPerlinNoiseFixed()` whenever the cell size is a constant.
-pub fn getPerlinNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
+pub inline fn getPerlinNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
     return perlinNoise(seed_vector, x, y, cell_size);
 }
 
-/// `getPerlinNoise()` with the cell size fixed at compile time; see `getDualValueNoiseFixed()`
+/// `getPerlinNoise()` with the cell size fixed at compile-time; see `getDualValueNoiseFixed()`
 /// for what that buys. Same field, same values.
-pub fn getPerlinNoiseFixed(
+pub inline fn getPerlinNoiseFixed(
     seed_vector: Vec2u,
     x: WorldCoord,
     y: WorldCoord,

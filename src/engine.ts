@@ -137,7 +137,7 @@ export class GameEngine {
     /** Determines if visible data is new for this frame or not (allowing for `loadOp` in `GPURenderPassDescriptor` to be changed from `"clear"` to `"load"` as necessary). */
     public isVisibleDataNew: boolean = true;
     /** Determines the opacity of wireframes (not rendered if set to 0). */
-    public wireframeOpacity: number = 0.0;
+    public wireframeBrightness: number = 0.0;
 
     /** Specifies when the game started. */
     public startTime: number = performance.now();
@@ -274,8 +274,8 @@ export class GameEngine {
     }
 
     /** Function called from Zig (using the `js_handle_visible_chunks` function in `env`) that actually draws the chunks. */
-    public handleVisibleChunks(opacity: number, wireframeOpacity: number) {
-        this.wireframeOpacity = wireframeOpacity;
+    public handleVisibleChunks(opacity: number, wireframeBrightness: number) {
+        this.wireframeBrightness = wireframeBrightness;
         // Ensure we have an active encoder from renderFrame to satisfy TS
         if (
             !this.currentEncoder ||
@@ -440,7 +440,7 @@ export class GameEngine {
             this.getScratchProperty(11, WasmTypeCode.Float64) % 3600;
 
         this.sceneDataF32[5] = effectiveZoom; // zoom to scale with
-        this.sceneDataF32[6] = effectiveZoom < 0.25 ? 0 : this.wireframeOpacity; // wireframe opacity: hidden if zoom is too small
+        this.sceneDataF32[6] = this.wireframeBrightness;
         this.sceneDataF32[7] = opacity; // opacity all tiles/sprites when rendering
         this.sceneDataF32[8] = playerX; // player pos
         this.sceneDataF32[9] = playerY;
@@ -569,6 +569,7 @@ export class GameEngine {
                         `assets/place.mp3`,
                         `assets/furnace.mp3`,
                         `assets/unmineable.mp3`,
+                        `assets/toofaraway.mp3`,
                     ][id],
                 );
 

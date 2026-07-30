@@ -316,7 +316,7 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
 /// Uses grid-relative tile coordinates (`i % wb`, `i / wb`); because the grid origin is chunk-aligned (an even tile offset),
 /// their parity matches absolute tile parity, so positional variants (2x2 stone, checkerboard edge stone)
 /// are seamless across the world exactly as the old shader was.
-inline fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
+fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
     for (out, 0..) |*block, i| {
         block.id = dw.variation.resolveVariant(block.*, i % wb, i / wb, frame);
         // Underlay sprites (ore/gem backgrounds) get the same variation treatment, so plain stone tiles for example.
@@ -334,7 +334,7 @@ inline fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
 }
 
 /// Sets scratch properties containing information to TypeScript for renderFrame.
-inline fn updateRenderProperties(
+fn updateRenderProperties(
     pass: LayerPass,
     interp_cam_x: f64,
     interp_cam_y: f64,
