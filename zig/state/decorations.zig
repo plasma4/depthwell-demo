@@ -244,6 +244,9 @@ fn stampColumns(chunk: *Chunk, cx: u64, cy: u64, column_seeds: *const [columns.l
 
                 if (stepColumn(feature, &state, wx, wy, block.isFoundation()) and block.isEmpty()) {
                     block.id = feature.sprite;
+                    // How far below its ceiling this cell hangs, which is what `refine.zig` continues
+                    // the chain from (and caps) at the next depth. `state.depth` is 1-based already.
+                    block.tag = .make(.chain_run, state.depth);
                 }
             }
         }

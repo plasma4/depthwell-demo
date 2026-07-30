@@ -338,6 +338,23 @@ pub const Sprite = enum(u16) {
         return self.props().category;
     }
 
+    /// The partner this sprite pins one cell to its RIGHT (the other half of a 2x1 kind), or `.none`.
+    /// Placing this sprite places that partner too; see `world.modifyBlockType()`.
+    pub inline fn pairedRight(self: Sprite) Sprite {
+        const val = @intFromEnum(self);
+        if (val < MAX_SPRITE_ID) return dense_pair_table[val];
+        return .none;
+    }
+
+    /// Whether this sprite is the RIGHT half of a 2x1 pair, and so is never placed on its own:
+    /// it appears only alongside its left half, and stays out of the creative palette.
+    pub inline fn isPairedRight(self: Sprite) bool {
+        for (self.supports()) |s| {
+            if (s.kind == .exact and s.dx == -1 and s.dy == 0) return true;
+        }
+        return false;
+    }
+
     /// Determines if the sprite is a heatmap (between types 65000-65256).
     pub inline fn isHeatmap(self: Sprite) bool {
         const id = @intFromEnum(self);
@@ -1047,6 +1064,40 @@ const dense_supports_table: [MAX_SPRITE_ID][]const Support = blk: {
         } else {
             table[i] = from_anchor ++ p.requires;
         }
+    }
+    break :blk table;
+};
+
+/// The partner each sprite pins one cell to its RIGHT, `.none` for all but the left half of a 2x1 pair.
+///
+/// Read back out of the `requires` table rather than listed again, so a pair is stated in exactly one
+/// place: each half demanding the other (see `moss_shrub1`) is already the whole definition.
+const dense_pair_table: [MAX_SPRITE_ID]Sprite = blk: {
+    @setEvalBranchQuota(20000);
+    var table: [MAX_SPRITE_ID]Sprite = @splat(.none);
+    for (0..MAX_SPRITE_ID) |i| {
+        for (dense_supports_table[i]) |s| {
+            if (s.kind != .exact or s.dx != 1 or s.dy != 0) continue;
+            if (table[i] != .none)
+                @compileError("A sprite demands two different partners to its right.");
+            // `world.modifyBlockType()` walks this rightward, so a sprite pointing at itself would be an
+            // endless row rather than a pair (use `SupportKind.solid_or_self` for a real chain).
+            if (@intFromEnum(s.sprite) == i)
+                @compileError("A sprite cannot be its own right-hand partner.");
+            table[i] = s.sprite;
+        }
+    }
+
+    // A pair has to be mutual, or placing the left half would leave the right one unpinned (and the
+    // cascade would then break the two halves at different times).
+    for (0..MAX_SPRITE_ID) |i| {
+        const right = table[i];
+        if (right == .none) continue;
+        var mutual = false;
+        for (dense_supports_table[@intFromEnum(right)]) |s| {
+            if (s.kind == .exact and s.dx == -1 and s.dy == 0 and @intFromEnum(s.sprite) == i) mutual = true;
+        }
+        if (!mutual) @compileError("A 2x1 pair's right half does not demand its left half back.");
     }
     break :blk table;
 };

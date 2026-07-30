@@ -689,8 +689,21 @@ inline fn oreField(seed: Vec2u, x: WorldCoord, y: WorldCoord, comptime lane: u3,
 }
 
 /// Returns a newly formed ore, if the host and depth gate permit one.
-pub fn disperseOre(host: Sprite, density: f32, x: WorldCoord, y: WorldCoord, depth: u64, seed: Vec2u) ?Sprite {
+///
+/// `host_tag` is the host block's provenance (`refine.DecorTag`): stone that is still standing in for
+/// something else, such as the canopy of a refined shrub, grows no ore for as long as the tag lasts.
+/// Base-depth callers have no provenance to state and pass `.{}`.
+pub fn disperseOre(
+    host: Sprite,
+    density: f32,
+    x: WorldCoord,
+    y: WorldCoord,
+    depth: u64,
+    seed: Vec2u,
+    host_tag: dw.refine.DecorTag,
+) ?Sprite {
     if (!host.isStone()) return null;
+    if (host_tag.blocksOverlay()) return null;
 
     // fast global exit: no ore/gem rule exists outside density range [0.20, 0.90]
     if (density < 0.20 or density > 0.90) return null;
@@ -757,6 +770,7 @@ pub fn addOresAndGems(base_data: TerrainData, x: u32, y: u32) Sprite {
         y,
         dw.startup.STARTING_ZOOM_TIMES,
         memory.game.getHashSeed(.ores1),
+        .{}, // base-depth terrain has no provenance to stand in the way
     ) orelse base_data.sprite;
 }
 
@@ -767,11 +781,22 @@ test "ore dispersal produces deposits at base and recursive depths" {
 
     for (0..256) |y| {
         for (0..256) |x| {
-            if (disperseOre(.stone, 0.5, x, y, dw.startup.STARTING_ZOOM_TIMES, seed)) |ore| {
+            if (disperseOre(.stone, 0.5, x, y, dw.startup.STARTING_ZOOM_TIMES, seed, .{})) |ore| {
                 base_count += 1;
                 _ = ore;
             }
-            if (disperseOre(.stone, 0.5, x, y, dw.startup.STARTING_ZOOM_TIMES + 3, seed) != null) deep_count += 1;
+            if (disperseOre(.stone, 0.5, x, y, dw.startup.STARTING_ZOOM_TIMES + 3, seed, .{}) != null) deep_count += 1;
+
+            // A block still standing in for a shrub's canopy grows nothing, whatever the field says.
+            try std.testing.expect(disperseOre(
+                .stone,
+                0.5,
+                x,
+                y,
+                dw.startup.STARTING_ZOOM_TIMES + 3,
+                seed,
+                .make(.plant_leaf, 2),
+            ) == null);
         }
     }
 
