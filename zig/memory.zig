@@ -208,7 +208,7 @@ pub const GameState = extern struct {
     /// as well as movement constants such as gravity.
     ///
     /// Also fully clears caches.
-    pub inline fn teleport(self: *@This(), coord: ?Coordinate, new_position: Vec2i) void {
+    pub fn teleport(self: *@This(), coord: ?Coordinate, new_position: Vec2i) void {
         // Clears the airborne/jump bookkeeping too, not just the accumulator: arriving somewhere new
         // must not carry over a coyote window earned before the teleport.
         player.resetMotionState();
@@ -386,7 +386,7 @@ pub const Block = packed struct(u128) {
 
     /// Makes a simple block of a certain type, with max light and no edge flags and mine level.
     /// Uses the BOTTOM 32 bits from `seed_bits` to place into `seed`.
-    pub inline fn makeBasicBlock(sprite_type: Sprite, seed_bits: u64) Block {
+    pub fn makeBasicBlock(sprite_type: Sprite, seed_bits: u64) Block {
         return .{
             .id = sprite_type,
             .hp = if (sprite_type.isLiquid()) MAX_HP else 0,
@@ -505,7 +505,7 @@ pub const BlockSpec = struct {
     tag: dw.refine.RefinedTag = .{},
 
     /// Compiles the spec into a packed `Block` (max light, no edge flags or mine level, matching `makeBasicBlock()`).
-    pub inline fn compile(self: @This()) Block {
+    pub fn compile(self: @This()) Block {
         var block: Block = .makeBasicBlock(self.id, self.seed);
         block.base_id = self.base_id;
         block.tag = self.tag;
@@ -751,7 +751,7 @@ fn growScratchBuffer(len: usize, new_scratch_len: usize) [*]u8 {
 ///
 /// Precondition: called from an aligned start (such as right after `scratchReset()`),
 /// as the tight packing relies on the running `scratch_len` being a multiple of `@sizeOf(WGSLEntity)`.
-pub inline fn scratchPushEntity() *WGSLEntity {
+pub fn scratchPushEntity() *WGSLEntity {
     const off: usize = @intCast(mem.scratch_len);
     // Ensures capacity (and grows/relocates the buffer if needed); its aligned bump is overwritten below.
     _ = scratchAlloc(@sizeOf(WGSLEntity));
@@ -814,7 +814,7 @@ pub inline fn scratchReset() void {
 }
 
 /// Sets a scratch property (uses generic compile-time inferences).
-pub inline fn setScratchProp(index: usize, value: anytype) void {
+pub fn setScratchProp(index: usize, value: anytype) void {
     const T = @TypeOf(value);
     switch (@typeInfo(T)) {
         .float => mem.scratch_properties[index] = @bitCast(@as(f64, @floatCast(value))),
