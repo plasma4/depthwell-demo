@@ -96,6 +96,11 @@ pub var mouse_block_x: u4 = 0;
 /// Y block location the mouse is on (within the chunk).
 /// Assume to be invalid if `mouse_chunk` or `mouse_subpixel` are null.
 pub var mouse_block_y: u4 = 0;
+/// How many chunks the mouse sits from the player's own chunk, on each axis.
+/// The same frame of reference the render window is measured out from,
+/// which is what lets mining look its block up in `lighting.miningLightAt()`.
+/// Assume to be invalid if `mouse_chunk_coord` is null.
+pub var mouse_chunk_offset: [2]i64 = .{ 0, 0 };
 /// Whether the mouse's block position changed. If coordinate is out of bounds, then set to true.
 /// Is reset in `handleMining()`, called from `handleTick()`.
 pub var block_position_changed = true;
@@ -116,7 +121,7 @@ pub fn requestCursorType(new_type: CursorType) void {
 /// Only sets `click_focus` if a pointerdown event was just fired and `is_hovered` is true.
 ///
 /// Returns whether the "capture" was successful.
-pub inline fn tryCaptureDown(category: ClickFocus, is_hovered: bool) bool {
+pub fn tryCaptureDown(category: ClickFocus, is_hovered: bool) bool {
     if (just_mouse_down and is_hovered) {
         if (click_focus == .none or click_focus == .canvas or click_focus == category) {
             click_focus = category;
@@ -211,6 +216,7 @@ pub fn updateMouseLocation() void {
     const player_coord = game.getPlayerCoord();
     if (player_coord.move(.{ chunk_offset_x, chunk_offset_y })) |coord| {
         mouse_chunk_coord = coord;
+        mouse_chunk_offset = .{ chunk_offset_x, chunk_offset_y };
 
         const lx = @mod(target_sx, dw.SUBPIXELS_IN_CHUNK); // no need to use % trick, @mod optimizes down to & instruction
         const ly = @mod(target_sy, dw.SUBPIXELS_IN_CHUNK);

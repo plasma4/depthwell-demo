@@ -76,10 +76,10 @@ pub fn CeilingDecor(comptime sprite: Sprite, comptime odds: f64) type {
     };
 }
 
-/// The terrain a decoration stands on: the foundation left AFTER structures.
-fn foundationSolid(wx: i32, wy: i32) bool {
-    if (wx < 0 or wy < 0 or wx > structures.MAX_WORLD_BLOCK or wy > structures.MAX_WORLD_BLOCK) return false;
-    return dw.world.sampleBaseFoundation(@bitCast(wx), @bitCast(wy)).isFoundation();
+/// Returns foundation sprite at world coordinate after structure generation.
+fn foundationSprite(wx: i32, wy: i32) Sprite {
+    if (wx < 0 or wy < 0 or wx > structures.MAX_WORLD_BLOCK or wy > structures.MAX_WORLD_BLOCK) return .none;
+    return dw.world.sampleBaseFoundation(@bitCast(wx), @bitCast(wy));
 }
 
 /// Each point decoration's `constraints`, sorted cheapest-first.
@@ -115,10 +115,11 @@ inline fn anchorState(comptime kind: usize, ax: i32, ay: i32, seed: Vec2u) HashS
 /// it rolled, and the terrain under its footprint accepts it.
 /// Says nothing about whether another anchor beats it (see `anchored()`).
 fn stands(comptime kind: usize, ax: i32, ay: i32, seed: Vec2u) bool {
-    @setEvalBranchQuota(20000); // getChance() comptime-searches for a rational approximation of the odds
+    @setEvalBranchQuota(20000);
     var state = anchorState(kind, ax, ay, seed);
     if (!state.getChance(points[kind].chance)) return false;
-    return structures.satisfies(foundationSolid, constraint_table[kind], footprint(kind, ax, ay));
+    // pass sprite probe to constraint check
+    return structures.satisfies(foundationSprite, constraint_table[kind], footprint(kind, ax, ay));
 }
 
 /// Whether (`ax`, `ay`) is the anchor a decoration of `kind` actually grows from.

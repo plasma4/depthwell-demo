@@ -160,7 +160,7 @@ pub const WaterloggedState = struct {
 };
 
 /// Computes the directional waterlogged flags and adjacent water volumes for a Block.
-pub inline fn getWaterFlags(
+pub fn getWaterFlags(
     top_nb: ?Block,
     bottom_nb: ?Block,
     left_nb: ?Block,
@@ -202,7 +202,7 @@ pub inline fn getWaterFlags(
 
 /// Sibling helper to compute waterlogged state for halo Sprites during base chunk generation.
 /// Procedural water blocks default to full HP, so adjacent volumes are stored as `MAX_HP`.
-pub inline fn getWaterloggedStateSprites(
+pub fn getWaterloggedStateSprites(
     top_nb: Sprite,
     bottom_nb: Sprite,
     left_nb: Sprite,
@@ -254,7 +254,7 @@ inline fn getChunkPtr(cx: u4, cy: u4) ?*Chunk {
 }
 
 /// Gets pointer to a local block with center and orthogonal chunks.
-inline fn getLocalBlockPtr(
+fn getLocalBlockPtr(
     curr: ?*Chunk,
     left: ?*Chunk,
     right: ?*Chunk,
@@ -386,7 +386,7 @@ fn updateChunkWaterFlags(
 }
 
 /// Recalculates solid neighbor edge flags when water is created or destroyed.
-inline fn notifyNeighborEdgeFlags(rx: i32, ry: i32) void {
+fn notifyNeighborEdgeFlags(rx: i32, ry: i32) void {
     var dy: i32 = -1;
     while (dy <= 1) : (dy += 1) {
         var dx: i32 = -1;
@@ -792,8 +792,8 @@ fn recomputeFlagsFor(chunks: *const std.StaticBitSet(SIM_BUFFER_SIZE)) void {
 
 /// Resolves everything `queueWaterFlags()` has queued immediately, instead of on the next tick.
 ///
-/// Loading needs this: a frame can render before the first tick ever runs, and the flags a save
-/// carries may be the stale ones from between a block change and its batched recompute
+/// Loading needs this: a frame can render before the first tick ever runs,
+/// and the flags a save carries may be the stale ones from between a block change and its batched recompute
 /// (see `finalizeLoad()`), which draws every queued water cell full for exactly one frame.
 pub fn flushPendingFlags() void {
     recomputeFlagsFor(&pending_flag_chunks);
