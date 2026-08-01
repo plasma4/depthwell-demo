@@ -11,7 +11,7 @@ pub const FORCE_DEBUG = true;
 // pub const FORCE_DEBUG = builtin.mode != .ReleaseFast;
 
 /// Set to true if the CPU architecture is set to `wasm32` or `wasm64`.
-pub const is_wasm = builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
+pub const is_wasm = builtin.cpu.arch.isWasm(); // builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
 /// Set to true if either test mode or `Debug` mode is used.
 pub const is_debug = FORCE_DEBUG or builtin.is_test or builtin.mode == .Debug;
 
