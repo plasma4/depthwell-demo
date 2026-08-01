@@ -264,7 +264,14 @@ pub const page_allocator: std.mem.Allocator =
 /// An instance of the general-purpose allocator (or testing allocator when running tests).
 /// Use `makeArena()` to create an `ArenaAllocator` around this (WASM has no SMP allocator support).
 pub const main_allocator: std.mem.Allocator =
-    if (builtin.is_test) std.testing.allocator else if (builtin.single_threaded) std.heap.brk_allocator else std.heap.smp_allocator;
+    if (builtin.is_test)
+        std.testing.allocator
+    else if (builtin.single_threaded and (builtin.cpu.arch.isWasm() or builtin.os.tag == .linux))
+        std.heap.brk_allocator
+    else if (builtin.single_threaded)
+        std.heap.c_allocator
+    else
+        std.heap.smp_allocator;
 
 /// Creates an `ArenaAllocator` around the `page_allocator`.
 /// It is usually preferable when possible to utilize the scratch buffer for temporary calculations through a callee,
@@ -406,10 +413,7 @@ pub const Block = packed struct(u128) {
         return self.id.isFoundation();
     }
 
-    /// Determines if the sprite's type is a valid block that could exist in any chunk.
-    /// Separate from `isItem()`. Includes the empty block, and excludes entities.
-    ///
-    /// If properties are wrong here, invalid (or unnamed) enums may appear and wreak havoc.
+    /// Determines if a sprite-type is digging. Hard-coded.
     pub inline fn isInWorld(self: @This()) bool {
         return self.id.isInWorld();
     }
@@ -465,6 +469,11 @@ pub const Block = packed struct(u128) {
     /// Precondition: the block's sprite type is valid.
     pub inline fn isDecor(self: @This()) bool {
         return self.id.isDecor();
+    }
+
+    /// Determines whether the sprite should use a digging sound effect.
+    pub inline fn isDigged(self: @This()) bool {
+        return self.id.isDigged();
     }
 
     /// Returns whether a block lets water flow through it and stores directional waterlogging (decor/crafter).

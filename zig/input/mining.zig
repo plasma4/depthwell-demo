@@ -260,10 +260,12 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                         // create a mining sound every so often!
                         if (in_creative or mining_frame % FRAMES_PER_SOUND == 0)
                             dw.sound.playSound(
-                                // play 3 possible mining sounds if mineable, the "can't mine" high-frequency sound if truly unmineable,
+                                // play 3 possible mining/digging sounds if mineable, the "can't mine" high-frequency sound if truly unmineable,
                                 // or the other "can't mine" sound if the player is too far away to reach
                                 if (unmineable)
-                                    if (!is_protected and near_enough) 8 else 9
+                                    if (!is_protected and near_enough) 11 else 12
+                                else if (block.isDigged())
+                                    @intCast((mining_frame / FRAMES_PER_SOUND) % 3 + 4)
                                 else
                                     @intCast((mining_frame / FRAMES_PER_SOUND) % 3 + 1),
                                 if (in_creative) 1 else (0.4 + 0.6 * @as(f32, @floatFromInt(mining_strength))),
@@ -298,7 +300,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                             not_mining_frame = 0;
                             if (strength == 0) {
                                 dw.sound.playSound(
-                                    4 + (memory.game.frame % 2),
+                                    7 + (memory.game.frame % 2),
                                     0.3, // 30% volume
                                     0.1,
                                     0.3,
@@ -361,7 +363,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                     inventory.selected_sprite = sprite_type;
                 } else {
                     dw.sound.playSound(
-                        6,
+                        9,
                         if (sprite_type.isFoundation()) 0.75 else 0.2,
                         0.1,
                         0.2,

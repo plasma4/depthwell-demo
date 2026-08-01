@@ -132,7 +132,7 @@ fn doCraft(recipe: Recipe) void {
     } else if (recipe.output.count > 0) {
         inventory.addToInventory(recipe.output.item, recipe.output.count);
     }
-    dw.sound.playSound(7, 1.0, 0.3, 0.1);
+    dw.sound.playSound(10, 1.0, 0.3, 0.1);
 }
 
 /// Draws the input requirements of the hovered recipe as a row just above the panel.

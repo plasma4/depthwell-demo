@@ -16,8 +16,11 @@ const DropHandlers = dw.drops.DropHandlers;
 /// Chosen as the max so the existing "never reaches strength" mining path already treats it as unmineable.
 pub const UNMINEABLE_STRENGTH: u64 = std.math.maxInt(u64);
 
+/// ID for `Sprite.wood`, which is after edge stone.
+pub const WOOD_ID = 13;
+
 /// Index where stone-like sprites begin.
-pub const STONE_START = 20;
+pub const STONE_START = WOOD_ID + 14;
 /// Index where stone-like sprites end.
 const STONE_END = STONE_START + 23;
 
@@ -43,7 +46,7 @@ const FRUIT_COUNT = 10;
 /// ID for `Sprite.gear`, which is after a list of fruit.
 const GEAR_ID = DECOR_START + 5 + FRUIT_COUNT;
 /// ID for `Sprite.bush`, which is after cornflower.
-const BUSH_ID = GEAR_ID + 22;
+const BUSH_ID = GEAR_ID + 25;
 /// ID for `Sprite.basic_core`, which is after furnaces.
 const CORE_ID = BUSH_ID + 14;
 
@@ -56,7 +59,7 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 305) {
+    if (max_sprite_value != 315) {
         var buf: [64]u8 = undefined;
         @compileError("Max sprite value of " ++
             (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
@@ -68,22 +71,29 @@ comptime {
 pub const Sprite = enum(u16) {
     /// Empty (air) sprite.
     none = 0,
-    /// Sprite of the player (4 variations).
+    /// Sprite of the player!
     player = 1,
+    player_blink,
+    player_jump1,
+    player_jump2,
+    player_jump3,
+    player_jump4,
     player_walk1,
     player_walk2,
     player_walk3,
     player_walk4,
 
     /// Edge stone (2 variations).
-    edge_stone = 6,
+    edge_stone = 11,
 
-    wood = 8,
+    wood = WOOD_ID,
     black_plate,
     white_plate,
     leaves,
-    dirt = 12, // bottom dirt, center dirt, 2 top dirt sprites
-    red_dirt = 16, // same as normal dirt
+    sand,
+    gravel,
+    dirt = WOOD_ID + 6, // bottom dirt, center dirt, 2 top dirt sprites
+    red_dirt = WOOD_ID + 10, // same as normal dirt
 
     // stone types!
     blue_strange_stone = STONE_START,
@@ -171,7 +181,9 @@ pub const Sprite = enum(u16) {
     flint,
     flint_visual,
     fiberstone,
-    clay,
+    aqua_stone, // 2 variations
+    hammerstone = GEAR_ID + 13,
+    blemclay,
     cordage,
     plant_haft,
     stone_haft,
@@ -180,7 +192,7 @@ pub const Sprite = enum(u16) {
     twinklemoss,
     spiralvine,
     plant_stem,
-    cornflower = GEAR_ID + 20, // 2 variations
+    cornflower = GEAR_ID + 23, // 2 variations
     bush = BUSH_ID, // 2 variations
     ceiling_flower = BUSH_ID + 2, // 4 variations
     mushroom = BUSH_ID + 6, // 3 variations
@@ -277,7 +289,9 @@ pub const Sprite = enum(u16) {
         return self.props().item;
     }
 
-    /// Determines if the sprite's type is considered solid, and should interact with the physics, player, and edge flags.
+    /// Determines if the sprite's type is considered solid,
+    /// and should interact with the physics, player, and edge flags.
+    ///
     /// This returns true for edge stone, unlike `isSolid()`.
     pub inline fn isSolid(self: Sprite) bool {
         return self.props().solid;
@@ -389,10 +403,18 @@ pub const Sprite = enum(u16) {
 
     /// Returns whether a sprite lets water flow through/around it and stores directional waterlogging
     /// (both decor and crafter installations); non-solid placeables that never block liquid.
+    /// Examples include things like furnaces/crafting cores which aren't filled block textures.
+    ///
     /// Precondition: the sprite is valid.
     pub inline fn isWaterloggable(self: Sprite) bool {
         const c = self.props().category;
         return c == .decor or c == .interactive;
+    }
+
+    /// Determines whether the sprite should use a digging sound effect.
+    /// Precondition: the sprite is valid.
+    pub inline fn isDigged(self: Sprite) bool {
+        return getSpriteProps(self).digged;
     }
 
     /// Returns whether a sprite is mined instantly like decor despite being solid (such as leaves).
@@ -424,14 +446,30 @@ pub const Sprite = enum(u16) {
 /// Centralized database describing all sprite properties.
 /// Rules are checked in order, with later rules overriding earlier ones.
 const rules = [_]SpriteRule{
+    // Weak solid blocks
+    .{
+        .{ .list = &[_]Sprite{
+            .sand,
+            .gravel,
+            .dirt,
+            .red_dirt,
+        } },
+        .{
+            .in_world = true,
+            .item = true,
+            .solid = true,
+            .foundation = true,
+            .digged = true,
+            .strength = 10,
+        },
+    },
+
     // Non-stone solid blocks
     .{
         .{ .list = &[_]Sprite{
             .wood,
             .black_plate,
             .white_plate,
-            .dirt,
-            .red_dirt,
         } },
         .{
             .in_world = true,
@@ -615,6 +653,7 @@ const rules = [_]SpriteRule{
         .{ .list = &[_]Sprite{
             .rock,
             .purple_rock,
+            .aqua_stone,
             .flint,
             .bush,
         } },
@@ -714,6 +753,7 @@ const rules = [_]SpriteRule{
         .{ .list = &[_]Sprite{
             .rock,
             .purple_rock,
+            .aqua_stone,
             .flint,
             .bush,
             .mushroom,
@@ -771,22 +811,27 @@ const rules = [_]SpriteRule{
             .strength = UNMINEABLE_STRENGTH,
         },
     },
-    // Normal decor!
+    // Normal decor! (the definition of decor is loose, so this includes useful things like hammerstones)
     .{
-        .{ .list = &[_]Sprite{
-            .rock,
-            .purple_rock,
-            .flint,
-            .bush,
-            .small_tree,
-            .spiralvine,
-            .twinklemoss,
-            .cornflower,
-            .plant_stem,
-            .ceiling_flower,
-            .mushroom,
-            .big_mushroom,
-        } },
+        .{
+            .list = &[_]Sprite{
+                .rock,
+                .purple_rock,
+                .aqua_stone,
+                .hammerstone,
+                // .blemclay,
+                .flint,
+                .bush,
+                .small_tree,
+                .spiralvine,
+                .twinklemoss,
+                .cornflower,
+                .plant_stem,
+                .ceiling_flower,
+                .mushroom,
+                .big_mushroom,
+            },
+        },
         .{
             .in_world = true,
             .item = true,
@@ -935,6 +980,8 @@ pub const SpriteProps = struct {
     /// 0 means "unset" during rule merging (see `mergeProps()`);
     /// a solid/foundation block left at 0 is treated as unmineable unless `instant_mine` is set.
     strength: u64 = 0,
+    /// If the block should use a digging sound effect instead of mining, this is set to `true`.
+    digged: bool = false,
     /// Pseudo-decor: mined instantly like a `.decor` sprite despite being `solid`/`foundation`.
     /// Only consulted by `mining.getSpriteStrength()`; lives outside `SpriteFlags` since it's off the hot path.
     instant_mine: bool = false,
@@ -1014,6 +1061,7 @@ fn mergeProps(dest: *SpriteProps, src: SpriteProps) void {
     if (src.gem) dest.gem = src.gem;
     if (src.category != .none) dest.category = src.category;
     if (src.strength != 0) dest.strength = src.strength;
+    if (src.digged) dest.digged = src.digged;
     if (src.instant_mine) dest.instant_mine = src.instant_mine;
     if (src.hitbox != .full) dest.hitbox = src.hitbox;
     if (src.anchor != .none) dest.anchor = src.anchor;

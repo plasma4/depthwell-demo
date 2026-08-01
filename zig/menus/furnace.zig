@@ -118,7 +118,7 @@ pub fn updateSmelting() void {
 
         // play the furnace smelting sound
         dw.sound.playSound(
-            7,
+            10,
             1.0,
             0.2,
             0.4,

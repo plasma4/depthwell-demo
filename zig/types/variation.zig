@@ -68,6 +68,7 @@ const rules = [_]struct { Sprite, VariantRule }{
     // seed variations! (non-uniform; read VariantKind definition!)
     .{ .bush, .{ .kind = .random, .count = 2 } },
     .{ .rock, .{ .kind = .random, .count = 2 } },
+    .{ .aqua_stone, .{ .kind = .random, .count = 2 } },
     .{ .ceiling_flower, .{ .kind = .random, .count = 4 } },
     .{ .cornflower, .{ .kind = .random, .count = 2 } },
     .{ .mushroom, .{ .kind = .random, .count = 3 } },

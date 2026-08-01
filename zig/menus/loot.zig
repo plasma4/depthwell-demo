@@ -144,7 +144,7 @@ fn lootAll(ref: dw.indicators.BlockRef) void {
 
     const prev = world.getBlockAt(ref.coord, ref.bx, ref.by, memory.game.depth);
     _ = world.modifyBlockType(ref.coord, ref.bx, ref.by, .none, prev);
-    dw.sound.playSound(7, 1.0, 0.3, 0.1);
+    dw.sound.playSound(10, 1.0, 0.3, 0.1);
 
     dw.indicators.menus.loot = false;
     close();

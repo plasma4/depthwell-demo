@@ -4195,7 +4195,11 @@ test "ModEntry: unmodified cells read as null and rewrites do not grow the entry
     }
 
     // Overwriting an already-modified cell must replace it, not insert a duplicate.
-    mod_store.beginWrite(key).setCell(64, .{ .id = .stone, .base_id = .none, .hp = 3 });
+    mod_store.beginWrite(key).setCell(64, .{
+        .id = .stone,
+        .base_id = .none,
+        .hp = 3,
+    });
     try testing.expectEqual(@as(u16, modified.len), entry.count);
     try testing.expectEqual(Sprite.stone, entry.get(64).?.id);
 }
