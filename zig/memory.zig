@@ -264,7 +264,14 @@ pub const page_allocator: std.mem.Allocator =
 /// An instance of the general-purpose allocator (or testing allocator when running tests).
 /// Use `makeArena()` to create an `ArenaAllocator` around this (WASM has no SMP allocator support).
 pub const main_allocator: std.mem.Allocator =
-    if (builtin.is_test) std.testing.allocator else if (builtin.single_threaded) std.heap.brk_allocator else std.heap.smp_allocator;
+    if (builtin.is_test)
+        std.testing.allocator
+    else if (builtin.single_threaded and (builtin.cpu.arch.isWasm() or builtin.os.tag == .linux))
+        std.heap.brk_allocator
+    else if (builtin.single_threaded)
+        std.heap.c_allocator
+    else
+        std.heap.smp_allocator;
 
 /// Creates an `ArenaAllocator` around the `page_allocator`.
 /// It is usually preferable when possible to utilize the scratch buffer for temporary calculations through a callee,

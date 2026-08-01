@@ -941,13 +941,25 @@ test "only the flower's base rebuilds it, and it rebuilds the whole shaft" {
     on_stem[6] = .makeBasicBlock(.plant_stem, 1);
 
     const base: Block = .makeBasicBlock(.plant_stem, 5);
-    const report = sweepRegion(.plant_stem, base, on_floor, 8, 9);
+    const report = sweepRegion(
+        .plant_stem,
+        base,
+        on_floor,
+        8,
+        9,
+    );
     // one or two flowers, each three cells tall
     try testing.expect(report.filled == 3 or report.filled == 6);
     try testing.expectEqual(report.filled / 3, report.anchored_columns);
 
     // the stem and flower above the base sit on more plant, so they contribute nothing
-    try testing.expectEqual(@as(usize, 0), sweepRegion(.plant_stem, base, on_stem, 8, 8).filled);
+    try testing.expectEqual(@as(usize, 0), sweepRegion(
+        .plant_stem,
+        base,
+        on_stem,
+        8,
+        8,
+    ).filled);
     try testing.expectEqual(@as(usize, 0), sweepRegion(
         .cornflower,
         .makeBasicBlock(.cornflower, 6),
@@ -970,7 +982,11 @@ test "an installation is never duplicated" {
     // a portal keeps its landing inside the 2x1 area a descent drops the player onto
     const rule = ruleFor(.portal).?;
     for (0..256) |py| {
-        const mask = drawColumns(regionHash(.{ 1, 2 }, 4, py, .layout), 1, rule.plan.single.columns);
+        const mask = drawColumns(
+            regionHash(.{ 1, 2 }, 4, py, .layout),
+            1,
+            rule.plan.single.columns,
+        );
         try testing.expect(mask == (1 << CENTER_LEFT) or mask == (1 << CENTER_RIGHT));
     }
 }
@@ -1201,8 +1217,20 @@ test "the shrub's two halves draw one coherent tree" {
     neighbors[6] = .makeBasicBlock(.stone, 2);
     neighbors[7] = .makeBasicBlock(.stone, 3);
 
-    const left = sweepRegion(.moss_shrub1, .makeBasicBlock(.moss_shrub1, 4), neighbors, 10, 20);
-    const right = sweepRegion(.moss_shrub1_right, .makeBasicBlock(.moss_shrub1_right, 5), neighbors, 11, 20);
+    const left = sweepRegion(
+        .moss_shrub1,
+        .makeBasicBlock(.moss_shrub1, 4),
+        neighbors,
+        10,
+        20,
+    );
+    const right = sweepRegion(
+        .moss_shrub1_right,
+        .makeBasicBlock(.moss_shrub1_right, 5),
+        neighbors,
+        11,
+        20,
+    );
 
     // Both halves fill exactly the cells their half of the picture asks for.
     var expected_left: usize = 0;
@@ -1242,6 +1270,12 @@ test "a stamped shape needs both halves' floors" {
     // the right half's floor is missing, so neither half draws
     try testing.expectEqual(
         @as(usize, 0),
-        sweepRegion(.moss_shrub1, .makeBasicBlock(.moss_shrub1, 4), half_floor, 10, 20).filled,
+        sweepRegion(
+            .moss_shrub1,
+            .makeBasicBlock(.moss_shrub1, 4),
+            half_floor,
+            10,
+            20,
+        ).filled,
     );
 }

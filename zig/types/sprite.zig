@@ -16,8 +16,11 @@ const DropHandlers = dw.drops.DropHandlers;
 /// Chosen as the max so the existing "never reaches strength" mining path already treats it as unmineable.
 pub const UNMINEABLE_STRENGTH: u64 = std.math.maxInt(u64);
 
+/// ID for `Sprite.wood`, which is after edge stone.
+pub const WOOD_START = 13;
+
 /// Index where stone-like sprites begin.
-pub const STONE_START = 20;
+pub const STONE_START = WOOD_START + 14;
 /// Index where stone-like sprites end.
 const STONE_END = STONE_START + 23;
 
@@ -43,7 +46,7 @@ const FRUIT_COUNT = 10;
 /// ID for `Sprite.gear`, which is after a list of fruit.
 const GEAR_ID = DECOR_START + 5 + FRUIT_COUNT;
 /// ID for `Sprite.bush`, which is after cornflower.
-const BUSH_ID = GEAR_ID + 22;
+const BUSH_ID = GEAR_ID + 25;
 /// ID for `Sprite.basic_core`, which is after furnaces.
 const CORE_ID = BUSH_ID + 14;
 
@@ -56,7 +59,7 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 305) {
+    if (max_sprite_value != 315) {
         var buf: [64]u8 = undefined;
         @compileError("Max sprite value of " ++
             (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
@@ -68,22 +71,29 @@ comptime {
 pub const Sprite = enum(u16) {
     /// Empty (air) sprite.
     none = 0,
-    /// Sprite of the player (4 variations).
+    /// Sprite of the player!
     player = 1,
+    player_blink,
+    player_jump1,
+    player_jump2,
+    player_jump3,
+    player_jump4,
     player_walk1,
     player_walk2,
     player_walk3,
     player_walk4,
 
     /// Edge stone (2 variations).
-    edge_stone = 6,
+    edge_stone = 11,
 
-    wood = 8,
+    wood = WOOD_START,
     black_plate,
     white_plate,
     leaves,
-    dirt = 12, // bottom dirt, center dirt, 2 top dirt sprites
-    red_dirt = 16, // same as normal dirt
+    sand,
+    gravel,
+    dirt = WOOD_START + 6, // bottom dirt, center dirt, 2 top dirt sprites
+    red_dirt = WOOD_START + 10, // same as normal dirt
 
     // stone types!
     blue_strange_stone = STONE_START,
@@ -171,7 +181,9 @@ pub const Sprite = enum(u16) {
     flint,
     flint_visual,
     fiberstone,
-    clay,
+    aqua_stone, // 2 variations
+    hammerstone = GEAR_ID + 13,
+    blemclay,
     cordage,
     plant_haft,
     stone_haft,
@@ -180,7 +192,7 @@ pub const Sprite = enum(u16) {
     twinklemoss,
     spiralvine,
     plant_stem,
-    cornflower = GEAR_ID + 20, // 2 variations
+    cornflower = GEAR_ID + 23, // 2 variations
     bush = BUSH_ID, // 2 variations
     ceiling_flower = BUSH_ID + 2, // 4 variations
     mushroom = BUSH_ID + 6, // 3 variations
