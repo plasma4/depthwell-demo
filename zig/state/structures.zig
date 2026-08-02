@@ -239,12 +239,12 @@ pub fn baseSolid(wx: i32, wy: i32) bool {
 
     const uwx: u32 = @bitCast(wx);
     const uwy: u32 = @bitCast(wy);
-    return dw.procedural.getBaseSpriteType(
+    return dw.procedural.getBaseSprite(
         uwx / dw.CHUNK_SIZE,
         uwy / dw.CHUNK_SIZE,
         @intCast(uwx % dw.CHUNK_SIZE),
         @intCast(uwy % dw.CHUNK_SIZE),
-    ).sprite.isFoundation();
+    ).isFoundation();
 }
 
 /// Finds the ground surface of column `wx`: the topmost row in `[y_from, y_to]` that is solid base terrain with open space directly above it.
@@ -517,6 +517,9 @@ const StructCacheEntry = struct {
     cx: i32 = 0,
     cy: i32 = 0,
     seed: Vec2u = .{ 0, 0 },
+    /// Terrain identity the placement was gated against (`procedural.terrainGeneration()`).
+    /// The structure seed alone cannot see a debug slider moving the ground a placement stands on.
+    generation: u64 = 0,
     bounds: ?Rect = null,
     blocked: ?bool = null,
     occupied: bool = false,
@@ -533,16 +536,20 @@ const STRUCT_CACHE_TILE = 32;
 /// Pure function of (cell, seed): the per-entry seed check self-invalidates on reseed, so no explicit clear.
 /// The `i32` cx/cy size is okay because it's at base depth!
 const STRUCT_CACHE_SLOTS = STRUCT_CACHE_TILE * STRUCT_CACHE_TILE;
-pub var struct_cache: [structures.len][STRUCT_CACHE_SLOTS]StructCacheEntry = @splat(@splat(.{}));
+var struct_cache: [structures.len][STRUCT_CACHE_SLOTS]StructCacheEntry = @splat(@splat(.{}));
 
 /// Returns the (populated) cache entry for structure `kind` at grid cell (`cx`, `cy`), computing bounds on miss.
 fn structCacheSlot(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) *StructCacheEntry {
+    const generation = dw.procedural.terrainGeneration();
     const e = &struct_cache[kind][dw.utils.tileIndex(STRUCT_CACHE_TILE, STRUCT_CACHE_TILE, cx, cy)];
-    if (!(e.occupied and e.cx == cx and e.cy == cy and @reduce(.And, e.seed == struct_seed))) {
+    if (!(e.occupied and e.cx == cx and e.cy == cy and
+        e.generation == generation and @reduce(.And, e.seed == struct_seed)))
+    {
         e.* = .{
             .cx = cx,
             .cy = cy,
             .seed = struct_seed,
+            .generation = generation,
             .bounds = computeStructureBounds(kind, cx, cy, struct_seed),
             .occupied = true,
         };
@@ -820,6 +827,8 @@ const ChunkCandidates = struct {
     chunk_x: i32 = 0,
     chunk_y: i32 = 0,
     seed: Vec2u = .{ 0, 0 },
+    /// Terrain identity these candidates were accepted under; see `StructCacheEntry.generation`.
+    generation: u64 = 0,
     occupied: bool = false,
     counts: [structures.len]u8 = @splat(0),
     /// Per kind, in the same (cy, cx) cell order the per-block scan used to walk, so the first candidate
@@ -850,6 +859,7 @@ fn buildChunkCandidates(ctx: *ChunkCandidates, chunk_x: i32, chunk_y: i32, struc
     ctx.chunk_x = chunk_x;
     ctx.chunk_y = chunk_y;
     ctx.seed = struct_seed;
+    ctx.generation = dw.procedural.terrainGeneration();
     ctx.occupied = true;
 
     const x0 = chunk_x * dw.CHUNK_SIZE;
@@ -910,6 +920,7 @@ pub fn addStructures(
 
     const ctx = &chunk_ctx[chunkCtxIndex(chunk_x, chunk_y)];
     if (!(ctx.occupied and ctx.chunk_x == chunk_x and ctx.chunk_y == chunk_y and
+        ctx.generation == dw.procedural.terrainGeneration() and
         @reduce(.And, ctx.seed == struct_seed)))
     {
         buildChunkCandidates(ctx, chunk_x, chunk_y, struct_seed);

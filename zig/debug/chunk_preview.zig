@@ -10,7 +10,7 @@ const EdgeFlags = dw.types.EdgeFlags;
 const addEntity = dw.entity.addEntity;
 
 /// Draws previews for the chunk based on the `entity.preview_tile_size` variable.
-/// Only called if `dw.is_debug` is true.
+/// Only called if `dw.dev_tools` is true.
 pub fn drawChunkPreview() void {
     // draw a rectangle background for preview, and then the chunk inside!
     const tile_size: f32 = @floatCast(dw.entity.preview_tile_size);
@@ -191,7 +191,7 @@ pub fn drawChunkPreview() void {
     const bx_idx = memory.game.getBlockXInChunk();
     const by_idx = memory.game.getBlockYInChunk();
     const deeper_preview_x = preview_x_origin + background_margin + 18.5 * tile_size;
-    if (dw.is_debug and !dw.procedural.USE_HEATMAP and depth > start_zoom) {
+    if (dw.dev_tools and !dw.procedural.USE_HEATMAP and depth > start_zoom) {
         // Draw background for D-1 (teal background)
         bg.position[0] = deeper_preview_x + tile_size * 2.5;
         bg.position[1] = preview_y_origin + tile_size * 2.5;

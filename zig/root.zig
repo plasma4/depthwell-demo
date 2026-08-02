@@ -5,15 +5,18 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// Whether to force `is_debug` to true regardless of build mode.
-/// Goes without saying: this should be false in prod!
-pub const FORCE_DEBUG = true;
-// pub const FORCE_DEBUG = builtin.mode != .ReleaseFast;
+/// Used for developer tooling: the debug UI in the corner and everything that exists only to serve it.
+/// Tuning sliders, heatmaps, creative mode, the depth hotkeys, the audit and preview passes,
+/// and the logger's text buffers all disappear when this is false.
+///
+/// Goes without saying, keep this false in prod.
+pub const dev_tools = true;
 
 /// Set to true if the CPU architecture is set to `wasm32` or `wasm64`.
 pub const is_wasm = builtin.cpu.arch.isWasm(); // builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
-/// Set to true if either test mode or `Debug` mode is used.
-pub const is_debug = FORCE_DEBUG or builtin.is_test or builtin.mode == .Debug;
+/// Set to true if either test mode or `Debug` mode is used. The BUILD MODE, nothing else:
+/// use `dev_tools` for anything the debug UI owns, or it will vanish from a release profile build.
+pub const is_debug = builtin.is_test or builtin.mode == .Debug;
 
 // Note: changing these constants below will probably have disastrous consequences.
 // A lot of logic is hard-coded, such as `[6][6]Sprite` use, and a lot of logic is bound to break if these constants are modified.
@@ -244,9 +247,10 @@ pub export fn scratchAlloc(len: usize) u64 { // pointer-like [*]u8, Memory64 hac
 //     memory.wasmFree(@ptrFromInt(@as(usize, @intCast(ptr))), len); // Memory64 hack
 // }
 
-/// Returns if code is in debugging mode for JS to see.
+/// Whether the developer tooling is compiled in, so the host knows to build the debug panel.
+/// Named for the export the host already binds; it reports `dev_tools`, NOT the build mode.
 pub export fn isDebug() bool {
-    return is_debug;
+    return dev_tools;
 }
 
 // Save/load API. The JS host owns the atomic OPFS write and per-frame budgeting;
@@ -279,18 +283,18 @@ pub export fn saveLastImportError() u32 {
     return save.lastImportError();
 }
 
-// Import debugging API and functions if optimization level is Debug.
+// Import the debug UI API and the developer-only exports; see `dev_tools`.
 comptime {
-    _ = if (is_debug) struct {
+    _ = if (dev_tools) struct {
         pub const debug_ui = @import("debug/debug_ui.zig");
         pub export fn debugBuildUiMetadata() void {
-            if (is_debug) debug_ui.buildMetadata();
+            if (dev_tools) debug_ui.buildMetadata();
         }
         pub export fn changeDebugUiSlider(id: u32, val: f32) void {
-            if (is_debug) debug_ui.changeSlider(id, val);
+            if (dev_tools) debug_ui.changeSlider(id, val);
         }
         pub export fn clickDebugUiButton(id: u32) void {
-            if (is_debug) debug_ui.clickButton(id);
+            if (dev_tools) debug_ui.clickButton(id);
         }
 
         pub export fn testLogs() void {
