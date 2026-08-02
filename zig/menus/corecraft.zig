@@ -19,31 +19,33 @@ const mouse = dw.mouse;
 const inventory = dw.inventory;
 
 /// A single input requirement (or the output) of a recipe.
-const Ingredient = struct { item: Sprite, count: u32 };
+const Ingredient = struct { item: Sprite, count: u32 = 1 };
 
 /// One craft: a list of input items+quantities producing a single output item+quantity.
 const Recipe = struct { inputs: []const Ingredient, output: Ingredient };
 
-/// The recipe database. The grid layout and panel size automatically resize based on the length of this.
+/// The recipe database what "comes out" based on the inputs. Output count of 1 implied.
+/// The grid layout and panel size automatically resize based on the length of this.
 const recipes = [_]Recipe{
     .{
         .inputs = &.{
             .{ .item = .wood, .count = 3 },
             .{ .item = .leaves, .count = 2 },
         },
-        .output = .{ .item = .campfire, .count = 1 },
+        .output = .{ .item = .campfire },
     },
     // placeholder slot for the dynamic pickaxe upgrades
     .{
         .inputs = &.{},
-        .output = .{ .item = .pickaxe, .count = 1 },
+        .output = .{ .item = .pickaxe },
     },
 };
 
 /// Slot grid: the panel sizes itself to hold `recipes.len` slots, wrapping at 5 columns.
 const grid = util.Grid(.{ .len = recipes.len, .cols = 5 });
 
-/// Menu panel size/placement in UV space (top-left aligned), anchored to the bottom-right so it never overlaps the bottom-left furnace panel.
+/// Menu panel size/placement in UV space (top-left aligned),
+/// anchored to the bottom-right so it never overlaps the bottom-left furnace panel.
 const MENU_SIZE: Vec2f32 = grid.SIZE_UV;
 const MENU_POS: Vec2f32 = .{ 0.98 - MENU_SIZE[0], 0.96 - MENU_SIZE[1] };
 
@@ -119,8 +121,10 @@ fn canCraft(recipe: Recipe) bool {
     return true;
 }
 
-/// Consumes a craftable recipe's inputs and grants its output. Assumes `canCraft(recipe)`.
+/// Consumes a craftable recipe's inputs and grants its output.
+/// Asserts that the recipe is craftable.
 fn doCraft(recipe: Recipe) void {
+    std.debug.assert(canCraft(recipe));
     if (!inventory.isInCreative()) {
         for (recipe.inputs) |in| {
             inventory.inventory_counts[@intFromEnum(in.item)] -= in.count;

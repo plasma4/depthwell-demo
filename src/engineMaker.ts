@@ -55,7 +55,7 @@ export async function create(
     if (canvas === undefined) {
         canvas = document.getElementsByTagName("canvas")[0];
         if (canvas === undefined) {
-            throw Error(
+            throw TypeError(
                 "No canvas element or ID string provided, and no canvas was not found in the HTML.",
             );
         }
@@ -63,7 +63,9 @@ export async function create(
     } else if (typeof canvas === "string") {
         const elem = document.getElementById(canvas);
         if (!(elem instanceof HTMLCanvasElement)) {
-            throw Error(`Element with ID "${canvas}" is not a canvas element.`);
+            throw TypeError(
+                `Element with ID "${canvas}" is not a canvas element.`,
+            );
         }
         canvas = elem;
     }

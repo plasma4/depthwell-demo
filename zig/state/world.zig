@@ -39,19 +39,22 @@ const FoundationCacheEntry = struct {
     occupied: bool = false,
 };
 
-/// Matches `procedural.zig`'s base terrain cache size and sweep pattern.
-///
-/// Sized to fit a full sweep row across 2 chunk rows.
-/// This keeps upper neighbors cached  during `addEdgeFlags()`/`resolveBaseFoundation()`,
-/// preventing 68 extra terrain evaluations per chunk.
+/// Matches `procedural.zig`'s base terrain cache size and sweep pattern; see `BASE_CACHE_TILE_H` there
+/// for why the window is 8 chunk rows tall rather than the 2 the edge-flag halo alone would need.
 const FOUNDATION_CACHE_TILE_W = SIM_GRID_SIZE;
-const FOUNDATION_CACHE_TILE_H = CHUNK_SIZE * 2;
+const FOUNDATION_CACHE_TILE_H = CHUNK_SIZE * 8;
 /// Direct-mapped cache of `resolveBaseFoundation()` (a power of two by construction).
-/// Release-only, matching `procedural.getBaseSpriteType()`: debug drags the terrain sliders live.
 const FOUNDATION_CACHE_SLOTS = FOUNDATION_CACHE_TILE_W * FOUNDATION_CACHE_TILE_H;
 var foundation_cache: [FOUNDATION_CACHE_SLOTS]FoundationCacheEntry = @splat(.{});
-/// Terrain identity the cache holds; a mismatch (reseed) drops every entry.
+/// Terrain identity the cache holds; a mismatch (reseed or a debug slider) drops every entry.
+/// See `procedural.terrainGeneration()`.
 var foundation_cache_key: u64 = 0;
+
+comptime {
+    // Static WASM memory, like the base terrain cache it mirrors.
+    if (@sizeOf(@TypeOf(foundation_cache)) > memory.MemorySizes.MiB)
+        @compileError("The base foundation cache exceeds its 1 MiB budget.");
+}
 
 /// Direct-mapped slot for a world block. Tiled rather than hashed, so a chunk and the halo around it
 /// cannot evict each other at all; see `dw.utils.tileIndex()`.
@@ -67,8 +70,6 @@ inline fn foundationCacheIndex(wx: u32, wy: u32) usize {
 /// so a neighbor recomputed for the halo carries the same ore id as the real chunk;
 /// `id_edge_flags` then connects a vein to its continuation across the chunk border instead of cutting it off.
 fn resolveBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
-    if (dw.is_debug) return computeBaseFoundation(cx, cy, bx, by);
-
     const wx: u32 = @intCast(cx * CHUNK_SIZE + bx);
     const wy: u32 = @intCast(cy * CHUNK_SIZE + by);
 
@@ -137,10 +138,10 @@ fn resolveFoundationSolid(cx: u64, cy: u64, bx: u4, by: u4) bool {
     // edge_stone is solid but NOT a foundation, so a world border never anchors a vine
     if (on_edge_x or on_edge_y) return false;
 
-    const base_data = procedural.getBaseSpriteType(@intCast(cx), @intCast(cy), bx, by);
+    const base_sprite = procedural.getBaseSprite(@intCast(cx), @intCast(cy), bx, by);
     const wx: u32 = @intCast(cx * CHUNK_SIZE + bx);
     const wy: u32 = @intCast(cy * CHUNK_SIZE + by);
-    const structured = procedural.addStructures(base_data.sprite, wx, wy, memory.game.getHashSeed(.structures));
+    const structured = procedural.addStructures(base_sprite, wx, wy, memory.game.getHashSeed(.structures));
     return structured.id.isFoundation();
 }
 
@@ -419,6 +420,10 @@ pub const ModificationStore = struct {
     /// Incremented whenever `entries` is dropped (`init()`/`clear()`), invalidating any external index
     /// into it. A budgeted save snapshot compares this to detect a mid-save wipe and abort.
     generation: u64 = 0,
+    /// Incremented whenever the CONTENT of the store changes, which `generation` does not track
+    /// (that one only counts wipes). Anything that memoizes a value derived from a modified block
+    /// keys on this, so an edit retires it. See `ancestor.ParentHoodCache`.
+    content_generation: u64 = 0,
     allocator: std.mem.Allocator = undefined,
     /// Whether the containers below hold real allocations. Guards `deinit()` before the first `init()`.
     live: bool = false,
@@ -426,7 +431,12 @@ pub const ModificationStore = struct {
     /// Initializes in-place to avoid stack overflow problems. Frees anything a previous world left behind.
     pub fn init(self: *ModificationStore, allocator: std.mem.Allocator) void {
         self.deinit();
-        self.* = .{ .allocator = allocator, .live = true, .generation = self.generation +% 1 };
+        self.* = .{
+            .allocator = allocator,
+            .live = true,
+            .generation = self.generation +% 1,
+            .content_generation = self.content_generation +% 1,
+        };
     }
 
     /// Releases every allocation. Safe to call on a store that was never initialized.
@@ -466,6 +476,7 @@ pub const ModificationStore = struct {
         self.allocator.free(entry.cells);
         entry.* = .{};
         self.free_entries.append(self.allocator, kv.value) catch memory.oom();
+        self.content_generation +%= 1;
     }
 
     /// Completely wipes all user modifications. Should be followed by `world.clearCaches(true)`.
@@ -479,6 +490,7 @@ pub const ModificationStore = struct {
         self.entries.clearRetainingCapacity();
         self.free_entries.clearRetainingCapacity();
         self.generation +%= 1;
+        self.content_generation +%= 1;
     }
 
     /// Reserves an entry slot, reusing a freed one when possible.
@@ -516,7 +528,7 @@ pub const ModificationStore = struct {
         const idx = self.index.get(key) orelse blk: {
             const new_idx = self.allocEntry();
             self.index.put(self.allocator, key, new_idx) catch memory.oom();
-            if (dw.is_debug and TRACE_NEW_ENTRIES) dw.logger.info(
+            if (dw.dev_tools and TRACE_NEW_ENTRIES) dw.logger.info(
                 @src(),
                 "new ChunkMod ({s}) at depth {d}, quadrant {d}, suffix {d}/{d}",
                 .{ @tagName(kind), key.depth, key.quadrant, key.suffix[0], key.suffix[1] },
@@ -524,6 +536,9 @@ pub const ModificationStore = struct {
             break :blk new_idx;
         };
         dw.save.shadowEntryForSave(idx);
+        // Every write to the store comes through here (`beginWrite()` and `markDescendant()` both),
+        // so this is the one place a content change has to be announced.
+        self.content_generation +%= 1;
         return idx;
     }
 
@@ -553,6 +568,7 @@ pub const ModificationStore = struct {
         entry.cells = try self.allocator.alloc(ModCell, @max(cells.len, MIN_MOD_CELLS));
         @memcpy(entry.cells[0..cells.len], cells);
         try self.index.put(self.allocator, key, idx);
+        self.content_generation +%= 1;
     }
 
     /// Total bytes of live `ModCell` payload, for the debug HUD.
@@ -1157,7 +1173,7 @@ pub const SimBuffer = struct {
 
     /// Logs a single edge-flag mismatch found by `checkEdgeFlags()` (debug builds only).
     fn reportInvalidEdge(coord: Coordinate, bx: u4, by: u4, got: u8, expected: u8) void {
-        if (!dw.is_debug) return;
+        if (!dw.dev_tools) return;
         dw.logger.err(@src(), "Invalid edge flags at chunk {any} block ({d}, {d}): got 0b{b:0>8}, expected 0b{b:0>8}", .{ coord, bx, by, got, expected });
     }
 
@@ -2007,10 +2023,29 @@ pub fn getChunkPtr(coord: Coordinate) *const Chunk {
 /// then a flag recompute (replaying ids invalidates the flags the generator derived).
 ///
 /// This is the ONLY way a `mod_store` entry should become a `Chunk`; the store holds no block data of its own.
+///
+/// WHY THIS IS SPLIT FROM `generateChunk()`, and must stay split:
+/// `generateChunk()` is the world's DEFINITION and has to be a pure function of the seed alone.
+/// Every child depth is derived from its parent, so a generator that could see a modification would
+/// bake that modification into the terrain of every depth below it, and the same block would then
+/// generate differently depending on whether the player had happened to mine near it. `mod_store`
+/// stays a separate OVERLAY replayed on top, which is also what lets a save hold a handful of edited
+/// cells instead of the chunks, and what lets a worldgen fix repair an existing save.
 pub fn materializeChunk(chunk: *Chunk, key: DepthCoordinate) void {
-    generateChunk(chunk, key);
+    // Asked BEFORE generating so the flag pass can be skipped when it is about to be redone below.
+    // A bool rather than the entry itself: generation is a long call and nothing should hold a store
+    // pointer across it.
+    const modified = mod_store.contains(key);
+    const is_base = key.depth == STARTING_ZOOM_TIMES;
+
+    // The generator derives flags from the ids it just wrote. Replaying an edit changes those ids, so
+    // those flags are dead the moment `applyTo()` runs; deriving them twice is pure waste.
+    // The base depth is the exception: its decoration pass reads the flags while generating.
+    generateChunkInner(chunk, key, if (modified and !is_base) .skip_flags else .derive_flags);
 
     const entry = mod_store.get(key);
+    // Generation must never touch the store, or the flag pass skipped above would never be made up for.
+    std.debug.assert((entry != null) == modified);
     if (entry) |e| {
         e.applyTo(chunk);
         // Only meaningful while looking down at a deeper depth; at the deepest depth the markers left
@@ -2022,8 +2057,9 @@ pub fn materializeChunk(chunk: *Chunk, key: DepthCoordinate) void {
         }
     }
 
-    if (key.depth != STARTING_ZOOM_TIMES) {
-        if (entry != null) addEdgeFlagsFractal(chunk, key);
+    if (!is_base) {
+        // Exactly the pass `generateChunkInner()` was told to skip, now that the ids are final.
+        if (modified) addEdgeFlagsFractal(chunk, key);
         return;
     }
 
@@ -2045,12 +2081,29 @@ fn resetEmptyEdgeFlags(chunk: *Chunk) void {
     }
 }
 
+/// Whether `generateChunkInner()` finishes with the edge-flag pass, or leaves it to its caller.
+///
+/// Only `materializeChunk()` may skip it, and only because it derives the flags itself right after
+/// replaying the modifications. A chunk that leaves here with `.skip_flags` and never gets a flag
+/// pass carries whatever the last chunk in that memory happened to have.
+const FlagPass = enum { derive_flags, skip_flags };
+
 /// Does not go through the cache, as its goal is to generate chunks from scratch;
 /// branches into base procedural generation or fractal scaling depending on depth.
 ///
 /// Purely procedural: modifications are NOT applied here. Use `materializeChunk()` for the chunk the player actually sees.
 pub fn generateChunk(chunk: *Chunk, key: DepthCoordinate) void {
+    generateChunkInner(chunk, key, .derive_flags);
+}
+
+/// `generateChunk()` with the trailing flag pass made optional; see `FlagPass`.
+///
+/// `flags` is a runtime parameter on purpose: a comptime one would emit the whole generation body
+/// twice for one predictable branch per chunk.
+fn generateChunkInner(chunk: *Chunk, key: DepthCoordinate, flags: FlagPass) void {
     if (key.depth == STARTING_ZOOM_TIMES) {
+        // Always flagged, whatever the caller asked: `decorations.stampChunk()` reads the flags to
+        // find the surfaces it anchors to, so the base pass cannot defer them.
         generateBaseChunk(chunk, key.asCoord());
         return;
     }
@@ -2091,7 +2144,7 @@ pub fn generateChunk(chunk: *Chunk, key: DepthCoordinate) void {
         }
     }
 
-    addEdgeFlagsFractal(chunk, key);
+    if (flags == .derive_flags) addEdgeFlagsFractal(chunk, key);
 }
 
 /// Gets an already materialized chunk without triggering any generation.
@@ -2215,6 +2268,18 @@ fn addEdgeFlags(target_chunk: *Chunk, key: DepthCoordinate, mods: ?*const ModNei
         }
     }
 
+    // Every neighbor test below asks the same two questions of a halo cell, and a cell is a neighbor of
+    // up to 8 others, so the sprite rule table is read once per cell here instead of 8 times below.
+    var halo_flagworthy: [18][18]bool = undefined;
+    var halo_solid_or_liquid: [18][18]bool = undefined;
+    for (0..18) |hy2| {
+        for (0..18) |hx2| {
+            const s = halo[hy2][hx2];
+            halo_flagworthy[hy2][hx2] = shouldHaveEdgeFlags(s);
+            halo_solid_or_liquid[hy2][hx2] = s.isSolid() or s.isLiquid();
+        }
+    }
+
     // Calculate flags using the static halo buffer
     for (0..CHUNK_SIZE) |y| {
         for (0..CHUNK_SIZE) |x| {
@@ -2239,17 +2304,17 @@ fn addEdgeFlags(target_chunk: *Chunk, key: DepthCoordinate, mods: ?*const ModNei
 
             // Same-sprite flags are computed for ALL foundation blocks (one extra compare per neighbor);
             // restrict to isOre()/isGem() here if that ever becomes worth the branch.
+            const current_liquid = current_sprite.isLiquid();
             var id_flags: u8 = 0;
             inline for (.{ -1, 0, 1 }) |dy| {
                 inline for (.{ -1, 0, 1 }) |dx| {
                     if (dx == 0 and dy == 0) continue;
-                    const sprite = halo[@intCast(y + @as(usize, 1 + dy))][@intCast(x + @as(usize, 1 + dx))];
+                    const hy2 = @as(usize, 1 + dy) + y;
+                    const hx2 = @as(usize, 1 + dx) + x;
 
-                    const is_solid_or_liquid = sprite.isSolid() or sprite.isLiquid();
-                    if ((!current_sprite.isLiquid() and shouldHaveEdgeFlags(sprite)) or (current_sprite.isLiquid() and is_solid_or_liquid)) {
-                        flags |= types.EdgeFlags.getFlagBit(dx, dy);
-                    }
-                    if (sprite == current_sprite) {
+                    const connects = if (current_liquid) halo_solid_or_liquid[hy2][hx2] else halo_flagworthy[hy2][hx2];
+                    if (connects) flags |= types.EdgeFlags.getFlagBit(dx, dy);
+                    if (halo[hy2][hx2] == current_sprite) {
                         id_flags |= types.EdgeFlags.getFlagBit(dx, dy);
                     }
                 }
@@ -2297,6 +2362,20 @@ fn addEdgeFlagsFractal(target_chunk: *Chunk, key: DepthCoordinate) void {
         }
     }
 
+    // Read the sprite rule table once per halo cell rather than once per (cell, neighbor) pair;
+    // see the matching pass in `addEdgeFlags()`.
+    var halo_sprite: [18][18]Sprite = undefined;
+    var halo_flagworthy: [18][18]bool = undefined;
+    var halo_solid_or_liquid: [18][18]bool = undefined;
+    for (0..18) |hy2| {
+        for (0..18) |hx2| {
+            const s = halo[hy2][hx2].id;
+            halo_sprite[hy2][hx2] = s;
+            halo_flagworthy[hy2][hx2] = shouldHaveEdgeFlags(s);
+            halo_solid_or_liquid[hy2][hx2] = s.isSolid() or s.isLiquid();
+        }
+    }
+
     // Process center blocks using local halo reads
     for (0..CHUNK_SIZE) |block_y| {
         for (0..CHUNK_SIZE) |block_x| {
@@ -2319,18 +2398,18 @@ fn addEdgeFlagsFractal(target_chunk: *Chunk, key: DepthCoordinate) void {
             const state = water.getWaterFlags(top_nb, bottom_nb, left_nb, right_nb, above_left_nb, above_right_nb);
 
             // Same-sprite flags computed for ALL foundation blocks (see `addEdgeFlags()` for the toggle note).
+            const current_liquid = current_sprite.isLiquid();
             var flags: u8 = 0;
             var id_flags: u8 = 0;
             inline for (.{ -1, 0, 1 }) |dy| {
                 inline for (.{ -1, 0, 1 }) |dx| {
                     if (dx == 0 and dy == 0) continue;
-                    const block = halo[@intCast(ly + dy)][@intCast(lx + dx)];
-                    const sprite = block.id;
-                    const is_solid_or_liquid = sprite.isSolid() or sprite.isLiquid();
-                    if ((!current_sprite.isLiquid() and shouldHaveEdgeFlags(sprite)) or (current_sprite.isLiquid() and is_solid_or_liquid)) {
-                        flags |= types.EdgeFlags.getFlagBit(dx, dy);
-                    }
-                    if (sprite == current_sprite) {
+                    const hy2: usize = @intCast(ly + dy);
+                    const hx2: usize = @intCast(lx + dx);
+
+                    const connects = if (current_liquid) halo_solid_or_liquid[hy2][hx2] else halo_flagworthy[hy2][hx2];
+                    if (connects) flags |= types.EdgeFlags.getFlagBit(dx, dy);
+                    if (halo_sprite[hy2][hx2] == current_sprite) {
                         id_flags |= types.EdgeFlags.getFlagBit(dx, dy);
                     }
                 }
@@ -2857,15 +2936,16 @@ pub fn clearCaches(comptime clear_ancestors: bool) void {
     @memset(&quad_cache.seed_clock_bits, 0);
     @memset(&quad_cache.seed_hand, 0);
     @memset(&quad_cache.seed_cache_keys, @splat(DepthCoordinate.invalid));
+    dw.ancestor.clearChunkNoise();
+    dw.ancestor.clearParentHoods();
 
-    // debug-only: a structure placement is a pure function of its cell and the structure seed,
-    // which the per-entry seed check already invalidates on, so a reseed or a teleport has nothing to drop here.
-    // HOWEVER! in debug, there's sliders that change the terrain. so yeah, we need to reset here then
-    if (dw.is_debug) {
-        for (dw.structures.struct_cache[0..]) |*row| {
-            @memset(row, .{});
-        }
-    }
+    // A debug slider changes what the terrain functions answer without changing the seed, so the
+    // memoized terrain has to go with it. Bumping the epoch retires every entry of the base terrain
+    // and foundation caches at once (see `procedural.terrainGeneration()`); release cannot reach this.
+    procedural.invalidateTuning();
+
+    // Nothing to do for the structure banks: every entry carries the seed AND the terrain generation
+    // it was resolved under, so a reseed or a slider retires it on its next read.
 
     if (clear_ancestors) dw.ancestor.ancestor_cache.clear();
 }
@@ -4040,14 +4120,18 @@ test "computeParentLayer: scales a point into its parent chunk with no pivot" {
     }
 
     memory.game = .{};
-    memory.game.depth = 11; // below HORIZON_DEPTH, so no rebase; parent 10 clears STARTING_ZOOM_TIMES
+    // Below HORIZON_DEPTH so there is no rebase, and at least one past STARTING_ZOOM_TIMES so the
+    // parent still clears it. Derived, not hardcoded: a larger spawn world used to walk into the
+    // `depth >= STARTING_ZOOM_TIMES` assert in `computeParentLayer()` and take the whole suite with it.
+    const test_depth = @max(11, STARTING_ZOOM_TIMES + 1);
+    memory.game.depth = test_depth;
     memory.game.player_chunk = .{ 13, 21 };
     max_possible_suffix = getMaxSuffixAtDepth(memory.game.depth);
     quad_cache.path_hashes.value[0] = memory.game.seed;
 
     const up = computeParentLayer(memory.game.getPlayerCoord(), .{ 1000, 500 });
 
-    try testing.expectEqual(@as(u64, 10), up.depth);
+    try testing.expectEqual(test_depth - 1, up.depth);
     // Zooming out shifts the suffix right by one cell.
     try testing.expectEqual(@as(Vec2u, .{ 3, 5 }), up.player_chunk);
 
@@ -4074,7 +4158,11 @@ test "AscentStep: a return reads the frame back rather than recomputing it" {
     ascent_stack.clearRetainingCapacity();
 
     memory.game = .{};
-    memory.game.depth = 11; // below HORIZON_DEPTH, so no rebase; parent 10 clears STARTING_ZOOM_TIMES
+    // Below HORIZON_DEPTH so there is no rebase, and at least one past STARTING_ZOOM_TIMES so the
+    // parent still clears it. Derived, not hardcoded: a larger spawn world used to walk into the
+    // `depth >= STARTING_ZOOM_TIMES` assert in `computeParentLayer()` and take the whole suite with it.
+    const test_depth = @max(11, STARTING_ZOOM_TIMES + 1);
+    memory.game.depth = test_depth;
     memory.game.player_chunk = .{ 13, 21 };
     memory.game.player_pos = .{ 1000, 500 };
     max_possible_suffix = getMaxSuffixAtDepth(memory.game.depth);

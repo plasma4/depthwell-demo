@@ -14,21 +14,36 @@ const CHUNK_SIZE_SQ = dw.CHUNK_SIZE_SQ;
 const CHUNK_SIZE_FLOAT = dw.CHUNK_SIZE_FLOAT;
 const SUBPIXELS_IN_CHUNK = dw.SUBPIXELS_IN_CHUNK;
 
-/// Sets the number of times the `push_layer` function is called in `startup.init()`.
-/// If set to n, the game will start off by being n ** ZOOM_FACTOR chunks wide in both dimensions.
-pub const STARTING_ZOOM_TIMES = 6;
-/// Sets the player's spawn randomly (if `STARTING_ZOOM_TIMES` is positive).
+/// Sets the player's spawn randomly when `STARTING_ZOOM_TIMES` is positive.
 const SET_PLAYER_SPAWN_RANDOMLY = true;
 
-comptime {
-    // technically, floating-point inaccuracies start to ~3% influence procedural generation at STARTING_ZOOM_TIMES = 7
-    // since the max coordinate from a block perspective is 2 ^ (7 * ZOOM_LOG2 + 4) and 2 ^ (7 * ZOOM_LOG2) from a chunk perspective
-    // that ends up meaning that you're using 18 of 23 bits of precision in f32
-    // any more than that would be pretty bad, probably; 3% precision jitter is pretty much negligible
+/// Sets the number of times `push_layer` is called in `startup.init()`.
+/// If set to n, the game starts at a scale of `4^n` chunks wide in each dimension.
+pub const STARTING_ZOOM_TIMES = 13;
 
-    // note that setting STARTING_ZOOM_TIMES to 0 or 1 may result in fully empty or boring chunks
-    if (STARTING_ZOOM_TIMES < 0 or STARTING_ZOOM_TIMES > 7) {
-        @compileError("STARTING_ZOOM_TIMES must be between 0 and 7 to prevent floating point or logic issues!");
+comptime {
+    // bit of yapping analysis
+    // floating-point precision starts to affect procedural generation noticeably around:
+    // - 48 bits for f64 (53 bits precision total, implicit leading bit)
+    // - 20 bits for f32 (24 bits precision total, including implicit leading bit)
+    // for f64: this occurs when STARTING_ZOOM_TIMES = 22, for a 4 ** (2 + 22) world block width, jitter/clamping at 1/32nd occurs
+    // for f32: this occurs when STARTING_ZOOM_TIMES = 8, for a 4 ** (2 + 8) world block width, jitter/clamping to ~1/16th occurs
+    // decreasing STARTING_ZOOM_TIMES by just one makes the jitter 4x less so generally anything less than that is safe
+
+    // f32->f64 lowers perf significantly so instead we would rather eliminate f32 entirely and use integers
+    // rather than the engine's. see procedural.WORLEY_FLOAT_PLACEMENT:
+    // - at 7 and below, the Worley pass converts the coordinate to f32 directly, because it is still exact there
+    // - at 8 and above, it places the sample in fixed point instead, which never quantizes at any world size
+    //   (costs ~5% of computeBaseSpriteType(), so it stays off until it is actually needed)
+    // both routes agree to f32 rounding wherever both are valid, so crossing 7 changes the world's SIZE and not the world
+
+    // what binds now is integer width, not mantissa width: `structures.MAX_WORLD_BLOCK` is an i32
+    // (deliberately, it is what traps out-of-world structure probes), so a 4 ** (2 + 14) world overflows it.
+    // 13 is verified to build and pass the suite; going past it means widening the structure pass to i64.
+    if (STARTING_ZOOM_TIMES > 13) {
+        @compileError("STARTING_ZOOM_TIMES must be less than or equal to 13; structures.MAX_WORLD_BLOCK is an i32 and overflows past it!");
+    } else if (STARTING_ZOOM_TIMES < 0) {
+        @compileError("STARTING_ZOOM_TIMES must be positive to allow for 1 full chunk to generate!");
     }
 }
 

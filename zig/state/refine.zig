@@ -288,7 +288,7 @@ const rules = [_]struct { Sprite, Rule }{
     // A mushroom becomes two big mushrooms in the middle of its region, and a big mushroom keeps doing
     // the same: the pair IS the refined shape, so it is fixed rather than rolled.
     .{ .mushroom, mushroom_pair },
-    .{ .big_mushroom, mushroom_pair },
+    .{ .big_mushroom, floorScatter(1.4, 2) }, // TODO: add "mushroom tree" sprites and shape instead
 
     // The flower's two sprites share one rule; only its base ever stands on a floor.
     .{ .cornflower, flower_rule },

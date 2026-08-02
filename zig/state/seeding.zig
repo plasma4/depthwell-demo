@@ -321,14 +321,16 @@ pub const HashState = struct {
 /// Folds a small, low-entropy value (a depth, a field id) into a seed lane.
 /// Useful for avalanching seeds (non-cryptographic); intentionally separate constants.
 pub const NoiseMix = struct {
-    // unironically, it's as simple as `openssl prime -generate -bits 64`.
-    const A: u64 = 16345503884828661061;
-    const B: u64 = 14692970800855061447;
-    const C: u64 = 16718323720851214277;
-    const D: u64 = 16201838404200683783;
+    // it's as simple as `openssl rand -hex 8` (+@popCount() check using another language but whatever)
+    // a specific shell function is left as an exercise to the reader
+    const A: u64 = 0x465b4e4aec1a19a5;
+    const B: u64 = 0xffd51ce1147d52a3;
+    const C: u64 = 0xbe6a3ddc83e2904b;
+    const D: u64 = 0xecf5e85671b64339;
 
     comptime {
         for ([_]u64{ A, B, C, D }) |k| {
+            if (@popCount(k) < 28 or @popCount(k) > 36) @compileError("NoiseMix constants must have a @popcount() betwen 28-36 inclusive.");
             if (k % 2 == 0) @compileError("NoiseMix constants must be odd to stay bijective under multiplication.");
         }
     }
