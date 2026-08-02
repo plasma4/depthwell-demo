@@ -1,5 +1,5 @@
 //! Handles debug options for sliders and buttons, and contains functions to pass these to JS.
-//! Only imported if `dw.is_debug` is true.
+//! Only imported if `dw.dev_tools` is true.
 const std = @import("std");
 const dw = @import("../root.zig");
 const main = dw.startup;
@@ -229,7 +229,8 @@ fn teleportRandomly() void {
 
 /// Handles a slider change to a new specified value.
 pub fn changeSlider(id: u32, val: f64) void {
-    if (id >= sliders.len and id < 0) @panic("Slider ID invalid!");
+    // `id` is unsigned, so only the upper bound can fail; the old `and id < 0` made this unreachable.
+    if (id >= sliders.len) @panic("Slider ID invalid!");
     if (sliders.len == 0) return;
     const s = sliders[id];
     s.val.* = val;
@@ -243,7 +244,7 @@ pub fn changeSlider(id: u32, val: f64) void {
 
 /// Handles the action or toggle of a button press.
 pub fn clickButton(id: u32) void {
-    if (id >= buttons.len and id < 0) @panic("Button ID invalid!");
+    if (id >= buttons.len) @panic("Button ID invalid!");
 
     const b = buttons[id];
     if (b.action) |func| {

@@ -1,7 +1,6 @@
 const std = @import("std");
 const dw = @import("../root.zig");
 
-const is_debug = dw.is_debug;
 const memory = dw.memory;
 const procedural = dw.procedural;
 
@@ -376,7 +375,7 @@ pub const Sprite = enum(u16) {
     /// Determines if the sprite is a heatmap (between types 65000-65256).
     pub inline fn isHeatmap(self: Sprite) bool {
         const id = @intFromEnum(self);
-        return is_debug and id >= 65000 and id <= 65256;
+        return dw.dev_tools and id >= 65000 and id <= 65256;
     }
 
     /// What this sprite becomes at increased depth and how often, or null when it stays as it is.
@@ -932,7 +931,7 @@ pub const Category = enum(u3) {
     /// Assumed to be instantly mineable.
     decor,
     /// Fixed installation (furnace, core, chest, portal).
-    /// Unmineable by normal pickaxe and waterloggable like decor (doesn't look like a full block).
+    /// Unmineable by a normal pickaxe and waterloggable like decor (doesn't look like a full block).
     interactive,
 };
 

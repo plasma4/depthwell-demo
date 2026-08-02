@@ -162,8 +162,7 @@ export class SaveManager {
     /** Serializes the full game state and copies it out of WASM memory into a standalone buffer. */
     private exportBytes(): Uint8Array {
         const len = Number(this.engine.exports.saveExportAll());
-        if (len === 0)
-            throw new Error("saveExportAll returned 0 (serialization failed)");
+        if (len === 0) throw new Error("saveExportAll() serialization failed!");
         const ptr = Number(this.engine.exports.saveGetExportPtr());
 
         // On single-core builds, the WASM heap is a normal ArrayBuffer, so a direct slice is enough.
@@ -178,7 +177,7 @@ export class SaveManager {
      */
     private async serializeBudgeted(): Promise<Uint8Array> {
         const total = Number(this.engine.exports.saveBeginSnapshot());
-        if (total < 0) throw new Error("saveBeginSnapshot failed");
+        if (total < 0) throw new Error("saveBeginSnapshot() failed");
 
         const startTime = performance.now();
         const TARGET_SAVE_TIME_MS = 11500; // target save duration within the 12-second limit

@@ -3,7 +3,6 @@ const std = @import("std");
 const dw = @import("../root.zig");
 const memory = dw.memory;
 const is_wasm = dw.is_wasm;
-const is_debug = dw.is_debug;
 
 /// Describes the category/severity of the message being sent.
 pub const LogCategory = enum(i32) {
@@ -337,10 +336,10 @@ fn formatArgs(writer: anytype, args: anytype) !void {
     }
 }
 
-/// Writes formatted text to one of the four UI text buffers. No-op in release modes.
+/// Writes formatted text to one of the four UI text buffers. No-op without `dw.dev_tools`.
 /// Argument can be a simple literal, complex nested struct, and most other things.
 pub inline fn write(buffer_id: u2, args: anytype) void {
-    if (!is_debug) return;
+    if (!dw.dev_tools) return;
 
     const targets = [4][]u8{ text_1, text_2, text_3, text_4 };
     const buf = targets[buffer_id];
@@ -391,9 +390,9 @@ fn writerTruncate(writer: *std.Io.Writer, args: anytype) bool {
     return true;
 }
 
-/// Clears the text from a specific UI buffer (id 0-3). No-op in release modes.
+/// Clears the text from a specific UI buffer (id 0-3). No-op without `dw.dev_tools`.
 pub fn clear(id: u2) void {
-    if (!is_debug) return;
+    if (!dw.dev_tools) return;
     text_lengths[id] = 0;
     if (dw.is_wasm) {
         const targets = [4][]u8{ text_1, text_2, text_3, text_4 };
