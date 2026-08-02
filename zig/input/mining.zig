@@ -15,7 +15,7 @@ pub var mining_progress: u64 = 0;
 pub var mining_speed: u64 = 8;
 
 /// How much `hp` the tool takes off the block every time `mining_progress` reaches the block's strength.
-/// Mining progress accumulates by `mining_speed` every logical.
+/// Mining progress accumulates by `mining_speed` every logical tick.
 pub var mining_strength: u4 = 1;
 
 /// Current selected block's HP. Should be from 0-15 normally, and 255 if block is empty.
@@ -196,13 +196,13 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
         }
 
         // Are we breaking something, or placing into empty air?
+        const in_creative = inventory.isInCreative();
         if (sprite_type.isEmpty() or !block.isEmpty()) {
             // mining or replacing case
             mining_progress += if (logic_speed == 1.0)
                 mining_speed
             else
                 @as(u64, @intFromFloat(@as(f64, @floatFromInt(mining_speed)) * logic_speed));
-            const in_creative = inventory.isInCreative();
 
             const can_mine_block = in_creative or (canMine(pickaxe_type, block.id) and !is_protected);
             const near_enough = in_creative or isLitForMining();
@@ -347,7 +347,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
         } else if (is_protected) {
             selected_hp = 255;
             mining_progress = 0;
-        } else if (block.isEmpty() and sprite_type.isInWorld()) {
+        } else if (block.isEmpty() and (in_creative or isLitForMining())) {
             // placing into empty air!
             if (inventory.removeFromInventory(sprite_type)) {
                 if (world.modifyBlockType(

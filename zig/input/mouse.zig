@@ -238,7 +238,8 @@ pub fn updateMouseLocation() void {
 /// Screen-space center of the block the mouse is over, in viewport pixels.
 /// Offsets the mouse's own screen position by its subpixel distance to the block center,
 /// so only `camera_scale` is needed (no camera interpolation).
-/// Assumes `updateMouseLocation()` has been called; null when the mouse is outside the world.
+///
+/// Precondition: `updateMouseLocation()` has been called; null when the mouse is outside the world.
 pub fn getMouseBlockCenterPx() ?dw.utils.Vec2f32 {
     const sub = mouse_subpixel orelse return null;
 

@@ -432,8 +432,25 @@ fn cornerDensities(parent_block: Block, n: [8]Block) @Vector(4, f32) {
     }) * @as(@Vector(4, f32), @splat(CORNER_UNIT));
 }
 
+/// Half-width of the corner jitter, in density units. Bounds the jitter term at `+/-` this,
+/// which is what lets `carvesSlope()` answer without sampling it when the corners already decide.
+const JITTER_SPAN = 0.4 * CORNER_UNIT;
+
 /// If true, a block is deleted based on bilinear corner density and erosion noise.
-fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord, lx: u4, ly: u4) bool {
+///
+/// `warp` is the cell's own `warpField()`, passed in rather than sampled here:
+/// `applyAncestorLogic()` needs the same vector for `warpedMaterial()`,
+/// and the two MUST be the same sample or the carved silhouette and the material it is cut from disagree.
+fn carvesSlope(
+    parent_block: Block,
+    n: [8]Block,
+    noise_seed: dw.utils.Vec2u,
+    warp: dw.utils.Vec2f32,
+    wx: WorldCoord,
+    wy: WorldCoord,
+    lx: u4,
+    ly: u4,
+) bool {
     // The core and its bridges outrank every density and erosion term below; see `CORE_MIN`.
     if (isProtectedCell(n, lx, ly)) return false;
 
@@ -443,8 +460,7 @@ fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx:
 
     const corners = cornerDensities(parent_block, n);
 
-    // Domain-warp bilinear coordinates to perturb surface contours and eliminate axis-aligned rectangular steps
-    const warp = warpField(noise_seed, wx, wy);
+    // Domain-warped bilinear coordinates perturb surface contours and remove axis-aligned rectangular steps.
     const warp_offset_x = (warp[0] - 0.5) * 1.8;
     const warp_offset_y = (warp[1] - 0.5) * 1.8;
 
@@ -460,14 +476,6 @@ fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx:
     );
     const weights: @Vector(4, f32) = .{ (1 - u) * (1 - v), u * (1 - v), (1 - u) * v, u * v };
 
-    // Continuous noise jitter!
-    const jitter = (procedural.getDualValueNoiseFixed(
-        noise_seed,
-        wx,
-        wy,
-        1.0 / 7.0,
-    )[0] - 0.5) * (0.8 * CORNER_UNIT);
-
     // horizontal/vertical groups of blocks on their own look lonely so we give them "supports" if you will
     const support = @reduce(.Add, corners) * 0.25;
     const body = std.math.clamp(
@@ -476,10 +484,33 @@ fn carvesSlope(parent_block: Block, n: [8]Block, noise_seed: dw.utils.Vec2u, wx:
         1.0,
     );
 
-    const density = @reduce(.Add, corners * weights) + jitter + BODY_BIAS * body;
+    // Everything the noise below can still move the verdict by is bounded, so the bounds are tested
+    // FIRST and the samples are only paid for where they can change the answer.
+    // The two terms are the jitter (`+/- JITTER_SPAN`) and the erosion mask
+    // (from 0-1 so it can only ever raise the carve threshold by at most `EROSION_DEPTH`).
+    const settled = @reduce(.Add, corners * weights) + BODY_BIAS * body;
+    // Carves whatever either sample says.
+    if (settled + JITTER_SPAN < SLOPE_THRESHOLD) return true;
+    // Solid whatever either sample says: too deep inside the parent for the mask to reach.
+    if (settled - JITTER_SPAN >= @max(3.5 * CORNER_UNIT, SLOPE_THRESHOLD + EROSION_DEPTH)) return false;
+
+    // Continuous noise jitter!
+    const jitter = (procedural.getDualValueNoiseFixed(
+        noise_seed,
+        wx,
+        wy,
+        1.0 / 7.0,
+    )[0] - 0.5) * (2 * JITTER_SPAN);
+
+    const density = settled + jitter;
 
     // Protect deep parent interiors based on continuous density field
     if (density >= 3.5 * CORNER_UNIT) return false;
+
+    // Same bounds again, now that the jitter is known: the mask is worth 4 more noise samples
+    // only in the band where it decides.
+    if (density < SLOPE_THRESHOLD) return true;
+    if (density >= SLOPE_THRESHOLD + EROSION_DEPTH) return false;
 
     return density < SLOPE_THRESHOLD + erosionMask(noise_seed, wx, wy) * EROSION_DEPTH;
 }
@@ -549,6 +580,45 @@ inline fn anchorsPortal(parent_neighbors: [8]Block) bool {
     return parent_neighbors[1].id == .portal or parent_neighbors[6].id == .invportal;
 }
 
+/// The two seed streams every cell of one chunk shares:
+/// the chunk's own seed material, and the per-depth, per-quadrant noise lane.
+///
+/// Both are pure functions of the `DepthCoordinate`, and `applyAncestorLogic()` runs once per BLOCK,
+/// so resolving them per block repeated one set-associative lookup plus a `mixChunkSeeds()` 256 times a chunk.
+const ChunkNoise = struct {
+    /// Feeds the per-block hash that becomes `Block.seed`.
+    hash_lane: dw.utils.Vec2u,
+    /// Feeds every terrain noise field this depth evaluates.
+    noise_seed: dw.utils.Vec2u,
+};
+
+/// Single-entry memo of `chunkNoise()`. One entry is enough: generation walks a chunk to completion
+/// before it moves to the next, and a miss costs exactly what the uncached path always cost.
+/// `world.clearCaches()` drops it, since a reseed leaves the same key naming different seeds.
+var chunk_noise_key: DepthCoordinate = DepthCoordinate.invalid;
+var chunk_noise_value: ChunkNoise = undefined;
+
+/// Drops the `chunkNoise()` memo. Call whenever the seeds behind a `DepthCoordinate` may have changed.
+pub fn clearChunkNoise() void {
+    chunk_noise_key = DepthCoordinate.invalid;
+}
+
+fn chunkNoise(key: DepthCoordinate) ChunkNoise {
+    if (chunk_noise_key.depth != 0 and chunk_noise_key.eql(key)) return chunk_noise_value;
+
+    const seeds = world.quad_cache.getChunkSeeds(key);
+    const quadrant_seed = world.quad_cache.getQuadrantSeed(@intCast(key.quadrant), key.depth);
+    chunk_noise_value = .{
+        .hash_lane = .{ seeds.value[0].value[2], seeds.value[0].value[3] },
+        .noise_seed = .{
+            seeding.NoiseMix.lane(quadrant_seed.value[0], key.depth),
+            seeding.NoiseMix.lane(quadrant_seed.value[1], ~key.depth),
+        },
+    };
+    chunk_noise_key = key;
+    return chunk_noise_value;
+}
+
 /// Evaluates child block evolution from its parent block and 8 parent neighbors.
 /// Handles water volume propagation, slope carving, material warping, and ore dispersal.
 pub fn applyAncestorLogic(
@@ -562,12 +632,8 @@ pub fn applyAncestorLogic(
     // const parent_seed = parent_block.seed;
 
     if (parent_sprite.isEmpty()) return .{};
-    const seeds = world.quad_cache.getChunkSeeds(key);
-    const noise_hash_2 = seeding.FastHash.hash2d(
-        .{ seeds.value[0].value[2], seeds.value[0].value[3] },
-        bx,
-        by,
-    );
+    const chunk_noise = chunkNoise(key);
+    const noise_hash_2 = seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by);
     if (parent_sprite == .edge_stone)
         return .{ .id = parent_sprite, .seed = noise_hash_2 };
 
@@ -576,11 +642,7 @@ pub fn applyAncestorLogic(
 
     const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
     const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
-    const quadrant_seed = world.quad_cache.getQuadrantSeed(@intCast(key.quadrant), key.depth);
-    const noise_seed: dw.utils.Vec2u = .{
-        seeding.NoiseMix.lane(quadrant_seed.value[0], key.depth),
-        seeding.NoiseMix.lane(quadrant_seed.value[1], ~key.depth),
-    };
+    const noise_seed = chunk_noise.noise_seed;
     const wx = worldBlock(@intCast(key.quadrant % 2), key.suffix[0], bx);
     const wy = worldBlock(@intCast(key.quadrant / 2), key.suffix[1], by);
 
@@ -638,12 +700,13 @@ pub fn applyAncestorLogic(
     // Every other refined decoration makes the same demand of the individual CELLS its own children
     // land on (`refine.protectsSurfaceCell()`), rather than of a whole row: a region holds one or two
     // copies, so everything else here still erodes normally.
+    // One sample for both the carve and the material pick; see `carvesSlope()`.
+    const warp = warpField(noise_seed, wx, wy);
     if (!anchorsPortal(parent_neighbors) and
         !dw.refine.protectsSurfaceCell(parent_neighbors, noise_seed, wx, wy, lx, ly) and
-        carvesSlope(parent_block, parent_neighbors, noise_seed, wx, wy, lx, ly)) return .{};
+        carvesSlope(parent_block, parent_neighbors, noise_seed, warp, wx, wy, lx, ly)) return .{};
 
     // Now, resolve material domain warping for solid cells.
-    const warp = warpField(noise_seed, wx, wy);
     const source = warpedMaterial(parent_block, parent_neighbors, warp, lx, ly);
 
     // Provenance travels with the material the warp picked, and counts down as it goes: a shrub's
@@ -681,12 +744,12 @@ pub fn applyAncestorLogic(
         };
     }
 
-    // The odds and the anchor rules (a vine needs a ceiling, moss mostly stays moss) both live in
-    // `refine.evolve()`; the warped material is what evolves here, not the parent's own sprite.
+    // the odds and the anchor rules (such as vines needing suspension) both live in refine.evolve()
+    // the warped material is what evolves here, not the parent's own sprite
     const evolution = dw.refine.evolve(source.id, cell);
     var evolved_sprite: Sprite = evolution.id;
     var child_tag = tag;
-    // A fresh chain starts at run 1, so the next depth can continue and cap it from here.
+    // a fresh chain starts at run 1, so the next depth can continue and cap it from here
     if (evolution.starts_chain) child_tag = .make(.chain_run, 1);
 
     if (source.id.isStone()) {
@@ -702,7 +765,7 @@ pub fn applyAncestorLogic(
             wx,
             wy,
             key.depth,
-            noise_seed,
+            .fromChunkSeed(noise_seed),
             tag,
         )) |ore| {
             evolved_sprite = ore;
@@ -724,6 +787,144 @@ pub fn applyAncestorLogic(
         .seed = noise_hash_2,
         .tag = child_tag,
     };
+}
+
+/// A parent block and its 8 neighbors, as `applyAncestorLogic()` wants them.
+pub const ParentHood = struct {
+    parent: Block,
+    neighbors: [8]Block align(8),
+};
+
+/// Memo of `resolveParentHood()`, keyed by the PARENT cell rather than the child block.
+///
+/// `BLOCKS_PER_PARENT` squared child cells (16) share one parent cell, and every one of them used to
+/// walk the same 3x3 parent neighborhood from scratch: 9 recursive resolutions each, 144 for a region
+/// that has exactly 9 distinct answers. The walk is chunk-granular (it resolves through `ancestor_cache`).
+///
+/// Set-associative rather than direct-mapped, because the 9 cells of one neighborhood are ADJACENT,
+/// and a direct-mapped tile would have them evict each other on the very next child cell.
+const ParentHoodCache = struct {
+    /// Sets, chosen so a chunk's worth of parent cells (16 across a chunk edge, plus the halo)
+    /// stays resident through one generation pass.
+    const SETS = 64;
+    /// Ways per set. 4 covers the 2x2 parent cells a child chunk's own region spans, plus a halo cell.
+    const WAYS = 4;
+
+    const Entry = struct {
+        key: DepthCoordinate = DepthCoordinate.invalid,
+        bx: u4 = 0,
+        by: u4 = 0,
+        hood: ParentHood = undefined,
+    };
+
+    entries: [SETS][WAYS]Entry = @splat(@splat(.{})),
+    /// Round-robin victim per set. No CLOCK here: the access pattern is a sweep, not a working set,
+    /// so recency buys nothing over plain rotation.
+    hand: [SETS]std.math.Log2Int(std.meta.Int(.unsigned, WAYS)) = @splat(0),
+    /// `mod_store.content_generation` these entries were resolved under. A parent hood is derived from
+    /// blocks the player can edit, so ANY store write retires the whole cache.
+    generation: u64 = 0,
+
+    comptime {
+        if (!std.math.isPowerOfTwo(SETS) or !std.math.isPowerOfTwo(WAYS))
+            @compileError("ParentHoodCache set and way counts must be powers of two.");
+        // A parent region is BLOCKS_PER_PARENT wide, so a child chunk spans this many parent cells per axis;
+        // the cache is pointless if one chunk's sweep cannot hold its own row of them.
+        if (SETS * WAYS < (dw.CHUNK_SIZE / dw.BLOCKS_PER_PARENT) * (dw.CHUNK_SIZE / dw.BLOCKS_PER_PARENT))
+            @compileError("ParentHoodCache is too small to hold one child chunk's parent cells.");
+    }
+
+    inline fn setOf(key: DepthCoordinate, bx: u4, by: u4) usize {
+        return @intCast((key.hash() ^ (@as(u64, by) << 4) ^ bx) % SETS);
+    }
+
+    fn get(self: *@This(), key: DepthCoordinate, bx: u4, by: u4) ?*const ParentHood {
+        const set = &self.entries[setOf(key, bx, by)];
+        for (set) |*e| {
+            if (e.key.depth != 0 and e.bx == bx and e.by == by and e.key.eql(key)) return &e.hood;
+        }
+        return null;
+    }
+
+    fn put(self: *@This(), key: DepthCoordinate, bx: u4, by: u4, hood: ParentHood) void {
+        const idx = setOf(key, bx, by);
+        const way = self.hand[idx];
+        self.hand[idx] +%= 1; // wraps mod WAYS (power of two)
+        self.entries[idx][way] = .{ .key = key, .bx = bx, .by = by, .hood = hood };
+    }
+
+    pub fn clear(self: *@This()) void {
+        for (&self.entries) |*set| {
+            for (set) |*e| e.key = DepthCoordinate.invalid;
+        }
+        @memset(&self.hand, 0);
+    }
+};
+
+var parent_hood_cache: ParentHoodCache = .{};
+
+/// Drops the parent neighborhood memo. Called by `world.clearCaches()`.
+pub fn clearParentHoods() void {
+    parent_hood_cache.clear();
+}
+
+/// The parent block at (`parent_key`, `bx`, `by`) and its 8 neighbors, row-major with the center removed.
+/// Border cells read as `world_edge_block`: air out there would have the terrain erode toward it.
+fn resolveParentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {
+    var hood: ParentHood = .{
+        .parent = getInheritedMaterial(parent_key, bx, by),
+        .neighbors = undefined,
+    };
+    const coord = parent_key.asCoord();
+
+    var n_idx: usize = 0;
+    var dy: i32 = -1;
+    while (dy <= 1) : (dy += 1) {
+        var dx: i32 = -1;
+        while (dx <= 1) : (dx += 1) {
+            if (dx == 0 and dy == 0) continue;
+
+            const lx = @as(i32, @intCast(bx)) + dx;
+            const ly = @as(i32, @intCast(by)) + dy;
+            const chunk_off_x = @divFloor(lx, dw.CHUNK_SIZE);
+            const chunk_off_y = @divFloor(ly, dw.CHUNK_SIZE);
+
+            // moveAtDepth() returns null only at the world border, where it should be edge_stone
+            // (see world.world_edge_block for why air here would be corrosive)
+            const target_nc = coord.moveAtDepth(
+                .{ chunk_off_x, chunk_off_y },
+                parent_key.depth,
+            ) orelse {
+                hood.neighbors[n_idx] = world.world_edge_block;
+                n_idx += 1;
+                continue;
+            };
+
+            // This uses AncestorCache!
+            hood.neighbors[n_idx] = getInheritedMaterial(
+                target_nc.asDepthCoordinate(parent_key.depth),
+                @intCast(@mod(lx, dw.CHUNK_SIZE)),
+                @intCast(@mod(ly, dw.CHUNK_SIZE)),
+            );
+            n_idx += 1;
+        }
+    }
+    return hood;
+}
+
+/// `resolveParentHood()` through the memo; see `ParentHoodCache`.
+fn parentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {
+    const generation = world.mod_store.content_generation;
+    if (parent_hood_cache.generation != generation) {
+        parent_hood_cache.clear();
+        parent_hood_cache.generation = generation;
+    } else if (parent_hood_cache.get(parent_key, bx, by)) |hit| {
+        return hit.*;
+    }
+
+    const hood = resolveParentHood(parent_key, bx, by);
+    parent_hood_cache.put(parent_key, bx, by, hood);
+    return hood;
 }
 
 /// Recursively traces the lineage of a single block type up to parent depths, overlaying player modifications.
@@ -754,46 +955,12 @@ pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
         return slot.blocks[block_idx];
     }
 
+    // Memoized on the PARENT cell, which all `BLOCKS_PER_PARENT` squared children of a region share;
+    // see `ParentHoodCache`.
     const p = getParentInfo(key, bx, by);
-    const parent_block = getInheritedMaterial(p.coord.asDepthCoordinate(target_depth - 1), p.bx, p.by);
+    const hood = parentHood(p.coord.asDepthCoordinate(target_depth - 1), p.bx, p.by);
 
-    // Fetch the 3x3 boundary of the parent block to pass to our ancestor logic
-    var neighbors: [8]Block align(8) = undefined;
-    var n_idx: usize = 0;
-
-    var dy: i32 = -1;
-    while (dy <= 1) : (dy += 1) {
-        var dx: i32 = -1;
-        while (dx <= 1) : (dx += 1) {
-            if (dx == 0 and dy == 0) continue;
-
-            const lx = @as(i32, @intCast(p.bx)) + dx;
-            const ly = @as(i32, @intCast(p.by)) + dy;
-            const chunk_off_x = @divFloor(lx, dw.CHUNK_SIZE);
-            const chunk_off_y = @divFloor(ly, dw.CHUNK_SIZE);
-
-            // moveAtDepth() returns null only at the world border, where it should be edge_stone
-            // (see world.world_edge_block for why air here would be corrosive)
-            const target_nc = p.coord.moveAtDepth(
-                .{ chunk_off_x, chunk_off_y },
-                target_depth - 1,
-            ) orelse {
-                neighbors[n_idx] = world.world_edge_block;
-                n_idx += 1;
-                continue;
-            };
-
-            // This uses AncestorCache!
-            neighbors[n_idx] = getInheritedMaterial(
-                target_nc.asDepthCoordinate(target_depth - 1),
-                @intCast(@mod(lx, dw.CHUNK_SIZE)),
-                @intCast(@mod(ly, dw.CHUNK_SIZE)),
-            );
-            n_idx += 1;
-        }
-    }
-
-    var block = applyAncestorLogic(parent_block, neighbors, key, bx, by).compile();
+    var block = applyAncestorLogic(hood.parent, hood.neighbors, key, bx, by).compile();
     if (world.mod_store.getCell(key, @intCast(block_idx))) |cell| cell.applyTo(&block);
     return block;
 }
@@ -876,7 +1043,8 @@ fn carvesAnywhere(parent_block: Block, n: [8]Block, lx: u4, ly: u4) bool {
         for (0..24) |px| {
             const wx = px * dw.BLOCKS_PER_PARENT + lx;
             const wy = py * dw.BLOCKS_PER_PARENT + ly;
-            if (carvesSlope(parent_block, n, seed, wx, wy, lx, ly)) return true;
+            const warp = warpField(seed, wx, wy);
+            if (carvesSlope(parent_block, n, seed, warp, wx, wy, lx, ly)) return true;
         }
     }
     return false;

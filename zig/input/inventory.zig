@@ -53,10 +53,10 @@ const DroppedItem = struct {
 pub var dropped_items: dw.Fifo(DroppedItem) = .{};
 
 pub inline fn isInCreative() bool {
-    return dw.is_debug and IN_CREATIVE;
+    return dw.dev_tools and IN_CREATIVE;
 }
 pub inline fn shouldShowAllItems() bool {
-    return dw.is_debug and (IN_CREATIVE or SHOW_ALL_INVENTORY_ITEMS);
+    return dw.dev_tools and (IN_CREATIVE or SHOW_ALL_INVENTORY_ITEMS);
 }
 
 /// Which row the selected sprite is in.

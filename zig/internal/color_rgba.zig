@@ -8,8 +8,10 @@ test "correct color byte length" {
 
 /// Represents a color. Note that WebGPU processes colors as `rgba16float` by default;
 /// this data is used to determine similarity of blocks and is not color-space compliant.
+///
+/// Assumes little-endian byte order.
 pub const ColorRgba = extern union {
-    /// Single-word access for quick equality checks. Assumes little-endian.
+    /// Single-word access for quick equality checks.
     word: u32,
     /// SIMD-ready vector access for RGBA components.
     v: [4]u8 align(4),
