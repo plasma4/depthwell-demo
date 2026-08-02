@@ -708,7 +708,7 @@ fn serialize(w: *Writer) !void {
 /// Serializes the entire game state into `save_buf`. Returns the byte length, or 0 on failure.
 /// Refuses while `in_tick` is set: the state is then not at a tick boundary and must never be persisted.
 pub fn exportAll() usize {
-    if (dw.is_debug and dw.procedural.USE_HEATMAP) {
+    if (dw.dev_tools and dw.procedural.USE_HEATMAP) {
         // no-op
         logger.log(@src(), "Refusing to export: heatmap data is garbage", .{});
         return 0;
@@ -734,7 +734,7 @@ pub fn getExportPtr() usize {
 
 /// Reserves `len` bytes in the load staging buffer and returns a pointer for JS to write into.
 pub fn prepareImport(len: usize) usize {
-    if (dw.is_debug and dw.procedural.USE_HEATMAP) {
+    if (dw.dev_tools and dw.procedural.USE_HEATMAP) {
         // no-op
         setImportError(error.Garbage);
         logger.log(@src(), "Refusing to export: heatmap data is garbage", .{});
@@ -935,7 +935,7 @@ fn clearShadow() void {
 /// Returns the number of chunks to write (feed to `writeBatch()`), or -1 on failure.
 /// Refuses while `in_tick` is set (see `exportAll()`).
 pub fn beginSnapshot() i64 {
-    if (dw.is_debug and dw.procedural.USE_HEATMAP) {
+    if (dw.dev_tools and dw.procedural.USE_HEATMAP) {
         // no-op
         logger.log(@src(), "Refusing to export: heatmap data is garbage", .{});
         return 0;

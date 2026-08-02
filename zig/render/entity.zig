@@ -76,7 +76,7 @@ pub fn updateEntities(time_diff: f64) void {
     dw.mouse.clearFrameFlags();
 
     // draw chunk preview at the front
-    if (dw.is_debug and preview_tile_size > 0.0) {
+    if (dw.dev_tools and preview_tile_size > 0.0) {
         dw.chunk_preview.drawChunkPreview();
     }
 
@@ -99,7 +99,7 @@ pub fn updateEntities(time_diff: f64) void {
     var buf: [128]u8 = undefined;
     const store = &dw.world.mod_store;
 
-    const msg = if (dw.is_debug)
+    const msg = if (dw.dev_tools)
         std.fmt.bufPrint(
             &buf,
             "{d} block{s} mined | mods: {d} chunk{s} / {d:.2}KB",

@@ -1,7 +1,7 @@
 const std = @import("std");
 const dw = @import("../root.zig");
 
-const is_debug = dw.is_debug;
+const dev_tools = dw.dev_tools;
 const memory = dw.memory;
 const procedural = dw.procedural;
 
@@ -376,7 +376,7 @@ pub const Sprite = enum(u16) {
     /// Determines if the sprite is a heatmap (between types 65000-65256).
     pub inline fn isHeatmap(self: Sprite) bool {
         const id = @intFromEnum(self);
-        return is_debug and id >= 65000 and id <= 65256;
+        return dev_tools and id >= 65000 and id <= 65256;
     }
 
     /// What this sprite becomes at increased depth and how often, or null when it stays as it is.
