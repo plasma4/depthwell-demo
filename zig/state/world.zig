@@ -4040,14 +4040,18 @@ test "computeParentLayer: scales a point into its parent chunk with no pivot" {
     }
 
     memory.game = .{};
-    memory.game.depth = 11; // below HORIZON_DEPTH, so no rebase; parent 10 clears STARTING_ZOOM_TIMES
+    // Below HORIZON_DEPTH so there is no rebase, and at least one past STARTING_ZOOM_TIMES so the
+    // parent still clears it. Derived, not hardcoded: a larger spawn world used to walk into the
+    // `depth >= STARTING_ZOOM_TIMES` assert in `computeParentLayer()` and take the whole suite with it.
+    const test_depth = @max(11, STARTING_ZOOM_TIMES + 1);
+    memory.game.depth = test_depth;
     memory.game.player_chunk = .{ 13, 21 };
     max_possible_suffix = getMaxSuffixAtDepth(memory.game.depth);
     quad_cache.path_hashes.value[0] = memory.game.seed;
 
     const up = computeParentLayer(memory.game.getPlayerCoord(), .{ 1000, 500 });
 
-    try testing.expectEqual(@as(u64, 10), up.depth);
+    try testing.expectEqual(test_depth - 1, up.depth);
     // Zooming out shifts the suffix right by one cell.
     try testing.expectEqual(@as(Vec2u, .{ 3, 5 }), up.player_chunk);
 
@@ -4074,7 +4078,11 @@ test "AscentStep: a return reads the frame back rather than recomputing it" {
     ascent_stack.clearRetainingCapacity();
 
     memory.game = .{};
-    memory.game.depth = 11; // below HORIZON_DEPTH, so no rebase; parent 10 clears STARTING_ZOOM_TIMES
+    // Below HORIZON_DEPTH so there is no rebase, and at least one past STARTING_ZOOM_TIMES so the
+    // parent still clears it. Derived, not hardcoded: a larger spawn world used to walk into the
+    // `depth >= STARTING_ZOOM_TIMES` assert in `computeParentLayer()` and take the whole suite with it.
+    const test_depth = @max(11, STARTING_ZOOM_TIMES + 1);
+    memory.game.depth = test_depth;
     memory.game.player_chunk = .{ 13, 21 };
     memory.game.player_pos = .{ 1000, 500 };
     max_possible_suffix = getMaxSuffixAtDepth(memory.game.depth);

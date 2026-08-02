@@ -15,7 +15,7 @@ pub var mining_progress: u64 = 0;
 pub var mining_speed: u64 = 8;
 
 /// How much `hp` the tool takes off the block every time `mining_progress` reaches the block's strength.
-/// Mining progress accumulates by `mining_speed` every logical.
+/// Mining progress accumulates by `mining_speed` every logical tick.
 pub var mining_strength: u4 = 1;
 
 /// Current selected block's HP. Should be from 0-15 normally, and 255 if block is empty.

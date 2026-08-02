@@ -64,6 +64,11 @@ pub const SeedType = enum {
     ores4,
     /// Used for ore generation at base depth.
     ores5,
+    /// Gem occurrence rolls. Separate from the `ores*` lanes on purpose:
+    /// the roll and the ore fields are read at the SAME block,
+    ///
+    /// Appended rather than inserted, so every stream above keeps the `seed2` slot it already had.
+    gems,
 };
 
 /// Longest seed string accepted, matching the host's generator and `seedFromBase26()`'s precondition.
@@ -408,7 +413,7 @@ pub const Block = packed struct(u128) {
     }
 
     /// Determines if the sprite's type is one that should interact with the edge flags and procedural generation.
-    /// This returns false for edge stone, unlike `isSolid()`. Assumes invalid block types are impossible.
+    /// This returns false for edge stone, unlike `isSolid()`.
     pub inline fn isFoundation(self: @This()) bool {
         return self.id.isFoundation();
     }

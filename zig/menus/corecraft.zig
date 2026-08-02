@@ -24,7 +24,8 @@ const Ingredient = struct { item: Sprite, count: u32 };
 /// One craft: a list of input items+quantities producing a single output item+quantity.
 const Recipe = struct { inputs: []const Ingredient, output: Ingredient };
 
-/// The recipe database. The grid layout and panel size automatically resize based on the length of this.
+/// The recipe database for what can be crafted into what!
+/// The grid layout and panel size automatically resize based on the length of this.
 const recipes = [_]Recipe{
     .{
         .inputs = &.{
@@ -43,7 +44,8 @@ const recipes = [_]Recipe{
 /// Slot grid: the panel sizes itself to hold `recipes.len` slots, wrapping at 5 columns.
 const grid = util.Grid(.{ .len = recipes.len, .cols = 5 });
 
-/// Menu panel size/placement in UV space (top-left aligned), anchored to the bottom-right so it never overlaps the bottom-left furnace panel.
+/// Menu panel size/placement in UV space (top-left aligned),
+/// anchored to the bottom-right so it never overlaps the bottom-left furnace panel.
 const MENU_SIZE: Vec2f32 = grid.SIZE_UV;
 const MENU_POS: Vec2f32 = .{ 0.98 - MENU_SIZE[0], 0.96 - MENU_SIZE[1] };
 
@@ -119,8 +121,10 @@ fn canCraft(recipe: Recipe) bool {
     return true;
 }
 
-/// Consumes a craftable recipe's inputs and grants its output. Assumes `canCraft(recipe)`.
+/// Consumes a craftable recipe's inputs and grants its output.
+/// Asserts that the recipe is craftable.
 fn doCraft(recipe: Recipe) void {
+    std.debug.assert(canCraft(recipe));
     if (!inventory.isInCreative()) {
         for (recipe.inputs) |in| {
             inventory.inventory_counts[@intFromEnum(in.item)] -= in.count;

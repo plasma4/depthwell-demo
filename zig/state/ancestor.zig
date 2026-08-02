@@ -702,7 +702,7 @@ pub fn applyAncestorLogic(
             wx,
             wy,
             key.depth,
-            noise_seed,
+            .fromChunkSeed(noise_seed),
             tag,
         )) |ore| {
             evolved_sprite = ore;
