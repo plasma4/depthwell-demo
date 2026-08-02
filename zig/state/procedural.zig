@@ -50,9 +50,9 @@ const TerrainData = struct {
 
 /// Generates a block for seeding (based on previous procedural generation logic).
 pub inline fn generateBaseProceduralSprite(d: *const TerrainData) Sprite {
-    // check is_debug because these will always be off in non-dev
+    // check dev_tools because these will always be off in non-dev
     // sprite IDs in this range create a heatmap
-    if (dw.is_debug and USE_HEATMAP and !USE_ORE_HEATMAP)
+    if (dw.dev_tools and USE_HEATMAP and !USE_ORE_HEATMAP)
         return @enumFromInt(65000 + @as(u20, @intFromFloat(d.density * 256.0)));
 
     const cutoff_density = d.density * d.cutoff;
@@ -139,7 +139,7 @@ fn computeBaseSpriteType(
         .ore_density = 0.0,
     };
 
-    if (dw.is_debug and USE_HEATMAP and !USE_ORE_HEATMAP) {
+    if (dw.dev_tools and USE_HEATMAP and !USE_ORE_HEATMAP) {
         base_data.sprite = generateBaseProceduralSprite(&base_data);
         return base_data;
     }
@@ -314,9 +314,9 @@ inline fn latticeAxis(v: WorldCoord, inv_scale: f32) LatticeAxis {
 }
 
 /// Returns a struct with an a `value: f64` and `getF32()`.
-/// Allows for numbers to act like variables in Debug mode and constant-fold in all Release modes.
+/// Allows for numbers to act like variables when the debug UI is built, and constant-fold when it is not.
 inline fn TuningFloat(comptime default_value: f64) type {
-    if (dw.is_debug) {
+    if (dw.dev_tools) {
         return struct {
             pub var value: f64 = default_value;
             pub inline fn getF32() f32 {
@@ -334,9 +334,9 @@ inline fn TuningFloat(comptime default_value: f64) type {
 }
 
 /// Returns a struct with an a `value: bool`.
-/// Allows for booleans to act like variables in Debug mode and dead code elimination in all Release modes.
+/// Allows for booleans to act like variables when the debug UI is built, and dead-code eliminate when it is not.
 inline fn TuningBool(comptime default_value: bool) type {
-    if (dw.is_debug) {
+    if (dw.dev_tools) {
         return struct {
             pub var value: bool = default_value;
         };
@@ -347,13 +347,13 @@ inline fn TuningBool(comptime default_value: bool) type {
     }
 }
 
-// When checking these heatmap values, ALWAYS add `dw.is_debug and USE_HEATMAP...` to the check.
+// When checking these heatmap values, ALWAYS add `dw.dev_tools and USE_HEATMAP...` to the check.
 
 /// Determines whether to use a heatmap or not for terrain.
-/// Ignored if `dw.is_debug` is false; must also be true if `USE_ORE_HEATMAP` is true.
+/// Ignored if `dw.dev_tools` is false; must also be true if `USE_ORE_HEATMAP` is true.
 pub var USE_HEATMAP = false;
 /// Determines whether to use a heatmap or not for ore generation.
-/// Ignored if `dw.is_debug` is false.
+/// Ignored if `dw.dev_tools` is false.
 pub var USE_ORE_HEATMAP = false;
 
 /// Configuration options passed to terrain noise generation (`getFbmValue()`).
@@ -426,7 +426,7 @@ pub var tuning_epoch: u64 = 0;
 
 /// Bumps `tuning_epoch`. Called by `dw.world.clearCaches()`, which every debug control routes through.
 pub fn invalidateTuning() void {
-    if (dw.is_debug) tuning_epoch +%= 1;
+    if (dw.dev_tools) tuning_epoch +%= 1;
 }
 
 /// Identity of the terrain every cache downstream of it holds; a mismatch drops the cache.
@@ -929,7 +929,7 @@ fn refreshDepthWindows(depth: u64) void {
 }
 
 inline fn depthWindows(depth: u64) *const [ORE_DISPERSALS.len]DepthWindow {
-    if (dw.is_debug or depth_windows_depth != depth) refreshDepthWindows(depth);
+    if (dw.dev_tools or depth_windows_depth != depth) refreshDepthWindows(depth);
     return &depth_windows;
 }
 
@@ -1123,7 +1123,7 @@ pub fn disperseOre(
 
 /// Applies the comptime ore palette to a base-depth stone block.
 pub fn addOresAndGems(base_data: TerrainData, x: WorldCoord, y: WorldCoord) Sprite {
-    if (dw.is_debug and USE_HEATMAP and USE_ORE_HEATMAP) {
+    if (dw.dev_tools and USE_HEATMAP and USE_ORE_HEATMAP) {
         const field = oreField(OreSeeds.atBaseDepth().field, x, y, 0, ORE_DISPERSALS[0]);
         return @enumFromInt(65000 + @as(u20, @intFromFloat(field * 256.0)));
     }
@@ -1533,7 +1533,7 @@ pub inline fn getDualValueNoiseFixed(
 
 /// Function that decides whether to use `getDualValueNoise()` or its fixed-scale variant if in debug.
 inline fn getDualValueNoiseTuned(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) dw.utils.Vec2f32 {
-    if (dw.is_debug) return getDualValueNoise(seed, x, y, inv_scale);
+    if (dw.dev_tools) return getDualValueNoise(seed, x, y, inv_scale);
     return getDualValueNoiseFixed(seed, x, y, inv_scale);
 }
 

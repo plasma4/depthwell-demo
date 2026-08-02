@@ -789,6 +789,145 @@ pub fn applyAncestorLogic(
     };
 }
 
+/// A parent block and its 8 neighbors, as `applyAncestorLogic()` wants them.
+pub const ParentHood = struct {
+    parent: Block,
+    neighbors: [8]Block align(8),
+};
+
+/// Memo of `resolveParentHood()`, keyed by the PARENT cell rather than the child block.
+///
+/// `BLOCKS_PER_PARENT` squared child cells (16) share one parent cell, and every one of them used to
+/// walk the same 3x3 parent neighborhood from scratch: 9 recursive resolutions each, 144 for a region
+/// that has exactly 9 distinct answers. The walk is chunk-granular one level up (it resolves through
+/// `ancestor_cache`), so this is the last per-block redundancy in the lineage trace.
+///
+/// Set-associative rather than direct-mapped, because the 9 cells of one neighborhood are ADJACENT
+/// and a direct-mapped tile would have them evict each other on the very next child cell.
+const ParentHoodCache = struct {
+    /// Sets, chosen so a chunk's worth of parent cells (16 across a chunk edge, plus the halo)
+    /// stays resident through one generation pass.
+    const SETS = 64;
+    /// Ways per set. 4 covers the 2x2 parent cells a child chunk's own region spans, plus a halo cell.
+    const WAYS = 4;
+
+    const Entry = struct {
+        key: DepthCoordinate = DepthCoordinate.invalid,
+        bx: u4 = 0,
+        by: u4 = 0,
+        hood: ParentHood = undefined,
+    };
+
+    entries: [SETS][WAYS]Entry = @splat(@splat(.{})),
+    /// Round-robin victim per set. No CLOCK here: the access pattern is a sweep, not a working set,
+    /// so recency buys nothing over plain rotation.
+    hand: [SETS]std.math.Log2Int(std.meta.Int(.unsigned, WAYS)) = @splat(0),
+    /// `mod_store.content_generation` these entries were resolved under. A parent hood is derived from
+    /// blocks the player can edit, so ANY store write retires the whole cache.
+    generation: u64 = 0,
+
+    comptime {
+        if (!std.math.isPowerOfTwo(SETS) or !std.math.isPowerOfTwo(WAYS))
+            @compileError("ParentHoodCache set and way counts must be powers of two.");
+        // A parent region is BLOCKS_PER_PARENT wide, so a child chunk spans this many parent cells per
+        // axis; the cache is pointless if one chunk's sweep cannot hold its own row of them.
+        if (SETS * WAYS < (dw.CHUNK_SIZE / dw.BLOCKS_PER_PARENT) * (dw.CHUNK_SIZE / dw.BLOCKS_PER_PARENT))
+            @compileError("ParentHoodCache is too small to hold one child chunk's parent cells.");
+    }
+
+    inline fn setOf(key: DepthCoordinate, bx: u4, by: u4) usize {
+        return @intCast((key.hash() ^ (@as(u64, by) << 4) ^ bx) % SETS);
+    }
+
+    fn get(self: *@This(), key: DepthCoordinate, bx: u4, by: u4) ?*const ParentHood {
+        const set = &self.entries[setOf(key, bx, by)];
+        for (set) |*e| {
+            if (e.key.depth != 0 and e.bx == bx and e.by == by and e.key.eql(key)) return &e.hood;
+        }
+        return null;
+    }
+
+    fn put(self: *@This(), key: DepthCoordinate, bx: u4, by: u4, hood: ParentHood) void {
+        const idx = setOf(key, bx, by);
+        const way = self.hand[idx];
+        self.hand[idx] +%= 1; // wraps mod WAYS (power of two)
+        self.entries[idx][way] = .{ .key = key, .bx = bx, .by = by, .hood = hood };
+    }
+
+    pub fn clear(self: *@This()) void {
+        for (&self.entries) |*set| {
+            for (set) |*e| e.key = DepthCoordinate.invalid;
+        }
+        @memset(&self.hand, 0);
+    }
+};
+
+var parent_hood_cache: ParentHoodCache = .{};
+
+/// Drops the parent neighborhood memo. Called by `world.clearCaches()`.
+pub fn clearParentHoods() void {
+    parent_hood_cache.clear();
+}
+
+/// The parent block at (`parent_key`, `bx`, `by`) and its 8 neighbors, row-major with the center removed.
+/// Border cells read as `world_edge_block`: air out there would have the terrain erode toward it.
+fn resolveParentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {
+    var hood: ParentHood = .{
+        .parent = getInheritedMaterial(parent_key, bx, by),
+        .neighbors = undefined,
+    };
+    const coord = parent_key.asCoord();
+
+    var n_idx: usize = 0;
+    var dy: i32 = -1;
+    while (dy <= 1) : (dy += 1) {
+        var dx: i32 = -1;
+        while (dx <= 1) : (dx += 1) {
+            if (dx == 0 and dy == 0) continue;
+
+            const lx = @as(i32, @intCast(bx)) + dx;
+            const ly = @as(i32, @intCast(by)) + dy;
+            const chunk_off_x = @divFloor(lx, dw.CHUNK_SIZE);
+            const chunk_off_y = @divFloor(ly, dw.CHUNK_SIZE);
+
+            // moveAtDepth() returns null only at the world border, where it should be edge_stone
+            // (see world.world_edge_block for why air here would be corrosive)
+            const target_nc = coord.moveAtDepth(
+                .{ chunk_off_x, chunk_off_y },
+                parent_key.depth,
+            ) orelse {
+                hood.neighbors[n_idx] = world.world_edge_block;
+                n_idx += 1;
+                continue;
+            };
+
+            // This uses AncestorCache!
+            hood.neighbors[n_idx] = getInheritedMaterial(
+                target_nc.asDepthCoordinate(parent_key.depth),
+                @intCast(@mod(lx, dw.CHUNK_SIZE)),
+                @intCast(@mod(ly, dw.CHUNK_SIZE)),
+            );
+            n_idx += 1;
+        }
+    }
+    return hood;
+}
+
+/// `resolveParentHood()` through the memo; see `ParentHoodCache`.
+fn parentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {
+    const generation = world.mod_store.content_generation;
+    if (parent_hood_cache.generation != generation) {
+        parent_hood_cache.clear();
+        parent_hood_cache.generation = generation;
+    } else if (parent_hood_cache.get(parent_key, bx, by)) |hit| {
+        return hit.*;
+    }
+
+    const hood = resolveParentHood(parent_key, bx, by);
+    parent_hood_cache.put(parent_key, bx, by, hood);
+    return hood;
+}
+
 /// Recursively traces the lineage of a single block type up to parent depths, overlaying player modifications.
 /// Accesses and potentially modifies `ancestor_cache`.
 pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
@@ -817,46 +956,12 @@ pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
         return slot.blocks[block_idx];
     }
 
+    // Memoized on the PARENT cell, which all `BLOCKS_PER_PARENT` squared children of a region share;
+    // see `ParentHoodCache`.
     const p = getParentInfo(key, bx, by);
-    const parent_block = getInheritedMaterial(p.coord.asDepthCoordinate(target_depth - 1), p.bx, p.by);
+    const hood = parentHood(p.coord.asDepthCoordinate(target_depth - 1), p.bx, p.by);
 
-    // Fetch the 3x3 boundary of the parent block to pass to our ancestor logic
-    var neighbors: [8]Block align(8) = undefined;
-    var n_idx: usize = 0;
-
-    var dy: i32 = -1;
-    while (dy <= 1) : (dy += 1) {
-        var dx: i32 = -1;
-        while (dx <= 1) : (dx += 1) {
-            if (dx == 0 and dy == 0) continue;
-
-            const lx = @as(i32, @intCast(p.bx)) + dx;
-            const ly = @as(i32, @intCast(p.by)) + dy;
-            const chunk_off_x = @divFloor(lx, dw.CHUNK_SIZE);
-            const chunk_off_y = @divFloor(ly, dw.CHUNK_SIZE);
-
-            // moveAtDepth() returns null only at the world border, where it should be edge_stone
-            // (see world.world_edge_block for why air here would be corrosive)
-            const target_nc = p.coord.moveAtDepth(
-                .{ chunk_off_x, chunk_off_y },
-                target_depth - 1,
-            ) orelse {
-                neighbors[n_idx] = world.world_edge_block;
-                n_idx += 1;
-                continue;
-            };
-
-            // This uses AncestorCache!
-            neighbors[n_idx] = getInheritedMaterial(
-                target_nc.asDepthCoordinate(target_depth - 1),
-                @intCast(@mod(lx, dw.CHUNK_SIZE)),
-                @intCast(@mod(ly, dw.CHUNK_SIZE)),
-            );
-            n_idx += 1;
-        }
-    }
-
-    var block = applyAncestorLogic(parent_block, neighbors, key, bx, by).compile();
+    var block = applyAncestorLogic(hood.parent, hood.neighbors, key, bx, by).compile();
     if (world.mod_store.getCell(key, @intCast(block_idx))) |cell| cell.applyTo(&block);
     return block;
 }

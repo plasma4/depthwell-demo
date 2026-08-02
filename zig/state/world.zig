@@ -420,6 +420,10 @@ pub const ModificationStore = struct {
     /// Incremented whenever `entries` is dropped (`init()`/`clear()`), invalidating any external index
     /// into it. A budgeted save snapshot compares this to detect a mid-save wipe and abort.
     generation: u64 = 0,
+    /// Incremented whenever the CONTENT of the store changes, which `generation` does not track
+    /// (that one only counts wipes). Anything that memoizes a value derived from a modified block
+    /// keys on this, so an edit retires it. See `ancestor.ParentHoodCache`.
+    content_generation: u64 = 0,
     allocator: std.mem.Allocator = undefined,
     /// Whether the containers below hold real allocations. Guards `deinit()` before the first `init()`.
     live: bool = false,
@@ -427,7 +431,12 @@ pub const ModificationStore = struct {
     /// Initializes in-place to avoid stack overflow problems. Frees anything a previous world left behind.
     pub fn init(self: *ModificationStore, allocator: std.mem.Allocator) void {
         self.deinit();
-        self.* = .{ .allocator = allocator, .live = true, .generation = self.generation +% 1 };
+        self.* = .{
+            .allocator = allocator,
+            .live = true,
+            .generation = self.generation +% 1,
+            .content_generation = self.content_generation +% 1,
+        };
     }
 
     /// Releases every allocation. Safe to call on a store that was never initialized.
@@ -467,6 +476,7 @@ pub const ModificationStore = struct {
         self.allocator.free(entry.cells);
         entry.* = .{};
         self.free_entries.append(self.allocator, kv.value) catch memory.oom();
+        self.content_generation +%= 1;
     }
 
     /// Completely wipes all user modifications. Should be followed by `world.clearCaches(true)`.
@@ -480,6 +490,7 @@ pub const ModificationStore = struct {
         self.entries.clearRetainingCapacity();
         self.free_entries.clearRetainingCapacity();
         self.generation +%= 1;
+        self.content_generation +%= 1;
     }
 
     /// Reserves an entry slot, reusing a freed one when possible.
@@ -517,7 +528,7 @@ pub const ModificationStore = struct {
         const idx = self.index.get(key) orelse blk: {
             const new_idx = self.allocEntry();
             self.index.put(self.allocator, key, new_idx) catch memory.oom();
-            if (dw.is_debug and TRACE_NEW_ENTRIES) dw.logger.info(
+            if (dw.dev_tools and TRACE_NEW_ENTRIES) dw.logger.info(
                 @src(),
                 "new ChunkMod ({s}) at depth {d}, quadrant {d}, suffix {d}/{d}",
                 .{ @tagName(kind), key.depth, key.quadrant, key.suffix[0], key.suffix[1] },
@@ -525,6 +536,9 @@ pub const ModificationStore = struct {
             break :blk new_idx;
         };
         dw.save.shadowEntryForSave(idx);
+        // Every write to the store comes through here (`beginWrite()` and `markDescendant()` both),
+        // so this is the one place a content change has to be announced.
+        self.content_generation +%= 1;
         return idx;
     }
 
@@ -554,6 +568,7 @@ pub const ModificationStore = struct {
         entry.cells = try self.allocator.alloc(ModCell, @max(cells.len, MIN_MOD_CELLS));
         @memcpy(entry.cells[0..cells.len], cells);
         try self.index.put(self.allocator, key, idx);
+        self.content_generation +%= 1;
     }
 
     /// Total bytes of live `ModCell` payload, for the debug HUD.
@@ -1158,7 +1173,7 @@ pub const SimBuffer = struct {
 
     /// Logs a single edge-flag mismatch found by `checkEdgeFlags()` (debug builds only).
     fn reportInvalidEdge(coord: Coordinate, bx: u4, by: u4, got: u8, expected: u8) void {
-        if (!dw.is_debug) return;
+        if (!dw.dev_tools) return;
         dw.logger.err(@src(), "Invalid edge flags at chunk {any} block ({d}, {d}): got 0b{b:0>8}, expected 0b{b:0>8}", .{ coord, bx, by, got, expected });
     }
 
@@ -2008,10 +2023,29 @@ pub fn getChunkPtr(coord: Coordinate) *const Chunk {
 /// then a flag recompute (replaying ids invalidates the flags the generator derived).
 ///
 /// This is the ONLY way a `mod_store` entry should become a `Chunk`; the store holds no block data of its own.
+///
+/// WHY THIS IS SPLIT FROM `generateChunk()`, and must stay split:
+/// `generateChunk()` is the world's DEFINITION and has to be a pure function of the seed alone.
+/// Every child depth is derived from its parent, so a generator that could see a modification would
+/// bake that modification into the terrain of every depth below it, and the same block would then
+/// generate differently depending on whether the player had happened to mine near it. `mod_store`
+/// stays a separate OVERLAY replayed on top, which is also what lets a save hold a handful of edited
+/// cells instead of the chunks, and what lets a worldgen fix repair an existing save.
 pub fn materializeChunk(chunk: *Chunk, key: DepthCoordinate) void {
-    generateChunk(chunk, key);
+    // Asked BEFORE generating so the flag pass can be skipped when it is about to be redone below.
+    // A bool rather than the entry itself: generation is a long call and nothing should hold a store
+    // pointer across it.
+    const modified = mod_store.contains(key);
+    const is_base = key.depth == STARTING_ZOOM_TIMES;
+
+    // The generator derives flags from the ids it just wrote. Replaying an edit changes those ids, so
+    // those flags are dead the moment `applyTo()` runs; deriving them twice is pure waste.
+    // The base depth is the exception: its decoration pass reads the flags while generating.
+    generateChunkInner(chunk, key, if (modified and !is_base) .skip_flags else .derive_flags);
 
     const entry = mod_store.get(key);
+    // Generation must never touch the store, or the flag pass skipped above would never be made up for.
+    std.debug.assert((entry != null) == modified);
     if (entry) |e| {
         e.applyTo(chunk);
         // Only meaningful while looking down at a deeper depth; at the deepest depth the markers left
@@ -2023,8 +2057,9 @@ pub fn materializeChunk(chunk: *Chunk, key: DepthCoordinate) void {
         }
     }
 
-    if (key.depth != STARTING_ZOOM_TIMES) {
-        if (entry != null) addEdgeFlagsFractal(chunk, key);
+    if (!is_base) {
+        // Exactly the pass `generateChunkInner()` was told to skip, now that the ids are final.
+        if (modified) addEdgeFlagsFractal(chunk, key);
         return;
     }
 
@@ -2046,12 +2081,29 @@ fn resetEmptyEdgeFlags(chunk: *Chunk) void {
     }
 }
 
+/// Whether `generateChunkInner()` finishes with the edge-flag pass, or leaves it to its caller.
+///
+/// Only `materializeChunk()` may skip it, and only because it derives the flags itself right after
+/// replaying the modifications. A chunk that leaves here with `.skip_flags` and never gets a flag
+/// pass carries whatever the last chunk in that memory happened to have.
+const FlagPass = enum { derive_flags, skip_flags };
+
 /// Does not go through the cache, as its goal is to generate chunks from scratch;
 /// branches into base procedural generation or fractal scaling depending on depth.
 ///
 /// Purely procedural: modifications are NOT applied here. Use `materializeChunk()` for the chunk the player actually sees.
 pub fn generateChunk(chunk: *Chunk, key: DepthCoordinate) void {
+    generateChunkInner(chunk, key, .derive_flags);
+}
+
+/// `generateChunk()` with the trailing flag pass made optional; see `FlagPass`.
+///
+/// `flags` is a runtime parameter on purpose: a comptime one would emit the whole generation body
+/// twice for one predictable branch per chunk.
+fn generateChunkInner(chunk: *Chunk, key: DepthCoordinate, flags: FlagPass) void {
     if (key.depth == STARTING_ZOOM_TIMES) {
+        // Always flagged, whatever the caller asked: `decorations.stampChunk()` reads the flags to
+        // find the surfaces it anchors to, so the base pass cannot defer them.
         generateBaseChunk(chunk, key.asCoord());
         return;
     }
@@ -2092,7 +2144,7 @@ pub fn generateChunk(chunk: *Chunk, key: DepthCoordinate) void {
         }
     }
 
-    addEdgeFlagsFractal(chunk, key);
+    if (flags == .derive_flags) addEdgeFlagsFractal(chunk, key);
 }
 
 /// Gets an already materialized chunk without triggering any generation.
@@ -2885,6 +2937,7 @@ pub fn clearCaches(comptime clear_ancestors: bool) void {
     @memset(&quad_cache.seed_hand, 0);
     @memset(&quad_cache.seed_cache_keys, @splat(DepthCoordinate.invalid));
     dw.ancestor.clearChunkNoise();
+    dw.ancestor.clearParentHoods();
 
     // A debug slider changes what the terrain functions answer without changing the seed, so the
     // memoized terrain has to go with it. Bumping the epoch retires every entry of the base terrain
