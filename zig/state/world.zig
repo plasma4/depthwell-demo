@@ -47,10 +47,10 @@ const FoundationCacheEntry = struct {
 const FOUNDATION_CACHE_TILE_W = SIM_GRID_SIZE;
 const FOUNDATION_CACHE_TILE_H = CHUNK_SIZE * 2;
 /// Direct-mapped cache of `resolveBaseFoundation()` (a power of two by construction).
-/// Release-only, matching `procedural.getBaseSpriteType()`: debug drags the terrain sliders live.
 const FOUNDATION_CACHE_SLOTS = FOUNDATION_CACHE_TILE_W * FOUNDATION_CACHE_TILE_H;
 var foundation_cache: [FOUNDATION_CACHE_SLOTS]FoundationCacheEntry = @splat(.{});
-/// Terrain identity the cache holds; a mismatch (reseed) drops every entry.
+/// Terrain identity the cache holds; a mismatch (reseed or a debug slider) drops every entry.
+/// See `procedural.terrainGeneration()`.
 var foundation_cache_key: u64 = 0;
 
 /// Direct-mapped slot for a world block. Tiled rather than hashed, so a chunk and the halo around it
@@ -67,8 +67,6 @@ inline fn foundationCacheIndex(wx: u32, wy: u32) usize {
 /// so a neighbor recomputed for the halo carries the same ore id as the real chunk;
 /// `id_edge_flags` then connects a vein to its continuation across the chunk border instead of cutting it off.
 fn resolveBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
-    if (dw.is_debug) return computeBaseFoundation(cx, cy, bx, by);
-
     const wx: u32 = @intCast(cx * CHUNK_SIZE + bx);
     const wy: u32 = @intCast(cy * CHUNK_SIZE + by);
 
@@ -2215,6 +2213,18 @@ fn addEdgeFlags(target_chunk: *Chunk, key: DepthCoordinate, mods: ?*const ModNei
         }
     }
 
+    // Every neighbor test below asks the same two questions of a halo cell, and a cell is a neighbor of
+    // up to 8 others, so the sprite rule table is read once per cell here instead of 8 times below.
+    var halo_flagworthy: [18][18]bool = undefined;
+    var halo_solid_or_liquid: [18][18]bool = undefined;
+    for (0..18) |hy2| {
+        for (0..18) |hx2| {
+            const s = halo[hy2][hx2];
+            halo_flagworthy[hy2][hx2] = shouldHaveEdgeFlags(s);
+            halo_solid_or_liquid[hy2][hx2] = s.isSolid() or s.isLiquid();
+        }
+    }
+
     // Calculate flags using the static halo buffer
     for (0..CHUNK_SIZE) |y| {
         for (0..CHUNK_SIZE) |x| {
@@ -2239,17 +2249,17 @@ fn addEdgeFlags(target_chunk: *Chunk, key: DepthCoordinate, mods: ?*const ModNei
 
             // Same-sprite flags are computed for ALL foundation blocks (one extra compare per neighbor);
             // restrict to isOre()/isGem() here if that ever becomes worth the branch.
+            const current_liquid = current_sprite.isLiquid();
             var id_flags: u8 = 0;
             inline for (.{ -1, 0, 1 }) |dy| {
                 inline for (.{ -1, 0, 1 }) |dx| {
                     if (dx == 0 and dy == 0) continue;
-                    const sprite = halo[@intCast(y + @as(usize, 1 + dy))][@intCast(x + @as(usize, 1 + dx))];
+                    const hy2 = @as(usize, 1 + dy) + y;
+                    const hx2 = @as(usize, 1 + dx) + x;
 
-                    const is_solid_or_liquid = sprite.isSolid() or sprite.isLiquid();
-                    if ((!current_sprite.isLiquid() and shouldHaveEdgeFlags(sprite)) or (current_sprite.isLiquid() and is_solid_or_liquid)) {
-                        flags |= types.EdgeFlags.getFlagBit(dx, dy);
-                    }
-                    if (sprite == current_sprite) {
+                    const connects = if (current_liquid) halo_solid_or_liquid[hy2][hx2] else halo_flagworthy[hy2][hx2];
+                    if (connects) flags |= types.EdgeFlags.getFlagBit(dx, dy);
+                    if (halo[hy2][hx2] == current_sprite) {
                         id_flags |= types.EdgeFlags.getFlagBit(dx, dy);
                     }
                 }
@@ -2297,6 +2307,20 @@ fn addEdgeFlagsFractal(target_chunk: *Chunk, key: DepthCoordinate) void {
         }
     }
 
+    // Read the sprite rule table once per halo cell rather than once per (cell, neighbor) pair;
+    // see the matching pass in `addEdgeFlags()`.
+    var halo_sprite: [18][18]Sprite = undefined;
+    var halo_flagworthy: [18][18]bool = undefined;
+    var halo_solid_or_liquid: [18][18]bool = undefined;
+    for (0..18) |hy2| {
+        for (0..18) |hx2| {
+            const s = halo[hy2][hx2].id;
+            halo_sprite[hy2][hx2] = s;
+            halo_flagworthy[hy2][hx2] = shouldHaveEdgeFlags(s);
+            halo_solid_or_liquid[hy2][hx2] = s.isSolid() or s.isLiquid();
+        }
+    }
+
     // Process center blocks using local halo reads
     for (0..CHUNK_SIZE) |block_y| {
         for (0..CHUNK_SIZE) |block_x| {
@@ -2319,18 +2343,18 @@ fn addEdgeFlagsFractal(target_chunk: *Chunk, key: DepthCoordinate) void {
             const state = water.getWaterFlags(top_nb, bottom_nb, left_nb, right_nb, above_left_nb, above_right_nb);
 
             // Same-sprite flags computed for ALL foundation blocks (see `addEdgeFlags()` for the toggle note).
+            const current_liquid = current_sprite.isLiquid();
             var flags: u8 = 0;
             var id_flags: u8 = 0;
             inline for (.{ -1, 0, 1 }) |dy| {
                 inline for (.{ -1, 0, 1 }) |dx| {
                     if (dx == 0 and dy == 0) continue;
-                    const block = halo[@intCast(ly + dy)][@intCast(lx + dx)];
-                    const sprite = block.id;
-                    const is_solid_or_liquid = sprite.isSolid() or sprite.isLiquid();
-                    if ((!current_sprite.isLiquid() and shouldHaveEdgeFlags(sprite)) or (current_sprite.isLiquid() and is_solid_or_liquid)) {
-                        flags |= types.EdgeFlags.getFlagBit(dx, dy);
-                    }
-                    if (sprite == current_sprite) {
+                    const hy2: usize = @intCast(ly + dy);
+                    const hx2: usize = @intCast(lx + dx);
+
+                    const connects = if (current_liquid) halo_solid_or_liquid[hy2][hx2] else halo_flagworthy[hy2][hx2];
+                    if (connects) flags |= types.EdgeFlags.getFlagBit(dx, dy);
+                    if (halo_sprite[hy2][hx2] == current_sprite) {
                         id_flags |= types.EdgeFlags.getFlagBit(dx, dy);
                     }
                 }
@@ -2857,15 +2881,15 @@ pub fn clearCaches(comptime clear_ancestors: bool) void {
     @memset(&quad_cache.seed_clock_bits, 0);
     @memset(&quad_cache.seed_hand, 0);
     @memset(&quad_cache.seed_cache_keys, @splat(DepthCoordinate.invalid));
+    dw.ancestor.clearChunkNoise();
 
-    // debug-only: a structure placement is a pure function of its cell and the structure seed,
-    // which the per-entry seed check already invalidates on, so a reseed or a teleport has nothing to drop here.
-    // HOWEVER! in debug, there's sliders that change the terrain. so yeah, we need to reset here then
-    if (dw.is_debug) {
-        for (dw.structures.struct_cache[0..]) |*row| {
-            @memset(row, .{});
-        }
-    }
+    // A debug slider changes what the terrain functions answer without changing the seed, so the
+    // memoized terrain has to go with it. Bumping the epoch retires every entry of the base terrain
+    // and foundation caches at once (see `procedural.terrainGeneration()`); release cannot reach this.
+    procedural.invalidateTuning();
+
+    // Nothing to do for the structure banks: every entry carries the seed AND the terrain generation
+    // it was resolved under, so a reseed or a slider retires it on its next read.
 
     if (clear_ancestors) dw.ancestor.ancestor_cache.clear();
 }
