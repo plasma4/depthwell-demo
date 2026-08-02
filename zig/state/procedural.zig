@@ -394,25 +394,48 @@ const BaseTerrainCacheEntry = struct {
 
 /// Block window one full sweep of the cache covers, in blocks (see `dw.utils.tileIndex()`).
 /// Shaped to the chunk sweep that fills it, exactly like (and for the same reason as) the foundation cache in `world.zig`:
-/// one full sweep row wide, two chunk rows tall,
-/// so the edge-flag halo of a chunk still finds the neighbor row above it rather than re-deriving terrain for all of it.
+/// one full `SimBuffer` sweep row wide, and 8 chunk rows tall.
+///
+/// The height is what the structure passes ask for, not the edge-flag halo:
+/// a seat scan, a `Level` constraint, and a column feature all probe well above and below the chunk,
+/// and a window only 2 chunk rows tall made those probes evict the chunk being generated.
+/// 8 rows is where the measured recompute count stops falling (a taller window changes nothing).
 const BASE_CACHE_TILE_W = dw.world.SIM_GRID_SIZE;
-const BASE_CACHE_TILE_H = dw.CHUNK_SIZE * 2;
+const BASE_CACHE_TILE_H = dw.CHUNK_SIZE * 8;
 /// Direct-mapped cache of `computeBaseSpriteType()` results (a power of two by construction).
 /// The same cell is recomputed many times per chunk gen (pass 1, the edge-flag halo, the vine scan,
 /// and structure terrain gates all resample it, plus overlap across neighbors),
 /// so memoizing removes FBM redundancy (the dominant generation cost).
-/// Release-only: in debug the `TuningFloat` sliders mutate FBM output live, so debug always recomputes.
 const BASE_CACHE_SLOTS = BASE_CACHE_TILE_W * BASE_CACHE_TILE_H;
 var base_terrain_cache: [BASE_CACHE_SLOTS]BaseTerrainCacheEntry = @splat(.{});
-/// Current seed the cache holds; a mismatch (reseed) invalidates every entry at once.
+
+comptime {
+    // Static WASM memory, paid whether or not a world is loaded, so a size change should be deliberate.
+    if (@sizeOf(@TypeOf(base_terrain_cache)) > 2 * memory.MemorySizes.MiB)
+        @compileError("The base terrain cache exceeds its 2 MiB budget.");
+}
+/// Current generation the cache holds; a mismatch invalidates every entry at once.
 var base_cache_key: u64 = 0;
 
+/// Counts the times a debug control changed what the terrain functions answer.
+/// Folded into `terrainGeneration()`, so a slider drag drops every memoized sample
+/// rather than serving one taken under the old value.
+///
+/// Release keeps the tuning values `const`, so nothing can bump this and it stays zero.
+pub var tuning_epoch: u64 = 0;
+
+/// Bumps `tuning_epoch`. Called by `dw.world.clearCaches()`, which every debug control routes through.
+pub fn invalidateTuning() void {
+    if (dw.is_debug) tuning_epoch +%= 1;
+}
+
 /// Identity of the terrain every cache downstream of it holds; a mismatch drops the cache.
-/// Release-only, like the caches themselves: debug recomputes, since the sliders mutate output live.
+///
+/// Two independent parts: the world seed, and (in debug only) the tuning epoch.
+/// A cache that keys on this cannot serve a sample from a different world OR a different slider value.
 pub inline fn terrainGeneration() u64 {
     const seed = memory.game.getHashSeed(.moisture);
-    return seed[0] ^ seed[1];
+    return (seed[0] ^ seed[1]) +% tuning_epoch;
 }
 
 /// Direct-mapped slot for a world block. Tiled rather than hashed, so a whole chunk pass is
@@ -421,7 +444,35 @@ inline fn baseCacheIndex(wx: u32, wy: u32) usize {
     return dw.utils.tileIndex(BASE_CACHE_TILE_W, BASE_CACHE_TILE_H, wx, wy);
 }
 
-/// Returns a base sprite type, memoized in release (see `BASE_CACHE_SLOTS`). Does 3 passes:
+/// The memoized terrain sample at a block, IN PLACE.
+///
+/// PRECONDITION: the pointer dies at the next call. The cache is direct-mapped, so any terrain probe
+/// in between can claim this very slot. Read what you need and let it go;
+/// never hold one across `addStructures()` or anything else that samples terrain.
+inline fn baseTerrainSlot(chunk_x: u32, chunk_y: u32, block_x: u4, block_y: u4) *const TerrainData {
+    const wx = chunk_x * 16 + block_x;
+    const wy = chunk_y * 16 + block_y;
+
+    const key = terrainGeneration();
+    if (key != base_cache_key) {
+        // @memset, not `= @splat(.{})`: an array this large would be built as a stack temporary first.
+        @memset(&base_terrain_cache, .{});
+        base_cache_key = key;
+    }
+
+    const entry = &base_terrain_cache[baseCacheIndex(wx, wy)];
+    if (!(entry.occupied and entry.wx == wx and entry.wy == wy)) {
+        entry.* = .{
+            .wx = wx,
+            .wy = wy,
+            .data = computeBaseSpriteType(chunk_x, chunk_y, block_x, block_y),
+            .occupied = true,
+        };
+    }
+    return &entry.data;
+}
+
+/// Returns a base sprite type, memoized (see `BASE_CACHE_SLOTS`). Does 3 passes:
 ///
 /// 1. Generate an initial terrain density+moisture value using the seed vectors.
 /// 2. Generate a block from those values.
@@ -432,26 +483,16 @@ pub fn getBaseSpriteType(
     block_x: u4,
     block_y: u4,
 ) TerrainData {
-    // Debug drags terrain sliders live, so caching would serve stale samples; just recompute for simplicity.
-    if (dw.is_debug) return computeBaseSpriteType(chunk_x, chunk_y, block_x, block_y);
+    return baseTerrainSlot(chunk_x, chunk_y, block_x, block_y).*;
+}
 
-    const wx = chunk_x * 16 + block_x;
-    const wy = chunk_y * 16 + block_y;
-
-    const seed = memory.game.getHashSeed(.moisture);
-    const key = seed[0] ^ seed[1];
-    if (key != base_cache_key) {
-        // @memset, not `= @splat(.{})`: an array this large would be built as a stack temporary first.
-        @memset(&base_terrain_cache, .{});
-        base_cache_key = key;
-    }
-
-    const entry = &base_terrain_cache[baseCacheIndex(wx, wy)];
-    if (entry.occupied and entry.wx == wx and entry.wy == wy) return entry.data;
-
-    const data = computeBaseSpriteType(chunk_x, chunk_y, block_x, block_y);
-    entry.* = .{ .wx = wx, .wy = wy, .data = data, .occupied = true };
-    return data;
+/// The base terrain SPRITE at a block, without copying the rest of the sample out of the cache.
+///
+/// For probes that only ask about solidity: a seat scan, a `Level` constraint, an `Encase` halo,
+/// and the column feature scan. Together those outnumber every other reader of the terrain,
+/// and each one used to carry a whole `TerrainData` back for one `isFoundation()` call.
+pub fn getBaseSprite(chunk_x: u32, chunk_y: u32, block_x: u4, block_y: u4) Sprite {
+    return baseTerrainSlot(chunk_x, chunk_y, block_x, block_y).sprite;
 }
 
 /// `max_offset` value meaning "this rule has no upper depth bound".
@@ -772,6 +813,45 @@ pub const OreSeeds = struct {
 /// Full-width random odd words, for the reasons given on `ORE_LANE_SEEDS`.
 const GEM_STREAM_MASK: [2]u64 = .{ 0x6c5a3f81e0b7d925, 0xa93e17c4582df6b3 };
 
+/// Density overrides a rule applies for a specific host stone, as `.{ sprite, host, min, max }`.
+/// Kept as a table rather than inline `if`s so the global density gate can be derived from the SAME
+/// numbers the per-rule check uses; an override the gate did not know about would silently never fire.
+const DensityOverride = struct { sprite: Sprite, host: Sprite, min: f32, max: f32 };
+const DENSITY_OVERRIDES = [_]DensityOverride{
+    .{ .sprite = .gold, .host = .lava_stone, .min = 0.52, .max = 0.71 },
+    .{ .sprite = .silver, .host = .blue_strange_stone, .min = 0.18, .max = 0.20 },
+};
+
+/// Widest density band any rule can accept, override bands included.
+/// `disperseOre()` rejects outside this before it touches a seed, so it MUST enclose every rule;
+/// deriving it instead of writing it down is what keeps a new rule from being unreachable.
+const DENSITY_GATE: struct { min: f32, max: f32 } = blk: {
+    var lo: f32 = 1.0;
+    var hi: f32 = 0.0;
+    for (ORE_DISPERSALS) |rule| {
+        lo = @min(lo, rule.min_density);
+        hi = @max(hi, rule.max_density);
+        for (DENSITY_OVERRIDES) |o| {
+            if (o.sprite != rule.sprite) continue;
+            lo = @min(lo, o.min);
+            hi = @max(hi, o.max);
+        }
+    }
+    break :blk .{ .min = lo, .max = hi };
+};
+
+comptime {
+    // An override that names a sprite no rule places is dead weight, and reads as a working rule.
+    for (DENSITY_OVERRIDES) |o| {
+        var found = false;
+        for (ORE_DISPERSALS) |rule| {
+            if (rule.sprite == o.sprite) found = true;
+        }
+        if (!found) @compileError("A density override names a sprite that no ore dispersal rule places.");
+        if (o.min >= o.max) @compileError("Density override bounds must be strictly ordered.");
+    }
+}
+
 /// A rule's value window after its `DepthCurve` has been applied at the current depth.
 const DepthWindow = struct {
     val_min: f32 = 0,
@@ -820,8 +900,31 @@ fn evaluateDepthCurve(comptime rule: OreDispersal, depth: u64) DepthWindow {
 var depth_windows: [ORE_DISPERSALS.len]DepthWindow = @splat(.{});
 var depth_windows_depth: ?u64 = null;
 
+/// `DENSITY_GATE` narrowed to the rules that are actually live at `depth_windows_depth`.
+/// A depth where half the palette is inert rejects a block sooner than the comptime bound can.
+/// `min > max` means nothing is live at all, which rejects every density.
+var depth_density_min: f32 = 1.0;
+var depth_density_max: f32 = 0.0;
+
 fn refreshDepthWindows(depth: u64) void {
-    inline for (ORE_DISPERSALS, 0..) |rule, i| depth_windows[i] = evaluateDepthCurve(rule, depth);
+    var lo: f32 = 1.0;
+    var hi: f32 = 0.0;
+    inline for (ORE_DISPERSALS, 0..) |rule, i| {
+        const window = evaluateDepthCurve(rule, depth);
+        depth_windows[i] = window;
+        if (window.live) {
+            lo = @min(lo, rule.min_density);
+            hi = @max(hi, rule.max_density);
+            inline for (DENSITY_OVERRIDES) |o| {
+                if (comptime o.sprite == rule.sprite) {
+                    lo = @min(lo, o.min);
+                    hi = @max(hi, o.max);
+                }
+            }
+        }
+    }
+    depth_density_min = lo;
+    depth_density_max = hi;
     depth_windows_depth = depth;
 }
 
@@ -961,14 +1064,18 @@ pub fn disperseOre(
     if (!host.isStone()) return null;
     if (host_tag.blocksOverlay()) return null;
 
-    // fast global exit: no ore/gem rule exists outside density range [0.20, 0.90]
-    if (density < 0.20 or density > 0.90) return null;
+    // Fast global exit, using the comptime bound over the WHOLE palette (see `DENSITY_GATE`).
+    // Cheap enough to run before the depth windows are even resolved.
+    if (density < DENSITY_GATE.min or density > DENSITY_GATE.max) return null;
 
     // The gem roll is shared by every gem rule, so it is computed AT MOST ONCE per block.
     // The noise fields are NOT shareable: each rule warps and folds the domain with its own scale/weights,
     // so a field is only ever read by the one rule that asked for it.
     var gem_roll_cache: ?f32 = null;
     const windows = depthWindows(depth);
+
+    // ...then the same exit again, narrowed to the rules this depth still has live.
+    if (density < depth_density_min or density > depth_density_max) return null;
 
     inline for (ORE_DISPERSALS, 0..) |rule, ri| {
         next_rule: {
@@ -979,13 +1086,16 @@ pub fn disperseOre(
             if (rule.forbidden_stone != .none and host == rule.forbidden_stone) break :next_rule;
             if (rule.required_stone != .none and host != rule.required_stone) break :next_rule;
 
-            // now add contextural density overrides (example extra "biome" rules)
+            // now add contextual density overrides (example extra "biome" rules); see `DENSITY_OVERRIDES`
             var min_d = rule.min_density;
             var max_d = rule.max_density;
-            if (rule.sprite == .gold and host == .lava_stone) min_d = 0.52;
-            if (rule.sprite == .silver and host == .blue_strange_stone) {
-                min_d = 0.18;
-                max_d = 0.20;
+            inline for (DENSITY_OVERRIDES) |o| {
+                if (comptime o.sprite == rule.sprite) {
+                    if (host == o.host) {
+                        min_d = o.min;
+                        max_d = o.max;
+                    }
+                }
             }
 
             if (density < min_d or density > max_d) break :next_rule;
