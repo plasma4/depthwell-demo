@@ -42,10 +42,8 @@ const CORNER: i32 = 3;
 /// Seating also guarantees the floor row has terrain beneath it,
 /// so no explicit "my base rests on solid ground" constraint is needed.
 ///
-/// `max_slope = 2` tolerates gently uneven ground instead of demanding a perfectly flat strip,
-/// which is rare enough to strangle the spawn rate.
-/// Seating drops to the LOWEST column, so the higher columns just embed into the footprint (carved out, reading as "dug into a rise");
-/// nothing floats. The grade-filler below then dresses those embedded columns with a clean stone foundation.
+/// `max_slope = 2` tolerates gently uneven ground instead of demanding a perfectly flat strip!
+/// Seating drops to the LOWEST column so it looks like embedding; filler applies afterward in generate() to cancel out slope.
 pub const seat: structures.Seat = .{ .max_drop = 6, .max_slope = 2 };
 
 /// Terrain rules! Evaluated by `structures.zig` cheapest-first; result is cached on a grid-cell level.
