@@ -106,7 +106,7 @@ fn computeBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
         wx,
         wy,
     );
-    const structured = procedural.addStructures(sprite, wx, wy, game.getHashSeed(.structures));
+    const structured = dw.structures.addStructures(sprite, wx, wy, game.getHashSeed(.structures));
     // A structure that places an overlay such as a Geode gem carries its own stone underlay;
     // fall back to the natural terrain only when it doesn't (.none).
     return .{
@@ -141,7 +141,7 @@ fn resolveFoundationSolid(cx: u64, cy: u64, bx: u4, by: u4) bool {
     const base_sprite = procedural.getBaseSprite(@intCast(cx), @intCast(cy), bx, by);
     const wx: u32 = @intCast(cx * CHUNK_SIZE + bx);
     const wy: u32 = @intCast(cy * CHUNK_SIZE + by);
-    const structured = procedural.addStructures(base_sprite, wx, wy, memory.game.getHashSeed(.structures));
+    const structured = dw.structures.addStructures(base_sprite, wx, wy, memory.game.getHashSeed(.structures));
     return structured.id.isFoundation();
 }
 
