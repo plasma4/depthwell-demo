@@ -20,6 +20,7 @@ const FastHash = seeding.FastHash;
 const Seed = seeding.Seed;
 const Vec2f32 = dw.utils.Vec2f32;
 const Vec2u = dw.utils.Vec2u;
+const Vec4f32 = dw.utils.Vec4f32;
 const Vec4u = dw.utils.Vec4u;
 const WorldCoord = seeding.WorldCoord;
 
@@ -38,76 +39,103 @@ pub const WorleyResult = struct {
     cell_hash: u64,
 };
 
+/// Everything downstream of the terrain rules reads out of a base terrain sample.
+///
+/// The intermediate noise fields do NOT live here.
+/// They belong to `TerrainSampler`, which is a stack value,
+/// so the memoized sample stays small enough to keep the cache in a few hundred KiB.
 const TerrainData = struct {
+    /// stone or air the terrain rules chose
     sprite: Sprite = .none,
-    /// multiplies cutoff for stone density
+    /// ore field density, and zero where no ore rule can reach the block
+    ore_density: f32 = 0,
+};
+
+/// Sprite index of the first heatmap tile.
+/// The heatmap occupies 256 tiles above it, one per density bucket.
+const HEATMAP_BASE = 65000;
+
+/// The noise fields of one base-depth world block, each calculated on demand.
+///
+/// `classifyTerrain()` reads every field through this type,
+/// so a rule which a block never reaches costs that block nothing:
+/// air pays for neither the island probe nor the detail octaves.
+const TerrainSampler = struct {
+    wx: u32,
+    wy: u32,
+    /// seed lane shared by the density field, its detail octave, and the island probe
+    density_seed: Vec2u,
+    /// domain warp of the density sample, reused by the detail octave
+    warp: Vec2f32,
+    /// hash of the Worley cell the density sample landed in
+    cell_hash: u64,
+
+    /// multiplies the cutoff for stone density
     cutoff: f32,
     /// selects the biome
     moisture: f32,
     /// base density for stone details
     density: f32,
-    /// secondary density for fine stone details
-    density2: f32,
-    /// density of ores
-    ore_density: f32,
-    /// controls rare block spawns
-    weirdness: f32,
-    /// tagged island sprite override
+
+    /// secondary density for fine stone details, valid once `detail()` ran
+    density2: f32 = 0,
+    /// controls rare block spawns, valid once `detail()` ran
+    weirdness: f32 = 0,
+    /// tagged island sprite, valid once `island()` ran
     island_sprite: Sprite = .none,
+
+    /// True once a block passed the cheap air and extreme-density rules.
+    /// A block which those rules settled can never host an ore,
+    /// so `computeBaseSpriteType()` reads this to skip the ore field.
+    deep: bool = false,
+    detail_ready: bool = false,
+    island_ready: bool = false,
+
+    /// Draws the three fields every terrain rule needs.
+    fn init(wx: u32, wy: u32) TerrainSampler {
+        const density_seed = memory.game.getHashSeed(.density);
+
+        var warp: Vec2f32 = .{ 0.0, 0.0 };
+        const density_res = getFbmValueWarp(density_seed, wx, wy, 93.0, 28.0, &warp);
+
+        return .{
+            .wx = wx,
+            .wy = wy,
+            .density_seed = density_seed,
+            .warp = warp,
+            .cell_hash = density_res.cell_hash,
+            .density = density_res.value,
+            .cutoff = 0.75 + 0.3 * getHybridNoise(memory.game.getHashSeed(.cutoff), wx, wy, 20.5),
+            .moisture = fbm(getPerlinNoiseFixed, memory.game.getHashSeed(.moisture), wx, wy, 375.0, 3),
+        };
+    }
+
+    /// Draws the two fields the fine stone rules need.
+    fn detail(self: *TerrainSampler) void {
+        if (self.detail_ready) return;
+        self.detail_ready = true;
+
+        self.weirdness = getBillowNoise(memory.game.getHashSeed(.weirdness), self.wx, self.wy, 140.8);
+        // reuse the density sample's domain warp instead of drawing a second one
+        self.density2 = getFbmValuePrewarped(
+            self.density_seed,
+            self.wx,
+            self.wy,
+            16.5,
+            self.warp[0] * 2.0,
+            self.warp[1] * 2.0,
+        ).value;
+    }
+
+    /// Resolves the island tag of the Worley cell, which costs a second warped sample.
+    fn island(self: *TerrainSampler) Sprite {
+        if (!self.island_ready) {
+            self.island_ready = true;
+            self.island_sprite = getIslandSprite(self.cell_hash, self.wx, self.wy, self.density_seed);
+        }
+        return self.island_sprite;
+    }
 };
-
-/// Generates base sprite from terrain data.
-pub inline fn generateBaseProceduralSprite(d: *const TerrainData) Sprite {
-    // dev_tools mode renders density heatmap
-    if (dw.dev_tools and USE_HEATMAP and !USE_ORE_HEATMAP) {
-        // heatmap range from 65000-65256 inclusive
-
-        // for island tag heatmap showing:
-        // if (d.island_sprite != .none) {
-        //     return d.island_sprite;
-        // }
-
-        return @enumFromInt(65000 + @as(u20, @intFromFloat(d.density * 256.0)));
-    }
-
-    const cutoff_density = d.density * d.cutoff;
-    if (cutoff_density <= density_min.getF32() or d.density >= density_max.getF32()) {
-        if (d.moisture >= 0.93 and d.moisture <= 0.94) return .purple_strange_stone;
-        return .none;
-    } else if (d.density <= 0.04 and d.moisture >= 0.3 and d.moisture <= 0.4) {
-        return .blue_strange_stone;
-    }
-
-    // return tagged sprite only on top surface
-    if (d.island_sprite != .none) {
-        if (d.moisture <= 0.63) return d.island_sprite;
-    }
-
-    if (d.moisture >= 0.98 and d.moisture <= 0.995)
-        return if (d.density >= 0.2 and d.density <= 0.3) .pale_ancient_stone else .ancient_stone;
-    if (d.moisture >= 0.93 and d.moisture <= 0.94) return .bright_red_stone;
-    if (d.moisture >= 0.97) return .none;
-
-    if (d.weirdness >= 0.6 and d.weirdness <= 0.9 and
-        (d.density2 >= 0.88 and d.density2 <= 0.915 or d.density >= 0.88))
-        return if (d.weirdness >= 0.73 or d.density2 >= 0.95) .molten_stone else .lava_stone;
-
-    if (d.moisture >= 0.50 and d.density >= 0.53 and d.density <= 0.6)
-        return if (d.weirdness >= 0.8) .lime_stone else .green_stone;
-
-    if ((d.weirdness <= 0.55 or d.weirdness >= 0.93) and
-        d.moisture >= 0.60 and d.moisture <= 0.72) return .blue_stone;
-    if (d.weirdness <= 0.1 and d.density >= 0.40 and d.density >= 0.45 and d.density2 <= 0.55)
-        return if (d.moisture >= 0.8) .pale_stone else .deep_blue_stone;
-
-    if (d.moisture >= 0.20 and d.moisture <= 0.26)
-        return if (d.weirdness >= 0.72 and d.weirdness <= 0.92) .more_mossy_stone else .mossy_stone;
-    if (d.moisture >= 0.43 and d.moisture <= 0.535)
-        return if (d.moisture <= 0.48 or d.density2 <= 0.08) .seagreen_stone else .green_stone;
-
-    if (d.density2 <= 0.1) return .dark_stone;
-    return .stone;
-}
 
 /// Determine the tagged island sprite from `cell_hash`.
 inline fn getIslandSprite(cell_hash: u64, wx: u32, wy: u32, density_seed: Vec2u) Sprite {
@@ -127,123 +155,71 @@ inline fn getIslandSprite(cell_hash: u64, wx: u32, wy: u32, density_seed: Vec2u)
     return .none;
 }
 
-/// Calculates base terrain data without cache using domain warping.
-fn computeBaseSpriteType(
-    chunk_x: u32,
-    chunk_y: u32,
-    block_x: u4,
-    block_y: u4,
-) TerrainData {
-    const wx = chunk_x * 16 + block_x;
-    const wy = chunk_y * 16 + block_y;
+/// Chooses the base sprite of a block from its terrain fields.
+///
+/// The rules run in one order and in one place.
+/// Each group of them sits directly after the sample it is the first to need,
+/// so the order is also the cost order.
+fn classifyTerrain(s: *TerrainSampler) Sprite {
+    // dev_tools mode replaces every rule with a density heatmap
+    if (dw.dev_tools and USE_HEATMAP and !USE_ORE_HEATMAP)
+        return @enumFromInt(HEATMAP_BASE + @as(u16, @intFromFloat(s.density * 256.0)));
 
-    const density_seed = memory.game.getHashSeed(.density);
+    // air, plus the two stones which only appear at the density extremes
+    const cutoff_density = s.density * s.cutoff;
+    if (cutoff_density <= density_min.getF32() or s.density >= density_max.getF32())
+        return if (isWithin(s.moisture, 0.93, 0.94)) .purple_strange_stone else .none;
+    if (s.density <= 0.04 and isWithin(s.moisture, 0.3, 0.4)) return .blue_strange_stone;
 
-    // calculate density and save domain warp vector
-    var warp_vec: dw.utils.Vec2f32 = .{ 0.0, 0.0 };
-    const density_res = getFbmValueWarp(
-        density_seed,
-        wx,
-        wy,
-        93.0,
-        28.0,
-        &warp_vec,
-    );
-    const density_val = density_res.value;
-    const island_sprite = getIslandSprite(density_res.cell_hash, wx, wy, density_seed);
-    const cutoff_val = 0.75 + 0.3 * getHybridNoise(
-        memory.game.getHashSeed(.cutoff),
-        wx,
-        wy,
-        20.5,
-    );
+    // the wettest bands, which need no field beyond moisture and cutoff
+    if (isWithin(s.moisture, 0.98, 0.995))
+        return if (isWithin(s.cutoff, 0.2, 0.3)) .pale_ancient_stone else .ancient_stone;
+    if (isWithin(s.moisture, 0.93, 0.955) and s.cutoff >= 0.6) return .bright_red_stone;
+    if (s.moisture >= 0.97) return .none;
 
-    const moisture_val = getFbmValue(
-        memory.game.getHashSeed(.moisture),
-        wx,
-        wy,
-        .{
-            .cell_size = 375.0,
-            .fbm_shift_size = 0.0,
-            .use_worley_hybrid = false,
-        },
-    );
+    s.deep = true;
 
-    var base_data: TerrainData = .{
-        .density = density_val,
-        .cutoff = cutoff_val,
-        .moisture = moisture_val,
-        .density2 = 0.0,
-        .weirdness = 0.0,
-        .ore_density = 0.0,
-        .island_sprite = island_sprite,
+    // a tagged island caps a surface, so it wins over every stone rule below
+    if (s.moisture <= 0.63) {
+        const tagged = s.island();
+        if (tagged != .none) return tagged;
+    }
+    if (isWithin(s.moisture, 0.93, 0.94)) return .bright_red_stone;
+
+    s.detail();
+
+    if (isWithin(s.weirdness, 0.6, 0.9) and (isWithin(s.density2, 0.88, 0.915) or s.density >= 0.88))
+        return if (s.weirdness >= 0.73 or s.density2 >= 0.95) .molten_stone else .lava_stone;
+
+    if (s.moisture >= 0.50 and isWithin(s.density, 0.53, 0.6))
+        return if (s.weirdness >= 0.8) .lime_stone else .green_stone;
+
+    if ((s.weirdness <= 0.55 or s.weirdness >= 0.93) and isWithin(s.moisture, 0.60, 0.72))
+        return .blue_stone;
+    if (s.weirdness <= 0.1 and s.density >= 0.45 and s.density2 <= 0.55)
+        return if (s.moisture >= 0.8) .pale_stone else .deep_blue_stone;
+
+    if (isWithin(s.moisture, 0.20, 0.26))
+        return if (isWithin(s.weirdness, 0.72, 0.92)) .more_mossy_stone else .mossy_stone;
+    if (isWithin(s.moisture, 0.43, 0.535))
+        return if (s.moisture <= 0.48 or s.density2 <= 0.08) .seagreen_stone else .green_stone;
+
+    if (s.density2 <= 0.1) return .dark_stone;
+    return .stone;
+}
+
+/// Calculates the base terrain sample of one world block, with no cache.
+fn computeBaseSpriteType(wx: u32, wy: u32) TerrainData {
+    var sampler: TerrainSampler = .init(wx, wy);
+    const sprite = classifyTerrain(&sampler);
+
+    return .{
+        .sprite = sprite,
+        .ore_density = if (sampler.deep)
+            fbm(getPerlinNoiseFixed, memory.game.getHashSeed(.ore_density), wx, wy, 122.0, 3)
+        else
+            0,
     };
-
-    if (dw.dev_tools and USE_HEATMAP and !USE_ORE_HEATMAP) {
-        base_data.sprite = generateBaseProceduralSprite(&base_data);
-        return base_data;
-    }
-
-    // check air and special stone conditions
-    const cutoff_density = density_val * cutoff_val;
-    if (cutoff_density <= density_min.getF32() or density_val >= density_max.getF32()) {
-        if (moisture_val >= 0.93 and moisture_val <= 0.94) {
-            base_data.sprite = .purple_strange_stone;
-            return base_data;
-        }
-        base_data.sprite = .none;
-        return base_data;
-    } else if (density_val <= 0.04 and moisture_val >= 0.3 and moisture_val <= 0.4) {
-        base_data.sprite = .blue_strange_stone;
-        return base_data;
-    }
-
-    if (moisture_val >= 0.98 and moisture_val <= 0.995) {
-        base_data.sprite = if (cutoff_val >= 0.2 and cutoff_val <= 0.3) .pale_ancient_stone else .ancient_stone;
-        return base_data;
-    }
-    if (moisture_val >= 0.93 and moisture_val <= 0.955 and cutoff_val >= 0.6) {
-        base_data.sprite = .bright_red_stone;
-        return base_data;
-    }
-    if (moisture_val >= 0.97) {
-        base_data.sprite = .none;
-        return base_data;
-    }
-
-    // calculate weirdness and secondary density when required
-    base_data.weirdness = getBillowNoise(
-        memory.game.getHashSeed(.weirdness),
-        wx,
-        wy,
-        140.8,
-    );
-
-    // reuse density domain warp vector
-    base_data.density2 = getFbmValuePrewarped(
-        density_seed,
-        wx,
-        wy,
-        16.5,
-        warp_vec[0] * 2.0,
-        warp_vec[1] * 2.0,
-    ).value;
-
-    base_data.sprite = generateBaseProceduralSprite(&base_data);
-
-    // calculate ore density for stone blocks
-    base_data.ore_density = getFbmValue(
-        memory.game.getHashSeed(.ore_density),
-        wx,
-        wy,
-        .{
-            .cell_size = 122.0,
-            .fbm_shift_size = 0.0,
-            .use_worley_hybrid = false,
-        },
-    );
-
-    return base_data;
 }
 
 /// Checks if a block is near the top surface of an island.
@@ -254,7 +230,7 @@ inline fn isTopSurface(wx: u32, wy: u32, density_seed: Vec2u) bool {
     const check_y = if (wy >= check_offset) wy - check_offset else 0;
 
     // sample density above block to detect open space
-    var warp_above: dw.utils.Vec2f32 = .{ 0.0, 0.0 };
+    var warp_above: Vec2f32 = .{ 0.0, 0.0 };
     const res_above = getFbmValueWarp(
         density_seed,
         wx,
@@ -428,35 +404,23 @@ pub var USE_HEATMAP = false;
 /// If ore heatmap is enabled then USE_HEATMAP must be true!
 pub var USE_ORE_HEATMAP = false;
 
-/// Configuration options for terrain noise generation.
-const TerrainOptions = struct {
-    /// grid cell size for noise
-    cell_size: comptime_float,
-    /// maximum offset for domain warping
-    fbm_shift_size: comptime_float,
-    /// selects Worley distance check when true, or Perlin FBM when false
-    use_worley_hybrid: bool = true,
-};
-
-/// Adds structures across blocks in a deterministic order.
-///
-/// Disperses ores using Worley noise. Requires stone block input.
-pub fn addStructures(
-    starting_sprite: Sprite,
-    wx: u32,
-    wy: u32,
-    struct_seed: Vec2u,
-) dw.structures.StructureResult {
-    return dw.structures.addStructures(starting_sprite, wx, wy, struct_seed);
-}
-
 /// Memoized base terrain sample for a world block.
+///
+/// The sprite and the ore density are stored flat rather than as a `TerrainData`,
+/// which lets the padding beside the sprite hold `occupied` and keeps the entry at 16 bytes.
 const BaseTerrainCacheEntry = struct {
     wx: u32 = 0,
     wy: u32 = 0,
-    data: TerrainData = undefined,
+    sprite: Sprite = .none,
     occupied: bool = false,
+    ore_density: f32 = 0,
 };
+
+comptime {
+    // verify the entry keeps its packed size, since the cache holds tens of thousands of them
+    if (@sizeOf(BaseTerrainCacheEntry) != 16)
+        @compileError("A base terrain cache entry must stay 16 bytes; a wider one doubles the cache's miss rate.");
+}
 
 /// Block dimensions for terrain cache tiles.
 ///
@@ -501,9 +465,9 @@ inline fn baseCacheIndex(wx: u32, wy: u32) usize {
 ///
 /// The pointer becomes invalid on subsequent terrain cache accesses.
 /// Copy required fields immediately.
-inline fn baseTerrainSlot(chunk_x: u32, chunk_y: u32, block_x: u4, block_y: u4) *const TerrainData {
-    const wx = chunk_x * 16 + block_x;
-    const wy = chunk_y * 16 + block_y;
+inline fn baseTerrainSlot(chunk_x: u32, chunk_y: u32, block_x: u4, block_y: u4) *const BaseTerrainCacheEntry {
+    const wx = chunk_x * CHUNK_SIZE + block_x;
+    const wy = chunk_y * CHUNK_SIZE + block_y;
 
     const key = terrainGeneration();
     if (key != base_cache_key) {
@@ -514,14 +478,16 @@ inline fn baseTerrainSlot(chunk_x: u32, chunk_y: u32, block_x: u4, block_y: u4) 
 
     const entry = &base_terrain_cache[baseCacheIndex(wx, wy)];
     if (!(entry.occupied and entry.wx == wx and entry.wy == wy)) {
+        const data = computeBaseSpriteType(wx, wy);
         entry.* = .{
             .wx = wx,
             .wy = wy,
-            .data = computeBaseSpriteType(chunk_x, chunk_y, block_x, block_y),
+            .sprite = data.sprite,
+            .ore_density = data.ore_density,
             .occupied = true,
         };
     }
-    return &entry.data;
+    return entry;
 }
 
 /// Returns base terrain data for block coordinates.
@@ -532,7 +498,8 @@ pub fn getBaseSpriteType(
     block_x: u4,
     block_y: u4,
 ) TerrainData {
-    return baseTerrainSlot(chunk_x, chunk_y, block_x, block_y).*;
+    const entry = baseTerrainSlot(chunk_x, chunk_y, block_x, block_y);
+    return .{ .sprite = entry.sprite, .ore_density = entry.ore_density };
 }
 
 /// Returns base terrain sprite for block coordinates without copying full sample.
@@ -1239,28 +1206,6 @@ test "the split lattice multiply agrees with a plain 128-bit one" {
     }
 }
 
-/// Represents 3 values: `v`, `min`, and `max` (range bounds).
-const ValueRange = struct { f32, f32, f32 };
-
-/// Represents 2 sprites: `old_sprite` and `new_sprite`.
-const SpritePair = struct { Sprite, Sprite };
-
-/// Selects new sprite if condition is true and value is within range bounds.
-/// Returns old sprite otherwise.
-pub inline fn selectSprite(sprites: SpritePair, condition: bool, range: ?ValueRange) Sprite {
-    const old_sprite = sprites[0];
-    const new_sprite = sprites[1];
-    if (range) |val| {
-        const v = val[0];
-        const min = val[1];
-        const max = val[2];
-        std.debug.assert(min <= max);
-        return if (condition and v >= min and v <= max) new_sprite else old_sprite;
-    } else {
-        return if (condition) new_sprite else old_sprite;
-    }
-}
-
 /// Returns true when value is between minimum and maximum bounds.
 pub inline fn isWithin(v: f32, min: comptime_float, max: comptime_float) bool {
     if (max <= min) @compileError("Maximum value must be larger than minimum value.");
@@ -1275,55 +1220,6 @@ inline fn fade(t: f32) f32 {
     return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
 }
 
-/// Calculates fast bilinear value noise.
-fn getBilinearValueNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
-    const ax = latticeAxis(x, 1.0 / cell_size);
-    const ay = latticeAxis(y, 1.0 / cell_size);
-
-    const u = fade(ax.t);
-    const v = fade(ay.t);
-
-    // vectorized hash lookup for 4 corners
-    const ix0 = ax.corner(0);
-    const ix1 = ax.corner(1);
-    const iy0 = ay.corner(0);
-    const iy1 = ay.corner(1);
-    const vx: Vec4u = .{ ix0, ix1, ix0, ix1 };
-    const vy: Vec4u = .{ iy0, iy0, iy1, iy1 };
-    const h = FastHash.hash2d_4x(seed_vector, vx, vy);
-
-    // convert hash values to floating point
-    const truncated: @Vector(4, u32) = @truncate(h);
-    const floats: @Vector(4, f32) = @floatFromInt(truncated);
-    const v_vec = floats * @as(@Vector(4, f32), @splat(INV_POW_2_32));
-
-    const v00 = v_vec[0];
-    const v10 = v_vec[1];
-    const v01 = v_vec[2];
-    const v11 = v_vec[3];
-
-    const nx0 = v00 + u * (v10 - v00);
-    const nx1 = v01 + u * (v11 - v01);
-    return nx0 + v * (nx1 - nx0);
-}
-
-/// Calculates normalized terrain noise value in range [0, 1].
-fn getFbmValue(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, options: TerrainOptions) f32 {
-    if (comptime !options.use_worley_hybrid) {
-        return fbm(
-            getPerlinNoiseFixed,
-            seed_vector,
-            x,
-            y,
-            options.cell_size,
-            3,
-        );
-    }
-
-    var unused_warp: dw.utils.Vec2f32 = .{ 0.0, 0.0 };
-    return getFbmValueWarp(seed_vector, x, y, options.cell_size, options.fbm_shift_size, &unused_warp).value;
-}
-
 /// Calculates Worley FBM noise and writes domain warp vector.
 fn getFbmValueWarp(
     seed_vector: Vec2u,
@@ -1331,7 +1227,7 @@ fn getFbmValueWarp(
     y: WorldCoord,
     comptime cell_size_base: f32,
     fbm_shift_size: f32,
-    out_warp: *dw.utils.Vec2f32,
+    out_warp: *Vec2f32,
 ) WorleyResult {
     const fbm_octaves = 3;
     var warp_x: f32 = 0;
@@ -1340,7 +1236,7 @@ fn getFbmValueWarp(
     var amp: f32 = fbm_shift_size;
     const inv_dual_value_scale = 1.0 / dual_value_scale.getF32();
 
-    if (amp > 0) {
+    if (fbm_shift_size > 0) {
         inline for (0..fbm_octaves) |octave| {
             const n = getDualValueNoiseTuned(
                 seed_vector,
@@ -1394,6 +1290,37 @@ const WorleyAxis = struct {
 const WORLEY_OFFSETS = [_]comptime_int{ -1, 0, 1 };
 /// Total candidate cell count for Worley search.
 const WORLEY_TAPS = WORLEY_OFFSETS.len * WORLEY_OFFSETS.len;
+
+/// The (`x`, `y`) cell offset of each Worley tap, in tap order.
+/// One table drives the hash gather and the distance pass,
+/// so the two can never disagree about which cell a tap belongs to.
+const WORLEY_TAP_CELLS: [WORLEY_TAPS][2]i2 = blk: {
+    var cells: [WORLEY_TAPS][2]i2 = undefined;
+    var tap = 0;
+    for (WORLEY_OFFSETS) |oy| {
+        for (WORLEY_OFFSETS) |ox| {
+            cells[tap] = .{ ox, oy };
+            tap += 1;
+        }
+    }
+    break :blk cells;
+};
+
+/// Bits each unit fraction packed in a Worley cell hash occupies.
+/// Three fractions fit in one hash: the feature point's x, its y, and the cell weight.
+const WORLEY_FIELD_BITS = 21;
+const INV_WORLEY_FIELD: f32 = 1.0 / @as(f32, 1 << WORLEY_FIELD_BITS);
+
+comptime {
+    // verify the three packed fields fit in one hash
+    if (3 * WORLEY_FIELD_BITS > 64) @compileError("A Worley cell hash cannot hold three fields this wide.");
+}
+
+/// Reads packed field `index` out of a Worley cell hash as a fraction in [0, 1).
+inline fn hashField(h: u64, comptime index: u2) f32 {
+    const bits: u21 = @truncate(h >> (@as(u6, index) * WORLEY_FIELD_BITS));
+    return @as(f32, @floatFromInt(bits)) * INV_WORLEY_FIELD;
+}
 
 /// Maps warped coordinate axis to candidate cells.
 inline fn placeWorley(comptime float_placement: bool, v: WorldCoord, inv_cell: f32, warp: f32) WorleyAxis {
@@ -1449,65 +1376,55 @@ fn worleyValue(
     const ax = placeWorley(float_placement, x, inv_cell_w, warp_x);
     const ay = placeWorley(float_placement, y, inv_cell_size, warp_y);
 
-    // calculate cell hash inputs across 3x3 candidate grid
-    var cell_x: [WORLEY_TAPS]u64 = undefined;
-    var cell_y: [WORLEY_TAPS]u64 = undefined;
-    var ox_f: [WORLEY_TAPS]f32 = undefined;
-    var oy_f: [WORLEY_TAPS]f32 = undefined;
-    comptime var tap = 0;
-    inline for (WORLEY_OFFSETS) |oy| {
-        inline for (WORLEY_OFFSETS) |ox| {
-            cell_x[tap] = ax.corner(ox);
-            cell_y[tap] = ay.corner(oy);
-            ox_f[tap] = ox;
-            oy_f[tap] = oy;
-            tap += 1;
-        }
-    }
-
+    // hash the 3x3 candidate grid, four cells per vector lookup and the ninth on its own
     var hashes: [WORLEY_TAPS]u64 = undefined;
     inline for (0..WORLEY_TAPS / 4) |group| {
-        const base = group * 4;
-        const h: Vec4u = FastHash.hash2d_4x(
-            seed_vector,
-            cell_x[base..][0..4].*,
-            cell_y[base..][0..4].*,
-        );
-        inline for (0..4) |i| hashes[base + i] = h[i];
+        var cx: Vec4u = undefined;
+        var cy: Vec4u = undefined;
+        inline for (0..4) |i| {
+            const tap = WORLEY_TAP_CELLS[group * 4 + i];
+            cx[i] = ax.corner(tap[0]);
+            cy[i] = ay.corner(tap[1]);
+        }
+        const h = FastHash.hash2d_4x(seed_vector, cx, cy);
+        inline for (0..4) |i| hashes[group * 4 + i] = h[i];
     }
     inline for (WORLEY_TAPS - WORLEY_TAPS % 4..WORLEY_TAPS) |i| {
-        hashes[i] = FastHash.hash2d(seed_vector, cell_x[i], cell_y[i]);
+        const tap = WORLEY_TAP_CELLS[i];
+        hashes[i] = FastHash.hash2d(seed_vector, ax.corner(tap[0]), ay.corner(tap[1]));
     }
 
-    const INV_POW_2_21 = 1.0 / 2097152.0;
-    var d1_sq = std.math.inf(f32);
-    var d2_sq = std.math.inf(f32);
-    var best_hash: u64 = 0;
-
+    // Measure every candidate first, then reduce.
+    // The measurement carries no dependency between taps, so it vectorizes;
+    // folding it into the reduction below would serialize nine divisions.
+    var dist_sq: [WORLEY_TAPS]f32 = undefined;
     inline for (0..WORLEY_TAPS) |i| {
-        // extract bits 0..20 for x offset
-        const off_x = @as(f32, @floatFromInt(@as(u21, @truncate(hashes[i])))) * INV_POW_2_21;
-        // extract bits 21..41 for y offset
-        const off_y = @as(f32, @floatFromInt(@as(u21, @truncate(hashes[i] >> 21)))) * INV_POW_2_21;
-        // extract bits 42..62 for cell weight
-        const weight_frac = @as(f32, @floatFromInt(@as(u21, @truncate(hashes[i] >> 42)))) * INV_POW_2_21;
+        const tap = WORLEY_TAP_CELLS[i];
+        const off_x = hashField(hashes[i], 0);
+        const off_y = hashField(hashes[i], 1);
 
-        // calculate non uniform cell scale weight
-        const cell_weight = 0.6 + 0.9 * weight_frac;
+        // a non-uniform cell scale keeps the cells from reading as a grid
+        const cell_weight = 0.6 + 0.9 * hashField(hashes[i], 2);
 
-        // calculate distance to cell feature point
-        const dx_span = (ax.t - ox_f[i] - off_x) * cell_w;
-        const dy_span = (ay.t - oy_f[i] - off_y) * cell_size;
+        const dx_span = (ax.t - @as(f32, tap[0]) - off_x) * cell_w;
+        const dy_span = (ay.t - @as(f32, tap[1]) - off_y) * cell_size;
         const dx = if (comptime float_placement) dx_span else dx_span + ax.frac;
         const dy = if (comptime float_placement) dy_span else dy_span + ay.frac;
 
-        const dist_sq = (dx * dx + dy * dy) / (cell_weight * cell_weight);
-        if (dist_sq < d1_sq) {
+        dist_sq[i] = (dx * dx + dy * dy) / (cell_weight * cell_weight);
+    }
+
+    // keep the two nearest feature points; their gap is the cell edge signal
+    var d1_sq = std.math.inf(f32);
+    var d2_sq = std.math.inf(f32);
+    var best_hash: u64 = 0;
+    inline for (0..WORLEY_TAPS) |i| {
+        if (dist_sq[i] < d1_sq) {
             d2_sq = d1_sq;
-            d1_sq = dist_sq;
+            d1_sq = dist_sq[i];
             best_hash = hashes[i];
-        } else if (dist_sq < d2_sq) {
-            d2_sq = dist_sq;
+        } else if (dist_sq[i] < d2_sq) {
+            d2_sq = dist_sq[i];
         }
     }
 
@@ -1516,7 +1433,7 @@ fn worleyValue(
 }
 
 /// Calculates two independent value noise components.
-pub fn getDualValueNoise(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) dw.utils.Vec2f32 {
+pub fn getDualValueNoise(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) Vec2f32 {
     return dualValueNoise(seed, x, y, inv_scale);
 }
 
@@ -1526,63 +1443,27 @@ pub inline fn getDualValueNoiseFixed(
     x: WorldCoord,
     y: WorldCoord,
     comptime inv_scale: f32,
-) dw.utils.Vec2f32 {
+) Vec2f32 {
     return dualValueNoise(seed, x, y, inv_scale);
 }
 
 /// Selects dual value noise variant based on dev tools state.
-inline fn getDualValueNoiseTuned(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) dw.utils.Vec2f32 {
+inline fn getDualValueNoiseTuned(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) Vec2f32 {
     if (dw.dev_tools) return getDualValueNoise(seed, x, y, inv_scale);
     return getDualValueNoiseFixed(seed, x, y, inv_scale);
 }
 
-inline fn dualValueNoise(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) dw.utils.Vec2f32 {
-    // map coordinates to lattice axes
-    const ax = latticeAxis(x, inv_scale);
-    const ay = latticeAxis(y, inv_scale);
-
-    // apply fade curve
-    const u = fade(ax.t);
-    const v = fade(ay.t);
-
-    // construct candidate corners
-    const x0 = ax.corner(0);
-    const x1 = ax.corner(1);
-    const y0 = ay.corner(0);
-    const y1 = ay.corner(1);
-    const vx: Vec4u = .{ x0, x1, x0, x1 };
-    const vy: Vec4u = .{ y0, y0, y1, y1 };
-
-    // hash corners with vectorized lookup
-    const h_vec = FastHash.hash2d_4x(seed, vx, vy);
-
-    var result: dw.utils.Vec2f32 = .{ 0, 0 };
-    inline for (0..2) |i| {
-        const shift: u6 = @intCast(i * 32);
-        const shifted = h_vec >> @as(Vec4u, @splat(shift));
-        const truncated: @Vector(4, u32) = @truncate(shifted);
-        const floats: @Vector(4, f32) = @floatFromInt(truncated);
-        const v_vec = floats * @as(@Vector(4, f32), @splat(INV_POW_2_32));
-
-        const v00 = v_vec[0];
-        const v10 = v_vec[1];
-        const v01 = v_vec[2];
-        const v11 = v_vec[3];
-
-        const nx0 = v00 + u * (v10 - v00);
-        const nx1 = v01 + u * (v11 - v01);
-        result[i] = nx0 + v * (nx1 - nx0);
-    }
-    return result;
+inline fn dualValueNoise(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) Vec2f32 {
+    const l = lattice(seed, x, y, inv_scale);
+    // the two components read opposite halves of the same four hashes
+    return .{
+        bilerp(unitFloats(l.h, 0), l.u, l.v),
+        bilerp(unitFloats(l.h, 1), l.u, l.v),
+    };
 }
 
 /// Normalization factor for perlin noise range.
 pub const PERLIN_NORM: f32 = @sqrt(2.0);
-
-/// Maps 64-bit hash to float in range [0, 1).
-inline fn hashToUnit(h: u64) f32 {
-    return @as(f32, @floatFromInt(h)) / POW_2_64;
-}
 
 /// Calculates dot product for perlin gradient direction.
 inline fn grad2(h: u64, dx: f32, dy: f32) f32 {
@@ -1598,35 +1479,67 @@ inline fn grad2(h: u64, dx: f32, dy: f32) f32 {
     };
 }
 
-/// Stores lattice parameters and corner hash values.
+/// One noise cell: the sample's position inside it, its fade weights, and its four corner hashes.
+/// Every lattice noise function in this file is built out of this plus one of the readers below.
 const Lattice = struct {
-    x0: u64,
-    y0: u64,
+    /// sample position inside the cell on each axis, in [0, 1)
     tx: f32,
     ty: f32,
+    /// faded interpolation weights of `tx` and `ty`
     u: f32,
     v: f32,
+    /// corner hashes, ordered `v00`, `v10`, `v01`, `v11`
     h: Vec4u,
 };
 
-inline fn lattice(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) Lattice {
-    const ax = latticeAxis(x, 1.0 / cell_size);
-    const ay = latticeAxis(y, 1.0 / cell_size);
+/// Places a sample on a lattice of cells `1 / inv_scale` blocks wide and hashes its four corners.
+inline fn lattice(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) Lattice {
+    const ax = latticeAxis(x, inv_scale);
+    const ay = latticeAxis(y, inv_scale);
     const x0 = ax.corner(0);
     const x1 = ax.corner(1);
     const y0 = ay.corner(0);
     const y1 = ay.corner(1);
-    const vx: Vec4u = .{ x0, x1, x0, x1 };
-    const vy: Vec4u = .{ y0, y0, y1, y1 };
     return .{
-        .x0 = x0,
-        .y0 = y0,
         .tx = ax.t,
         .ty = ay.t,
         .u = fade(ax.t),
         .v = fade(ay.t),
-        .h = FastHash.hash2d_4x(seed_vector, vx, vy),
+        .h = FastHash.hash2d_4x(seed_vector, .{ x0, x1, x0, x1 }, .{ y0, y0, y1, y1 }),
     };
+}
+
+/// Interpolates a cell's four corner values, ordered `v00`, `v10`, `v01`, `v11`.
+inline fn bilerp(c: Vec4f32, u: f32, v: f32) f32 {
+    const nx0 = c[0] + u * (c[1] - c[0]);
+    const nx1 = c[2] + u * (c[3] - c[2]);
+    return nx0 + v * (nx1 - nx0);
+}
+
+/// Maps one 32-bit half of four corner hashes to unit floats.
+/// The two halves are independent, which is what lets one lookup drive two noise fields.
+inline fn unitFloats(h: Vec4u, comptime half: u1) Vec4f32 {
+    const shifted = h >> @as(Vec4u, @splat(@as(u64, half) * 32));
+    const truncated: @Vector(4, u32) = @truncate(shifted);
+    const floats: Vec4f32 = @floatFromInt(truncated);
+    return floats * @as(Vec4f32, @splat(INV_POW_2_32));
+}
+
+/// Maps four corner hashes to unit floats across their full width.
+inline fn unitFloatsWide(h: Vec4u) Vec4f32 {
+    const floats: Vec4f32 = @floatFromInt(h);
+    return floats * @as(Vec4f32, @splat(1.0 / @as(f32, POW_2_64)));
+}
+
+/// Interpolates a cell's four corner gradients and normalizes the result to [0, 1].
+inline fn gradLerp(l: Lattice) f32 {
+    const g: Vec4f32 = .{
+        grad2(l.h[0], l.tx, l.ty),
+        grad2(l.h[1], l.tx - 1.0, l.ty),
+        grad2(l.h[2], l.tx, l.ty - 1.0),
+        grad2(l.h[3], l.tx - 1.0, l.ty - 1.0),
+    };
+    return std.math.clamp(bilerp(g, l.u, l.v) * PERLIN_NORM * 0.5 + 0.5, 0.0, 1.0);
 }
 
 /// Calculates Perlin gradient noise.
@@ -1645,23 +1558,7 @@ pub inline fn getPerlinNoiseFixed(
 }
 
 inline fn perlinNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
-    // calculate perlin gradient noise interpolation
-    const l = lattice(seed_vector, x, y, cell_size);
-    const n00 = grad2(l.h[0], l.tx, l.ty);
-    const n10 = grad2(l.h[1], l.tx - 1.0, l.ty);
-    const n01 = grad2(l.h[2], l.tx, l.ty - 1.0);
-    const n11 = grad2(l.h[3], l.tx - 1.0, l.ty - 1.0);
-    const nx0 = n00 + l.u * (n10 - n00);
-    const nx1 = n01 + l.u * (n11 - n01);
-    const raw = (nx0 + l.v * (nx1 - nx0)) * PERLIN_NORM;
-    return std.math.clamp(raw * 0.5 + 0.5, 0.0, 1.0);
-}
-
-/// Calculates ridged noise from Perlin gradient field.
-pub fn getRidgedNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
-    const signed = getPerlinNoise(seed_vector, x, y, cell_size) * 2.0 - 1.0;
-    const r = 1.0 - @abs(signed);
-    return r * r;
+    return gradLerp(lattice(seed_vector, x, y, 1.0 / cell_size));
 }
 
 /// Calculates billow noise from Perlin gradient field.
@@ -1672,26 +1569,12 @@ pub fn getBillowNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_siz
 
 /// Calculates hybrid value and gradient noise.
 pub fn getHybridNoise(seed_vector: Vec2u, x: WorldCoord, y: WorldCoord, cell_size: f32) f32 {
-    const l = lattice(seed_vector, x, y, cell_size);
+    const l = lattice(seed_vector, x, y, 1.0 / cell_size);
 
-    // calculate value noise component
-    const v00 = hashToUnit(l.h[0]);
-    const v10 = hashToUnit(l.h[1]);
-    const v01 = hashToUnit(l.h[2]);
-    const v11 = hashToUnit(l.h[3]);
-    const val = (v00 + l.u * (v10 - v00)) + l.v * ((v01 + l.u * (v11 - v01)) - (v00 + l.u * (v10 - v00)));
-
-    // calculate gradient noise component
-    const g00 = grad2(l.h[0], l.tx, l.ty);
-    const g10 = grad2(l.h[1], l.tx - 1.0, l.ty);
-    const g01 = grad2(l.h[2], l.tx, l.ty - 1.0);
-    const g11 = grad2(l.h[3], l.tx - 1.0, l.ty - 1.0);
-    const gx0 = g00 + l.u * (g10 - g00);
-    const gx1 = g01 + l.u * (g11 - g01);
-    const grad = std.math.clamp((gx0 + l.v * (gx1 - gx0)) * PERLIN_NORM * 0.5 + 0.5, 0.0, 1.0);
-
-    const w = hybrid_weight.getF32();
-    return val + w * (grad - val);
+    // one corner lookup feeds both halves of the mix
+    const val = bilerp(unitFloatsWide(l.h), l.u, l.v);
+    const grad = gradLerp(l);
+    return val + hybrid_weight.getF32() * (grad - val);
 }
 
 /// Normalization factor for simplex noise.
