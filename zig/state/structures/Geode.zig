@@ -76,7 +76,7 @@ pub fn generate(
         const shell: Sprite = switch (shell_rand) {
             0...1 => .pink_stone,
             2...3 => .purple_stone,
-            4 => .bright_red_stone,
+            4 => .deep_blue_stone,
             else => unreachable,
         };
 
