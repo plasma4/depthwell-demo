@@ -290,7 +290,7 @@ pub const HashState = struct {
     }
 
     /// Returns an integer of type `T` in the range `[0, limit)` for non-power-of-two limits.
-    /// Uses a branch-free, division-free multiplicative method with guaranteed termination.
+    /// Uses a division-free multiplicative method with guaranteed termination (with marginal statistical error).
     ///
     /// Precondition: `T` is a 64-bit integer or smaller, and `limit` is positive.
     pub inline fn getLimit(self: *HashState, T: type, limit: T) T {

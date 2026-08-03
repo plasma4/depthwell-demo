@@ -75,9 +75,9 @@ By using `ChaCha12` and `Blake3` and a seed with 1-100 `a-z` characters, the gam
 
 Before the specifics, here's the fixed pipeline a chunk runs through. Every stage is a deterministic function of the seed and the chunk's position, so the same chunk regenerates identically whether it is streamed in for the first time, revisited from cache, or rebuilt on load. Later stages only ever _read_ what earlier ones produced (think of this as a "dependency order"), never the reverse, which is what keeps the whole thing order-independent across chunk borders:
 
-1. **Base terrain** sets up the world! Each cell samples moisture and density noise to pick its foundation block (a stone variation, lava stone, air for caves, water in pools). This is the "raw" world with no features yet.
+1. **Base terrain** sets up the world! Each cell samples moisture and density noise to pick its foundation block (a stone variation, lava stone, or air for caves). This is the "raw" world with no features yet; water arrives later, placed by structures.
 2. **Ores and gems** get added to the terrain. A second noise pass overlays ore "veins" onto these terrain blocks. Ores/gems record the stone visually beneath them as `base_id`.
-3. **Structures** that are terrain-gated features (chambers, pillars, geodes, trees) are placed by a prioritized, collision-resolved planner. This uses hashing, attempts to minimize biases, and decides _whether and where_ a structure exists at all.
+3. **Structures** that are terrain-gated features (chambers, pillars, geodes, trees, sand/clay deposits) are placed by a prioritized, collision-resolved planner. This uses hashing, attempts to minimize biases, and decides _whether and where_ a structure exists at all.
 4. **Decorations** appear after, which are context-aware plants (mushrooms, flowers, vines, shrubs) that only check local terrain (whether there's a solid block above and below, for example).
 5. **Modifications** then get applied, which are any player edits (or water flowing changes) recorded in the `ModificationStore`. These are "replayed" over the freshly generated chunk, overriding whatever generation produced. This is the only stage that isn't purely procedural, and it, of course, has the highest priority.
 6. **Derived passes** finish up, with edge flags and waterlogging getting (re-)computed again after modifications, from the settled block ids/neighbors. Then a lighting value pass occurs right before sending data to WGSL. These are render/simulation state so they're re-calculated rather than stored.
@@ -91,32 +91,38 @@ Here are the basic terms (note that there are, for example, 16 possible subpixel
 - 1 Pixel = 16 Subpixels
 - 1 Block = 16 Pixels
 - 1 Chunk = 16 Blocks = 256 Pixels = 4,096 Subpixels
-- **Depth**: How "deep" the player is. Depth starts at $6$ (see `STARTING_ZOOM_TIMES` in `zig/startup.zig`). Each time you enter a portal, the world zooms in by $4\text{x}$, making terrain look 4 times larger, and the depth increases by 1. You can think of this as "delving deeper" in to the world or descending farther. Ascending would be decreasing the depth.
+- **Depth**: How "deep" the player is. Depth starts at $13$ (see `STARTING_ZOOM_TIMES` in `zig/startup.zig`). Each time you enter a portal, the world zooms in by $4\text{x}$, making terrain look 4 times larger, and the depth increases by 1. You can think of this as "delving deeper" in to the world or descending farther. Ascending would be decreasing the depth.
 - **$D$**: Shorthand for the current depth. You can think of depth $D-1$ as the coordinate space you occupied right _before_ entering a portal.
-- **The Event Horizon ($H$)**: Shorthand for $D-32$. When you are deep in the fractal ($D \ge 32 + 6$), the game stops tracking individual blocks shallower than 32 levels above you. This is because at $H$, each block is $2^{64}$ times wider than than the current depth, and recursive logic can stop. (This is internal and, when functional, shouldn't be noticeable or affect gameplay. More explanations below.)
+- **The Event Horizon ($H$)**: Shorthand for $D-32$. When you are deep in the fractal ($D \ge 32 + 13$), the game stops tracking individual blocks shallower than 32 levels above you. This is because at $H$, each block is $2^{64}$ times wider than at the current depth, and recursive logic can stop. (This is internal and, when functional, shouldn't be noticeable or affect gameplay. More explanations below.)
 
-The player starts off at `STARTING_ZOOM_TIMES`, which defaults to 6. So, $D$ starts off as 6 and $D-1$ doesn't exist until $D$ increases further.
+The player starts off at `STARTING_ZOOM_TIMES`, which defaults to 13. So, $D$ starts off as 13 and $D-1$ doesn't exist until $D$ increases further. The base depth is also the only depth generated from noise rather than inherited from a parent, and the only one with a finite size (a closed square walled in by `edge_stone`).
 
 The camera and the player work with (integeric) subpixels, while entities are considered in terms of (floating-point) pixels. Seeding of specific blocks in chunks and modifications concern themselves with blocks. Asking something "where" it is involves just chunks (see later).
 
 Now, bear with me here, because you might be freaking out over the fact a code segment just appeared. But don't fret, I'll break things down! This code is just those interested in specific details on what these numbers _could_ mean, because there are a lot of definitions!
 
-Basically, all the code below is doing is declaring some constants in Zig, a fancy low-level language. The `CHUNK_SIZE` variable just represents 16; you don't really need to understand the code blocks so feel free to skip these. From `zig/memory.zig`:
+Basically, all the code below is doing is declaring some constants in Zig, a fancy low-level language. The `CHUNK_SIZE` variable just represents 16; you don't really need to understand the code blocks so feel free to skip these. From `zig/root.zig`:
 
 ```zig
-/// The main number (as an integer) representing the number of blocks in a chunk, number of pixels in a block, and number of subpixels in a pixel. (Note that changing these values WILL break the code!)
+/// The core dimension, 16: how many units one level spans of the level below, along a single axis.
+/// - blocks per chunk edge
+/// - pixels per block edge
+/// - subpixels per pixel edge
 pub const CHUNK_SIZE: comptime_int = 16;
 // ...
-/// An integer representing the number of subpixels in a block, pixels in a chunk, number of blocks in a chunk, number of pixels in a block, and number of possible subpixel positions within a pixel.
+/// `CHUNK_SIZE` squared, 256, along a single axis:
+/// - subpixels per block edge
+/// - pixels per chunk edge
 pub const CHUNK_SIZE_SQ: comptime_int = CHUNK_SIZE * CHUNK_SIZE;
 // ...
-/// An integer representing the number of subpixels within a chunk. The player's X and Y coordinate should wrap around such that it is between 0 and this value (inclusive).
+/// `CHUNK_SIZE` cubed, 4096: subpixels per chunk edge.
+/// Player X/Y wrap within [0, 4095] (= this value minus one).
 pub const SUBPIXELS_IN_CHUNK: comptime_int = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
 ```
 
-Imagine the entire game world as a massive grid. Every time you zoom in, every single grid cell splits into a $2\text{x}2$ layout of $4$ smaller sub-cells.
+Imagine the entire game world as a massive grid. Every time you zoom in, every single grid cell splits into a $4\text{x}4$ layout of $16$ smaller sub-cells (the zoom factor is 4 _per axis_).
 
-Your position in the world is essentially a string of directions: _"From the top level, go to cell 2, then go to sub-cell 3, then sub-cell 1..."_ Because every step is a choice between 0, 1, 2, or 3, each step can be represented as a tiny **2-bit number** (a `u2`).
+Your position in the world is essentially a string of directions, kept as one such string **per axis**: _"From the top level, go to column 2, then sub-column 3, then sub-column 1..."_ Because every step is a choice between 0, 1, 2, or 3, each step can be represented as a tiny **2-bit number** (a `u2`).
 
 To represent where any chunk is, we use a struct called `Coordinate` composed of three parts:
 
@@ -157,7 +163,7 @@ Of course, to have a fractal _mining_ game, you must store if the player has mod
 
 > Does this chunk have any blocks where the player replaced a block of type A with type B?
 
-(Air/empty space is itself a type of block.) If the answer is YES, that chunk gets an entry in the `ModificationStore` (keyed by a `DepthCoordinate` referencing both location and height). The entry is _sparse_, as it records only the individual cells that differ, so a single edited block in a 256-block chunk costs one cell, not a whole chunk. See "The fractal modification buffer" below for the layout.
+(Air/empty space is itself a type of block.) If the answer is YES, that chunk gets an entry in the `ModificationStore` (keyed by a `DepthCoordinate`, which names both the chunk's position and its depth). The entry is _sparse_, as it records only the individual cells that differ, so a single edited block in a 256-block chunk costs one cell, not a whole chunk. See "The fractal modification buffer" below for the layout.
 
 But wait, what is a block? Here is `zig/memory.zig`:
 
@@ -230,13 +236,13 @@ The most complex part of Depthwell's architecture, though, is ensuring that a ho
 
 When the generator builds a chunk at Depth $D$, it iteratively traverses backward through the prefix stack from $D-1$ down to $D-32$. (Recall that $D$ is larger the "more zoomed in" the game is, and starts at `STARTING_ZOOM_TIMES`. It represents how many `u2`s need to represent where a chunk is, to put it another way.)
 
-For each ancestor level, it traces upward and queries `ModificationStore` or evaluates `AncestorCache`: _"Was the parent block at this specific path modified?"_ At $D-32$ (the event horizon limit), chunk-level details are replaced by checking the global `QuadCache` 4x4 material grid. Any properties inherited directly from parents influence chunk structures appropriately.
+For each ancestor level, it traces upward and queries `ModificationStore` or evaluates `AncestorCache`: _"Was the parent block at this specific path modified?"_ At $D-32$ (the event horizon limit), chunk-level details are replaced by checking the global `QuadCache` material grid, a 16x16 block window (`ANCESTOR_GRID`) whose central 2x2 holds the active quadrants. Any properties inherited directly from parents influence chunk structures appropriately.
 
 #### Prefix stack and memoization
 
 You might be wondering how the engine handles a path 10,000 layers deep without lag, and the solution is to **relentlessly use the prefix stack and cache the seed**. In `zig/state/world.zig`, the big prefix path is stored using dynamic array allocations (`SegmentedList`).
 
-Why memoize and make the logic so complicated? By storing the resulting 512-bit `seed` at every level of the stack, the game no longer needs to spend resources reseeding a bunch for each chunk (while the math working out, as if every chunk was, resulting in high-quality seeding!). We never re-calculate the entire 10,000-level BLAKE3 chain; we only hash the _newest_ nibble added to the stack. This makes procedural chunk generation on ascend effectively constant-time!
+Why memoize and make the logic so complicated? By storing the resulting 512-bit `seed` at every level of the stack, the game no longer needs to spend resources reseeding a bunch for each chunk (while the math working out, as if every chunk was, resulting in high-quality seeding!). We never re-calculate the entire 10,000-level BLAKE3 chain; we only hash the _newest_ step added to the stack. This makes procedural chunk generation on ascend effectively constant-time!
 
 #### Procedural generation
 
@@ -265,11 +271,42 @@ Ore and gem dispersal across the base stone blocks is driven by a data-driven ru
 
 Specific values and comptime logic for everything may be found in `zig/state/procedural.zig`.
 
+Each of those six values costs a full noise evaluation, and most blocks need only the first three. So the rules never run against a filled-in record. They run against a `TerrainSampler`, which draws density, cutoff, and moisture up front and everything else on first use. `classifyTerrain()` holds the rules as one ordered list, and each group of rules sits directly after the sample it is the first to need, which makes the rule order the cost order too. Air is settled by density and cutoff alone, and air is most of the world, so an air block pays for none of weirdness, secondary density, the ore field, or the island probe. That last one is worth calling out: an island tag costs a _second_ warped Worley sample a few rows above the block, because "is this near a surface?" cannot be answered from the block's own density. Only a block that reaches the island rule pays for it.
+
+What gets memoized is only what survives. `base_terrain_cache` keeps the chosen sprite and the ore density and nothing else, 16 bytes per entry, so one direct-mapped bank covers a 256-by-128 block window in half a megabyte and the intermediate fields never leave the stack. The bank is keyed by `terrainGeneration()`, which folds in the world seed and a `tuning_epoch` that the debug sliders bump, so moving any terrain slider drops the whole cache instead of serving stale samples.
+
+The Worley pass underneath all of this searches the 3x3 cells around a sample for the two nearest feature points, and their distance gap is what draws the cell edges. All nine taps are measured before any of them is compared, since the measurement has no dependency from one tap to the next and vectorizes, while the "keep the best two" reduction does not. Each tap's feature point offset and its cell weight are three 21-bit fractions unpacked out of that cell's single hash, so nine hashes buy twenty-seven values.
+
+#### Structure pass
+
+Structures are the large, deliberate things: trees, geodes, pillars, portals, chambers. They are placed only at base depth (every deeper copy of one is inherited through the ancestor/refine passes, not re-rolled), and the whole pass is a pure function of world position and seed, so a chunk generates identically whatever order chunks arrive in and a structure that straddles a chunk border agrees with itself on both sides.
+
+Each kind declares a `spawn_area`, a power of two, and the world is tiled into cells of that size. One cell gets one placement, resolved in four fixed stages that a kind opts into:
+
+- **Roll.** `target_chance` decides whether the cell tries at all. It is a roll and not a density, because the stages below throw most rolls away.
+- **Anchor.** The box is jittered to _anywhere_ in the cell, overhang included. Drawing the origin from the cell's interior instead would leave a blank band along every cell edge and make the spawn lattice visible.
+- **Seat.** The box slides down onto the terrain surface. This cannot be a constraint: a constraint is a predicate over a box that is already final, while seating is the transform that decides where the box belongs.
+- **Gate.** The terrain rules accept or reject the finished box.
+
+Anchor, seat, and gate retry together up to `attempts` times before the cell gives up.
+
+The terrain rules are a small vocabulary rather than per-structure code: `solid` and `empty` over a region, `level` for flat ground under a footprint, `encase` for "walled in by rock, to this degree", and `custom` as the escape hatch. Every region is expressed relative to the candidate's own bounds (the row directly below the box is `y0 = .{ .at = .end }`, `y1 = .{ .at = .end, .off = 1 }`), so a rule survives a structure changing size. `constraintCost()` counts each rule's terrain samples at compile time and `sortConstraints()` puts the cheapest first, so a candidate usually dies on a four-block probe rather than on the scan that would have cost a hundred.
+
+`encase` deserves a note, because "surrounded by rock" is easy for a rectangle and awkward for anything else: a bounding box around a circle tests the wrong blocks. So the structure hands over its own shape predicate, the halo is derived from it (a block the shape does not occupy but which touches one it does), and the _fraction_ of that halo which is open must land in a band. A band and not a ceiling is what lets a geode be deliberately breached: mostly buried, but never perfectly sealed, so a player can find it.
+
+Priority is the order of the `structures` tuple. A placement is dropped when an overlapping one outranks it, which `isBeaten()` settles in one scan: a higher-priority kind always wins, and two placements of the same kind (which overhang makes possible) are settled by a hash-derived `cellRank()` so no compass direction is favored. A kind can opt out of the same-kind rule with `overlaps_self` when two of its blobs are indistinguishable from one larger blob.
+
+Two caches carry the pass. `struct_cache` holds one bank per kind, memoizing a cell's box and, lazily, whether anything beat it. That matters because the same cell is re-derived constantly: by every block inside the footprint, and again by every later kind's collision scan. `chunk_ctx` then resolves every kind's candidates once for a whole chunk, so the per-block call is a walk over a handful of rectangles instead of a grid search. Nothing reachable from the structure pass re-enters `chunk_ctx` (terrain sampling reads base terrain, which is upstream), but `isBeaten()` _does_ re-enter `struct_cache` for neighboring cells of its own kind and can evict the very slot it was called from, which is why no cache pointer is ever held across that scan.
+
+Structure coordinates are `i32` on purpose. Probing outside the world is routine here (a seat scan reaching below the box, an `encase` halo, `isBeaten()` resolving the cell at `cx - 1`), and signed coordinates turn what would be an unsigned wrap into an easy bounds check in `baseSolid()`. This is also what caps `STARTING_ZOOM_TIMES` at 13.
+
+Small things that need no collision handling belong in the decoration pass below instead, which is far cheaper. See `structures/Example.zig` for a fully commented walkthrough.
+
 #### Decoration pass
 
-The final pass handles the "flavor" of the world. These are things such as mushrooms, spiral plants, and ceiling flowers. Since this pass is less computationally expensive, we switch back to `ChaCha12` for high-quality entropy.
+The final pass handles the "flavor" of the world. These are things such as mushrooms, spiral plants, and ceiling flowers. Like every other generation pass it draws from position-keyed `FastHash` streams (`structures.makeBlockHash()`), so a decoration is a pure function of its own world position and never of the order chunks happen to be generated in. `ChaCha12` is used only to fill each block's per-block visual `seed`, which is stream-ordered within a chunk.
 
-Decorations are context-aware. Mushrooms only spawn if the block below is solid, ceiling flowers if the block above is solid, and spiral plants can grow multiple blocks tall by checking for a spiral plant above on top of a solid-block above generation check, and so on.
+Decorations are context-aware. Mushrooms only spawn if the block below is solid, ceiling flowers if the block above is solid, and spiral plants grow multiple blocks tall through a small state machine walked down each world column, and so on.
 
 Critically, the generator finishes by setting the `edge_flags` of these decorations to `0xFF`. This tells the WebGPU shader that it shouldn't have erosion and edge darkening applied to it!
 
@@ -410,7 +447,7 @@ The original goal with modifications was to ensure the following:
 
 Therefore, the current solution is to hash a `DepthCoordinate` and use it to index a per-chunk `ModEntry`. A `ModEntry` is _sparse_: rather than a full 4KiB `Chunk`, it stores only the cells the player (or the water sim) actually modified, as an `modified` bitmap (one bit per block) plus a packed `ModCell` array kept in ascending block-index order.
 
-A `ModCell` holds just the only three fields that cannot be recovered by regenerating the chunk: `id`, `base_id`, and `hp`. Everything else (`seed`, `edge_flags`, `light`, waterlogging) is _derived_ and is rebuilt by `materializeChunk()`, which replays every modified cell over a freshly generated chunk and then reruns the flag pass. So a chunk the player mined 30 blocks out of costs ~210 bytes here, not 4KiB. See some definitions and more details:
+A `ModCell` holds just the only three fields that cannot be recovered by regenerating the chunk: `id`, `base_id`, and `hp`. Everything else (`seed`, `edge_flags`, `light`, waterlogging) is _derived_ and is rebuilt by `materializeChunk()`, which replays every modified cell over a freshly generated chunk and then reruns the flag pass. So a chunk the player mined 30 blocks out of costs a few hundred bytes here, not 4KiB. See some definitions and more details:
 
 ```zig
 /// One modified cell: the only `Block` fields that cannot be recovered by regenerating the chunk.
@@ -422,6 +459,9 @@ pub const ModEntry = struct {
     /// Cells whose value came from a player edit or the water sim rather than from procedural generation.
     /// Bit `i` (block index `by * CHUNK_SIZE + bx`) set means `cells[rank(i)]` holds that cell's value.
     modified: [MODIFIED_WORDS]u64 = @splat(0),
+    /// Blocks whose descendant region holds a modification at some deeper depth, same bit layout as `modified`.
+    /// Grown one depth per ascent by `markDescendantsFromChild()` and never cleared.
+    descendants: [MODIFIED_WORDS]u64 = @splat(0),
     /// Modified cells in ascending block-index order. The first `count` are live; the rest is spare capacity.
     cells: []ModCell = &.{},
     /// Live entries in `cells`. Always equals the population count of `modified`.
@@ -493,7 +533,8 @@ pub const DepthCoordinate = struct {
 /// A static 2x2 grid of seeds only updated during depth increase or game startup.
 pub const QuadCache = struct {
     pub const PATH_PREALLOC_SIZE = 256;
-    pub const SEED_CACHE_SIZE = 256; // TODO: evaluate why making this large causes a crash
+    // NOTE: making this cache too large results in crashes due to naive copying in Debug.
+    pub const SEED_CACHE_SIZE = 256;
     pub const SEED_CACHE_WAYS = 4;
     pub const SEED_CACHE_SETS = SEED_CACHE_SIZE / SEED_CACHE_WAYS;
 
@@ -511,9 +552,9 @@ pub const QuadCache = struct {
     /// The 512-bit hashes for the 4 active quadrants (sequentially from D to D-31).
     /// (0: NW, 1: NE, 2: SW, 3: SE)
     path_hashes: ChunkSeeds align(memory.MAIN_ALIGN_BYTES),
-    /// The 4-by-4 material grid representing the "event horizon" at H (D-32).
-    /// The inner 2-by-2 (indices [1..2][1..2]) corresponds to the active quadrants.
-    ancestor_materials: [4][4]Block,
+    /// The material grid representing the "event horizon" at H (D-32), `ANCESTOR_GRID` blocks square.
+    /// The central 2-by-2 (at `ANCESTOR_CENTER`) corresponds to the active quadrants.
+    ancestor_materials: [ANCESTOR_GRID][ANCESTOR_GRID]Block,
 
     /// A list representing the prefix stack of the top left quadrant's X-coordinate.
     /// NOT for use with ancestory logic.
@@ -540,7 +581,7 @@ Entering a portal shifts a bunch of data around, particularly the cache and all 
 
 Because the coordinate tracking suffix uses a 64-bit integer, and each depth traversal consumes exactly 2 bits, a player can natively traverse exactly 32 depths ($2^{64}$ chunks) without exceeding standard integer bounds.
 
-To manage near-infinite zoom, Depthwell stores seeds for each quadrant in `path_hashes` (4 because the code generates four 64-bit BLAKE3 hashes for various parts of seeding, from terrain to WGSL decoration).
+To manage near-infinite zoom, Depthwell stores one 512-bit seed per quadrant in `path_hashes` (4 of them, one each for NW, NE, SW, and SE).
 
 Once increasing the depth past 32, the engine executes a "rebase" each time. The player is re-centered inside the 64-bit bounds, and the highest 2 bits (the overflow nibble) "fall off" the top of the suffix into the `QuadCache` history arrays.
 
@@ -551,7 +592,7 @@ Modifications of "higher" $D$-values are prioritized, and lower $D$-values are u
 - Reading performance is an amortized O(1) due to only needing to consider block sizes between depth $D-32$ to $D$.
 - Writing performance is an amortized O(1) due to needing to modify a `HashMap`.
 - Increasing depth is, surprisingly, an O(1) operation due to a lack of modification culling (to allow for a "spectator view" on death), and storing where things are with a 256-bit `DepthCoordinate` and assuming that collisions are impossible.
-- Space complexity is O(n) based on the number of modified _cells_, not chunks: a `ModEntry` only holds the blocks actually modified (a `ModCell` is 5 bytes), so a lightly edited chunk costs a few hundred bytes rather than a full 4KiB `Chunk`. Removing a chunk's edits recycles its entry slot and cell block, but `entries` itself never shrinks (the budgeted save holds indices into it), so it is stored as a `SegmentedList` to prevent large unused gaps in WASM memory.
+- Space complexity is O(n) based on the number of modified _cells_, not chunks: a `ModEntry` only holds the blocks actually modified (a `ModCell` is 6 bytes), so a lightly edited chunk costs a few hundred bytes rather than a full 4KiB `Chunk`. Removing a chunk's edits recycles its entry slot and cell block, but `entries` itself never shrinks (the budgeted save holds indices into it), so it is stored as a `SegmentedList` to prevent large unused gaps in WASM memory.
 
 #### Storing chunks with a simulation distance
 

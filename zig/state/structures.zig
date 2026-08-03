@@ -20,6 +20,7 @@
 //! - `seat`: stands the structure on the ground; see `Seat`
 //! - `constraints`: terrain rules over the footprint (comptime-sorted cheapest first)
 //! - `attempts`: placements to try in a cell before giving up (default 1)
+//! - `overlaps_self`: lets two placements of THIS kind overlap; see `hasSelfOverlap()`
 //!
 //! `target_chance` is a ROLL, not a density: seating and terrain rules throw most rolls away.
 //! it's also sadly not possible to guess the odds of terrain rules throwing odds...only approximate with auditing.
@@ -109,6 +110,16 @@ pub const Region = struct {
     y0: Edge = .{ .at = .start },
     /// Bottom edge, EXCLUSIVE: `.{ .at = .end }` is the first row past the footprint, not its last row.
     y1: Edge = .{ .at = .end },
+
+    /// Resolves all four edges against a candidate's bounds at once.
+    pub inline fn resolve(self: Region, bounds: Rect) Rect {
+        return .{
+            .x_start = self.x0.resolve(bounds.x_start, bounds.x_end),
+            .x_end = self.x1.resolve(bounds.x_start, bounds.x_end),
+            .y_start = self.y0.resolve(bounds.y_start, bounds.y_end),
+            .y_end = self.y1.resolve(bounds.y_start, bounds.y_end),
+        };
+    }
 };
 
 /// Ground-flatness rule: profiles every column in `[x0, x1)` for its ground surface (see `surfaceY()`)
@@ -257,10 +268,10 @@ pub fn surfaceY(wx: i32, y_from: i32, y_to: i32) ?i32 {
 /// `surfaceY()` against an arbitrary terrain probe.
 pub fn surfaceYWith(comptime probe: anytype, wx: i32, y_from: i32, y_to: i32) ?i32 {
     std.debug.assert(y_to >= y_from);
-    var above_solid = probe(wx, y_from - 1);
+    var above_solid = probeSolid(probe(wx, y_from - 1));
     var y = y_from;
     while (y <= y_to) : (y += 1) {
-        const solid = probe(wx, y);
+        const solid = probeSolid(probe(wx, y));
         if (solid and !above_solid) return y;
         above_solid = solid;
     }
@@ -282,43 +293,34 @@ pub fn jitter(state: *HashState, cx: i32, cy: i32, area: u32, w: i32, h: i32) Re
     };
 }
 
+/// Reads one terrain probe's answer as "this block is a foundation".
+/// A probe answers with a `Sprite` or with a `bool`, and every rule has to accept both.
+inline fn probeSolid(sample: anytype) bool {
+    return if (@TypeOf(sample) == bool) sample else sample.isFoundation();
+}
+
+/// Reads one terrain probe's answer as "this block is strictly air or a liquid".
+inline fn probeEmpty(sample: anytype) bool {
+    return if (@TypeOf(sample) == bool) !sample else (sample == .none or sample.isEmpty());
+}
+
+/// Tests every block of `rect` and fails on the first block `accepts` rejects.
+inline fn everyBlock(comptime probe: anytype, comptime accepts: anytype, rect: Rect) bool {
+    var y = rect.y_start;
+    while (y < rect.y_end) : (y += 1) {
+        var x = rect.x_start;
+        while (x < rect.x_end) : (x += 1) {
+            if (!accepts(probe(x, y))) return false;
+        }
+    }
+    return true;
+}
+
 /// Runs one terrain rule against a candidate's bounds.
 inline fn checkConstraint(comptime probe: anytype, comptime c: Constraint, bounds: Rect) bool {
     switch (c) {
-        .solid => |region| {
-            const x0 = region.x0.resolve(bounds.x_start, bounds.x_end);
-            const x1 = region.x1.resolve(bounds.x_start, bounds.x_end);
-            const y0 = region.y0.resolve(bounds.y_start, bounds.y_end);
-            const y1 = region.y1.resolve(bounds.y_start, bounds.y_end);
-            var y = y0;
-            while (y < y1) : (y += 1) {
-                var x = x0;
-                while (x < x1) : (x += 1) {
-                    const sample = probe(x, y);
-                    // check foundation status for sprite or boolean probes
-                    const is_solid = if (@TypeOf(sample) == bool) sample else sample.isFoundation();
-                    if (!is_solid) return false;
-                }
-            }
-            return true;
-        },
-        .empty => |region| {
-            const x0 = region.x0.resolve(bounds.x_start, bounds.x_end);
-            const x1 = region.x1.resolve(bounds.x_start, bounds.x_end);
-            const y0 = region.y0.resolve(bounds.y_start, bounds.y_end);
-            const y1 = region.y1.resolve(bounds.y_start, bounds.y_end);
-            var y = y0;
-            while (y < y1) : (y += 1) {
-                var x = x0;
-                while (x < x1) : (x += 1) {
-                    const sample = probe(x, y);
-                    // verify block is strictly empty air or water
-                    const is_empty = if (@TypeOf(sample) == bool) !sample else (sample == .none or sample.isEmpty());
-                    if (!is_empty) return false;
-                }
-            }
-            return true;
-        },
+        .solid => |region| return everyBlock(probe, probeSolid, region.resolve(bounds)),
+        .empty => |region| return everyBlock(probe, probeEmpty, region.resolve(bounds)),
 
         .level => |lv| {
             const x0 = lv.x0.resolve(bounds.x_start, bounds.x_end);
@@ -342,24 +344,31 @@ inline fn checkConstraint(comptime probe: anytype, comptime c: Constraint, bound
             return true;
         },
         .encase => |en| {
-            const x0 = en.region.x0.resolve(bounds.x_start, bounds.x_end);
-            const x1 = en.region.x1.resolve(bounds.x_start, bounds.x_end);
-            const y0 = en.region.y0.resolve(bounds.y_start, bounds.y_end);
-            const y1 = en.region.y1.resolve(bounds.y_start, bounds.y_end);
+            const area = en.region.resolve(bounds);
 
             var open: u32 = 0;
             var total: u32 = 0;
-            var y = y0;
-            while (y < y1) : (y += 1) {
-                var x = x0;
-                while (x < x1) : (x += 1) {
+            var y = area.y_start;
+            while (y < area.y_end) : (y += 1) {
+                // A row slides a three-wide window along, so each column's shape test is done once
+                // instead of once for itself and twice more as its neighbors' left and right taps.
+                var left = en.covers(area.x_start - 1, y, bounds);
+                var here = en.covers(area.x_start, y, bounds);
+                var x = area.x_start;
+                while (x < area.x_end) : (x += 1) {
+                    const right = en.covers(x + 1, y, bounds);
+                    defer {
+                        left = here;
+                        here = right;
+                    }
+
                     // Blocks the structure occupies are its own business; only the ring around it is tested.
-                    if (en.covers(x, y, bounds)) continue;
-                    const touches_shape = en.covers(x - 1, y, bounds) or en.covers(x + 1, y, bounds) or
+                    if (here) continue;
+                    const touches_shape = left or right or
                         en.covers(x, y - 1, bounds) or en.covers(x, y + 1, bounds);
                     if (!touches_shape) continue;
                     total += 1;
-                    if (!probe(x, y)) open += 1;
+                    if (probeEmpty(probe(x, y))) open += 1;
                 }
             }
             if (total == 0) return en.min_open == 0; // no halo at all counts as fully sealed
@@ -389,10 +398,33 @@ fn constraintCost(comptime c: Constraint, comptime w: i32, comptime h: i32) usiz
     };
 }
 
+/// Rejects a rule whose own numbers cannot describe a box, before it ever runs.
+///
+/// `Level` in particular feeds `surfaceYWith()`, which asserts its window is not inverted.
+/// A negative reach there would only show up as a Debug-only assert on the one candidate that hits it.
+fn validateConstraint(comptime c: Constraint) void {
+    switch (c) {
+        .solid, .empty, .custom => {},
+        .level => |lv| {
+            if (lv.max_rise < 0 or lv.max_drop < 0)
+                @compileError("A level rule's max_rise/max_drop are reaches, so neither may be negative.");
+            if (lv.max_slope < 0)
+                @compileError("A level rule's max_slope is a height difference, so it may not be negative.");
+        },
+        .encase => |en| {
+            if (en.min_open < 0 or en.max_open > 1)
+                @compileError("An encase rule's open fractions must be normalized in [0, 1].");
+            if (en.min_open > en.max_open)
+                @compileError("An encase rule's open band is inverted, so no halo can ever satisfy it.");
+        },
+    }
+}
+
 /// Sorts a structure constraint list cheapest-first. Shared with `decorations.zig`.
 pub fn sortConstraints(comptime list: []const Constraint, comptime w: i32, comptime h: i32) []const Constraint {
     comptime {
         @setEvalBranchQuota(1e6);
+        for (list) |c| validateConstraint(c);
         var sorted: [list.len]Constraint = list[0..list.len].*;
         // basic insertion sort
         if (sorted.len >= 2) {
@@ -701,17 +733,33 @@ fn cellRank(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) u64 {
     return state.getRaw();
 }
 
+/// Whether a kind lets two of its OWN placements overlap instead of settling them by rank.
+///
+/// Off by default, and it must stay off for anything shaped: two overlapping trees interleave into one unreadable blob.
+/// Exists for a REGION-like kind (see `structures/Deposit.zig`), where every placement in a neighborhood draws the same material,
+/// so two overlapping blobs are indistinguishable from one larger one!
+///
+/// This only relaxes the SAME-kind rule; every other kind still outranks it exactly as before.
+inline fn hasSelfOverlap(comptime kind: usize) bool {
+    const S = structures[kind];
+    return @hasDecl(S, "overlaps_self") and S.overlaps_self;
+}
+
 /// Whether an overlapping placement outranks this one.
 ///
 /// Collapses what used to be two separate rules into one scan, because both ask the same question:
 /// - a higher-priority KIND always wins (that ordering is the point of the tuple)
-/// - two placements of the SAME kind (which overhang makes possible) are settled by `cellRank()`
+/// - two placements of the SAME kind (which overhang makes possible) are settled by `cellRank()`,
+///   unless the kind opted out through `hasSelfOverlap()`
 fn isBeaten(comptime kind: usize, cx: i32, cy: i32, bounds: Rect, struct_seed: Vec2u) bool {
     // (inlining this has been tested to improve perf;
     // also comptime kind forces multiple function signatures anyway)
-    const my_rank = cellRank(kind, cx, cy, struct_seed);
+    const allows_self = comptime hasSelfOverlap(kind);
+    const my_rank = if (allows_self) 0 else cellRank(kind, cx, cy, struct_seed);
 
     inline for (0..kind + 1) |other| {
+        // comptime-known both ways, so a kind that opted out never emits the scan at all!
+        if (other == kind and allows_self) continue;
         const area = @as(i32, @intCast(Configs[other].spawn_area));
         const xs = cellRange(
             area,
@@ -753,14 +801,15 @@ fn isBeaten(comptime kind: usize, cx: i32, cy: i32, bounds: Rect, struct_seed: V
 /// Never holds a cache POINTER across the scan: `isBeaten()` re-enters `structCacheSlot()`
 /// for neighboring cells of this same kind, which share this bank and can evict this very slot.
 fn acceptedBounds(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) ?Rect {
-    const bounds = structCacheSlot(kind, cx, cy, struct_seed).bounds orelse return null;
+    const slot = structCacheSlot(kind, cx, cy, struct_seed);
+    const bounds = slot.bounds orelse return null;
+    // The settled case is the common one and it reads the slot exactly once.
+    if (slot.blocked) |blocked| return if (blocked) null else bounds;
 
-    const blocked = structCacheSlot(kind, cx, cy, struct_seed).blocked orelse blk: {
-        const v = isBeaten(kind, cx, cy, bounds, struct_seed);
-        structCacheSlot(kind, cx, cy, struct_seed).blocked = v;
-        break :blk v;
-    };
-    return if (blocked) null else bounds;
+    const verdict = isBeaten(kind, cx, cy, bounds, struct_seed);
+    // `slot` is stale past this point, so the verdict is written through a fresh lookup.
+    structCacheSlot(kind, cx, cy, struct_seed).blocked = verdict;
+    return if (verdict) null else bounds;
 }
 
 /// `acceptedBounds()` for `debug/audit.zig`, which needs the placement itself rather than a block's sprite.
@@ -821,6 +870,12 @@ const MAX_CHUNK_CANDIDATES: usize = blk: {
     }
     break :blk m;
 };
+
+comptime {
+    // `ChunkCandidates.counts` is a u8 per kind, so a wider bound would wrap instead of overflowing loudly.
+    if (MAX_CHUNK_CANDIDATES > std.math.maxInt(u8))
+        @compileError("A kind can reach one chunk from more cells than ChunkCandidates.counts can hold.");
+}
 
 /// Every candidate that can claim a block of one chunk, resolved once for the whole chunk.
 const ChunkCandidates = struct {
