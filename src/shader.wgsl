@@ -10,12 +10,12 @@
 // Auto-generated from zig/types/sprite.zig by zig/generate_shader.zig (runs during `zig build`).
 // Do NOT edit values between the markers by hand; edit the Sprite enum instead.
 const TILES_PER_ROW: f32 = 16.0;
-const TILES_PER_COLUMN: f32 = 20.0;
+const TILES_PER_COLUMN: f32 = 21.0;
 const STONE_START: u32 = 32u;
-const ORE_START: u32 = 65u;
-const GEM_START: u32 = 71u;
-const GEM_MASK_START: u32 = 85u;
-const WATER_START: u32 = 317u;
+const ORE_START: u32 = 67u;
+const GEM_START: u32 = 73u;
+const GEM_MASK_START: u32 = 87u;
+const WATER_START: u32 = 319u;
 // #CONSTANT REGION END#
 
 const PI = radians(180.0);

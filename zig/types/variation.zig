@@ -63,6 +63,7 @@ pub const VariantRule = struct {
 const rules = [_]struct { Sprite, VariantRule }{
     // "Plain" stone: 2x2 grid so it reads like a 32x32 texture instead of obviously tiling.
     .{ .stone, .{ .kind = .grid_2x2, .count = 4 } },
+    .{ .diorite, .{ .kind = .x_parity, .count = 2 } },
     // Edge stone alternates in a checkerboard.
     .{ .edge_stone, .{ .kind = .checkerboard, .count = 2 } },
     // seed variations! (non-uniform; read VariantKind definition!)

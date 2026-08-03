@@ -21,7 +21,7 @@ pub const WOOD_ID = 13;
 /// Index where stone-like sprites begin.
 pub const STONE_START = WOOD_ID + 19;
 /// Index where stone-like sprites end.
-const STONE_END = STONE_START + 23;
+const STONE_END = STONE_START + 25;
 
 /// Index where smelted bar sprites begin.
 const BAR_START = STONE_END + 4;
@@ -58,7 +58,7 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 318) {
+    if (max_sprite_value != 320) {
         var buf: [64]u8 = undefined;
         @compileError("Max sprite value of " ++
             (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
@@ -116,14 +116,15 @@ pub const Sprite = enum(u16) {
     molten_stone,
     lava_stone,
     bright_red_stone,
+    rose_stone,
     ancient_stone,
     pale_ancient_stone,
     brown_sulfuric_stone,
     sulfuric_stone,
     basalt,
-    diorite,
-    dark_stone,
-    /// "Plain" stone type, with 2x2 variations to prevent an overly tiling look.
+    diorite, // 2 variations
+    dark_stone = STONE_END - 1,
+    /// "Plain" stone type (4 variations to prevent obvious tiling)
     stone = STONE_END,
 
     // smelted bars! (item-only product of smelting ore; parallel to the ore range below)

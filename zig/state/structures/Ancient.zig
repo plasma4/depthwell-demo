@@ -91,19 +91,19 @@ pub fn generate(
         const dx = struct_x - center_x;
         const dy = struct_y - center_y;
 
-        // Add random variation
+        // add random variation
         const skew_x = state.getRange(i32, -1, 2);
         const skew_y = state.getRange(i32, -1, 1);
         const local_noise_x = state.getRange(i32, -1, 1);
 
-        // Compute the final mutated outer radii for the ellipse math!
+        // compute the final mutated outer radii for the ellipse math!
         const rx = base_radius_x + skew_x + local_noise_x;
         const ry = base_radius_y + skew_y;
         if (rx > 0 and ry > 0) {
             const dist_sq = (dx * dx * ry * ry) + (dy * dy * rx * rx);
             const outer_bound = rx * rx * ry * ry;
 
-            const wall_thickness = 2;
+            const wall_thickness: i32 = 2;
             const inner_rx: i32 = @max(1, rx - wall_thickness);
             const inner_ry: i32 = @max(1, ry - wall_thickness);
 
@@ -128,7 +128,7 @@ pub fn generate(
                 }
 
                 if (inner_dist_sq > inner_bound) {
-                    const erosion_factor = (wx ^ wy) % 7;
+                    const erosion_factor = (wx ^ wy) % 7; // random erosion value (fancy!)
                     if (erosion_factor == 0) return .{ .id = .none };
                     return .{ .id = .sulfuric_stone };
                 } else {

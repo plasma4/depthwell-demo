@@ -1,7 +1,7 @@
 //! Portal chamber: a rounded-rect-ish shape on flat ground, with the portal inside.
-//! TODO: add all the items required to make portal "unlocking" a req
+//! TODO: add all the items required to make portal "unlocking" a req!
 //!
-//!   #######
+//!     ##
 //!  #########
 //! ###.....###
 //! #.........#
@@ -17,7 +17,7 @@ const Sprite = dw.Sprite;
 const structures = @import("../structures.zig");
 const Rect = structures.Rect;
 
-/// high chance+attempts=likely to appear regularly; intentional behavior!
+/// High chance + attempts = likely to appear regularly; intentional behavior!
 pub const spawn_area: u32 = 64;
 pub const max_w: u32 = size_x;
 /// Footprint height only. `structures.zig` adds `seat.max_drop` when it computes the vertical reach.
