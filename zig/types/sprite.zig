@@ -19,7 +19,7 @@ pub const UNMINEABLE_STRENGTH: u64 = std.math.maxInt(u64);
 pub const WOOD_ID = 13;
 
 /// Index where stone-like sprites begin.
-pub const STONE_START = WOOD_ID + 14;
+pub const STONE_START = WOOD_ID + 19;
 /// Index where stone-like sprites end.
 const STONE_END = STONE_START + 23;
 
@@ -45,7 +45,7 @@ const FRUIT_COUNT = 10;
 /// ID for `Sprite.gear`, which is after a list of fruit.
 const GEAR_ID = DECOR_START + 5 + FRUIT_COUNT;
 /// ID for `Sprite.bush`, which is after cornflower.
-const BUSH_ID = GEAR_ID + 25;
+const BUSH_ID = GEAR_ID + 23;
 /// ID for `Sprite.basic_core`, which is after furnaces.
 const CORE_ID = BUSH_ID + 14;
 
@@ -58,7 +58,7 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 315) {
+    if (max_sprite_value != 318) {
         var buf: [64]u8 = undefined;
         @compileError("Max sprite value of " ++
             (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
@@ -91,8 +91,13 @@ pub const Sprite = enum(u16) {
     leaves,
     sand,
     gravel,
-    dirt = WOOD_ID + 6, // bottom dirt, center dirt, 2 top dirt sprites
-    red_dirt = WOOD_ID + 10, // same as normal dirt
+    clay, // TODO: maybe add a fictional blem variant
+    clay_visual,
+    red_clay,
+    red_clay_visual,
+    hammerstone,
+    dirt = WOOD_ID + 11, // bottom dirt, center dirt, 2 top dirt sprites
+    red_dirt = WOOD_ID + 15, // same as normal dirt
 
     // stone types!
     blue_strange_stone = STONE_START,
@@ -181,9 +186,7 @@ pub const Sprite = enum(u16) {
     flint_visual,
     fiberstone,
     aqua_stone, // 2 variations
-    hammerstone = GEAR_ID + 13,
-    blemclay,
-    cordage,
+    cordage = GEAR_ID + 13,
     plant_haft,
     stone_haft,
     flint_hatchet,
@@ -191,7 +194,7 @@ pub const Sprite = enum(u16) {
     twinklemoss,
     spiralvine,
     plant_stem,
-    cornflower = GEAR_ID + 23, // 2 variations
+    cornflower = GEAR_ID + 21, // 2 variations
     bush = BUSH_ID, // 2 variations
     ceiling_flower = BUSH_ID + 2, // 4 variations
     mushroom = BUSH_ID + 6, // 3 variations
@@ -428,6 +431,10 @@ pub const Sprite = enum(u16) {
         const id = @intFromEnum(self);
         return if (id >= GEM_START and id < GEM_START + GEM_COUNT)
             id + GEM_COUNT
+        else if (self == .clay)
+            @intFromEnum(Sprite.clay_visual)
+        else if (self == .red_clay)
+            @intFromEnum(Sprite.red_clay_visual)
         else if (self == .rock)
             @intFromEnum(Sprite.rock_visual)
         else if (self == .flint)
@@ -452,6 +459,8 @@ const rules = [_]SpriteRule{
             .gravel,
             .dirt,
             .red_dirt,
+            .clay,
+            .red_clay,
         } },
         .{
             .in_world = true,
@@ -818,7 +827,6 @@ const rules = [_]SpriteRule{
                 .purple_rock,
                 .aqua_stone,
                 .hammerstone,
-                // .blemclay,
                 .flint,
                 .bush,
                 .small_tree,
@@ -1331,20 +1339,20 @@ comptime {
     if ((@as(Sprite, @enumFromInt(65535))).isInWorld())
         @compileError("isInWorld() returned true for the unselected type! Ranges are wrong.");
 
-    // `oreToBar()` relies on the bar range sitting directly before the ore range with the same
-    // length, so the mapping is a constant offset. Enforce that here.
+    // oreToBar() relies on the bar range sitting directly before the ore range with the same length,
+    // so the mapping is a constant offset. Enforce that here.
     if (ORE_START - BAR_START != GEM_START - ORE_START)
         @compileError("Bar range is not parallel to the ore range; oreToBar() would be wrong.");
 
     // Equal-length ranges are not enough: the two must also line up name-for-name, or a reordered ore
-    // would smelt into someone else's bar. Cheap to check, and it catches an insertion into either range.
+    // would smelt into someone else's bar. Catches an insertion into either range!
     for (ORE_START..GEM_START) |ore_id| {
         const ore: Sprite = @enumFromInt(ore_id);
         if (!std.mem.eql(u8, @tagName(ore.oreToBar()), @tagName(ore) ++ "_bar"))
             @compileError("Ore `" ++ @tagName(ore) ++ "` smelts into `" ++ @tagName(ore.oreToBar()) ++ "`; the bar range drifted out of order.");
     }
 
-    // GEM_COUNT positions MASK_START (and bounds `isOverlay()`), so it must match the actual gem span.
+    // GEM_COUNT positions MASK_START (and bounds isOverlay()), so it must match the actual gem span.
     if (@intFromEnum(Sprite.electrit) - GEM_START + 1 != GEM_COUNT)
         @compileError("GEM_COUNT does not match the quartz..electrit range.");
 
@@ -1354,6 +1362,32 @@ comptime {
         const s: Sprite = @enumFromInt(o);
         if (s.isOverlay() != (s.isOre() or s.isGem()))
             @compileError("isOverlay() range drifted from ore/gem props; fix ORE_START/GEM_START/GEM_COUNT.");
+    }
+
+    // check that solid blocks are not waterloggable or decor
+    for (0..MAX_SPRITE_ID) |id| {
+        const s: Sprite = @enumFromInt(id);
+        if (s.isSolid()) {
+            if (s.isWaterloggable()) {
+                @compileError("Sprite `" ++ @tagName(s) ++ "` is solid but marked as waterloggable!");
+            }
+            if (s.category() == .decor) {
+                @compileError("Sprite `" ++ @tagName(s) ++ "` is solid but categorized as decor!");
+            }
+        }
+    }
+
+    // check that static drop items are valid items
+    for (0..MAX_SPRITE_ID) |id| {
+        const s: Sprite = @enumFromInt(id);
+        const p = getSpriteProps(s);
+        if (p.drops.strategy == .static) {
+            for (p.drops.static_items) |dropped| {
+                if (!dropped.isItem() and !dropped.isInWorld()) {
+                    @compileError("Sprite `" ++ @tagName(s) ++ "` drops `" ++ @tagName(dropped) ++ "`, which is not a valid item!");
+                }
+            }
+        }
     }
 
     var i: u16 = 0;
