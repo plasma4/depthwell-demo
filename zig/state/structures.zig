@@ -20,6 +20,7 @@
 //! - `seat`: stands the structure on the ground; see `Seat`
 //! - `constraints`: terrain rules over the footprint (comptime-sorted cheapest first)
 //! - `attempts`: placements to try in a cell before giving up (default 1)
+//! - `overlaps_self`: lets two placements of THIS kind overlap; see `hasSelfOverlap()`
 //!
 //! `target_chance` is a ROLL, not a density: seating and terrain rules throw most rolls away.
 //! it's also sadly not possible to guess the odds of terrain rules throwing odds...only approximate with auditing.
@@ -701,17 +702,33 @@ fn cellRank(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) u64 {
     return state.getRaw();
 }
 
+/// Whether a kind lets two of its OWN placements overlap instead of settling them by rank.
+///
+/// Off by default, and it must stay off for anything shaped: two overlapping trees interleave into one unreadable blob.
+/// Exists for a REGION-like kind (see `structures/Deposit.zig`), where every placement in a neighborhood draws the same material,
+/// so two overlapping blobs are indistinguishable from one larger one!
+///
+/// This only relaxes the SAME-kind rule; every other kind still outranks it exactly as before.
+inline fn hasSelfOverlap(comptime kind: usize) bool {
+    const S = structures[kind];
+    return @hasDecl(S, "overlaps_self") and S.overlaps_self;
+}
+
 /// Whether an overlapping placement outranks this one.
 ///
 /// Collapses what used to be two separate rules into one scan, because both ask the same question:
 /// - a higher-priority KIND always wins (that ordering is the point of the tuple)
-/// - two placements of the SAME kind (which overhang makes possible) are settled by `cellRank()`
+/// - two placements of the SAME kind (which overhang makes possible) are settled by `cellRank()`,
+///   unless the kind opted out through `hasSelfOverlap()`
 fn isBeaten(comptime kind: usize, cx: i32, cy: i32, bounds: Rect, struct_seed: Vec2u) bool {
     // (inlining this has been tested to improve perf;
     // also comptime kind forces multiple function signatures anyway)
-    const my_rank = cellRank(kind, cx, cy, struct_seed);
+    const allows_self = comptime hasSelfOverlap(kind);
+    const my_rank = if (allows_self) 0 else cellRank(kind, cx, cy, struct_seed);
 
     inline for (0..kind + 1) |other| {
+        // comptime-known both ways, so a kind that opted out never emits the scan at all!
+        if (other == kind and allows_self) continue;
         const area = @as(i32, @intCast(Configs[other].spawn_area));
         const xs = cellRange(
             area,

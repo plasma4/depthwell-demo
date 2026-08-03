@@ -150,8 +150,8 @@ fn liveLayer(dt: f64) LayerPass {
             @as(f64, @floatFromInt(game.player_pos[0])) + @as(f64, @floatFromInt(player_vel_x)) * dt,
             @as(f64, @floatFromInt(game.player_pos[1])) + @as(f64, @floatFromInt(player_vel_y)) * dt,
         },
-        // A descent zooms the whole world in without touching `camera_scale`, so the committed zoom
-        // is still there to fall back to the moment it ends.
+        // A descent zooms the whole world in without touching camera_scale,
+        // so the committed view (D+1 chunks) is still there to fall back to the moment it ends.
         .zoom = interpolated_zoom * dw.portal.zoomFactor(),
         .source = .live,
     };
@@ -160,7 +160,7 @@ fn liveLayer(dt: f64) LayerPass {
 /// Builds the pass for the transition's preview layer (the depth being entered).
 ///
 /// Drawn at `portal.overlayScale()` of `camera_scale`, which cancels the live layer's zoom on the last
-/// frame so the preview lands exactly on the committed view and the hand-off is invisible.
+/// frame so the preview lands exactly on the committed view (D+1 chunks).
 /// The world is frozen for the whole transition, so nothing here needs interpolating.
 fn overlayLayer() LayerPass {
     const t = dw.portal.overlayTransition();

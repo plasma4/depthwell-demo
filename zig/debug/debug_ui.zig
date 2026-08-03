@@ -131,7 +131,7 @@ const render_sliders = [_]SliderDef{
         .name = "Wireframe brightness",
         .min = 0.0,
         .max = 1.0,
-        .val = &dw.render.WIREFRAME_OPACITY,
+        .val = &dw.render.WIREFRAME_BRIGHTNESS,
     },
     .{
         .name = "Preview tile size",

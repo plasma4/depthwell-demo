@@ -45,7 +45,7 @@ pub const PLAYER_HITBOX_HEIGHT = 200;
 const CCD_STEP_SIZE = CHUNK_SIZE_SQ;
 
 /// The zoom in/out keys change the zoom multiplier this fast per frame.
-const CAMERA_CHANGE_SPEED = 1.02;
+const CAMERA_CHANGE_SPEED = if (dw.dev_tools) 1.04 else 1.025;
 /// How fast the camera should adjust per frame to the new position. Larger means faster.
 const CAMERA_SMOOTHING = 0.25;
 

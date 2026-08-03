@@ -7,8 +7,8 @@ const chunks = dw.chunks;
 const sprite = dw.sprite;
 const logger = dw.logger;
 
-/// Opacity of chunk wireframes.
-pub var WIREFRAME_OPACITY: f64 = 0.0;
+/// Brightness of chunk wireframes.
+pub var WIREFRAME_BRIGHTNESS: f64 = 0.0;
 
 const CHUNK_SIZE = dw.CHUNK_SIZE;
 const CHUNK_SIZE_FLOAT = dw.CHUNK_SIZE_FLOAT;
@@ -60,14 +60,14 @@ pub fn prepareVisibleData(dt: f64, time_diff: f64, canvas_w: f64, canvas_h: f64)
 
     const world_opacity = dw.portal.worldOpacity();
     drawBackground(world_opacity);
-    handleVisibleChunks(world_opacity, WIREFRAME_OPACITY);
+    handleVisibleChunks(world_opacity, WIREFRAME_BRIGHTNESS);
 
     if (dw.portal.isActive()) {
         const opacity = dw.portal.overlayOpacity();
         if (opacity > 0.0) {
             dw.chunks.updateOverlayChunks(canvas_w, canvas_h);
             drawBackground(opacity);
-            handleVisibleChunks(opacity, WIREFRAME_OPACITY);
+            handleVisibleChunks(opacity, WIREFRAME_BRIGHTNESS);
         }
     }
 
