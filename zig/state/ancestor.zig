@@ -61,7 +61,7 @@ pub const AncestorCache = struct {
 
     /// Tiers nearest the current depth that receive the wide, high-capacity layout.
     pub const HOT_TIERS = 2;
-    /// Sets per hot tier. `HOT_SETS * WAYS` = 128 slots covers the ~50-chunk worst-case parent working set
+    /// Sets per hot tier. `HOT_SETS * WAYS` = 128 slots covers the ~50-chunk worst-case parent working set.
     /// (at minimum zoom without overflowing any single 8-way set).
     pub const HOT_SETS = 16;
     /// Chunks stored per hot tier.
@@ -69,8 +69,8 @@ pub const AncestorCache = struct {
 
     /// Remaining tiers past the hot ones; sized for the converged (deep) footprint only.
     pub const COLD_TIERS = NUM_TIERS - HOT_TIERS;
-    /// A single set per cold tier; 8 slots is plenty for the converged footprint plus a
-    /// quadrant-crossing buffer.
+    /// A single set per cold tier;
+    /// 8 slots is plenty for the converged footprint plus a quadrant-crossing buffer.
     pub const COLD_SETS = 1;
     /// Chunks stored per cold tier.
     pub const COLD_SIZE = COLD_SETS * WAYS;
