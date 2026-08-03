@@ -271,6 +271,37 @@ Ore and gem dispersal across the base stone blocks is driven by a data-driven ru
 
 Specific values and comptime logic for everything may be found in `zig/state/procedural.zig`.
 
+Each of those six values costs a full noise evaluation, and most blocks need only the first three. So the rules never run against a filled-in record. They run against a `TerrainSampler`, which draws density, cutoff, and moisture up front and everything else on first use. `classifyTerrain()` holds the rules as one ordered list, and each group of rules sits directly after the sample it is the first to need, which makes the rule order the cost order too. Air is settled by density and cutoff alone, and air is most of the world, so an air block pays for none of weirdness, secondary density, the ore field, or the island probe. That last one is worth calling out: an island tag costs a _second_ warped Worley sample a few rows above the block, because "is this near a surface?" cannot be answered from the block's own density. Only a block that reaches the island rule pays for it.
+
+What gets memoized is only what survives. `base_terrain_cache` keeps the chosen sprite and the ore density and nothing else, 16 bytes per entry, so one direct-mapped bank covers a 256-by-128 block window in half a megabyte and the intermediate fields never leave the stack. The bank is keyed by `terrainGeneration()`, which folds in the world seed and a `tuning_epoch` that the debug sliders bump, so moving any terrain slider drops the whole cache instead of serving stale samples.
+
+The Worley pass underneath all of this searches the 3x3 cells around a sample for the two nearest feature points, and their distance gap is what draws the cell edges. All nine taps are measured before any of them is compared, since the measurement has no dependency from one tap to the next and vectorizes, while the "keep the best two" reduction does not. Each tap's feature point offset and its cell weight are three 21-bit fractions unpacked out of that cell's single hash, so nine hashes buy twenty-seven values.
+
+#### Structure pass
+
+Structures are the large, deliberate things: trees, geodes, pillars, portals, chambers. They are placed only at base depth (every deeper copy of one is inherited through the ancestor/refine passes, not re-rolled), and the whole pass is a pure function of world position and seed, so a chunk generates identically whatever order chunks arrive in and a structure that straddles a chunk border agrees with itself on both sides.
+
+Each kind declares a `spawn_area`, a power of two, and the world is tiled into cells of that size. One cell gets one placement, resolved in four fixed stages that a kind opts into:
+
+- **Roll.** `target_chance` decides whether the cell tries at all. It is a roll and not a density, because the stages below throw most rolls away.
+- **Anchor.** The box is jittered to _anywhere_ in the cell, overhang included. Drawing the origin from the cell's interior instead would leave a blank band along every cell edge and make the spawn lattice visible.
+- **Seat.** The box slides down onto the terrain surface. This cannot be a constraint: a constraint is a predicate over a box that is already final, while seating is the transform that decides where the box belongs.
+- **Gate.** The terrain rules accept or reject the finished box.
+
+Anchor, seat, and gate retry together up to `attempts` times before the cell gives up.
+
+The terrain rules are a small vocabulary rather than per-structure code: `solid` and `empty` over a region, `level` for flat ground under a footprint, `encase` for "walled in by rock, to this degree", and `custom` as the escape hatch. Every region is expressed relative to the candidate's own bounds (the row directly below the box is `y0 = .{ .at = .end }`, `y1 = .{ .at = .end, .off = 1 }`), so a rule survives a structure changing size. `constraintCost()` counts each rule's terrain samples at compile time and `sortConstraints()` puts the cheapest first, so a candidate usually dies on a four-block probe rather than on the scan that would have cost a hundred.
+
+`encase` deserves a note, because "surrounded by rock" is easy for a rectangle and awkward for anything else: a bounding box around a circle tests the wrong blocks. So the structure hands over its own shape predicate, the halo is derived from it (a block the shape does not occupy but which touches one it does), and the _fraction_ of that halo which is open must land in a band. A band and not a ceiling is what lets a geode be deliberately breached: mostly buried, but never perfectly sealed, so a player can find it.
+
+Priority is the order of the `structures` tuple. A placement is dropped when an overlapping one outranks it, which `isBeaten()` settles in one scan: a higher-priority kind always wins, and two placements of the same kind (which overhang makes possible) are settled by a hash-derived `cellRank()` so no compass direction is favored. A kind can opt out of the same-kind rule with `overlaps_self` when two of its blobs are indistinguishable from one larger blob.
+
+Two caches carry the pass. `struct_cache` holds one bank per kind, memoizing a cell's box and, lazily, whether anything beat it. That matters because the same cell is re-derived constantly: by every block inside the footprint, and again by every later kind's collision scan. `chunk_ctx` then resolves every kind's candidates once for a whole chunk, so the per-block call is a walk over a handful of rectangles instead of a grid search. Nothing reachable from the structure pass re-enters `chunk_ctx` (terrain sampling reads base terrain, which is upstream), but `isBeaten()` _does_ re-enter `struct_cache` for neighboring cells of its own kind and can evict the very slot it was called from, which is why no cache pointer is ever held across that scan.
+
+Structure coordinates are `i32` on purpose. Probing outside the world is routine here (a seat scan reaching below the box, an `encase` halo, `isBeaten()` resolving the cell at `cx - 1`), and signed coordinates turn what would be an unsigned wrap into an easy bounds check in `baseSolid()`. This is also what caps `STARTING_ZOOM_TIMES` at 13.
+
+Small things that need no collision handling belong in the decoration pass below instead, which is far cheaper. See `structures/Example.zig` for a fully commented walkthrough.
+
 #### Decoration pass
 
 The final pass handles the "flavor" of the world. These are things such as mushrooms, spiral plants, and ceiling flowers. Like every other generation pass it draws from position-keyed `FastHash` streams (`structures.makeBlockHash()`), so a decoration is a pure function of its own world position and never of the order chunks happen to be generated in. `ChaCha12` is used only to fill each block's per-block visual `seed`, which is stream-ordered within a chunk.
