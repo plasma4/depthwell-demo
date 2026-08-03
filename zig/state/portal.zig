@@ -411,14 +411,22 @@ inline fn pullProgress() f64 {
 }
 
 /// How hard the world is shaking this frame, 0 (still) to 1 (full tremor).
-/// Builds with the zoom so the tremor peaks as the descent commits (see `chunks.updateShake()`).
+/// Increases as the zoom progresses, with a minor fade-out at the end (see `render/chunk.zig`'s updateShake()).
 pub fn shakeIntensity() f32 {
     @setFloatMode(.optimized);
     if (!isActive()) return 0.0;
-    // The arrival is a still, landed world; shaking it would undo the calm the fade-in buys.
+    // if returning then there's no need to shake
     if (isReturning() and memory.game.portal_frame >= RETURN_DIVE_FRAMES) return 0.0;
-    // A floor keeps a tremor present from the first frame, since the zoom curve starts flat.
-    return @floatCast(0.25 + 0.75 * zoomCurve(curveProgress()));
+
+    const p = curveProgress();
+    const base_shake = 0.25 + 0.75 * zoomCurve(p);
+
+    const fade = if (p >= 0.9)
+        @max(0.0, (1.0 - p) / 0.1)
+    else
+        1.0;
+
+    return @floatCast(base_shake * fade);
 }
 
 /// Rate the background clock advances at, eased to a standstill as the player is drawn in.

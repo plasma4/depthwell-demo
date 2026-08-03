@@ -32,10 +32,9 @@ pub var player_screen_pos: dw.utils.Vec2f32 = .{ 0.0, 0.0 };
 pub var player_screen_size: f32 = 16.0;
 
 /// Largest tremor the warp can reach, at full intensity.
-/// Deliberately fairly small: the effect should register as unease, not as a camera being thrown around.
 const SHAKE_MAX_OFFSET: f32 = 3.0; // internal viewport pixels
-const SHAKE_MAX_ROTATION: f32 = 2.0 * std.math.pi / 180.0; // 2 degrees
-const SHAKE_MAX_SCALE: f32 = 0.02; // 1%
+const SHAKE_MAX_ROTATION: f32 = 2.5 * std.math.pi / 180.0; // 2.5 degrees
+const SHAKE_MAX_SCALE: f32 = 0.03; // plus or minus 3%
 
 /// How quickly the warp chases a fresh random target each render frame.
 /// Pure white noise strobes at high frame rates, so each frame only closes part of the gap.
@@ -62,7 +61,7 @@ inline fn shakeSigned() f32 {
 }
 
 /// Rolls a new warp for this render frame, eased toward from the last one.
-/// `intensity` is 0 (still) to 1 (full tremor).
+/// `intensity` is 0 (still) to 1 (full random tremor).
 fn updateShake(intensity: f32) void {
     if (intensity <= 0.0) {
         warp = .{};
@@ -397,7 +396,7 @@ fn updateRenderProperties(
     const abs_grid_x = @as(f64, @floatFromInt(abs_grid_cx * @as(i32, dw.CHUNK_SIZE)));
     const abs_grid_y = @as(f64, @floatFromInt(abs_grid_cy * @as(i32, dw.CHUNK_SIZE)));
 
-    // Wrap the background's absolute camera every `BG_WRAP_CHUNKS` chunks so the FBM background loops
+    // Wrap the background's absolute camera every BG_WRAP_CHUNKS chunks so the FBM background loops
     // seamlessly when walking OR zooming across the boundary (see the constant's doc comment for the contract).
     const player_cx_bg_mod = @as(i64, @intCast(pass.origin.suffix[0] % BG_WRAP_CHUNKS));
     const player_cy_bg_mod = @as(i64, @intCast(pass.origin.suffix[1] % BG_WRAP_CHUNKS));
@@ -427,7 +426,7 @@ fn updateRenderProperties(
     memory.setScratchProp(11, memory.game.bg_time);
 
     // Per-frame warp of this layer. The offset is authored in internal viewport pixels, so it is scaled
-    // into canvas pixels here to match `screen_pos` in the shader (which is already resolution-scaled).
+    // into canvas pixels here to match screen_pos in the shader (which is already resolution-scaled).
     const resolution_scale = effective_zoom / interpolated_zoom;
     memory.setScratchProp(12, @as(f64, warp.offset[0]) * resolution_scale);
     memory.setScratchProp(13, @as(f64, warp.offset[1]) * resolution_scale);
@@ -435,7 +434,7 @@ fn updateRenderProperties(
     memory.setScratchProp(15, warp.scale);
 
     // Live pass only. A portal descent rasterizes a second (D+1) layer, and reporting from both would
-    // run every format and `jsWriteText()` twice a frame, which is expensive precisely when the debug
+    // run every format and jsWriteText() twice a frame, which is expensive precisely when the debug
     // panel is on screen (each write dirties a visible element and forces a reflow).
     // It would also be wrong: the overlay would overwrite the readout with the preview's depth.
     if (dw.dev_tools and pass.source == .live) {

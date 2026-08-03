@@ -216,7 +216,7 @@ fn auditBlocks(x0: i32, y0: i32, span: i32) void {
     }
     if (total == 0) return;
 
-    // selection sort: `tracked` is tiny and this keeps the debug path allocation-free
+    // selection sort: tracked is tiny and this keeps the debug path allocation-free
     for (0..tracked) |i| {
         var best = i;
         for (i + 1..tracked) |j| {
@@ -238,8 +238,8 @@ fn auditBlocks(x0: i32, y0: i32, span: i32) void {
 }
 
 /// Cross-checks live-state invariants over the loaded `SimBuffer` and the modification store,
-/// logging every violation class it finds (or a clean bill).
-/// Complements `VERIFY_WATER_MASS` in state/water.zig, which guards per-tick conservation instead.
+/// logging any violations!
+/// (Different from `VERIFY_WATER_MASS` in state/water.zig which guards per-tick conservation instead.)
 ///
 /// Checked here (each invariant is documented at its owning definition):
 /// - `ModEntry.count` equals the population count of `ModEntry.modified` and fits its capacity
@@ -301,7 +301,7 @@ pub fn verifySimInvariants() void {
     }
 }
 
-/// A decoration's label: its own `name` if it declares one (the `FloorDecor()` kinds do), else its type name.
+/// A decoration's own own `name` if it declares one or the `@typeName()` of it.
 inline fn decorName(comptime D: type) []const u8 {
     return if (@hasDecl(D, "name")) D.name else shortName(@typeName(D));
 }
