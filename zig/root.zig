@@ -10,12 +10,12 @@ const builtin = @import("builtin");
 /// and the logger's text buffers all disappear when this is false.
 ///
 /// Goes without saying, keep this false in prod.
-pub const dev_tools = true;
+pub const dev_menu = true;
 
 /// Set to true if the CPU architecture is set to `wasm32` or `wasm64`.
 pub const is_wasm = builtin.cpu.arch.isWasm(); // builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
 /// Set to true if either test mode or `Debug` mode is used. The BUILD MODE, nothing else:
-/// use `dev_tools` for anything the debug UI owns, or it will vanish from a release profile build.
+/// use `dev_menu` for anything the debug UI owns, or it will vanish from a release profile build.
 pub const is_debug = builtin.is_test or builtin.mode == .Debug;
 
 // Note: changing these constants below will probably have disastrous consequences.
@@ -248,9 +248,9 @@ pub export fn scratchAlloc(len: usize) u64 { // pointer-like [*]u8, Memory64 hac
 // }
 
 /// Whether the developer tooling is compiled in, so the host knows to build the debug panel.
-/// Named for the export the host already binds; it reports `dev_tools`, NOT the build mode.
+/// Named for the export the host already binds; it reports `dev_menu`, NOT the build mode.
 pub export fn isDebug() bool {
-    return dev_tools;
+    return dev_menu;
 }
 
 // Save/load API. The JS host owns the atomic OPFS write and per-frame budgeting;
@@ -283,18 +283,18 @@ pub export fn saveLastImportError() u32 {
     return save.lastImportError();
 }
 
-// Import the debug UI API and the developer-only exports; see `dev_tools`.
+// Import the debug UI API and the developer-only exports; see `dev_menu`.
 comptime {
-    _ = if (dev_tools) struct {
+    _ = if (dev_menu) struct {
         pub const debug_ui = @import("debug/debug_ui.zig");
         pub export fn debugBuildUiMetadata() void {
-            if (dev_tools) debug_ui.buildMetadata();
+            if (dev_menu) debug_ui.buildMetadata();
         }
         pub export fn changeDebugUiSlider(id: u32, val: f32) void {
-            if (dev_tools) debug_ui.changeSlider(id, val);
+            if (dev_menu) debug_ui.changeSlider(id, val);
         }
         pub export fn clickDebugUiButton(id: u32) void {
-            if (dev_tools) debug_ui.clickButton(id);
+            if (dev_menu) debug_ui.clickButton(id);
         }
 
         pub export fn testLogs() void {

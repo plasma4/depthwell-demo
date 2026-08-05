@@ -191,11 +191,16 @@ pub const HashState = struct {
     y: u64,
     bits_left: u8 = 0,
 
-    /// Gets a power of two and increments the hash state.
+    /// Returns an integer of type `T` in the range `[0, limit)` for non-power-of-two limits.
+    /// Increments the hash state; consumes less bits than `getLimit()` but requires comptime-known limits.
     pub inline fn get(self: *HashState, T: type, modulo: comptime_int) T {
         comptime {
-            if (!std.math.isPowerOfTwo(modulo)) {
-                @compileError("Modulo must be a power of two for mask bitwise AND to be correct.");
+            if (modulo <= 0 or !std.math.isPowerOfTwo(modulo)) {
+                @compileError("Modulo must be a positive power of two for the mask bitwise logic to be correct. Use getLimit() for non-powers-of-two.");
+            }
+            // modulo is a power of 2, log2() comptime_int result is always exact
+            if (std.math.log2(modulo) > @bitSizeOf(T)) {
+                @compileError("The modulo must fit within the type itself.");
             }
             if (modulo > (1 << 63)) {
                 @compileError("HashState.get() supports up to 63 bits (modulo <= 1 << 63); use getRaw() for 64-bit extractions.");
