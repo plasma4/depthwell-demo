@@ -234,10 +234,10 @@ const variant_table: [dw.sprite.MAX_SPRITE_ID]?CompiledRule = blk: {
     break :blk table;
 };
 
-// A variant could reserve the atlas IDs base+1 .. base+count-1 for its extra frames,
-// all while nothing in the `Sprite` enum marks them as taken.
-// So every ID inside a variant's span must either be unnamed, or an explicit frame of that same sprite
-// (named with the base's tag as a prefix, like `campfire_2`).
+// sanity check: a variant could reserve the atlas IDs base+1..base+count-1 for its extra frames,
+// all while nothing in the Sprite enum marks them as taken!
+// hence, every ID inside a variant's span must either be unnamed, or an explicit frame of that same sprite
+// (with the base tag name as a prefix, like campfire_2).
 comptime {
     @setEvalBranchQuota(200000);
     for (rules) |entry| {
