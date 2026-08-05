@@ -984,7 +984,12 @@ comptime {
 }
 
 /// Calculates normalized noise field value for an ore rule.
-inline fn oreField(seed: Vec2u, x: WorldCoord, y: WorldCoord, comptime lane: u3, comptime rule: OreDispersal) f32 {
+/// Deliberately NOT `inline`: `lane` and `rule` are `comptime`,
+/// so Zig already makes one specialization per rule and nothing is lost.
+/// `disperseOre()` unrolls 13 rules, and inlining a whole FBM evaluation into each copy
+/// made that one function large enough to dominate the Debug build.
+/// LLVM cost per function is quadratic in basic-block count, and `ReleaseFast` inlines this again anyway.
+fn oreField(seed: Vec2u, x: WorldCoord, y: WorldCoord, comptime lane: u3, comptime rule: OreDispersal) f32 {
     const inv_scale = 1.0 / rule.scale;
     // derive lane seed
     const lane_seed = seed ^ @as(Vec2u, ORE_LANE_SEEDS[lane]);
