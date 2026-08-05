@@ -294,6 +294,36 @@ fn getLocalBlockPtr(
 /// Recomputes one cell's edge flags and packed `waterlogged` neighbor volumes from the chunk-local window.
 /// Shared core of `updateWaterEdgeFlags()` (single cell) and `updateChunkWaterFlags()` (whole chunk).
 /// A missing neighbor (outside the loaded `SimBuffer`) is treated as present so border cells never erode open.
+/// Resolves the edge flag bit that one of the eight neighbors of a cell contributes,
+/// or 0 when that neighbor sets no bit.
+/// A missing neighbor always sets its bit, so border cells never erode open.
+///
+/// NOTE: `dx` and `dy` are `comptime` so `getFlagBit()` folds to a single constant,
+/// but the function is deliberately NOT `inline`:
+/// the 3x3 unroll in `applyCellWaterFlags()` would otherwise paste eight copies of the packed `Block` accessors into one function,
+/// and LLVM cost is quadratic in basic-block count.
+fn neighborEdgeBit(
+    comptime dx: i32,
+    comptime dy: i32,
+    curr: *Chunk,
+    left: ?*Chunk,
+    right: ?*Chunk,
+    top: ?*Chunk,
+    bottom: ?*Chunk,
+    bx: i32,
+    by: i32,
+    src_is_liquid: bool,
+) u8 {
+    const nb = getLocalBlockPtr(curr, left, right, top, bottom, bx + dx, by + dy) orelse
+        return types.EdgeFlags.getFlagBit(dx, dy);
+
+    const is_solid_or_liquid = nb.isSolid() or nb.isLiquid() or getVolume(nb.*) > 0;
+    if ((!src_is_liquid and world.shouldHaveEdgeFlags(nb.id)) or (src_is_liquid and is_solid_or_liquid)) {
+        return types.EdgeFlags.getFlagBit(dx, dy);
+    }
+    return 0;
+}
+
 fn applyCellWaterFlags(
     curr: *Chunk,
     left: ?*Chunk,
@@ -329,19 +359,11 @@ fn applyCellWaterFlags(
         const state = getWaterFlags(top_nb, bottom_nb, left_nb, right_nb, above_left_nb, above_right_nb);
         waterlogged = state.flags;
 
+        const src_is_liquid = ptr.isLiquid();
         inline for (.{ -1, 0, 1 }) |dy| {
             inline for (.{ -1, 0, 1 }) |dx| {
                 if (dx == 0 and dy == 0) continue;
-
-                const neighbor = getLocalBlockPtr(curr, left, right, top, bottom, bx + dx, by + dy);
-                if (neighbor) |nb| {
-                    const is_solid_or_liquid = nb.isSolid() or nb.isLiquid() or getVolume(nb.*) > 0;
-                    if ((!ptr.isLiquid() and world.shouldHaveEdgeFlags(nb.id)) or (ptr.isLiquid() and is_solid_or_liquid)) {
-                        flags |= types.EdgeFlags.getFlagBit(dx, dy);
-                    }
-                } else {
-                    flags |= types.EdgeFlags.getFlagBit(dx, dy);
-                }
+                flags |= neighborEdgeBit(dx, dy, curr, left, right, top, bottom, bx, by, src_is_liquid);
             }
         }
     }
@@ -421,6 +443,323 @@ fn notifyNeighborEdgeFlags(rx: i32, ry: i32) void {
 }
 
 /// Runs a single frame of the (mass-conserving) water simulation for blocks within the `SimBuffer`.
+/// The chunk neighborhood that one water cell can reach,
+/// resolved once per chunk instead of once per cell.
+/// Only `curr` is always present; the others are `null` at the simulation buffer edge.
+const Neighborhood = struct {
+    curr: *Chunk,
+    left: ?*Chunk,
+    right: ?*Chunk,
+    top: ?*Chunk,
+    bottom: ?*Chunk,
+    chunk_x: i32,
+    chunk_y: i32,
+    chunk_idx: usize,
+};
+
+/// Moves the water in one cell of `hood.curr` down and then sideways.
+/// Split out of `tickWater()` and deliberately NOT `inline`:
+/// LLVM cost per function is quadratic in basic-block count,
+/// so folding this body back into the four nested sweep loops made the Debug build much slower to compile.
+/// `ReleaseFast` inlines it again, so runtime does not change.
+///
+/// `bx` counts along the row in sweep order.
+/// The real block column is `rbx`, which reverses on odd rows.
+fn simulateCell(
+    hood: *const Neighborhood,
+    bx: i32,
+    by: i32,
+    dirty_chunks: *std.StaticBitSet(SIM_BUFFER_SIZE),
+) void {
+    const curr = hood.curr;
+    const left = hood.left;
+    const right = hood.right;
+    const top = hood.top;
+    const bottom = hood.bottom;
+    const chunk_idx = hood.chunk_idx;
+
+    // Horizontal sweep direction alternates by ROW parity, not by frame parity:
+    // a per-frame flip makes the whole surface visibly slosh left/right every tick,
+    // while a fixed per-row direction keeps lateral flow fair with no temporal flicker.
+    const rbx = if ((by & 1) == 0) bx else (CHUNK_SIZE - 1) - bx;
+    const rx = hood.chunk_x * CHUNK_SIZE + rbx;
+    const ry = hood.chunk_y * CHUNK_SIZE + by;
+    const idx = @as(usize, @intCast(ry)) * SIM_GRID_SIZE + @as(usize, @intCast(rx));
+
+    if (water_updated.isSet(idx)) return;
+
+    const block_ptr = &curr.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | rbx))];
+    var src_vol = getVolume(block_ptr.*);
+    if (src_vol == 0) return;
+
+    water_updated.set(idx);
+
+    const down_ptr = if (by < CHUNK_SIZE - 1)
+        &curr.blocks[@as(usize, @intCast(((by + 1) << CHUNK_SIZE_LOG2) | rbx))]
+    else if (bottom) |b|
+        &b.blocks[@as(usize, @intCast(rbx))]
+    else
+        null;
+
+    // Gravity first: pour into the cell below.
+    // Full rate into empty space AND into a destination that is itself still falling
+    // (its own below can accept water) so streams merge with mid-air droplets,
+    // instead of just braking on them and splitting into parity columns (see the file header).
+    // The 4-units-per-tick cap only throttles pouring onto a resting pool surface.
+    if (down_ptr) |dp| {
+        if (dp.isFlowable()) {
+            const dest_vol = getVolume(dp.*);
+            if (dest_vol < MAX_HP) {
+                const available = MAX_HP - dest_vol;
+                const is_free_fall = dp.id == .none;
+                const cap: u32 = if (is_free_fall)
+                    MAX_HP
+                else if (getLocalBlockPtr(curr, left, right, top, bottom, rbx, by + 2)) |below_dest|
+                    (if (below_dest.isFlowable() and getVolume(below_dest.*) < MAX_HP) MAX_HP else 4)
+                else
+                    4;
+                const amt = @min(@min(src_vol, available), cap);
+
+                setVolumeAt(block_ptr, src_vol - amt, idx);
+                // down_ptr is non-null only when a cell below exists, so idx + SIM_GRID_SIZE is in range.
+                setVolumeAt(dp, dest_vol + amt, idx + SIM_GRID_SIZE);
+
+                dirty_chunks.set(chunk_idx);
+                if (by == CHUNK_SIZE - 1 and bottom != null) {
+                    dirty_chunks.set(chunk_idx + SIM_BUFFER_WIDTH);
+                }
+
+                src_vol = getVolume(block_ptr.*);
+                if (src_vol == 0) return;
+            }
+        }
+    }
+
+    // Lateral flow only happens once the cell can no longer fall, and never from a
+    // cell that already received sideways water this tick (stops chain teleports).
+    const down_blocked = if (down_ptr) |dp| (!dp.isFlowable() or getVolume(dp.*) >= MAX_HP) else true;
+    if (!down_blocked) return;
+    if (lateral_received.isSet(idx)) return;
+
+    // Spreading additionally requires RESTING: sitting on something unflowable, or on a
+    // full cell that is itself supported. A mid-air cell whose below is only momentarily
+    // full (a falling stream backing up for one tick) must hold instead, or the leftover
+    // sprays sideways into the alternating parity shelves described in the file header.
+    const resting = if (down_ptr) |dp| blk: {
+        if (!dp.isFlowable()) break :blk true;
+        // down_blocked means dp is full here; resting depends on what dp sits on.
+        const dp2 = getLocalBlockPtr(curr, left, right, top, bottom, rbx, by + 2);
+        break :blk if (dp2) |b| (!b.isFlowable() or getVolume(b.*) >= MAX_HP) else true;
+    } else true;
+    if (!resting) return;
+
+    spreadSideways(hood, rbx, by, idx, block_ptr, src_vol, dirty_chunks);
+}
+
+/// Decides whether a slope of exactly 1 unit may still move one unit sideways.
+/// Such a move is allowed only when it cascades,
+/// which means the cell BEYOND the destination is lower still,
+/// or when a full and unconfined source tops off a neighbor that sits under a solid block.
+/// This grinds leftover slope-1 staircases into near-flat pools without oscillating.
+///
+/// Returns at most one unit, on at most one side.
+/// Split out of `spreadSideways()` and NOT `inline` for the same build-time reason.
+fn cascadeSide(
+    hood: *const Neighborhood,
+    rbx: i32,
+    by: i32,
+    src_vol: u32,
+    left_vol: u32,
+    right_vol: u32,
+    diff_left: u32,
+    diff_right: u32,
+) struct { left: u32, right: u32 } {
+    const curr = hood.curr;
+    const left = hood.left;
+    const right = hood.right;
+    const top = hood.top;
+    const bottom = hood.bottom;
+    const rx = hood.chunk_x * CHUNK_SIZE + rbx;
+    const ry = hood.chunk_y * CHUNK_SIZE + by;
+
+    // A full, unconfined source may also top off a neighbor sitting directly under a solid block,
+    // so confined cells rest at 15 instead of 14.
+    // The source must not be confined itself or two capped cells would ping-pong.
+    const src_confined = if (getLocalBlockPtr(curr, left, right, top, bottom, rbx, by - 1)) |a| !a.isFlowable() else false;
+    const topup_ok = src_vol == MAX_HP and !src_confined;
+    var casc_left = false;
+    var casc_right = false;
+    if (diff_left == 1 and rx > 0 and
+        !lateral_received.isSet(@as(usize, @intCast(ry)) * SIM_GRID_SIZE + @as(usize, @intCast(rx - 1))))
+    {
+        if (getLocalBlockPtr(curr, left, right, top, bottom, rbx - 2, by)) |far| {
+            if (far.isFlowable() and getVolume(far.*) < left_vol) casc_left = true;
+        }
+        if (!casc_left and topup_ok) {
+            if (getLocalBlockPtr(curr, left, right, top, bottom, rbx - 1, by - 1)) |a| {
+                if (!a.isFlowable()) casc_left = true;
+            }
+        }
+    }
+    if (diff_right == 1 and rx < SIM_GRID_SIZE - 1 and
+        !lateral_received.isSet(@as(usize, @intCast(ry)) * SIM_GRID_SIZE + @as(usize, @intCast(rx + 1))))
+    {
+        if (getLocalBlockPtr(curr, left, right, top, bottom, rbx + 2, by)) |far| {
+            if (far.isFlowable() and getVolume(far.*) < right_vol) casc_right = true;
+        }
+        if (!casc_right and topup_ok) {
+            if (getLocalBlockPtr(curr, left, right, top, bottom, rbx + 1, by - 1)) |a| {
+                if (!a.isFlowable()) casc_right = true;
+            }
+        }
+    }
+    if (casc_left and casc_right) {
+        // Prefer the side whose far cell sits lower; ties follow the row sweep.
+        const far_l = getVolumeLocal(curr, left, right, rbx - 2, by);
+        const far_r = getVolumeLocal(curr, left, right, rbx + 2, by);
+        if (far_l < far_r) {
+            casc_right = false;
+        } else if (far_r < far_l or (by & 1) == 0) {
+            casc_left = false;
+        } else {
+            casc_right = false;
+        }
+    }
+
+    if (casc_left) return .{ .left = 1, .right = 0 };
+    if (casc_right) return .{ .left = 0, .right = 1 };
+    return .{ .left = 0, .right = 0 };
+}
+
+/// Equalizes one resting cell with its two side neighbors.
+/// Split out of `simulateCell()` for the same build-time reason, and NOT `inline`.
+///
+/// Precondition: the caller checked that the cell cannot fall and is resting,
+/// and that it did not receive lateral water this tick.
+fn spreadSideways(
+    hood: *const Neighborhood,
+    rbx: i32,
+    by: i32,
+    idx: usize,
+    block_ptr: *Block,
+    src_vol: u32,
+    dirty_chunks: *std.StaticBitSet(SIM_BUFFER_SIZE),
+) void {
+    const curr = hood.curr;
+    const left = hood.left;
+    const right = hood.right;
+    const chunk_idx = hood.chunk_idx;
+    const rx = hood.chunk_x * CHUNK_SIZE + rbx;
+    const ry = hood.chunk_y * CHUNK_SIZE + by;
+
+    const left_ptr = if (rbx > 0)
+        &curr.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | (rbx - 1)))]
+    else if (left) |l|
+        &l.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | (CHUNK_SIZE - 1)))]
+    else
+        null;
+
+    const right_ptr = if (rbx < CHUNK_SIZE - 1)
+        &curr.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | (rbx + 1)))]
+    else if (right) |r|
+        &r.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | 0))]
+    else
+        null;
+
+    var left_ok = false;
+    var right_ok = false;
+    var left_vol: u32 = 0;
+    var right_vol: u32 = 0;
+
+    const src_press = getVolumeLocal(curr, left, right, rbx, by);
+    var left_press: u32 = 0;
+    var right_press: u32 = 0;
+
+    if (left_ptr) |b| {
+        if (b.isFlowable()) {
+            left_press = getVolumeLocal(curr, left, right, rbx - 1, by);
+            if (left_press < src_press) {
+                left_ok = true;
+                left_vol = getVolume(b.*);
+            }
+        }
+    }
+    if (right_ptr) |b| {
+        if (b.isFlowable()) {
+            right_press = getVolumeLocal(curr, left, right, rbx + 1, by);
+            if (right_press < src_press) {
+                right_ok = true;
+                right_vol = getVolume(b.*);
+            }
+        }
+    }
+
+    // Equalize with strictly-lower neighbors, moving up to `diff / 2` (capped at 4) units per side per tick.
+    // A difference of 1 only flows when the move cascades (the cell beyond the destination is lower still),
+    // which grinds leftover slope-1 staircases into near-flat pools without oscillating.
+    const diff_left = if (left_ok) src_press - left_press else 0;
+    const diff_right = if (right_ok) src_press - right_press else 0;
+
+    var flow_left: u32 = 0;
+    var flow_right: u32 = 0;
+
+    if (diff_left > 1 or diff_right > 1) {
+        flow_left = if (diff_left > 1) @min(diff_left / 2, 4) else 0;
+        flow_right = if (diff_right > 1) @min(diff_right / 2, 4) else 0;
+
+        const total_flow = flow_left + flow_right;
+        if (total_flow > src_vol - 1) {
+            const scale = @as(f32, @floatFromInt(src_vol - 1)) / @as(f32, @floatFromInt(total_flow));
+            flow_left = @intFromFloat(@as(f32, @floatFromInt(flow_left)) * scale);
+            flow_right = @intFromFloat(@as(f32, @floatFromInt(flow_right)) * scale);
+            // Truncation can zero BOTH sides (a 2-unit spike flanked by two lower
+            // cells would never move); nudge 1 unit toward the deeper drop instead.
+            if (flow_left == 0 and flow_right == 0 and src_vol >= 2) {
+                if (diff_left > diff_right or (diff_left == diff_right and (by & 1) != 0)) {
+                    flow_left = 1;
+                } else {
+                    flow_right = 1;
+                }
+            }
+        }
+
+        if (left_ok) flow_left = @min(flow_left, MAX_HP - left_vol);
+        if (right_ok) flow_right = @min(flow_right, MAX_HP - right_vol);
+    } else if (diff_left == 1 or diff_right == 1) {
+        const casc = cascadeSide(hood, rbx, by, src_vol, left_vol, right_vol, diff_left, diff_right);
+        flow_left = casc.left;
+        flow_right = casc.right;
+    }
+
+    if (flow_left > 0 or flow_right > 0) {
+        setVolumeAt(block_ptr, src_vol - (flow_left + flow_right), idx);
+        dirty_chunks.set(chunk_idx);
+
+        if (flow_left > 0) {
+            // left_ptr is non-null only when rbx > 0 or a left chunk exists, so rx > 0.
+            const left_idx = @as(usize, @intCast(ry)) * SIM_GRID_SIZE + @as(usize, @intCast(rx - 1));
+            setVolumeAt(left_ptr.?, left_vol + flow_left, left_idx);
+            if (rbx > 0) {
+                dirty_chunks.set(chunk_idx);
+            } else if (left != null) {
+                dirty_chunks.set(chunk_idx - 1);
+            }
+            lateral_received.set(left_idx);
+        }
+        if (flow_right > 0) {
+            // right_ptr is non-null only when a cell to the right exists, so rx + 1 is in range.
+            const right_idx = @as(usize, @intCast(ry)) * SIM_GRID_SIZE + @as(usize, @intCast(rx + 1));
+            setVolumeAt(right_ptr.?, right_vol + flow_right, right_idx);
+            if (rbx < CHUNK_SIZE - 1) {
+                dirty_chunks.set(chunk_idx);
+            } else if (right != null) {
+                dirty_chunks.set(chunk_idx + 1);
+            }
+            lateral_received.set(right_idx);
+        }
+    }
+}
+
 pub fn tickWater() void {
     // Phase 1: begin by collecting chunks that hold water and have not settled; skip the whole tick if none.
     active_chunks = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
@@ -459,7 +798,7 @@ pub fn tickWater() void {
     var dirty_chunks = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
 
     // Phase 2: sweep active chunks bottom-up so falling water moves one cell per tick without being double-moved
-    // (the `water_updated` bitset guards cells that already took their turn).
+    // (the water_updated bitset guards cells that already took their turn)
     var chunk_y: i32 = SIM_BUFFER_WIDTH - 1;
     while (chunk_y >= 0) : (chunk_y -= 1) {
         var chunk_x: i32 = 0;
@@ -474,236 +813,22 @@ pub fn tickWater() void {
             const top = if (chunk_y > 0) getChunkPtr(@intCast(chunk_x), @intCast(chunk_y - 1)) else null;
             const bottom = if (chunk_y < SIM_BUFFER_WIDTH - 1) getChunkPtr(@intCast(chunk_x), @intCast(chunk_y + 1)) else null;
 
+            const hood: Neighborhood = .{
+                .curr = curr,
+                .left = left,
+                .right = right,
+                .top = top,
+                .bottom = bottom,
+                .chunk_x = chunk_x,
+                .chunk_y = chunk_y,
+                .chunk_idx = chunk_idx,
+            };
+
             var by: i32 = CHUNK_SIZE - 1;
             while (by >= 0) : (by -= 1) {
                 var bx: i32 = 0;
                 while (bx < CHUNK_SIZE) : (bx += 1) {
-                    // Horizontal sweep direction alternates by ROW parity, not by frame parity:
-                    // a per-frame flip makes the whole surface visibly slosh left/right every tick,
-                    // while a fixed per-row direction keeps lateral flow fair with no temporal flicker.
-                    const rbx = if ((by & 1) == 0) bx else (CHUNK_SIZE - 1) - bx;
-                    const rx = chunk_x * CHUNK_SIZE + rbx;
-                    const ry = chunk_y * CHUNK_SIZE + by;
-                    const idx = @as(usize, @intCast(ry)) * SIM_GRID_SIZE + @as(usize, @intCast(rx));
-
-                    if (water_updated.isSet(idx)) continue;
-
-                    const block_ptr = &curr.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | rbx))];
-                    var src_vol = getVolume(block_ptr.*);
-                    if (src_vol == 0) continue;
-
-                    water_updated.set(idx);
-
-                    const down_ptr = if (by < CHUNK_SIZE - 1)
-                        &curr.blocks[@as(usize, @intCast(((by + 1) << CHUNK_SIZE_LOG2) | rbx))]
-                    else if (bottom) |b|
-                        &b.blocks[@as(usize, @intCast(rbx))]
-                    else
-                        null;
-
-                    // Gravity first: pour into the cell below.
-                    // Full rate into empty space AND into a destination that is itself still falling
-                    // (its own below can accept water), so streams merge with mid-air droplets instead
-                    // of braking on them and splitting into parity columns (see the file header).
-                    // The 4-units-per-tick cap only throttles pouring onto a resting pool surface.
-                    if (down_ptr) |dp| {
-                        if (dp.isFlowable()) {
-                            const dest_vol = getVolume(dp.*);
-                            if (dest_vol < MAX_HP) {
-                                const available = MAX_HP - dest_vol;
-                                const is_free_fall = dp.id == .none;
-                                const cap: u32 = if (is_free_fall)
-                                    MAX_HP
-                                else if (getLocalBlockPtr(curr, left, right, top, bottom, rbx, by + 2)) |below_dest|
-                                    (if (below_dest.isFlowable() and getVolume(below_dest.*) < MAX_HP) MAX_HP else 4)
-                                else
-                                    4;
-                                const amt = @min(@min(src_vol, available), cap);
-
-                                setVolumeAt(block_ptr, src_vol - amt, idx);
-                                // `down_ptr` is non-null only when a cell below exists, so `idx + SIM_GRID_SIZE` is in range.
-                                setVolumeAt(dp, dest_vol + amt, idx + SIM_GRID_SIZE);
-
-                                dirty_chunks.set(chunk_idx);
-                                if (by == CHUNK_SIZE - 1 and bottom != null) {
-                                    dirty_chunks.set(chunk_idx + SIM_BUFFER_WIDTH);
-                                }
-
-                                src_vol = getVolume(block_ptr.*);
-                                if (src_vol == 0) continue;
-                            }
-                        }
-                    }
-
-                    // Lateral flow only happens once the cell can no longer fall, and never from a
-                    // cell that already received sideways water this tick (stops chain teleports).
-                    const down_blocked = if (down_ptr) |dp| (!dp.isFlowable() or getVolume(dp.*) >= MAX_HP) else true;
-                    if (!down_blocked) continue;
-                    if (lateral_received.isSet(idx)) continue;
-
-                    // Spreading additionally requires RESTING: sitting on something unflowable, or on a
-                    // full cell that is itself supported. A mid-air cell whose below is only momentarily
-                    // full (a falling stream backing up for one tick) must hold instead, or the leftover
-                    // sprays sideways into the alternating parity shelves described in the file header.
-                    const resting = if (down_ptr) |dp| blk: {
-                        if (!dp.isFlowable()) break :blk true;
-                        // down_blocked means dp is full here; resting depends on what dp sits on.
-                        const dp2 = getLocalBlockPtr(curr, left, right, top, bottom, rbx, by + 2);
-                        break :blk if (dp2) |b| (!b.isFlowable() or getVolume(b.*) >= MAX_HP) else true;
-                    } else true;
-                    if (!resting) continue;
-
-                    const left_ptr = if (rbx > 0)
-                        &curr.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | (rbx - 1)))]
-                    else if (left) |l|
-                        &l.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | (CHUNK_SIZE - 1)))]
-                    else
-                        null;
-
-                    const right_ptr = if (rbx < CHUNK_SIZE - 1)
-                        &curr.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | (rbx + 1)))]
-                    else if (right) |r|
-                        &r.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | 0))]
-                    else
-                        null;
-
-                    var left_ok = false;
-                    var right_ok = false;
-                    var left_vol: u32 = 0;
-                    var right_vol: u32 = 0;
-
-                    const src_press = getVolumeLocal(curr, left, right, rbx, by);
-                    var left_press: u32 = 0;
-                    var right_press: u32 = 0;
-
-                    if (left_ptr) |b| {
-                        if (b.isFlowable()) {
-                            left_press = getVolumeLocal(curr, left, right, rbx - 1, by);
-                            if (left_press < src_press) {
-                                left_ok = true;
-                                left_vol = getVolume(b.*);
-                            }
-                        }
-                    }
-                    if (right_ptr) |b| {
-                        if (b.isFlowable()) {
-                            right_press = getVolumeLocal(curr, left, right, rbx + 1, by);
-                            if (right_press < src_press) {
-                                right_ok = true;
-                                right_vol = getVolume(b.*);
-                            }
-                        }
-                    }
-
-                    // Equalize with strictly-lower neighbors, moving up to `diff / 2` (capped at 4) units per side per tick.
-                    // A difference of 1 only flows when the move cascades (the cell beyond the destination is lower still),
-                    // which grinds leftover slope-1 staircases into near-flat pools without oscillating.
-                    const diff_left = if (left_ok) src_press - left_press else 0;
-                    const diff_right = if (right_ok) src_press - right_press else 0;
-
-                    var flow_left: u32 = 0;
-                    var flow_right: u32 = 0;
-
-                    if (diff_left > 1 or diff_right > 1) {
-                        flow_left = if (diff_left > 1) @min(diff_left / 2, 4) else 0;
-                        flow_right = if (diff_right > 1) @min(diff_right / 2, 4) else 0;
-
-                        const total_flow = flow_left + flow_right;
-                        if (total_flow > src_vol - 1) {
-                            const scale = @as(f32, @floatFromInt(src_vol - 1)) / @as(f32, @floatFromInt(total_flow));
-                            flow_left = @intFromFloat(@as(f32, @floatFromInt(flow_left)) * scale);
-                            flow_right = @intFromFloat(@as(f32, @floatFromInt(flow_right)) * scale);
-                            // Truncation can zero BOTH sides (a 2-unit spike flanked by two lower
-                            // cells would never move); nudge 1 unit toward the deeper drop instead.
-                            if (flow_left == 0 and flow_right == 0 and src_vol >= 2) {
-                                if (diff_left > diff_right or (diff_left == diff_right and (by & 1) != 0)) {
-                                    flow_left = 1;
-                                } else {
-                                    flow_right = 1;
-                                }
-                            }
-                        }
-
-                        if (left_ok) flow_left = @min(flow_left, MAX_HP - left_vol);
-                        if (right_ok) flow_right = @min(flow_right, MAX_HP - right_vol);
-                    } else if (diff_left == 1 or diff_right == 1) {
-                        // A full, unconfined source may also top off a neighbor sitting directly under a solid block, so confined cells rest at 15 instead of 14.
-                        // The source must not be confined itself or two capped cells would ping-pong.
-                        const src_confined = if (getLocalBlockPtr(curr, left, right, top, bottom, rbx, by - 1)) |a| !a.isFlowable() else false;
-                        const topup_ok = src_vol == MAX_HP and !src_confined;
-                        var casc_left = false;
-                        var casc_right = false;
-                        if (diff_left == 1 and rx > 0 and
-                            !lateral_received.isSet(@as(usize, @intCast(ry)) * SIM_GRID_SIZE + @as(usize, @intCast(rx - 1))))
-                        {
-                            if (getLocalBlockPtr(curr, left, right, top, bottom, rbx - 2, by)) |far| {
-                                if (far.isFlowable() and getVolume(far.*) < left_vol) casc_left = true;
-                            }
-                            if (!casc_left and topup_ok) {
-                                if (getLocalBlockPtr(curr, left, right, top, bottom, rbx - 1, by - 1)) |a| {
-                                    if (!a.isFlowable()) casc_left = true;
-                                }
-                            }
-                        }
-                        if (diff_right == 1 and rx < SIM_GRID_SIZE - 1 and
-                            !lateral_received.isSet(@as(usize, @intCast(ry)) * SIM_GRID_SIZE + @as(usize, @intCast(rx + 1))))
-                        {
-                            if (getLocalBlockPtr(curr, left, right, top, bottom, rbx + 2, by)) |far| {
-                                if (far.isFlowable() and getVolume(far.*) < right_vol) casc_right = true;
-                            }
-                            if (!casc_right and topup_ok) {
-                                if (getLocalBlockPtr(curr, left, right, top, bottom, rbx + 1, by - 1)) |a| {
-                                    if (!a.isFlowable()) casc_right = true;
-                                }
-                            }
-                        }
-                        if (casc_left and casc_right) {
-                            // Prefer the side whose far cell sits lower; ties follow the row sweep.
-                            const far_l = getVolumeLocal(curr, left, right, rbx - 2, by);
-                            const far_r = getVolumeLocal(curr, left, right, rbx + 2, by);
-                            if (far_l < far_r) {
-                                casc_right = false;
-                            } else if (far_r < far_l or (by & 1) == 0) {
-                                casc_left = false;
-                            } else {
-                                casc_right = false;
-                            }
-                        }
-                        if (casc_left) {
-                            flow_left = 1;
-                        } else if (casc_right) {
-                            flow_right = 1;
-                        }
-                    }
-
-                    if (flow_left > 0 or flow_right > 0) {
-                        setVolumeAt(block_ptr, src_vol - (flow_left + flow_right), idx);
-                        dirty_chunks.set(chunk_idx);
-
-                        if (flow_left > 0) {
-                            // `left_ptr` is non-null only when `rbx > 0` or a left chunk exists, so `rx > 0`.
-                            const left_idx = @as(usize, @intCast(ry)) * SIM_GRID_SIZE + @as(usize, @intCast(rx - 1));
-                            setVolumeAt(left_ptr.?, left_vol + flow_left, left_idx);
-                            if (rbx > 0) {
-                                dirty_chunks.set(chunk_idx);
-                            } else if (left != null) {
-                                dirty_chunks.set(chunk_idx - 1);
-                            }
-                            lateral_received.set(left_idx);
-                        }
-                        if (flow_right > 0) {
-                            // `right_ptr` is non-null only when a cell to the right exists, so `rx + 1` is in range.
-                            const right_idx = @as(usize, @intCast(ry)) * SIM_GRID_SIZE + @as(usize, @intCast(rx + 1));
-                            setVolumeAt(right_ptr.?, right_vol + flow_right, right_idx);
-                            if (rbx < CHUNK_SIZE - 1) {
-                                dirty_chunks.set(chunk_idx);
-                            } else if (right != null) {
-                                dirty_chunks.set(chunk_idx + 1);
-                            }
-                            lateral_received.set(right_idx);
-                        }
-                        src_vol = getVolume(block_ptr.*);
-                    }
+                    simulateCell(&hood, bx, by, &dirty_chunks);
                 }
             }
         }

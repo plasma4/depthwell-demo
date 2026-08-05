@@ -13,4 +13,6 @@ if [ $? -ne 0 ]; then
     echo "Error: NPM build failed; commit stopped."
     exit 1
 fi
+
+# done!
 exit 0
