@@ -1,20 +1,11 @@
+//! Basic build information:
+//! - Run zig build normally, and zig build -Doptimize=ReleaseSafe for near-production performance.
+//! - Use zig build -Dwasm-opt to use ReleaseFast AND highly aggressive wasm-opt (from Binaryen).
+//! - Use zig build -Dgen-enums as well to automatically construct src/enums.ts
+//! - Use zig test "zig/root.zig" to run all tests across the codebase.
+//! - Change -Daseprite=PATH as necessary (or enforce a default in this file).
 const std = @import("std");
 const builtin = @import("builtin");
-// Zig has four optimization modes: Debug, ReleaseSafe, ReleaseFast and ReleaseSmall.
-// It has no -O0, -Og, -O1, -O2 or -O3 flag, and no way to select an LLVM level directly,
-// so -Doptimize is the only code generation control. wasm-opt is a separate pass after it.
-//
-// Run zig build normally, and zig build -Doptimize=ReleaseFast for a quick production version test.
-// Use zig build -Dwasm-opt to use ReleaseFast AND highly aggressive wasm-opt (from Binaryen).
-// Use zig build -Dgen-enums as well to automatically construct src/enums.ts and zig test "zig/root.zig" to run all tests across the codebase.
-//
-//   (none)             Debug mode, which the LLVM backend compiles at -O0. DWARF is kept.
-//   -Doptimize=MODE    Any Zig mode. ReleaseFast is LLVM -O3 with no safety checks.
-//   -Dwasm-opt         ReleaseFast plus the full aggressive wasm-opt -O4 pass. DWARF is dropped.
-//   -Dmemory64         64-bit build: wasm64 with Memory64.
-//   -Drelaxed-simd     Relaxed SIMD. Dangerous, because it reorders instructions.
-//   -Dnative           Native desktop build with Mach Engine. Currently a stub.
-//   -Daseprite=PATH    Path to the Aseprite executable.
 
 pub fn build(b: *std.Build) void {
     b.install_path = ".";
