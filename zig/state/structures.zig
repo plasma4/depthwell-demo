@@ -48,6 +48,7 @@ pub const structures = .{
     @import("structures/Tree.zig"),
     @import("structures/BasicRect.zig"),
     @import("structures/Ancient.zig"),
+    @import("structures/Ancient2.zig"),
     @import("structures/Geode.zig"),
     @import("structures/Pillar.zig"),
     @import("structures/Portal.zig"),

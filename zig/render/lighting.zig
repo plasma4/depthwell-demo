@@ -290,7 +290,7 @@ pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: 
     const light_orange = orange_buffer.items;
     const light_white = white_buffer.items;
 
-    const ambient: u16 = if (dw.dev_tools and IS_LIGHT_GLOBAL) AMBIENT_LIGHT_DEBUG else AMBIENT_LIGHT;
+    const ambient: u16 = if (dw.dev_menu and IS_LIGHT_GLOBAL) AMBIENT_LIGHT_DEBUG else AMBIENT_LIGHT;
 
     // Single reset pass: precompute per-cell cost, initialize both channels to ambient
     // then, "seed" (add) light-emitting blocks into their channel's appropriate buckets.
@@ -332,7 +332,7 @@ pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: 
         block.light = @intCast(@min(max_light, @as(u16, MAX_LIGHT)));
 
         // this fixes an issue where orange light overtakes normal white light if ambient light is at max
-        if (AMBIENT_LIGHT == 255 or (dw.dev_tools and IS_LIGHT_GLOBAL and AMBIENT_LIGHT_DEBUG == 255)) continue;
+        if (AMBIENT_LIGHT == 255 or (dw.dev_menu and IS_LIGHT_GLOBAL and AMBIENT_LIGHT_DEBUG == 255)) continue;
 
         // block is orange if it receives more orange light than white, or is in the core radius (>= 255)
         const is_orange = orange >= white or orange >= 255;
@@ -459,7 +459,7 @@ fn floodMiningLight() void {
         }
     }
 
-    if (dw.dev_tools) {
+    if (dw.dev_menu) {
         const probe_dx: i32 = 3;
         const probe_dy: i32 = -5;
         const abs_x = base_bx + probe_dx;

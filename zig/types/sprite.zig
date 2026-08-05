@@ -379,7 +379,7 @@ pub const Sprite = enum(u16) {
     /// Determines if the sprite is a heatmap (between types 65000-65256).
     pub inline fn isHeatmap(self: Sprite) bool {
         const id = @intFromEnum(self);
-        return dw.dev_tools and id >= 65000 and id <= 65256;
+        return dw.dev_menu and id >= 65000 and id <= 65256;
     }
 
     /// What this sprite becomes at increased depth and how often, or null when it stays as it is.
