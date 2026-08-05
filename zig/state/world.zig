@@ -528,7 +528,7 @@ pub const ModificationStore = struct {
         const idx = self.index.get(key) orelse blk: {
             const new_idx = self.allocEntry();
             self.index.put(self.allocator, key, new_idx) catch memory.oom();
-            if (dw.dev_tools and TRACE_NEW_ENTRIES) dw.logger.info(
+            if (dw.dev_menu and TRACE_NEW_ENTRIES) dw.logger.info(
                 @src(),
                 "new ChunkMod ({s}) at depth {d}, quadrant {d}, suffix {d}/{d}",
                 .{ @tagName(kind), key.depth, key.quadrant, key.suffix[0], key.suffix[1] },
@@ -1173,7 +1173,7 @@ pub const SimBuffer = struct {
 
     /// Logs a single edge-flag mismatch found by `checkEdgeFlags()` (debug builds only).
     fn reportInvalidEdge(coord: Coordinate, bx: u4, by: u4, got: u8, expected: u8) void {
-        if (!dw.dev_tools) return;
+        if (!dw.dev_menu) return;
         dw.logger.err(@src(), "Invalid edge flags at chunk {any} block ({d}, {d}): got 0b{b:0>8}, expected 0b{b:0>8}", .{ coord, bx, by, got, expected });
     }
 
@@ -2643,6 +2643,35 @@ const BlockWindow = struct {
     }
 };
 
+/// Resolves the edge flag bit and the same-sprite flag bit
+/// that one of the eight neighbors of a cell contributes.
+///
+/// `ndx` and `ndy` are `comptime` so `getFlagBit()` folds to a single constant,
+/// but the function is deliberately NOT `inline`:
+/// the 3x3 unroll in `updateLocalEdgeFlags()` would otherwise paste eight copies into one function,
+/// and LLVM cost is quadratic in basic-block count.
+fn neighborFlagBits(
+    comptime ndx: i32,
+    comptime ndy: i32,
+    window: *BlockWindow,
+    nx: i32,
+    ny: i32,
+    current_sprite: Sprite,
+    src_is_liquid: bool,
+) struct { edge: u8, id: u8 } {
+    const neighbor_block = window.get(nx + ndx, ny + ndy);
+    const bit = types.EdgeFlags.getFlagBit(ndx, ndy);
+
+    const is_solid_or_liquid = neighbor_block.isSolid() or neighbor_block.isLiquid();
+    const takes_edge = (!src_is_liquid and shouldHaveEdgeFlags(neighbor_block.id)) or
+        (src_is_liquid and is_solid_or_liquid);
+
+    return .{
+        .edge = if (takes_edge) bit else 0,
+        .id = if (neighbor_block.id == current_sprite) bit else 0,
+    };
+}
+
 /// Recalculates edge flags for a specific block its 8 neighbors.
 /// Returns whether the current block was removed due to being in an invalid position.
 ///
@@ -2758,20 +2787,13 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                     waterlogged = state.flags;
 
                     // Recalculate edge flags (same-sprite flags for all foundation blocks; see `addEdgeFlags()`)
+                    const src_is_liquid = current_sprite.isLiquid();
                     inline for (.{ -1, 0, 1 }) |ndy| {
                         inline for (.{ -1, 0, 1 }) |ndx| {
                             if (ndx == 0 and ndy == 0) continue;
-                            const neighbor_block = window.get(nx + ndx, ny + ndy);
-
-                            const is_solid_or_liquid = neighbor_block.isSolid() or neighbor_block.isLiquid();
-                            if ((!current_sprite.isLiquid() and shouldHaveEdgeFlags(neighbor_block.id)) or
-                                (current_sprite.isLiquid() and is_solid_or_liquid))
-                            {
-                                flags |= types.EdgeFlags.getFlagBit(ndx, ndy);
-                            }
-                            if (neighbor_block.id == current_sprite) {
-                                id_flags |= types.EdgeFlags.getFlagBit(ndx, ndy);
-                            }
+                            const bits = neighborFlagBits(ndx, ndy, &window, nx, ny, current_sprite, src_is_liquid);
+                            flags |= bits.edge;
+                            id_flags |= bits.id;
                         }
                     }
                 }

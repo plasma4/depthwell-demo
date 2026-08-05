@@ -1,7 +1,6 @@
-//! example structure documentation
-//! test at bottom verifies compilation
+//! Example structure documentation; UNUSED. Read the comments to understand more!
 //!
-//! hut design:
+//! Hut design:
 //!     #########     <- roof
 //!     #.......#
 //!     #.......#     <- chest on floor

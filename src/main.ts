@@ -256,7 +256,7 @@ const past60SlowestRenders = Array(60).fill(0);
 const past60SlowestZigRenders = Array(60).fill(0);
 
 // Add custom properties into the engine object (not handled by TypeScript)
-engine.isDebug = !!engine.exports.isDebug(); // True when WASM is built with dev tools on (see zig/root.zig); unrelated to optimization level.
+engine.isDebug = !!engine.exports.isDebug(); // True when WASM is built with dev menu on (see zig/root.zig); unrelated to optimization level.
 engine.renderLoop = function (_t: number) {
     // simulate to a second/tick of logical simulation, whichever is higher (in practice, a tick will be less than a second, so 1 second)
     let tempTime = performance.now();

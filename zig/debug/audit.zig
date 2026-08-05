@@ -32,7 +32,7 @@ const MAX_TRACKED_SPRITES = 64;
 ///
 /// Do note that this code WILL run faster in release!
 pub fn sampleWorldAroundPlayer() void {
-    if (!dw.dev_tools) return;
+    if (!dw.dev_menu) return;
 
     const coord = memory.game.getPlayerCoord();
     const edge_margin_chunks: u64 = @intCast(std.math.divCeil(i32, DEFAULT_SPAN, dw.CHUNK_SIZE) catch unreachable);
@@ -49,7 +49,7 @@ pub fn sampleWorldAroundPlayer() void {
 
 /// Samples the `span`-by-`span` block region whose corner is (`x0`, `y0`) and logs tallied information.
 pub fn run(x0: i32, y0: i32, span: i32) void {
-    if (!dw.dev_tools) return;
+    if (!dw.dev_menu) return;
     if (memory.game.depth != dw.startup.STARTING_ZOOM_TIMES) {
         logger.info(@src(), "can't run this when not at base depth!", .{});
     }
@@ -249,7 +249,7 @@ fn auditBlocks(x0: i32, y0: i32, span: i32) void {
 /// - dry, non-foundation, non-liquid, non-waterloggable cells (air and plain decorations)
 ///   keep the `0xFF` edge-flag sentinels so the shader skips erosion on them.
 pub fn verifySimInvariants() void {
-    if (!dw.dev_tools) return;
+    if (!dw.dev_menu) return;
 
     var bad_entries: u64 = 0;
     var entry_idx: usize = 0;
