@@ -1,7 +1,6 @@
 //! Portal chamber: a rounded-rect-ish shape on flat ground, with the portal inside.
 //! TODO: add all the items required to make portal "unlocking" a req!
-//!
-//!     ##
+//!     ###
 //!  #########
 //! ###.....###
 //! #.........#

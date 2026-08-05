@@ -70,7 +70,7 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
     // The (inverted) portal indicators are the real way to change depth (see `state/portal.zig`);
     // these hotkeys stay as a way to skip straight there, and are ignored mid-animation so they
     // cannot push a second transition during one.
-    const can_hotkey_depth = dw.dev_tools and !dw.portal.isActive();
+    const can_hotkey_depth = dw.dev_menu and !dw.portal.isActive();
 
     // Z: increase depth. While spectating it retraces the ascent (the only descent allowed); at the
     // deepest depth it pushes a fresh layer.

@@ -88,11 +88,9 @@ pub fn generate(
             const core_rand = block_state.getLimit(u32, 50);
             const which_stone = state.getLimit(u32, 3);
 
-            // The plain stone this core block would be if it weren't a gem.
-            // Gems overlay this so their base_id reflects the geode (not the natural terrain the structure replaced).
-            // The inner rim gets a consistent stone accent; everything deeper is a stone variant.
+            // figure out which stone was chosen for the core!
             const core_stone: Sprite = if (dist_sq >= (core_radius - 1) * (core_radius - 1))
-                (if (shell == .bright_red_stone) .stone else ([_]Sprite{ .stone, .deep_blue_stone, .purple_stone })[which_stone])
+                ([_]Sprite{ .stone, .deep_blue_stone, .purple_stone })[which_stone]
             else
                 .stone;
 

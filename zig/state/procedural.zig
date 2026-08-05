@@ -161,8 +161,8 @@ inline fn getIslandSprite(cell_hash: u64, wx: u32, wy: u32, density_seed: Vec2u)
 /// Each group of them sits directly after the sample it is the first to need,
 /// so the order is also the cost order.
 fn classifyTerrain(s: *TerrainSampler) Sprite {
-    // dev_tools mode replaces every rule with a density heatmap
-    if (dw.dev_tools and USE_HEATMAP and !USE_ORE_HEATMAP)
+    // dev_menu mode replaces every rule with a density heatmap
+    if (dw.dev_menu and USE_HEATMAP and !USE_ORE_HEATMAP)
         return @enumFromInt(HEATMAP_BASE + @as(u16, @intFromFloat(s.density * 256.0)));
 
     // air, plus the two stones which only appear at the density extremes
@@ -364,7 +364,7 @@ inline fn latticeAxis(v: WorldCoord, inv_scale: f32) LatticeAxis {
 /// Returns a struct with an a `value: f64`.
 /// Allows for booleans to act like variables when the debug UI is built.
 inline fn TuningFloat(comptime default_value: f64) type {
-    if (dw.dev_tools) {
+    if (dw.dev_menu) {
         return struct {
             pub var value: f64 = default_value;
             pub inline fn getF32() f32 {
@@ -384,7 +384,7 @@ inline fn TuningFloat(comptime default_value: f64) type {
 /// Returns a struct with an a `value: bool`.
 /// Allows for booleans to act like variables when the debug UI is built.
 inline fn TuningBool(comptime default_value: bool) type {
-    if (dw.dev_tools) {
+    if (dw.dev_menu) {
         return struct {
             pub var value: bool = default_value;
         };
@@ -395,12 +395,12 @@ inline fn TuningBool(comptime default_value: bool) type {
     }
 }
 
-// When checking these heatmap values, ALWAYS guard with dw.dev_tools.
+// When checking these heatmap values, ALWAYS guard with dw.dev_menu.
 
-/// Enables terrain heatmap when dev tools are active.
+/// Enables terrain heatmap when dev menu are active.
 /// If ore heatmap is enabled then USE_HEATMAP must be true!
 pub var USE_HEATMAP = false;
-/// Enables ore heatmap when dev tools are active.
+/// Enables ore heatmap when dev menu are active.
 /// If ore heatmap is enabled then USE_HEATMAP must be true!
 pub var USE_ORE_HEATMAP = false;
 
@@ -447,7 +447,7 @@ pub var tuning_epoch: u64 = 0;
 
 /// Increments tuning epoch counter to invalidate terrain caches.
 pub fn invalidateTuning() void {
-    if (dw.dev_tools) tuning_epoch +%= 1;
+    if (dw.dev_menu) tuning_epoch +%= 1;
 }
 
 /// Returns version key for current world seed and tuning state.
@@ -908,7 +908,7 @@ fn refreshDepthWindows(depth: u64) void {
 }
 
 inline fn depthWindows(depth: u64) *const [ORE_DISPERSALS.len]DepthWindow {
-    if (dw.dev_tools or depth_windows_depth != depth) refreshDepthWindows(depth);
+    if (dw.dev_menu or depth_windows_depth != depth) refreshDepthWindows(depth);
     return &depth_windows;
 }
 
@@ -984,7 +984,12 @@ comptime {
 }
 
 /// Calculates normalized noise field value for an ore rule.
-inline fn oreField(seed: Vec2u, x: WorldCoord, y: WorldCoord, comptime lane: u3, comptime rule: OreDispersal) f32 {
+/// Deliberately NOT `inline`: `lane` and `rule` are `comptime`,
+/// so Zig already makes one specialization per rule and nothing is lost.
+/// `disperseOre()` unrolls 13 rules, and inlining a whole FBM evaluation into each copy
+/// made that one function large enough to dominate the Debug build.
+/// LLVM cost per function is quadratic in basic-block count, and `ReleaseFast` inlines this again anyway.
+fn oreField(seed: Vec2u, x: WorldCoord, y: WorldCoord, comptime lane: u3, comptime rule: OreDispersal) f32 {
     const inv_scale = 1.0 / rule.scale;
     // derive lane seed
     const lane_seed = seed ^ @as(Vec2u, ORE_LANE_SEEDS[lane]);
@@ -1089,7 +1094,7 @@ pub fn disperseOre(
 
 /// Generates ores and gems for base depth terrain.
 pub fn addOresAndGems(base_data: TerrainData, x: WorldCoord, y: WorldCoord) Sprite {
-    if (dw.dev_tools and USE_HEATMAP and USE_ORE_HEATMAP) {
+    if (dw.dev_menu and USE_HEATMAP and USE_ORE_HEATMAP) {
         const field = oreField(OreSeeds.atBaseDepth().field, x, y, 0, ORE_DISPERSALS[0]);
         return @enumFromInt(65000 + @as(u20, @intFromFloat(field * 256.0)));
     }
@@ -1447,9 +1452,9 @@ pub inline fn getDualValueNoiseFixed(
     return dualValueNoise(seed, x, y, inv_scale);
 }
 
-/// Selects dual value noise variant based on dev tools state.
+/// Selects dual value noise variant based on dev menu state.
 inline fn getDualValueNoiseTuned(seed: Vec2u, x: WorldCoord, y: WorldCoord, inv_scale: f32) Vec2f32 {
-    if (dw.dev_tools) return getDualValueNoise(seed, x, y, inv_scale);
+    if (dw.dev_menu) return getDualValueNoise(seed, x, y, inv_scale);
     return getDualValueNoiseFixed(seed, x, y, inv_scale);
 }
 
