@@ -39,6 +39,8 @@ Run:
 - `zig build -Dgen-enums` to build _and_ generate `enums.ts` if changes were made.
 - `zig test "zig/root.zig"` to run (all) tests
 
+Every build keeps DWARF except `-Dwasm-opt`, because the Binaryen pass strips it.
+
 See `build.zig` for more options on compiling a final version! It's enormously helpful to use the Zig Language Server in VSCode/VSCodium and set it to "watch" mode, which automatically builds the WASM while providing highlighting any errors as well as "Go to Definition" quality-of-life.
 
 Useful variables to customize include `CONFIG` in `src/main.ts`, `engine.wireframeBrightness`, `engine.baseSpeed`, and `zig/state/player.zig` config options.

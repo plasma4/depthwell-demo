@@ -37,7 +37,7 @@ const NUMBER_WIDTHS: [10]f32 = .{
 /// List of monospace characters starting from
 const MONOSPACE_CHARS = "!\"%$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz(|)~";
 /// Width of each character relative to the font size (6/16).
-const CHARACTER_WIDTH_FRACTION: f32 = 6.0 / 16.0;
+const CHARACTER_WIDTH_FRACTION: f32 = 12.0 / 16.0;
 
 /// Current number of entities (reset every frame).
 pub var entity_count: u64 = 0;
@@ -76,7 +76,7 @@ pub fn updateEntities(time_diff: f64) void {
     dw.mouse.clearFrameFlags();
 
     // draw chunk preview at the front
-    if (dw.dev_tools and preview_tile_size > 0.0) {
+    if (dw.dev_menu and preview_tile_size > 0.0) {
         dw.chunk_preview.drawChunkPreview();
     }
 
@@ -99,7 +99,7 @@ pub fn updateEntities(time_diff: f64) void {
     var buf: [128]u8 = undefined;
     const store = &dw.world.mod_store;
 
-    const msg = if (dw.dev_tools)
+    const msg = if (dw.dev_menu)
         std.fmt.bufPrint(
             &buf,
             "{d} block{s} mined | mods: {d} chunk{s} / {d:.2}KB",
@@ -119,11 +119,11 @@ pub fn updateEntities(time_diff: f64) void {
         ) catch unreachable;
 
     dw.entity.drawString(msg, .{ 19.5, 8.5 }, .{
-        .font_size = 7.5,
+        .font_size = 3.5,
         .lcha = .{ 0.45, 0.04, 1.8, 1.0 },
     });
     dw.entity.drawString(msg, .{ 20.0, 9.0 }, .{
-        .font_size = 7.5,
+        .font_size = 3.5,
         .lcha = .{ 0.85, 0.08, 1.8, 1.0 },
     });
 

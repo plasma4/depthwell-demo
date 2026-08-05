@@ -437,7 +437,7 @@ fn updateRenderProperties(
     // run every format and jsWriteText() twice a frame, which is expensive precisely when the debug
     // panel is on screen (each write dirties a visible element and forces a reflow).
     // It would also be wrong: the overlay would overwrite the readout with the preview's depth.
-    if (dw.dev_tools and pass.source == .live) {
+    if (dw.dev_menu and pass.source == .live) {
         const game = &memory.game;
         const qc = world.quad_cache;
         const d: u64 = @intCast(memory.game.depth);

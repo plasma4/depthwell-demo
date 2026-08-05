@@ -528,7 +528,7 @@ pub const ModificationStore = struct {
         const idx = self.index.get(key) orelse blk: {
             const new_idx = self.allocEntry();
             self.index.put(self.allocator, key, new_idx) catch memory.oom();
-            if (dw.dev_tools and TRACE_NEW_ENTRIES) dw.logger.info(
+            if (dw.dev_menu and TRACE_NEW_ENTRIES) dw.logger.info(
                 @src(),
                 "new ChunkMod ({s}) at depth {d}, quadrant {d}, suffix {d}/{d}",
                 .{ @tagName(kind), key.depth, key.quadrant, key.suffix[0], key.suffix[1] },
@@ -1173,7 +1173,7 @@ pub const SimBuffer = struct {
 
     /// Logs a single edge-flag mismatch found by `checkEdgeFlags()` (debug builds only).
     fn reportInvalidEdge(coord: Coordinate, bx: u4, by: u4, got: u8, expected: u8) void {
-        if (!dw.dev_tools) return;
+        if (!dw.dev_menu) return;
         dw.logger.err(@src(), "Invalid edge flags at chunk {any} block ({d}, {d}): got 0b{b:0>8}, expected 0b{b:0>8}", .{ coord, bx, by, got, expected });
     }
 
