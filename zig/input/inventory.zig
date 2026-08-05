@@ -53,10 +53,10 @@ const DroppedItem = struct {
 pub var dropped_items: dw.Fifo(DroppedItem) = .{};
 
 pub inline fn isInCreative() bool {
-    return dw.dev_tools and IN_CREATIVE;
+    return dw.dev_menu and IN_CREATIVE;
 }
 pub inline fn shouldShowAllItems() bool {
-    return dw.dev_tools and (IN_CREATIVE or SHOW_ALL_INVENTORY_ITEMS);
+    return dw.dev_menu and (IN_CREATIVE or SHOW_ALL_INVENTORY_ITEMS);
 }
 
 /// Which row the selected sprite is in.
@@ -682,7 +682,7 @@ fn drawSelectedName(time_diff: f64) void {
     const primary = palette.primaryColorOf(rendered);
     const secondary = palette.secondaryColorOf(rendered);
 
-    const font_size: f32 = 10.0;
+    const font_size: f32 = 5.0;
     const amplitude = name_wave * 1.5; // peak ripple displacement in px
     const origin: Vec2f32 = .{ 20.0, 14.0 };
 

@@ -17,7 +17,7 @@ const Vec2f = dw.utils.Vec2f;
 /// The `SimBuffer` size automatically adjusts when setting this to a very small value.
 ///
 /// Setting this to a very small value is useful for testing cache validity or overall performance, however.
-pub const CAMERA_MIN_ZOOM = if (dw.dev_tools) 0.05 else 0.5;
+pub const CAMERA_MIN_ZOOM = if (dw.dev_menu) 0.05 else 0.5;
 /// Maximum camera zoom/scale allowed. This is strategically calculated to make sure the player always remains in the viewport.
 /// Any more and it would look weird, and camera deadzone would start to no longer work.
 pub const CAMERA_MAX_ZOOM = 1.5; // 150%
@@ -45,7 +45,7 @@ pub const PLAYER_HITBOX_HEIGHT = 200;
 const CCD_STEP_SIZE = CHUNK_SIZE_SQ;
 
 /// The zoom in/out keys change the zoom multiplier this fast per frame.
-const CAMERA_CHANGE_SPEED = if (dw.dev_tools) 1.04 else 1.025;
+const CAMERA_CHANGE_SPEED = if (dw.dev_menu) 1.04 else 1.025;
 /// How fast the camera should adjust per frame to the new position. Larger means faster.
 const CAMERA_SMOOTHING = 0.25;
 

@@ -18,7 +18,7 @@ pub const Shape = struct {
     w: f64,
     /// Height of the shape.
     h: f64,
-    /// Corner radius (0-0.5+).
+    /// Corner radius (0-0.5).
     r: f64 = 0.0,
 
     /// Circle shape constructor.
@@ -69,7 +69,8 @@ pub const Shape = struct {
         const dy = @abs(point[1] - center[1]);
 
         // Rounded rectangle math (uses signed dist fields)
-        const cr = @min(self.r, 0.5) * @min(self.w, self.h);
+        std.debug.assert(self.r >= 0 and self.r <= 0.5);
+        const cr = self.r * @min(self.w, self.h);
 
         // Find the vector from the inner rectangle corner to the point
         const qx = dx - (half_w - cr);
@@ -92,9 +93,11 @@ pub const Shape = struct {
             self.start[1] > other.start[1] + other.h or
             other.start[1] > self.start[1] + self.h) return false;
 
-        // Calculate absolute corner radius
-        const r1 = if (self.r <= 0.0) 0.0 else @min(self.r, 0.5) * @min(self.w, self.h);
-        const r2 = if (other.r <= 0.0) 0.0 else @min(other.r, 0.5) * @min(other.w, other.h);
+        // calculate and check absolute corner radius
+        std.debug.assert(self.r >= 0 and self.r <= 0.5);
+        std.debug.assert(other.r >= 0 and other.r <= 0.5);
+        const r1 = if (self.r <= 0.0) 0.0 else self.r * @min(self.w, self.h);
+        const r2 = if (other.r <= 0.0) 0.0 else other.r * @min(other.w, other.h);
 
         // Not rounded rectangle/circle: exit early!
         if (r1 == 0.0 and r2 == 0.0) return true;

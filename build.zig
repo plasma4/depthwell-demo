@@ -1,16 +1,18 @@
+//! Basic build information:
+//! - Run zig build normally, and zig build -Doptimize=ReleaseSafe for near-production performance.
+//! - Use zig build -Dwasm-opt to use ReleaseFast AND highly aggressive wasm-opt (from Binaryen).
+//! - Use zig build -Dgen-enums as well to automatically construct src/enums.ts
+//! - Use zig test "zig/root.zig" to run all tests across the codebase.
+//! - Change -Daseprite=PATH as necessary (or enforce a default in this file).
 const std = @import("std");
 const builtin = @import("builtin");
-// Run zig build normally, and zig build -Doptimize=ReleaseFast for a quick production version test.
-// Use zig build -Dwasm-opt to use ReleaseFast AND highly aggressive wasm-opt (from Binaryen).
-// Use zig build -Dgen-enums as well to automatically construct src/enums.ts and zig test "zig/root.zig" to run all tests across the codebase.
-// (Add --memory64 for 64-bit builds.)
 
 pub fn build(b: *std.Build) void {
     b.install_path = ".";
     const aseprite_path = b.option([]const u8, "aseprite", "Path to the Aseprite executable (default: aseprite in PATH)") orelse
         b.findProgram(&.{"aseprite"}, &.{}) catch null;
     const gen_enums = b.option(bool, "gen-enums", "Regenerate TypeScript enum definitions (default: no)") orelse false; // -Dgen-enums
-    const wasm_opt = b.option(bool, "wasm-opt", "Add a very aggressive pass of optimizations provided by wasm-opt from Binaryen, forcing optimization level to ReleaseFast") orelse false; // -Dgen-enums
+    const wasm_opt = b.option(bool, "wasm-opt", "Add a very aggressive pass of optimizations provided by wasm-opt from Binaryen, forcing optimization level to ReleaseFast") orelse false; // -Dwasm-opt
     const memory64 = b.option(bool, "memory64", "Utilize Memory64") orelse false; // -Dmemory64
     // We can bundle this back with Zig in the future once inconsistencies are fixed.
     const relaxed_simd = b.option(bool, "relaxed-simd", "Enable relaxed SIMD when building for WASM (DANGEROUS: reorders instructions in concerning ways)") orelse false; // -Drelaxed-simd
@@ -41,7 +43,14 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const optimize: std.builtin.OptimizeMode = if (wasm_opt) .ReleaseFast else b.standardOptimizeOption(.{});
+    // Ask for -Doptimize unconditionally, so that the flag stays valid (and stays in zig build --help)
+    // even when -Dwasm-opt answers the question instead. Zig rejects an option that no one reads.
+    const requested_optimize = b.standardOptimizeOption(.{});
+    if (wasm_opt and b.user_input_options.contains("optimize")) {
+        @panic("-Doptimize conflicts with -Dwasm-opt, which always builds ReleaseFast.");
+    }
+
+    const optimize: std.builtin.OptimizeMode = if (wasm_opt) .ReleaseFast else requested_optimize;
 
     if (build_native) {
         // TODO: when SPIR-V is supported by Mach Engine update this logic to work.
@@ -148,43 +157,33 @@ pub fn build(b: *std.Build) void {
             // exe.root_module.stack_check = false;
             if (optimize != .ReleaseSafe) exe.lto = .full;
         }
+
         exe.rdynamic = true;
         exe.stack_size = 8 * 65536;
 
-        const install_wasm = b.addInstallFileWithDir(
-            exe.getEmittedBin(),
-            .{ .custom = "" },
-            "main.wasm",
-        );
-        b.getInstallStep().dependOn(&install_wasm.step);
-
-        if (wasm_opt) {
-            const optimize_wasm = b.addSystemCommand(&.{
-                "wasm-opt",
-                "main.wasm",
-                "-o",
-                "main.wasm",
-                "-O4",
-            });
+        const wasm_bin: std.Build.LazyPath = if (wasm_opt) blk: {
+            const optimize_wasm = b.addSystemCommand(&.{"wasm-opt"});
+            optimize_wasm.addFileArg(exe.getEmittedBin());
+            optimize_wasm.addArg("-o");
+            const optimized = optimize_wasm.addOutputFileArg("main.wasm");
             optimize_wasm.addArgs(&.{
+                "-O4",
                 // we can keep fn names, makes crash info easier in release
                 // "--strip-debug",
                 "--debuginfo",
 
+                // required: Binaryen stops with a fatal error if it must read Zig's DWARF 5.
                 "--strip-dwarf",
                 "--strip-producers",
+            });
+
+            optimize_wasm.addArgs(&.{
                 "--optimize-instructions",
 
                 // No --flatten/--rereloop here: they run after the -O4 pipeline,
                 // so nothing coalesces the locals they introduce. generateChunk() locals grew too big,
-                // and V8 sizes wasm frames by local count. Those commands also bloatt the file-size!
+                // and V8 sizes wasm frames by local count. Those commands also bloat the file-size!
 
-                "--enable-simd",
-                "--enable-sign-ext",
-                "--enable-tail-call",
-                "--enable-bulk-memory",
-                "--enable-multivalue",
-                "--enable-reference-types",
                 "--converge",
                 "--gufa-optimizing",
                 "--traps-never-happen",
@@ -202,6 +201,9 @@ pub fn build(b: *std.Build) void {
                 "--low-memory-unused",
             });
 
+            // Invariant: wasm-opt must accept every feature that code generation can emit,
+            // or it rejects the module at validation. Both lists come from wasm_features above.
+            for (wasm_features) |feature| optimize_wasm.addArg(binaryenFeatureFlag(feature));
             if (memory64) {
                 optimize_wasm.addArg("--enable-memory64");
             }
@@ -209,17 +211,21 @@ pub fn build(b: *std.Build) void {
                 optimize_wasm.addArg("--enable-relaxed-simd");
             }
 
-            optimize_wasm.step.dependOn(&install_wasm.step);
-            b.getInstallStep().dependOn(&optimize_wasm.step);
-        }
+            break :blk optimized;
+        } else exe.getEmittedBin();
+
+        const install_wasm = b.addInstallFileWithDir(
+            wasm_bin,
+            .{ .custom = "" },
+            "main.wasm",
+        );
+        b.getInstallStep().dependOn(&install_wasm.step);
 
         if (gen_enums) {
             generateEnums(b, &[_][]const u8{ "zig/root.zig", "zig/types/types.zig", "zig/memory.zig" });
         }
 
-        // Bake sprite-layout constants into src/shader.wgsl. Not behind -Dgen-enums: these must always
-        // match the current Sprite enum, and it is guarded by its own content hash so the host tool is
-        // only rebuilt when the source values (sprite.zig / mining.zig) actually change.
+        // Bake sprite-layout constants into src/shader.wgsl.
         generateShaderConstants(b, &[_][]const u8{"zig/types/sprite.zig"});
 
         // Bake per-tile sprite sheet colors into zig/render/particle_colors.zig;
@@ -244,6 +250,25 @@ pub fn build(b: *std.Build) void {
             std.debug.print("Aseprite executable not found; skipping step. Either add to your system PATH or use -Daseprite.", .{});
         }
     }
+}
+
+/// The `wasm-opt` flag that turns on the same wasm feature as `feature`.
+/// `wasm-opt` may reject a module that uses a feature it did not get told about.
+fn binaryenFeatureFlag(feature: std.Target.wasm.Feature) []const u8 {
+    return switch (feature) {
+        .simd128 => "--enable-simd",
+        .relaxed_simd => "--enable-relaxed-simd",
+        .tail_call => "--enable-tail-call",
+        .bulk_memory => "--enable-bulk-memory",
+        .mutable_globals => "--enable-mutable-globals",
+        .sign_ext => "--enable-sign-ext",
+        .nontrapping_fptoint => "--enable-nontrapping-float-to-int",
+        .reference_types => "--enable-reference-types",
+        .multivalue => "--enable-multivalue",
+        .exception_handling => "--enable-exception-handling",
+        .extended_const => "--enable-extended-const",
+        else => std.debug.panic("No wasm-opt flag is known for the wasm feature {t}.", .{feature}),
+    };
 }
 
 /// Handles `.aseprite` file exports automatically.
@@ -370,7 +395,12 @@ fn generateShaderConstants(b: *std.Build, paths: []const []const u8) void {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
 
     for (paths) |path| {
-        const content = b.build_root.handle.readFileAlloc(b.graph.io, path, b.allocator, .unlimited) catch |err| {
+        const content = b.build_root.handle.readFileAlloc(
+            b.graph.io,
+            path,
+            b.allocator,
+            .unlimited,
+        ) catch |err| {
             std.debug.panic("Skipping shader-constant generation; could not read {s}: {any}\n", .{ path, err });
         };
         defer b.allocator.free(content);
@@ -381,7 +411,12 @@ fn generateShaderConstants(b: *std.Build, paths: []const []const u8) void {
     hasher.final(&current_hash_binary);
     const current_hash_hex: []const u8 = &std.fmt.bytesToHex(current_hash_binary, .lower);
 
-    const old_hash_hex = b.build_root.handle.readFileAlloc(b.graph.io, cache_path, b.allocator, .limited(1024)) catch |err| blk: {
+    const old_hash_hex = b.build_root.handle.readFileAlloc(
+        b.graph.io,
+        cache_path,
+        b.allocator,
+        .limited(1024),
+    ) catch |err| blk: {
         if (err != error.FileNotFound) std.debug.panic("Could not read shader cache: {any}\n", .{err});
         break :blk b.allocator.alloc(u8, 0) catch "";
     };
@@ -414,7 +449,12 @@ fn generateParticleColors(b: *std.Build, paths: []const []const u8) ?*std.Build.
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
 
     for (paths) |path| {
-        const content = b.build_root.handle.readFileAlloc(b.graph.io, path, b.allocator, .unlimited) catch |err| {
+        const content = b.build_root.handle.readFileAlloc(
+            b.graph.io,
+            path,
+            b.allocator,
+            .unlimited,
+        ) catch |err| {
             std.debug.panic("Skipping particle-color generation; could not read {s}: {any}\n", .{ path, err });
         };
         defer b.allocator.free(content);
@@ -425,7 +465,12 @@ fn generateParticleColors(b: *std.Build, paths: []const []const u8) ?*std.Build.
     hasher.final(&current_hash_binary);
     const current_hash_hex: []const u8 = &std.fmt.bytesToHex(current_hash_binary, .lower);
 
-    const old_hash_hex = b.build_root.handle.readFileAlloc(b.graph.io, cache_path, b.allocator, .limited(1024)) catch |err| blk: {
+    const old_hash_hex = b.build_root.handle.readFileAlloc(
+        b.graph.io,
+        cache_path,
+        b.allocator,
+        .limited(1024),
+    ) catch |err| blk: {
         if (err != error.FileNotFound) std.debug.panic("Could not read particle-color cache: {any}\n", .{err});
         break :blk b.allocator.alloc(u8, 0) catch "";
     };
