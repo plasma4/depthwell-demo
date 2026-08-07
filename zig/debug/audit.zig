@@ -252,18 +252,35 @@ pub fn verifySimInvariants() void {
     if (!dw.dev_menu) return;
 
     var bad_entries: u64 = 0;
-    var entry_idx: usize = 0;
-    // iterator stuff is kinda cool
-    var it = dw.world.mod_store.entries.constIterator(0);
-    while (it.next()) |e| : (entry_idx += 1) {
-        var pop: u32 = 0;
-        for (e.modified) |w| pop += @popCount(w);
-        if (pop != e.count or e.count > e.cells.len or e.cells.len > dw.CHUNK_SIZE_SQ) {
-            logger.err(@src(), "mod entry {d} desynced: popcount {d}, count {d}, capacity {d}", .{
-                entry_idx,
-                pop,
-                e.count,
-                e.cells.len,
+    for ([_]*const dw.world.ModificationStore{ &dw.world.mod_store, &dw.world.legacy_store }, 0..) |store, store_id| {
+        const name = if (store_id == 0) "mod" else "legacy";
+        var entry_idx: usize = 0;
+        // iterator stuff is kinda cool
+        var it = store.entries.constIterator(0);
+        while (it.next()) |e| : (entry_idx += 1) {
+            var pop: u32 = 0;
+            for (e.modified) |w| pop += @popCount(w);
+            if (pop != e.count or e.count > e.cells.len or e.cells.len > dw.CHUNK_SIZE_SQ) {
+                logger.err(@src(), "{s} entry {d} desynced: popcount {d}, count {d}, capacity {d}", .{
+                    name,
+                    entry_idx,
+                    pop,
+                    e.count,
+                    e.cells.len,
+                });
+                bad_entries += 1;
+            }
+        }
+    }
+
+    // A frozen value only exists for a depth the player has already descended past.
+    // One at or below the frontier means a capture ran when it should not have (see `world.captureLegacy()`).
+    var legacy_keys = dw.world.legacy_store.index.iterator();
+    while (legacy_keys.next()) |kv| {
+        if (kv.key_ptr.depth >= dw.world.frontier()) {
+            logger.err(@src(), "legacy entry at depth {d} is not below the frontier {d}", .{
+                kv.key_ptr.depth,
+                dw.world.frontier(),
             });
             bad_entries += 1;
         }
@@ -291,7 +308,10 @@ pub fn verifySimInvariants() void {
     }
 
     if (bad_entries + water_unmarked + sentinel_violations == 0) {
-        logger.log(@src(), "invariant audit: clean ({d} mod entries, loaded SimBuffer slots scanned)", .{entry_idx});
+        logger.log(@src(), "invariant audit: clean ({d} mod entries, {d} frozen, loaded SimBuffer slots scanned)", .{
+            dw.world.mod_store.index.count(),
+            dw.world.legacy_store.index.count(),
+        });
     } else {
         logger.err(@src(), "invariant audit: {d} mod entries desynced, {d} watery chunks unmarked, {d} edge-flag sentinel violations", .{
             bad_entries,

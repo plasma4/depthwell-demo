@@ -26,6 +26,22 @@ pub const STARTING_CAMERA_SCALE = 1.0; // 100%
 
 /// The base speed of the player.
 pub var PLAYER_BASE_SPEED: f64 = 0.60;
+/// How much faster the player moves in ghost mode. Applies to all four directions.
+pub var GHOST_SPEED_MULT: f64 = 3.0;
+
+/// Whether the player flies and goes through blocks.
+///
+/// Creative mode implies ghost mode today.
+/// The separate function is the one place to change that, and it keeps
+/// `dw.dev_menu` as the gate: ghost mode leaves a release build with the rest of creative mode.
+pub inline fn isGhost() bool {
+    return dw.inventory.isInCreative();
+}
+
+/// The speed the player moves at this tick, in subpixels.
+inline fn currentSpeed() f64 {
+    return if (isGhost()) PLAYER_BASE_SPEED * GHOST_SPEED_MULT else PLAYER_BASE_SPEED;
+}
 /// How strong the gravity is.
 pub var GRAVITY: f64 = 0.25;
 /// How high the player jumps.
@@ -213,14 +229,14 @@ pub fn currentSprite() Sprite {
 
 /// Adds the player as a render entity at the grid-aligned screen position computed in `render/chunk.zig`.
 /// Mirrored horizontally to match `facing_right`. Should only be called from `entity.updateEntities`.
-/// Alpha the player is drawn at while spectating, so flying through solid rock reads as intended
+/// Alpha the player is drawn at in ghost mode, so flying through solid rock reads as intended
 /// rather than as a collision bug.
 const GHOST_ALPHA: f32 = 0.8;
 
 pub fn drawPlayerEntity() void {
     // Turns ghostly the moment the ascent starts rather than when it commits, so the fade belongs to
     // the animation instead of popping at the end of it.
-    const ghost = world.isSpectating() or dw.portal.isAscending();
+    const ghost = isGhost() or dw.portal.isAscending();
     dw.entity.addEntity(.{
         .sprite = currentSprite(),
         .position = dw.chunks.player_screen_pos,
@@ -247,9 +263,10 @@ pub fn move(logic_speed: f64) void {
     game.camera_scale_change = game.camera_scale / old_camera_scale;
 
     // Analytical velocity (basic damped linear system)
+    const speed = currentSpeed();
     var move_input: f64 = 0;
-    if (KeyBits.isSet(KeyBits.left, game.keys_held_mask)) move_input -= PLAYER_BASE_SPEED;
-    if (KeyBits.isSet(KeyBits.right, game.keys_held_mask)) move_input += PLAYER_BASE_SPEED;
+    if (KeyBits.isSet(KeyBits.left, game.keys_held_mask)) move_input -= speed;
+    if (KeyBits.isSet(KeyBits.right, game.keys_held_mask)) move_input += speed;
 
     const x_mult = 1.0 - FRICTION_X;
     const y_mult = 1.0 - FRICTION_Y;
@@ -269,14 +286,12 @@ pub fn move(logic_speed: f64) void {
 
     // Update y velocity with gravity.
     //
-    // Spectating flies instead: a block the player stands in at D is a quarter of a block at D-1, so
-    // an ascent lands inside solid rock more often than not. Free flight (with `isColliding()` giving
-    // way below) is what makes looking around from above possible at all, and it costs nothing since
-    // the layer cannot be modified anyway.
-    if (world.isSpectating()) {
+    // Ghost mode flies instead, with `isColliding()` giving way below.
+    // Vertical flight uses the X friction constants on purpose: the Y ones model falling.
+    if (isGhost()) {
         var lift: f64 = 0;
-        if (KeyBits.isSet(KeyBits.up, game.keys_held_mask)) lift -= PLAYER_BASE_SPEED;
-        if (KeyBits.isSet(KeyBits.down, game.keys_held_mask)) lift += PLAYER_BASE_SPEED;
+        if (KeyBits.isSet(KeyBits.up, game.keys_held_mask)) lift -= speed;
+        if (KeyBits.isSet(KeyBits.down, game.keys_held_mask)) lift += speed;
         game.player_velocity[1] = game.player_velocity[1] * pow_fx;
         game.player_velocity[1] += if (FRICTION_X < 1e-4)
             lift * x_mult
@@ -400,11 +415,60 @@ fn handleLocalWrap(comptime axis: u1) bool {
     return false;
 }
 
+/// How far `escapeSolid()` looks for open space, in blocks.
+/// A parent block is `BLOCKS_PER_PARENT` squared child blocks,
+/// so a landing is never deep inside rock and this is already generous.
+const MAX_ESCAPE_BLOCKS: i64 = 24;
+
+/// Moves the player to the nearest open cell, if a depth change left them inside rock.
+///
+/// A block at D is a quarter of a block at D-1, so an ascent frequently lands in a wall.
+/// Free flight used to make that safe. Every depth now collides, so the player is moved instead.
+/// Call after the `SimBuffer` holds the new depth: an absent chunk reads as solid.
+///
+/// Does nothing when the player is already free, or when no open cell is within range.
+pub fn escapeSolid() void {
+    const game = &memory.game;
+    if (!isColliding(game.player_pos[0], game.player_pos[1])) return;
+
+    const step: i64 = dw.CHUNK_SIZE_SQ; // subpixels in one block
+    var r: i64 = 1;
+    while (r <= MAX_ESCAPE_BLOCKS) : (r += 1) {
+        // Rows run top to bottom, so an equally near cell above wins. Falling back down looks natural.
+        var dy: i64 = -r;
+        while (dy <= r) : (dy += 1) {
+            // Columns run outward from the center, so the player never slides sideways
+            // past a cell that was free directly above them.
+            var k: i64 = 0;
+            while (k <= 2 * r) : (k += 1) {
+                const dx: i64 = if (@mod(k, 2) == 0) @divTrunc(k, 2) else -@divTrunc(k + 1, 2);
+                // Only the ring this radius adds; a smaller one already rejected everything inside it.
+                if (@abs(dx) != r and @abs(dy) != r) continue;
+
+                const px = game.player_pos[0] + dx * step;
+                const py = game.player_pos[1] + dy * step;
+                if (isColliding(px, py)) continue;
+
+                game.player_pos = .{ px, py };
+                // The offset can cross a chunk edge, and the world edge can refuse it.
+                _ = handleLocalWrap(0);
+                _ = handleLocalWrap(1);
+                // Snap the trailing position and the camera, exactly as `teleport()` does.
+                game.last_player_pos = game.player_pos;
+                game.camera_pos = game.player_pos;
+                game.last_camera_pos = game.player_pos;
+                game.player_velocity = .{ 0.0, 0.0 };
+                resetMotionState();
+                return;
+            }
+        }
+    }
+}
+
 /// Performs an AABB check (for the player's position) against the world grid.
 pub fn isColliding(px: i64, py: i64) bool {
-    // Spectating flies through everything (see the lift branch in `move()`): the layer is read-only,
-    // so terrain is scenery rather than a surface, and an ascent frequently lands inside solid rock.
-    if (world.isSpectating()) return false;
+    // Ghost mode goes through everything (see the lift branch in `move()`).
+    if (isGhost()) return false;
 
     const game = &memory.game;
     const corners = [4][2]i64{
