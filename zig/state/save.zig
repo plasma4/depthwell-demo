@@ -92,6 +92,7 @@ const SectionTag = enum(u16) {
     misc,
     mod_store,
     ascent_stack,
+    legacy_store,
 };
 
 fn sectionTagFromInt(raw: u16) ?SectionTag {
@@ -385,8 +386,8 @@ fn readQuadCache(r: *Reader) !void {
 }
 
 /// Writes the ascent stack (the blocks the player has ascended past, deepest last).
-/// Present but empty when the player is at their deepest depth; its length is what puts the game into
-/// read-only spectating mode on load (see `world.isSpectating()`).
+/// Present but empty when the player is at their deepest depth.
+/// Its length is the route back down, and it recovers `max_depth_reached` for a save that predates it.
 fn writeAscentStack(w: *Writer) !void {
     const at = try w.beginSection(.ascent_stack, 1);
     const stack = world.ascent_stack.items;
@@ -597,33 +598,35 @@ fn writeEntryPayload(w: *Writer, entry: *const world.ModEntry) !void {
     try w.bytes(std.mem.sliceAsBytes(packed_cells[0..entry.count]));
 }
 
-/// Serializes every chunk the player has modified, keyed by its `DepthCoordinate`.
+/// Serializes every chunk of one store, keyed by its `DepthCoordinate`.
 /// Reads the index/entries live (non-budgeted).
-fn writeModStore(w: *Writer) !void {
-    const at = try w.beginSection(.mod_store, 1);
-    try w.varint(world.mod_store.index.count());
+///
+/// `legacy_store` uses the same record format as `mod_store` and differs only in its section tag.
+fn writeStore(w: *Writer, tag: SectionTag, store: *const world.ModificationStore) !void {
+    const at = try w.beginSection(tag, 1);
+    try w.varint(store.index.count());
 
-    var it = world.mod_store.index.iterator();
+    var it = store.index.iterator();
     while (it.next()) |e| {
         try writeEntryKey(w, e.key_ptr.*);
-        try writeEntryPayload(w, world.mod_store.entries.at(e.value_ptr.*));
+        try writeEntryPayload(w, store.entries.at(e.value_ptr.*));
     }
     w.endSection(at);
 }
 
-/// Returns the exact `MOD_STORE` payload size, excluding its section header.
+/// Returns the exact payload size of one store's section, excluding its header.
 /// This lets callers reserve the final output space before the high-volume entry writes begin.
-fn modStorePayloadBytes() u64 {
-    var payload_len: u64 = varintLen(world.mod_store.index.count());
-    var it = world.mod_store.index.iterator();
+fn storePayloadBytes(store: *const world.ModificationStore) u64 {
+    var payload_len: u64 = varintLen(store.index.count());
+    var it = store.index.iterator();
     while (it.next()) |entry| {
-        payload_len += MOD_KEY_BYTES + entryPayloadBytes(world.mod_store.entries.at(entry.value_ptr.*));
+        payload_len += MOD_KEY_BYTES + entryPayloadBytes(store.entries.at(entry.value_ptr.*));
     }
     return payload_len;
 }
 
-/// Rebuilds `mod_store` from the saved records.
-fn readModStore(r: *Reader) !void {
+/// Rebuilds one store from the saved records.
+fn readStore(r: *Reader, store: *world.ModificationStore) !void {
     // we do NOT need to reset the mod store because importAll() resets before section dispatch
     const n = try r.varint();
     var e: u64 = 0;
@@ -656,7 +659,7 @@ fn readModStore(r: *Reader) !void {
             if (cell.hp > Block.MAX_HP) return SaveError.BadData;
         }
 
-        try world.mod_store.loadEntry(key, modified, descendants, cells[0..count]);
+        try store.loadEntry(key, modified, descendants, cells[0..count]);
     }
 }
 
@@ -691,12 +694,15 @@ fn serialize(w: *Writer) !void {
     try writeMisc(w);
     try writeAscentStack(w);
 
-    // Reserve the exact large section plus the end marker and checksum.
+    // Reserve the exact large sections plus the end marker and checksum.
     // This avoids repeated ArrayList growth/copying while modified cells are added.
-    const mod_store_len = modStorePayloadBytes();
-    const reserve_len: usize = @intCast(@as(u64, w.list.items.len) + 12 + mod_store_len + 2 + 32);
+    const mod_store_len = storePayloadBytes(&world.mod_store);
+    const legacy_store_len = storePayloadBytes(&world.legacy_store);
+    const reserve_len: usize = @intCast(@as(u64, w.list.items.len) +
+        12 + mod_store_len + 12 + legacy_store_len + 2 + 32);
     try w.list.ensureTotalCapacity(save_alloc, reserve_len);
-    try writeModStore(w);
+    try writeStore(w, .mod_store, &world.mod_store);
+    try writeStore(w, .legacy_store, &world.legacy_store);
 
     try w.int(u16, @intFromEnum(SectionTag.end));
 
@@ -877,13 +883,22 @@ fn deserialize(buf: []const u8) !void {
             .menus => try readMenus(&r),
             .tools => try readTools(&r),
             .misc => try readMisc(&r),
-            .mod_store => try readModStore(&r),
+            .mod_store => try readStore(&r, &world.mod_store),
+            .legacy_store => try readStore(&r, &world.legacy_store),
             .ascent_stack => try readAscentStack(&r),
             .end => unreachable,
         }
         // trust the framing length even if a reader consumed a different amount
         r.pos = section_end;
     }
+
+    // A save from before the frontier existed carries neither the counter nor a `legacy_store`,
+    // which is exactly a world that has only ever had one timeline.
+    // Retrace is the only descent above the frontier, so the ascent stack gives the right value.
+    memory.game.max_depth_reached = @max(
+        memory.game.max_depth_reached,
+        memory.game.depth + world.ascent_stack.items.len,
+    );
 }
 
 /// Byte length of the finished save buffer (valid after `exportAll()` or a completed snapshot).
@@ -891,8 +906,32 @@ pub fn getExportLen() usize {
     return save_buf.items.len;
 }
 
-/// One modified chunk to serialize: its `DepthCoordinate` key and its index into `mod_store.entries`.
-const PlanEntry = struct { key: DepthCoordinate, idx: usize };
+/// Which store a plan entry and a shadow copy belong to.
+/// The two stores share every record format, so only the section tag and the target differ.
+const StoreId = enum(u8) {
+    mods,
+    legacy,
+
+    inline fn store(self: StoreId) *world.ModificationStore {
+        return switch (self) {
+            .mods => &world.mod_store,
+            .legacy => &world.legacy_store,
+        };
+    }
+
+    inline fn tag(self: StoreId) SectionTag {
+        return switch (self) {
+            .mods => .mod_store,
+            .legacy => .legacy_store,
+        };
+    }
+};
+
+/// One modified chunk to serialize: its `DepthCoordinate` key and its index into that store's `entries`.
+const PlanEntry = struct { key: DepthCoordinate, idx: usize, id: StoreId };
+
+/// Identifies one preserved payload. The two stores index their entries separately.
+const ShadowKey = struct { id: StoreId, idx: usize };
 
 /// Number of bytes `Writer.varint()` emits for `value`.
 fn varintLen(value: u64) u64 {
@@ -904,25 +943,31 @@ fn varintLen(value: u64) u64 {
 
 var plan: std.ArrayList(PlanEntry) = .empty;
 var plan_cursor: usize = 0;
-/// Offset of the MOD_STORE section's length field in `save_buf` (precomputed; kept only for the finalize assert).
-var mod_store_len_off: usize = 0;
+/// Plan entries that belong to `mod_store`. They come first, so the cursor reaching this
+/// is where `writeBatchInner()` closes that section and opens the LEGACY_STORE one.
+var mod_plan_len: usize = 0;
+/// Offset of each store's section length field in `save_buf`
+/// (precomputed; kept only for the finalize assert).
+var store_len_off: [2]usize = .{ 0, 0 };
+/// Payload length each store's section header promised.
+var store_payload_len: [2]u64 = .{ 0, 0 };
 /// Incremental BLAKE3 over the snapshot stream, fed batch-by-batch so finalizing never rehashes the whole blob in one frame.
 var snapshot_hasher: std.crypto.hash.Blake3 = undefined;
 /// Bytes of `save_buf` already fed to `snapshot_hasher`.
 var hashed_upto: usize = 0;
-/// `mod_store.generation` captured at `beginSnapshot()`; a change aborts the in-flight snapshot.
-var snapshot_gen: u64 = 0;
+/// Each store's `generation` captured at `beginSnapshot()`; a change aborts the in-flight snapshot.
+var snapshot_gen: [2]u64 = .{ 0, 0 };
 var snapshot_active: bool = false;
 
-/// `mod_store.entries.len` at `beginSnapshot()`. Entries at indices below this are in the plan;
+/// Each store's `entries.len` at `beginSnapshot()`. Entries at indices below this are in the plan;
 /// any appended after are new mods excluded from this snapshot and never need shadowing.
-var snapshot_entries_len: usize = 0;
-/// Copy-on-write side store: `entries` index -> that entry's payload, already serialized, as of snapshot
+var snapshot_entries_len: [2]usize = .{ 0, 0 };
+/// Copy-on-write side store: `ShadowKey` -> that entry's payload, already serialized, as of snapshot
 /// start. Filled by `shadowEntryForSave()` the first time the game touches a still-unencoded planned entry.
 ///
 /// Storing encoded bytes rather than a copy of the entry keeps the preserved size fixed, which is what lets
 /// `beginSnapshotInner()` precompute the section length even though entries grow as the player keeps editing.
-var shadow: std.AutoHashMapUnmanaged(usize, []u8) = .empty;
+var shadow: std.AutoHashMapUnmanaged(ShadowKey, []u8) = .empty;
 
 /// Drops every preserved payload. `shadow` owns its values, unlike the old whole-`Chunk` map.
 fn clearShadow() void {
@@ -970,6 +1015,17 @@ pub fn beginSnapshot() i64 {
     return @intCast(plan.items.len);
 }
 
+/// Writes one store's section header and its chunk count, with the length precomputed by
+/// `beginSnapshotInner()`. The entries themselves follow, batch by batch.
+fn openStoreSection(w: *Writer, id: StoreId, count: usize) !void {
+    const slot = @intFromEnum(id);
+    try w.int(u16, @intFromEnum(id.tag()));
+    try w.int(u16, 3); // section version
+    store_len_off[slot] = save_buf.items.len;
+    try w.int(u64, store_payload_len[slot]);
+    try w.varint(count);
+}
+
 fn beginSnapshotInner() !void {
     var w: Writer = .{ .list = &save_buf };
     try w.bytes(MAGIC);
@@ -984,27 +1040,31 @@ fn beginSnapshotInner() !void {
     try writeMisc(&w);
     try writeAscentStack(&w);
 
-    snapshot_entries_len = world.mod_store.entries.len;
-    var it = world.mod_store.index.iterator();
-    while (it.next()) |entry| {
-        try plan.append(save_alloc, .{ .key = entry.key_ptr.*, .idx = entry.value_ptr.* });
+    // `mod_store` first, then `legacy_store`: the cursor crossing `mod_plan_len` is the section break.
+    inline for (.{ StoreId.mods, StoreId.legacy }) |id| {
+        const store = id.store();
+        snapshot_entries_len[@intFromEnum(id)] = store.entries.len;
+        snapshot_gen[@intFromEnum(id)] = store.generation;
+
+        var it = store.index.iterator();
+        while (it.next()) |entry| {
+            try plan.append(save_alloc, .{ .key = entry.key_ptr.*, .idx = entry.value_ptr.*, .id = id });
+        }
+        if (id == .mods) mod_plan_len = plan.items.len;
     }
 
-    // open the MOD_STORE section with its exact length precomputed, no backpatching needed
-    var payload_len: u64 = varintLen(plan.items.len);
+    // Each section's exact length is precomputed, so nothing needs backpatching later.
+    store_payload_len = .{ varintLen(mod_plan_len), varintLen(plan.items.len - mod_plan_len) };
     for (plan.items) |e| {
-        payload_len += MOD_KEY_BYTES + entryPayloadBytes(world.mod_store.entries.at(e.idx));
+        store_payload_len[@intFromEnum(e.id)] +=
+            MOD_KEY_BYTES + entryPayloadBytes(e.id.store().entries.at(e.idx));
     }
 
-    const reserve_len: usize = @intCast(@as(u64, save_buf.items.len) + 12 + payload_len + 2 + 32);
+    const total_payload = store_payload_len[0] + store_payload_len[1];
+    const reserve_len: usize = @intCast(@as(u64, save_buf.items.len) + 12 + 12 + total_payload + 2 + 32);
     try save_buf.ensureTotalCapacity(save_alloc, reserve_len);
 
-    try w.int(u16, @intFromEnum(SectionTag.mod_store));
-    try w.int(u16, 3); // section version
-    mod_store_len_off = save_buf.items.len;
-    try w.int(u64, payload_len);
-    try w.varint(plan.items.len);
-    snapshot_gen = world.mod_store.generation;
+    try openStoreSection(&w, .mods, mod_plan_len);
 
     snapshot_hasher = std.crypto.hash.Blake3.init(.{});
     snapshot_hasher.update(save_buf.items);
@@ -1017,21 +1077,24 @@ fn beginSnapshotInner() !void {
 /// Do NOT call this directly: `ModificationStore.beginWrite()` is the only way to mutate an entry and it
 /// calls this first, so no mutation path can forget to. No-op unless a snapshot is active and the entry is
 /// both planned and still unencoded.
-pub fn shadowEntryForSave(idx: usize) void {
+pub fn shadowEntryForSave(is_legacy: bool, idx: usize) void {
     if (!snapshot_active) return;
-    if (idx >= snapshot_entries_len) return; // appended after the snapshot began; not planned
-    if (shadow.contains(idx)) return; // already preserved at its start-of-snapshot state
+    const id: StoreId = if (is_legacy) .legacy else .mods;
+    const key: ShadowKey = .{ .id = id, .idx = idx };
 
-    const entry = world.mod_store.entries.at(idx);
+    if (idx >= snapshot_entries_len[@intFromEnum(id)]) return; // appended after the snapshot began; not planned
+    if (shadow.contains(key)) return; // already preserved at its start-of-snapshot state
+
+    const entry = id.store().entries.at(idx);
     const size: usize = @intCast(entryPayloadBytes(entry));
 
-    preserve(idx, entry, size) catch {
+    preserve(key, entry, size) catch {
         // can't preserve it -> abort rather than emit an incoherent save
         snapshot_active = false;
     };
 }
 
-fn preserve(idx: usize, entry: *const world.ModEntry, size: usize) !void {
+fn preserve(key: ShadowKey, entry: *const world.ModEntry, size: usize) !void {
     var list: std.ArrayList(u8) = try .initCapacity(save_alloc, size);
     errdefer list.deinit(save_alloc);
 
@@ -1040,7 +1103,7 @@ fn preserve(idx: usize, entry: *const world.ModEntry, size: usize) !void {
     // The plan's precomputed section length counted exactly `size` bytes for this entry.
     std.debug.assert(list.items.len == size);
 
-    try shadow.put(save_alloc, idx, try list.toOwnedSlice(save_alloc));
+    try shadow.put(save_alloc, key, try list.toOwnedSlice(save_alloc));
 }
 
 /// Encodes more chunks of the frozen plan into `save_buf`.
@@ -1048,7 +1111,9 @@ fn preserve(idx: usize, entry: *const world.ModEntry, size: usize) !void {
 /// or -1 on abort/error. Safe to call once per frame until it returns 0.
 pub fn writeBatch(max_chunks: usize) i64 {
     if (!snapshot_active) return -1;
-    if (world.mod_store.generation != snapshot_gen) {
+    if (world.mod_store.generation != snapshot_gen[@intFromEnum(StoreId.mods)] or
+        world.legacy_store.generation != snapshot_gen[@intFromEnum(StoreId.legacy)])
+    {
         snapshot_active = false;
         return -1;
     }
@@ -1077,21 +1142,37 @@ pub fn writeBatch(max_chunks: usize) i64 {
 fn writeBatchInner(w: *Writer, max_chunks: usize) !void {
     const end = @min(plan_cursor + max_chunks, plan.items.len);
     while (plan_cursor < end) : (plan_cursor += 1) {
+        // The plan holds every `mod_store` entry first, so this is where that section ends.
+        if (plan_cursor == mod_plan_len) {
+            assertStoreSectionLen(.mods);
+            try openStoreSection(w, .legacy, plan.items.len - mod_plan_len);
+        }
+
         const e = plan.items[plan_cursor];
         try writeEntryKey(w, e.key);
         // prefer the copy-on-write payload if the game has since touched this entry
-        if (shadow.get(e.idx)) |preserved| {
+        if (shadow.get(.{ .id = e.id, .idx = e.idx })) |preserved| {
             try w.bytes(preserved);
         } else {
-            try writeEntryPayload(w, world.mod_store.entries.at(e.idx));
+            try writeEntryPayload(w, e.id.store().entries.at(e.idx));
         }
     }
 }
 
+/// Verifies the batches wrote exactly the byte count `openStoreSection()` promised.
+fn assertStoreSectionLen(id: StoreId) void {
+    const off = store_len_off[@intFromEnum(id)];
+    const stored_len: u64 = @bitCast(save_buf.items[off..][0..8].*);
+    std.debug.assert(stored_len == save_buf.items.len - (off + 8));
+}
+
 fn finalizeSnapshot(w: *Writer) !void {
-    // the section length was precomputed in beginSnapshotInner(); verify the batches wrote exactly that
-    const stored_len: u64 = @bitCast(save_buf.items[mod_store_len_off..][0..8].*);
-    std.debug.assert(stored_len == save_buf.items.len - (mod_store_len_off + 8));
+    // An empty `legacy_store` never reaches the break in `writeBatchInner()`, so open it here.
+    if (plan_cursor == mod_plan_len) {
+        assertStoreSectionLen(.mods);
+        try openStoreSection(w, .legacy, 0);
+    }
+    assertStoreSectionLen(.legacy);
 
     try w.int(u16, @intFromEnum(SectionTag.end));
     snapshot_hasher.update(save_buf.items[hashed_upto..]);
@@ -1105,6 +1186,8 @@ const testing = std.testing;
 test "mod_store: encoding/decoding is correct" {
     world.mod_store.init(testing.allocator);
     defer world.mod_store.deinit();
+    world.legacy_store.init(testing.allocator);
+    defer world.legacy_store.deinit();
 
     // dead beef haha
     const key: DepthCoordinate = .{
@@ -1117,6 +1200,7 @@ test "mod_store: encoding/decoding is correct" {
         .{ .i = 77, .cell = .{ .id = .water, .base_id = .none, .hp = 15 } },
         .{ .i = 255, .cell = .{ .id = .none, .base_id = .stone, .hp = 4 } },
     };
+    world.testEnterDepth(key.depth);
     for (cells) |c| world.mod_store.beginWrite(key).setCell(c.i, c.cell);
 
     var buf: std.ArrayList(u8) = .empty;
@@ -1168,8 +1252,11 @@ test "mod_store: encoding/decoding is correct" {
 test "mod_store: descendant markers survive an encode/decode round trip" {
     world.mod_store.init(testing.allocator);
     defer world.mod_store.deinit();
+    world.legacy_store.init(testing.allocator);
+    defer world.legacy_store.deinit();
 
     const key: DepthCoordinate = .{ .suffix = .{ 1, 2 }, .depth = 40, .quadrant = 1 };
+    world.testEnterDepth(key.depth);
     world.mod_store.beginWrite(key).setCell(5, .{ .id = .stone, .base_id = .none, .hp = 0 });
     world.mod_store.markDescendant(key, 5);
     world.mod_store.markDescendant(key, 200);

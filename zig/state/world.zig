@@ -313,8 +313,10 @@ pub const ModEntry = struct {
     /// Bit `i` (block index `by * CHUNK_SIZE + bx`) set means `cells[rank(i)]` holds that cell's value.
     modified: [MODIFIED_WORDS]u64 = @splat(0),
     /// Blocks whose descendant region holds a modification at some deeper depth, same bit layout as `modified`.
-    /// Grown one depth per ascent by `markDescendantsFromChild()` and never cleared,
-    /// which holds because ascent is read-only (see `isSpectating()`).
+    /// Grown one depth per ascent by `markDescendantsFromChild()` and never cleared.
+    /// The markers are a display hint only (see `Block.descendant_mods`), so a stale one costs nothing.
+    ///
+    /// Always zero in `legacy_store`: a frozen value says nothing about the depths below it.
     descendants: [MODIFIED_WORDS]u64 = @splat(0),
     /// Modified cells in ascending block-index order. The first `count` are live; the rest is spare capacity.
     cells: []ModCell = &.{},
@@ -422,7 +424,10 @@ pub const ModificationStore = struct {
     generation: u64 = 0,
     /// Incremented whenever the CONTENT of the store changes, which `generation` does not track
     /// (that one only counts wipes). Anything that memoizes a value derived from a modified block
-    /// keys on this, so an edit retires it. See `ancestor.ParentHoodCache`.
+    /// keys on this, so an edit retires it.
+    ///
+    /// `ancestor.ParentHoodCache` deliberately does NOT: a parent hood only reads depths below the
+    /// frontier, and those can no longer change (see `legacy_store`).
     content_generation: u64 = 0,
     allocator: std.mem.Allocator = undefined,
     /// Whether the containers below hold real allocations. Guards `deinit()` before the first `init()`.
@@ -507,11 +512,24 @@ pub const ModificationStore = struct {
     /// This is the ONLY correct way to mutate the store!
     /// This preserves the entry's pre-edit contents for an in-flight budgeted save before handing back a writer.
     pub fn beginWrite(self: *@This(), key: DepthCoordinate) ModWriter {
-        std.debug.assert(!isSpectating()); // of course, you can't modify if spectating the world!
         // A transition froze the layer its preview was generated from; editing it now would leave the
         // depth we land on disagreeing with the one we left (see `portal.beginTransition()`).
         std.debug.assert(!dw.portal.isActive());
-        return .{ .entry = self.entries.at(self.reserve(key, .edit)) };
+        // The player cannot stand below the frontier, so nothing can write there.
+        std.debug.assert(key.depth <= frontier());
+        return .{
+            .entry = self.entries.at(self.reserve(key, .edit)),
+            .key = key,
+            // Below the frontier this depth is frozen for its descendants,
+            // so each cell must give up its inherited value before the edit lands.
+            .capture_legacy = self == &mod_store and key.depth < frontier(),
+        };
+    }
+
+    /// `beginWrite()` without the legacy capture or the transition guards.
+    /// Only `captureLegacy()` and the save loader may use this.
+    fn beginWriteRaw(self: *@This(), key: DepthCoordinate) ModWriter {
+        return .{ .entry = self.entries.at(self.reserve(key, .edit)), .key = key };
     }
 
     /// Why an entry is being opened, for `TRACE_NEW_ENTRIES`. The store itself does not care.
@@ -535,7 +553,7 @@ pub const ModificationStore = struct {
             );
             break :blk new_idx;
         };
-        dw.save.shadowEntryForSave(idx);
+        dw.save.shadowEntryForSave(self == &legacy_store, idx);
         // Every write to the store comes through here (`beginWrite()` and `markDescendant()` both),
         // so this is the one place a content change has to be announced.
         self.content_generation +%= 1;
@@ -585,14 +603,20 @@ pub const ModificationStore = struct {
 pub const ModWriter = struct {
     // (abstractions and types do be cool like this sometimes)
     entry: *ModEntry,
+    /// The chunk being written, which `captureLegacy()` needs to resolve the cell being replaced.
+    key: DepthCoordinate,
+    /// Whether each cell must be frozen into `legacy_store` before the edit lands.
+    capture_legacy: bool = false,
 
     /// Marks block `i` as modified and stores its value.
     pub inline fn setCell(self: ModWriter, i: u8, cell: ModCell) void {
+        if (self.capture_legacy) captureLegacy(self.key, i);
         self.entry.setCellRaw(i, cell);
     }
 
     /// Captures a materialized block's authoritative fields as block `i`'s modified value.
     pub inline fn setBlock(self: ModWriter, i: u8, block: Block) void {
+        if (self.capture_legacy) captureLegacy(self.key, i);
         self.entry.setCellRaw(i, .from(block));
     }
 };
@@ -600,6 +624,45 @@ pub const ModWriter = struct {
 /// Stores and handles modifications of chunks across various depths.
 /// Initialized in `main()`.
 pub var mod_store: ModificationStore = .{};
+
+/// The material each cell had when its depth stopped being the frontier.
+///
+/// A cell can need two values at once:
+/// the one the depths below it inherited, and the one its own depth shows now.
+/// `mod_store` holds the second; this holds the first.
+/// A cell enters here on its FIRST edit below the frontier, and is never written again.
+///
+/// Only ancestor lookups read this (see `inheritedCell()`).
+/// It is invisible to the depth it belongs to, which is what makes each depth its own world.
+pub var legacy_store: ModificationStore = .{};
+
+/// Freezes block `i` of `key` into `legacy_store`, if it is not frozen already.
+///
+/// The captured value is the cell as it reads RIGHT NOW.
+/// That is its `mod_store` value when it has one, and its procedural value when it does not.
+/// Both come back from `ancestor.getInheritedMaterial()`, which reads the resident chunk first.
+fn captureLegacy(key: DepthCoordinate, i: u8) void {
+    if (legacy_store.get(key)) |e| {
+        if (e.isModified(i)) return; // frozen already, and a frozen cell never changes
+    }
+    const bx: u4 = @truncate(i);
+    const by: u4 = @truncate(i >> CHUNK_SIZE_LOG2);
+    const block = dw.ancestor.getInheritedMaterial(key, bx, by);
+    legacy_store.beginWriteRaw(key).setCell(i, .from(block));
+}
+
+/// The value one cell contributes to the depths BELOW it, or null when it is still procedural.
+///
+/// The one lookup every ancestor path must use, so the two call sites cannot drift.
+/// A frozen value wins over the live one:
+/// an edit made after the depth was left is local to that depth and must not travel down.
+pub inline fn inheritedCell(key: DepthCoordinate, block_idx: u8) ?ModCell {
+    // Almost every session never edits below the frontier, so this keeps the store off the hot path.
+    if (legacy_store.index.count() != 0) {
+        if (legacy_store.getCell(key, block_idx)) |cell| return cell;
+    }
+    return mod_store.getCell(key, block_idx);
+}
 
 /// One depth the player has ascended past, recording the block they went up through.
 ///
@@ -615,8 +678,8 @@ pub const AscentStep = struct {
     /// `computeRetraceLayer()` reads the recorded frame back instead, exactly as `computeParentLayer()` does going the other way.
     suffix: Vec2u,
     quadrant: u2,
-    /// Subpixels within `suffix`'s chunk. The invportal is only the way up; where you come back to is
-    /// where you were standing.
+    /// Subpixels within `suffix`'s chunk: the stand position on the portal block itself.
+    /// A return puts the player back on the portal they went up through, at both ends of the move.
     origin_pos: Vec2i,
 
     pub inline fn coord(self: @This()) Coordinate {
@@ -628,14 +691,38 @@ pub const AscentStep = struct {
 /// Lives on `main_allocator` because it can be pushed or popped.
 pub var ascent_stack: std.ArrayList(AscentStep) = .empty;
 
-/// Whether the player is above the deepest depth they have reached, looking down at it.
-pub inline fn isSpectating() bool {
+/// Whether a recorded ascent step is available to descend back through.
+///
+/// This is the ONLY way down while above the frontier.
+/// A fresh descent frame would renumber every suffix below and orphan its `mod_store` keys
+/// (see `AscentStep`).
+pub inline fn canRetrace() bool {
     return ascent_stack.items.len != 0;
 }
 
-/// The deepest depth the player has reached, which is the only depth they may modify.
+/// The deepest depth the player has reached: the FRONTIER.
+///
+/// Floored at the current depth, which can never be deeper than the deepest one reached.
+/// Read this rather than `max_depth_reached` directly:
+/// the floor holds the invariant even when the depth is set without a `commitLayer()`.
+pub inline fn frontier() u64 {
+    return @max(memory.game.max_depth_reached, memory.game.depth);
+}
+
+/// Whether the current depth is above the frontier, so its edits stay local to it.
+///
+/// The player has already descended past this depth,
+/// so the depths below it hold the material they inherited at that moment.
+/// See `legacy_store` for how that material is kept.
+pub inline fn isAboveFrontier() bool {
+    return memory.game.depth < frontier();
+}
+
+/// The deepest depth the player has reached.
+/// Retrace is the only descent above the frontier, so this also equals
+/// `game.depth + ascent_stack.items.len` during play.
 pub inline fn deepestDepth() u64 {
-    return memory.game.depth + ascent_stack.items.len;
+    return frontier();
 }
 
 /// Whether there is a depth above the current one to ascend into.
@@ -645,12 +732,12 @@ pub inline fn canAscend() bool {
 
 /// The step a descent must retrace, or null when the player is already at their deepest depth.
 pub inline fn retraceStep() ?AscentStep {
-    return if (isSpectating()) ascent_stack.items[ascent_stack.items.len - 1] else null;
+    return if (canRetrace()) ascent_stack.items[ascent_stack.items.len - 1] else null;
 }
 
 /// Drops the top ascent step, once the descent that retraced it has committed.
 pub fn popAscentStep() void {
-    std.debug.assert(isSpectating());
+    std.debug.assert(canRetrace());
     _ = ascent_stack.pop();
 }
 
@@ -2032,10 +2119,28 @@ pub fn getChunkPtr(coord: Coordinate) *const Chunk {
 /// stays a separate OVERLAY replayed on top, which is also what lets a save hold a handful of edited
 /// cells instead of the chunks, and what lets a worldgen fix repair an existing save.
 pub fn materializeChunk(chunk: *Chunk, key: DepthCoordinate) void {
+    materializeChunkInner(chunk, key, .live);
+}
+
+/// `materializeChunk()` for a chunk that serves as an ANCESTOR of a deeper depth.
+///
+/// Replays the frozen values over the live ones, exactly as `inheritedCell()` chooses between them,
+/// so the whole-chunk route and the cell-by-cell route agree.
+/// A chunk built by this must never reach the player: it is the depth as its descendants remember it.
+pub fn materializeInheritedChunk(chunk: *Chunk, key: DepthCoordinate) void {
+    materializeChunkInner(chunk, key, .inherited);
+}
+
+/// Which of the two stores a materialization replays.
+/// `.inherited` replays `mod_store` and then `legacy_store` ON TOP, since a frozen value wins.
+const StoreView = enum { live, inherited };
+
+fn materializeChunkInner(chunk: *Chunk, key: DepthCoordinate, comptime view: StoreView) void {
     // Asked BEFORE generating so the flag pass can be skipped when it is about to be redone below.
     // A bool rather than the entry itself: generation is a long call and nothing should hold a store
     // pointer across it.
-    const modified = mod_store.contains(key);
+    const frozen = view == .inherited and legacy_store.contains(key);
+    const modified = mod_store.contains(key) or frozen;
     const is_base = key.depth == STARTING_ZOOM_TIMES;
 
     // The generator derives flags from the ids it just wrote. Replaying an edit changes those ids, so
@@ -2045,17 +2150,19 @@ pub fn materializeChunk(chunk: *Chunk, key: DepthCoordinate) void {
 
     const entry = mod_store.get(key);
     // Generation must never touch the store, or the flag pass skipped above would never be made up for.
-    std.debug.assert((entry != null) == modified);
+    std.debug.assert((entry != null) == (mod_store.contains(key)));
     if (entry) |e| {
         e.applyTo(chunk);
-        // Only meaningful while looking down at a deeper depth; at the deepest depth the markers left
+        // Only meaningful while looking down at a deeper depth; at the frontier the markers left
         // behind by an earlier ascent describe modifications that ARE this layer.
-        if (isSpectating()) {
+        if (view == .live and isAboveFrontier()) {
             for (0..CHUNK_SIZE_SQ) |idx| {
                 chunk.blocks[idx].descendant_mods = e.hasDescendantMods(@intCast(idx));
             }
         }
     }
+    // A frozen value beats the live one, so it goes on last.
+    if (frozen) legacy_store.get(key).?.applyTo(chunk);
 
     if (!is_base) {
         // Exactly the pass `generateChunkInner()` was told to skip, now that the ids are final.
@@ -2981,6 +3088,7 @@ pub fn clearCaches(comptime clear_ancestors: bool) void {
 pub fn initArenaAllocatedStructures() void {
     flag_worklist = std.ArrayList(UpdateItem).initCapacity(alloc, 256) catch memory.oom();
     mod_store.init(memory.main_allocator);
+    legacy_store.init(memory.main_allocator);
     ascent_stack.clearRetainingCapacity();
     quad_cache.reset();
 }
@@ -3255,6 +3363,11 @@ pub fn commitLayer(t: LayerTransition, keep_ancestors: bool) void {
     dw.inventory.dropped_items.clear(null);
     memory.game.teleport(null, t.new_pos); // make sure to teleport!
     installLayer(t);
+
+    // The one place the frontier moves. The depth just left is now frozen for its descendants:
+    // its later edits go to `legacy_store` instead of reaching down (see `captureLegacy()`).
+    // `clearCaches()` above already dropped the parent hoods this invalidates.
+    if (t.depth > memory.game.max_depth_reached) memory.game.max_depth_reached = t.depth;
 }
 
 /// Increases the game's depth by 1, invalidates caches, moves the player, and handles data modification.
@@ -3386,7 +3499,7 @@ pub fn computeParentLayer(coord: Coordinate, pos: Vec2i) LayerTransition {
 
 /// Decreases the game's depth by 1, moving the player into the block they were standing in.
 ///
-/// Records the step on `ascent_stack`, which both puts the world into its read-only spectating mode and pins the block a later descent has to retrace.
+/// Records the step on `ascent_stack`, which pins the block a later descent has to retrace.
 /// The descendant markers are propagated first, while the deeper depth is still the current one and its parents are still one hop away.
 pub fn popLayer() void {
     const g = &memory.game;
@@ -3397,6 +3510,8 @@ pub fn popLayer() void {
     // chunk reads as solid to collision (see `getBlockPtr()`).
     SimBuffer.sync(g.getPlayerCoord());
     applyDescendantMarkersToSim();
+    // An ascent scales the player down into a wall more often than not, and every depth collides now.
+    dw.player.escapeSolid();
 }
 
 /// Commits an already-computed ascent transition: rolls the deeper depth's modifications up into markers,
@@ -3404,7 +3519,7 @@ pub fn popLayer() void {
 /// so both leave the exact same state behind.
 ///
 /// `origin_coord`/`origin_pos` are where at the DEEPER depth a later return should put the player:
-/// where they were standing, not the block they rose through.
+/// the portal block they rose through.
 ///
 /// Asserts `t.depth == game.depth - 1` (the world is still at the depth being left).
 pub fn applyAscent(t: LayerTransition, origin_coord: Coordinate, origin_pos: Vec2i) void {
@@ -3455,17 +3570,18 @@ pub fn computeRetraceLayer(step: AscentStep) LayerTransition {
 }
 
 /// Instantly descends back through the block the player last ascended past, popping the ascent stack.
-/// The only descent allowed while spectating (see `isSpectating()`).
+/// The only descent allowed above the frontier (see `canRetrace()`).
 ///
-/// The block only picks the depth's coordinate frame; the player is put back on the exact spot they left from,
-/// so a return lands where they were rather than on the target block's floor.
-/// Still spectating afterwards if more steps remain, since the depth reached is still above the deepest.
+/// The block picks the depth's coordinate frame AND the landing spot,
+/// so a return lands on the portal that the ascent went up through.
+/// Still above the frontier afterwards if more steps remain.
 pub fn retraceInstant() void {
     // No preview warmed the ancestor cache here (unlike the animated return),
     // and its entries are tiered relative to the old depth, so they must be dropped rather than kept.
     commitLayer(computeRetraceLayer(retraceStep().?), false);
     popAscentStep();
     SimBuffer.sync(memory.game.getPlayerCoord());
+    dw.player.escapeSolid();
 }
 
 /// Commits an already-computed return transition, popping the ascent stack.
@@ -3833,7 +3949,8 @@ fn refineHorizonWindow(prev: *const HorizonWindow, trace: HorizonTrace, target_h
 
                 // the traces above are purely procedural, so the player's edit at this exact cell (if any) wins
                 const block_idx: u8 = @intCast((@as(usize, local_by) << 4) | local_bx);
-                if (mod_store.getCell(child_key, block_idx)) |cell| {
+                // `inheritedCell()`, as in `ancestor.getInheritedMaterial()`: this trace feeds deeper depths.
+                if (inheritedCell(child_key, block_idx)) |cell| {
                     cell.applyTo(&next[y_idx][x_idx]);
                 }
                 // forced world edge
@@ -3978,6 +4095,8 @@ test "horizon window: a replay from the base reproduces every stored window" {
     memory.game = .{};
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     // A handful of arbitrary but fixed traces, standing in for a descent path.
     const traces = [_]HorizonTrace{
@@ -4051,6 +4170,8 @@ test "horizon window: a checkpointed rebuild matches replaying from the base" {
     memory.game = .{};
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     const count = 2 * QuadCache.MATERIALS_CHECKPOINT_STRIDE + 3;
     quad_cache.materials_windows.len = 0;
@@ -4117,6 +4238,8 @@ test "refineHorizonWindow: leaves the game depth exactly as it found it" {
     memory.game = .{};
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     memory.game.depth = 61;
     const before = memory.game.depth;
@@ -4222,6 +4345,8 @@ test "markDescendantsFromChild: rolls a deep edit into a parent marker, idempote
 
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
     ascent_stack.clearRetainingCapacity();
 
     memory.game = .{};
@@ -4248,11 +4373,23 @@ fn testCell(i: u8) ModCell {
     return .{ .id = @enumFromInt(@as(u16, i) + 1), .base_id = @enumFromInt(@as(u16, i) + 300), .hp = i % 16 };
 }
 
+/// Puts the player at `depth` so a storage test can write there.
+/// `beginWrite()` refuses a depth below the frontier, and these tests use arbitrary keys.
+pub fn testEnterDepth(depth: u64) void {
+    memory.game.depth = depth;
+    memory.game.max_depth_reached = depth;
+}
+
 test "ModEntry: cells stay indexable by block index regardless of insertion order" {
+    const saved_game = memory.game;
+    defer memory.game = saved_game;
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     const key: DepthCoordinate = .{ .suffix = .{ 1, 2 }, .depth = 7, .quadrant = 0 };
+    testEnterDepth(key.depth);
 
     // Insert scrambled so every insert lands in the middle of the packed array and exercises the shift!
     var n: u32 = 0;
@@ -4282,10 +4419,15 @@ test "ModEntry: cells stay indexable by block index regardless of insertion orde
 }
 
 test "ModEntry: unmodified cells read as null and rewrites do not grow the entry" {
+    const saved_game = memory.game;
+    defer memory.game = saved_game;
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     const key: DepthCoordinate = .{ .suffix = .{ 0, 0 }, .depth = 6, .quadrant = 3 };
+    testEnterDepth(key.depth);
     const modified = [_]u8{ 0, 1, 63, 64, 65, 127, 128, 200, 255 };
 
     for (modified) |i| mod_store.beginWrite(key).setCell(i, testCell(i));
@@ -4309,10 +4451,15 @@ test "ModEntry: unmodified cells read as null and rewrites do not grow the entry
 }
 
 test "ModEntry: applyTo overwrites exactly the modified cells" {
+    const saved_game = memory.game;
+    defer memory.game = saved_game;
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     const key: DepthCoordinate = .{ .suffix = .{ 9, 9 }, .depth = 8, .quadrant = 1 };
+    testEnterDepth(key.depth);
     mod_store.beginWrite(key).setCell(5, .{ .id = .none, .base_id = .none, .hp = 0 });
     mod_store.beginWrite(key).setCell(200, .{ .id = .water, .base_id = .none, .hp = 9 });
 
@@ -4336,10 +4483,15 @@ test "ModEntry: applyTo overwrites exactly the modified cells" {
 }
 
 test "ModificationStore: remove drops the chunk and recycles its slot" {
+    const saved_game = memory.game;
+    defer memory.game = saved_game;
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     const a: DepthCoordinate = .{ .suffix = .{ 1, 1 }, .depth = 6, .quadrant = 0 };
+    testEnterDepth(a.depth);
     const b: DepthCoordinate = .{ .suffix = .{ 2, 2 }, .depth = 6, .quadrant = 0 };
 
     mod_store.beginWrite(a).setCell(10, testCell(10));
@@ -4387,6 +4539,8 @@ test "coordinate consistency: a block is the same whatever route reached it" {
 
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     // Two depths of refinement above the base, so the ancestry is a chain rather than a single step.
     const depth = STARTING_ZOOM_TIMES + 2;
@@ -4430,8 +4584,12 @@ test "coordinate consistency: a block is the same whatever route reached it" {
     memory.game.depth = depth;
     max_possible_suffix = getMaxSuffixAtDepth(depth);
     const parent_key = key.getParent().asCoord().asDepthCoordinate(depth - 1);
+    // The edit has to be frontier-era to reach the depth below it. An edit made after the player
+    // descended past the parent stays at the parent (see `legacy_store`), which is a different test.
+    testEnterDepth(depth - 1);
     mod_store.beginWrite(parent_key).setCell(37, .{ .id = .lava_stone, .base_id = .none, .hp = 0 });
     mod_store.beginWrite(parent_key).setCell(38, .{ .id = .none, .base_id = .none, .hp = 0 });
+    testEnterDepth(depth);
     clearCaches(true);
 
     var edited: Chunk = undefined;
@@ -4466,6 +4624,8 @@ test "a 2x1 pair is placed and validated as one unit" {
 
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
     flag_worklist = try std.ArrayList(UpdateItem).initCapacity(testing.allocator, 256);
     defer {
         flag_worklist.deinit(testing.allocator);
@@ -4513,6 +4673,98 @@ test "a 2x1 pair is placed and validated as one unit" {
     materializeChunk(&chunk, key);
     try testing.expectEqual(Sprite.moss_shrub1, chunk.blocks[idx].id);
     try testing.expectEqual(Sprite.moss_shrub1_right, chunk.blocks[idx + 1].id);
+}
+
+test "frozen ancestry: an edit made after a depth is left never reaches the depths below it" {
+    const saved_game = memory.game;
+    const saved_suffix = max_possible_suffix;
+    defer {
+        memory.game = saved_game;
+        max_possible_suffix = saved_suffix;
+        clearCaches(true);
+    }
+
+    memory.game = .{};
+    var rng = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, .seed2_init));
+    for (&memory.game.seed2) |*v| v.* = rng.next();
+    quad_cache.path_hashes.value[0] = memory.game.seed;
+
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
+
+    const depth = STARTING_ZOOM_TIMES + 2;
+    const coord: Coordinate = .{ .suffix = .{ 37, 52 }, .quadrant = 0 };
+    const key = coord.asDepthCoordinate(depth);
+
+    memory.game.depth = depth;
+    max_possible_suffix = getMaxSuffixAtDepth(depth);
+    const parent_key = key.getParent().asCoord().asDepthCoordinate(depth - 1);
+    const parent_idx: u8 = 37;
+
+    // The player is at the parent, which is the deepest depth reached: this edit shapes what comes below.
+    testEnterDepth(depth - 1);
+    max_possible_suffix = getMaxSuffixAtDepth(depth - 1);
+    mod_store.beginWrite(parent_key).setCell(parent_idx, .{ .id = .lava_stone, .base_id = .none, .hp = 0 });
+    try testing.expectEqual(@as(usize, 0), legacy_store.index.count()); // frontier edits never freeze
+
+    // Descend. The child inherits the edit.
+    testEnterDepth(depth);
+    max_possible_suffix = getMaxSuffixAtDepth(depth);
+    clearCaches(true);
+    var inherited: Chunk = undefined;
+    generateChunk(&inherited, key);
+
+    // Go back up and undo the edit. The parent is below the frontier now, so this stays at the parent.
+    memory.game.depth = depth - 1;
+    max_possible_suffix = getMaxSuffixAtDepth(depth - 1);
+    mod_store.beginWrite(parent_key).setCell(parent_idx, .{ .id = .stone, .base_id = .none, .hp = 0 });
+    try testing.expectEqual(@as(usize, 1), legacy_store.index.count()); // the old value was frozen
+
+    // The parent itself shows the new value...
+    try testing.expectEqual(Sprite.stone, mod_store.getCell(parent_key, parent_idx).?.id);
+    // ...while everything below it still sees the value it inherited.
+    try testing.expectEqual(Sprite.lava_stone, inheritedCell(parent_key, parent_idx).?.id);
+
+    // And the child regenerates byte for byte the same, however many times the parent is edited.
+    memory.game.depth = depth;
+    max_possible_suffix = getMaxSuffixAtDepth(depth);
+    clearCaches(true);
+    var again: Chunk = undefined;
+    generateChunk(&again, key);
+    for (0..CHUNK_SIZE_SQ) |i| try testing.expectEqual(inherited.blocks[i], again.blocks[i]);
+
+    // A second edit at the parent must not overwrite the frozen value.
+    memory.game.depth = depth - 1;
+    mod_store.beginWrite(parent_key).setCell(parent_idx, .{ .id = .none, .base_id = .none, .hp = 0 });
+    try testing.expectEqual(Sprite.lava_stone, inheritedCell(parent_key, parent_idx).?.id);
+}
+
+test "frozen ancestry: an edit below the frontier is playable at its own depth" {
+    const saved_game = memory.game;
+    defer memory.game = saved_game;
+
+    memory.game = .{};
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
+
+    // A deep ascent: the frontier stays far below, and the shallow depth is still fully writable.
+    const shallow = STARTING_ZOOM_TIMES + 1;
+    memory.game.depth = shallow;
+    memory.game.max_depth_reached = shallow + 100;
+    try testing.expect(isAboveFrontier());
+
+    const key: DepthCoordinate = .{ .suffix = .{ 3, 4 }, .depth = shallow, .quadrant = 0 };
+    try testing.expectEqual(@as(u64, shallow + 100), frontier());
+
+    // A cell that was never modified freezes as its procedural value, so the depths below keep it.
+    mod_store.beginWrite(key).setCell(11, .{ .id = .sand, .base_id = .none, .hp = 0 });
+    try testing.expectEqual(Sprite.sand, mod_store.getCell(key, 11).?.id);
+    try testing.expect(legacy_store.getCell(key, 11) != null);
+    try testing.expect(legacy_store.getCell(key, 11).?.id != .sand);
 }
 
 test "coordinate consistency: refinement reads a coordinate, not a route" {

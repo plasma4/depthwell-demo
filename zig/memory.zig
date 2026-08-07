@@ -174,6 +174,15 @@ pub const GameState = extern struct {
     /// Characters used in `seed_string`, never above `SEED_STRING_MAX`.
     seed_string_len: u8 = 0,
 
+    /// The deepest depth the player has reached, called the FRONTIER.
+    /// Never decreases for the life of a world.
+    ///
+    /// This is the timeline authority (see `world.isAboveFrontier()`).
+    /// An edit at a depth below this value is local to that depth:
+    /// deeper depths keep the material they inherited when they were made.
+    /// Set up in `startup.zig`, and raised by `world.commitLayer()`.
+    max_depth_reached: u64 align(8) = 0,
+
     /// Records the seed string the world was created from. Truncates rather than rejecting an oversized one,
     /// since the derived `seed` is already in place by the time this is called and half a record beats none.
     pub fn setSeedString(self: *@This(), text: []const u8) void {
@@ -384,7 +393,7 @@ pub const Block = packed struct(u128) {
 
     /// Set when this block's descendant region holds a modification made at a deeper depth.
     ///
-    /// Display-only, and written by `materializeChunk()` only while `world.isSpectating()`:
+    /// Display-only, and written by `materializeChunk()` only above the frontier:
     /// `variation.resolveVariant()` draws it as `.inventory_selected_orange` while leaving `id` alone,
     /// so the ancestor chain never inherits the marker as if it were terrain.
     descendant_mods: bool = false,
