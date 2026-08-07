@@ -243,7 +243,7 @@ pub fn getAncestorChunk(key: DepthCoordinate) *const Chunk {
     if (ancestor_cache.get(key)) |cached| return cached;
 
     const slot = ancestor_cache.allocateSlot(key);
-    world.materializeChunk(slot, key);
+    world.materializeInheritedChunk(slot, key);
     return slot;
 }
 
@@ -821,10 +821,6 @@ const ParentHoodCache = struct {
     /// Round-robin victim per set. No CLOCK here: the access pattern is a sweep, not a working set,
     /// so recency buys nothing over plain rotation.
     hand: [SETS]std.math.Log2Int(std.meta.Int(.unsigned, WAYS)) = @splat(0),
-    /// `mod_store.content_generation` these entries were resolved under. A parent hood is derived from
-    /// blocks the player can edit, so ANY store write retires the whole cache.
-    generation: u64 = 0,
-
     comptime {
         if (!std.math.isPowerOfTwo(SETS) or !std.math.isPowerOfTwo(WAYS))
             @compileError("ParentHoodCache set and way counts must be powers of two.");
@@ -913,14 +909,16 @@ fn resolveParentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {
 }
 
 /// `resolveParentHood()` through the memo; see `ParentHoodCache`.
+///
+/// A parent hood does NOT key on `mod_store.content_generation`, and must not start to.
+/// `parent_key.depth` is always below `memory.game.depth`, so it is always below the frontier,
+/// and a depth below the frontier can no longer gain an edit that travels down (see `world.legacy_store`).
+/// The hoods are therefore fixed while the frontier is, and `world.clearCaches()` covers the moment it moves.
 fn parentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {
-    const generation = world.mod_store.content_generation;
-    if (parent_hood_cache.generation != generation) {
-        parent_hood_cache.clear();
-        parent_hood_cache.generation = generation;
-    } else if (parent_hood_cache.get(parent_key, bx, by)) |hit| {
-        return hit.*;
-    }
+    // The structural half of the invariant above. The other half is `game.depth <= max_depth_reached`,
+    // which `world.commitLayer()` keeps.
+    std.debug.assert(parent_key.depth < memory.game.depth);
+    if (parent_hood_cache.get(parent_key, bx, by)) |hit| return hit.*;
 
     const hood = resolveParentHood(parent_key, bx, by);
     parent_hood_cache.put(parent_key, bx, by, hood);
@@ -951,7 +949,7 @@ pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
     // the base depth has no parent to inherit from, so just materialize
     if (target_depth == STARTING_ZOOM_TIMES) {
         const slot = ancestor_cache.allocateSlot(key);
-        world.materializeChunk(slot, key);
+        world.materializeInheritedChunk(slot, key);
         return slot.blocks[block_idx];
     }
 
@@ -961,7 +959,8 @@ pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
     const hood = parentHood(p.coord.asDepthCoordinate(target_depth - 1), p.bx, p.by);
 
     var block = applyAncestorLogic(hood.parent, hood.neighbors, key, bx, by).compile();
-    if (world.mod_store.getCell(key, @intCast(block_idx))) |cell| cell.applyTo(&block);
+    // `inheritedCell()`, not `mod_store`: an edit made after this depth was left stays at this depth.
+    if (world.inheritedCell(key, @intCast(block_idx))) |cell| cell.applyTo(&block);
     return block;
 }
 

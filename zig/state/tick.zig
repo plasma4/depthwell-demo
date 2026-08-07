@@ -72,12 +72,12 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
     // cannot push a second transition during one.
     const can_hotkey_depth = dw.dev_menu and !dw.portal.isActive();
 
-    // Z: increase depth. While spectating it retraces the ascent (the only descent allowed); at the
-    // deepest depth it pushes a fresh layer.
+    // Z key increases depth. Above the frontier it "retraces" back to already accessed depths!
+    // At the frontier it "pushes" a fresh layer and suffix updates accordingly.
     const just_increased_depth = can_hotkey_depth and
         KeyBits.isSet(KeyBits.increase_depth, memory.game.keys_pressed_mask);
     if (just_increased_depth) {
-        if (dw.world.isSpectating()) {
+        if (dw.world.canRetrace()) {
             dw.world.retraceInstant();
         } else {
             dw.world.pushLayer(
@@ -92,8 +92,8 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
         dw.mouse.mouse_chunk_coord = null;
     }
 
-    // X: decrease depth (ascend), instantly, above the deepest depth this puts the world into the
-    // read-only spectating mode (see `world.isSpectating()`).
+    // X: decrease depth (ascend), instantly. The depth left behind becomes frozen for its
+    // descendants, but stays fully playable (see `world.isAboveFrontier()`).
     const just_decreased_depth = can_hotkey_depth and
         !just_increased_depth and
         dw.world.canAscend() and
@@ -129,14 +129,13 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
             if (dw.indicators.menus.furnace) @import("../menus/furnace.zig").updateSmelting();
 
             // mouse block and mining/placing logic all updated in this function.
-            // Spectating is read-only, so mining and the water sim (both of which write `mod_store`)
-            // are held; only movement (free flight) and animation run.
-            const spectating = dw.world.isSpectating();
-            if (!changed_depth and !spectating) dw.mining.handleMiningAndPlacing(logic_speed);
+            // Every depth plays the same way. An edit above the frontier stays at its own depth
+            // (see world.legacy_store), so nothing below it can change.
+            if (!changed_depth) dw.mining.handleMiningAndPlacing(logic_speed);
 
             dw.player.move(logic_speed); // logic that moves the player/camera based on keys
             dw.player.tickAnimation(); // advance player sprite animation + facing on the logic tick
-            if (!spectating) dw.water.tickWater(); // fluid sim
+            dw.water.tickWater(); // fluid sim
 
             inventory.tickDroppedItems(); // process item animation ticks and inventory collection!
         }

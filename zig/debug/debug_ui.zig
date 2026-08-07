@@ -101,6 +101,12 @@ const player_sliders = [_]SliderDef{
         .val = &player.PLAYER_BASE_SPEED,
     },
     .{
+        .name = "Ghost speed mult",
+        .min = 1.0,
+        .max = 20.0,
+        .val = &player.GHOST_SPEED_MULT,
+    },
+    .{
         .name = "Base player gravity",
         .min = 0.01,
         .max = 2.0,
