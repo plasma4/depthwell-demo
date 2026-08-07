@@ -174,6 +174,15 @@ pub const GameState = extern struct {
     /// Characters used in `seed_string`, never above `SEED_STRING_MAX`.
     seed_string_len: u8 = 0,
 
+    /// The deepest depth the player has reached, called the FRONTIER.
+    /// Never decreases for the life of a world.
+    ///
+    /// This is the timeline authority (see `world.isAboveFrontier()`).
+    /// An edit at a depth below this value is local to that depth:
+    /// deeper depths keep the material they inherited when they were made.
+    /// Set up in `startup.zig`, and raised by `world.commitLayer()`.
+    max_depth_reached: u64 align(8) = 0,
+
     /// Records the seed string the world was created from. Truncates rather than rejecting an oversized one,
     /// since the derived `seed` is already in place by the time this is called and half a record beats none.
     pub fn setSeedString(self: *@This(), text: []const u8) void {
@@ -330,7 +339,7 @@ pub const MemorySizes = struct {
 /// - word0: `id` | `edge_flags` | `light`
 /// - word1: `hp` | `seed` (the shader reads the whole word as seed0, so `hp` is folded into the seed for free)
 /// - word2: `base_id` | `id_edge_flags` | `lighting_color`
-/// - word3: `waterlogged` | `_pad`
+/// - word3: `waterlogged` | `tag` | `_pad` (the shader reads only `waterlogged`)
 pub const Block = packed struct(u128) {
     /// A block with an `id` of `none`.
     pub const empty: Block = .makeBasicBlock(.none, 0);
@@ -382,12 +391,6 @@ pub const Block = packed struct(u128) {
     ///   - bits 7-10: right adjacent liquid volume (0-15; 0 means no liquid to the right)
     waterlogged: u12 = 0,
 
-    /// Set when this block's descendant region holds a modification made at a deeper depth.
-    ///
-    /// Display-only, and written by `materializeChunk()` only while `world.isSpectating()`:
-    /// `variation.resolveVariant()` draws it as `.inventory_selected_orange` while leaving `id` alone,
-    /// so the ancestor chain never inherits the marker as if it were terrain.
-    descendant_mods: bool = false,
     /// What this block was refined out of, once its own `id` no longer says so: the canopy of a shrub
     /// that is now leaf stone, or how far a vine cell hangs below its ceiling. See `refine.RefinedTag`.
     ///
@@ -397,7 +400,7 @@ pub const Block = packed struct(u128) {
     /// (this field included) is invisible to it.
     tag: dw.refine.RefinedTag = .{},
     /// Unused portion of block data.
-    _pad: u9 = 0,
+    _pad: u10 = 0,
 
     /// Makes a simple block of a certain type, with max light and no edge flags and mine level.
     /// Uses the BOTTOM 32 bits from `seed_bits` to place into `seed`.
