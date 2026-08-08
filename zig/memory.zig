@@ -344,12 +344,45 @@ pub const MemorySizes = struct {
     pub const wasm_page = 64 * 1024;
 };
 
+/// One channel of a block's resolved light. See `BlockLight` for what the three of them mean.
+///
+/// Six bits each. Visual testing put the banding threshold below that for all three, and chroma is
+/// the one to check, because light chroma matters most at LOW values, where a linear step is finest
+/// in absolute terms. Three of these also pack into the three words that had room to spare.
+pub const LightChannel = u6;
+/// Largest `LightChannel` value. Every channel maps 0..this onto the top of its own range.
+pub const LIGHT_MAX: LightChannel = std.math.maxInt(LightChannel);
+
+/// The light one block receives, as OKLCH, quantized the way `Block` stores it.
+///
+/// Lightness MULTIPLIES the sprite's own OKLAB lightness, so 0 is pitch black and `LIGHT_MAX` leaves
+/// the sprite alone. Chroma and hue are ADDED in OKLAB, so a colored lamp tints a block without
+/// replacing its material: stone under a violet lamp still reads as stone.
+/// `render/lighting.zig` produces these and `fs_tile()` in src/shader.wgsl consumes them.
+pub const BlockLight = struct {
+    /// 0..`LIGHT_MAX` onto 0..1.
+    l: LightChannel = 0,
+    /// 0..`LIGHT_MAX` onto 0..`lighting.LIGHT_CHROMA_MAX`, in OKLAB units.
+    c: LightChannel = 0,
+    /// A full turn in `lighting.HUE_STEPS` WRAPPING steps, so the value after the last is the first
+    /// again. Meaningless when `c` is 0.
+    h: LightChannel = 0,
+
+    /// Full, untinted light: what a block carries before any lighting pass has run on it.
+    pub const full: BlockLight = .{ .l = LIGHT_MAX };
+    /// No light at all.
+    pub const none: BlockLight = .{};
+};
+
 /// Contains a `Sprite` id and various packed properties; ready to be sent to the GPU or stored in caches.
 /// Field order keeps every field inside one aligned 32-bit word so the shader (`unpack_tile()` in src/shader.wgsl) extracts each with a single per-word `extractBits()`:
-/// - word0: `id` | `edge_flags` | `light`
+/// - word0: `id` | `edge_flags` | `light_l`
 /// - word1: `hp` | `seed` (the shader reads the whole word as seed0, so `hp` is folded into the seed for free)
-/// - word2: `base_id` | `id_edge_flags` | `lighting_color`
-/// - word3: `waterlogged` | `tag` | `_pad` (the shader reads only `waterlogged`)
+/// - word2: `base_id` | `id_edge_flags` | `light_c`
+/// - word3: `water` | `tag` | `light_h` (the shader reads `water` and `light_h`, never `tag`)
+///
+/// The three light channels are split across three words on purpose: 18 bits do not fit in any one
+/// word beside what already lives there, and the shader pays one `extractBits()` either way.
 pub const Block = packed struct(u128) {
     /// A block with an `id` of `none`.
     pub const empty: Block = .makeBasicBlock(.none, 0);
@@ -368,8 +401,10 @@ pub const Block = packed struct(u128) {
     /// - A 1 bit for a liquid block means that there is either solid or liquid adjacent.
     /// Edge flags must be reset to 255 for decorations (non-blocks or liquids) after a final decoration pass.
     edge_flags: u8,
-    /// The brightness of the tile.
-    light: u8,
+    /// Lightness of the light reaching this block; see `BlockLight.l`.
+    light_l: LightChannel = 0,
+    /// Unused portion of word0.
+    _pad0: u2 = 0,
 
     /// Dual-purpose field depending on block type (range 0-15, see `MAX_HP`):
     /// - For solid blocks: how "mined" the block is (0 means unmined, 15 is most mined).
@@ -386,43 +421,50 @@ pub const Block = packed struct(u128) {
     /// Drives the ore overlay mask so a vein reads as connected only to itself.
     /// Follows the same 0xFF reset rule as `edge_flags` for decorations/air.
     id_edge_flags: u8 = 0,
-    /// Type of color lighting should use.
-    /// - 0: default white
-    /// - 1: warm orange glow
-    lighting_color: u8 = 0,
+    /// Chroma of the light reaching this block; see `BlockLight.c`.
+    light_c: LightChannel = 0,
+    /// Unused portion of word2.
+    _pad2: u2 = 0,
 
-    /// Packed directional waterlogging field (bits 0-10 used; see `WaterloggedState` in `state/water.zig`).
-    /// - For liquid blocks: only bit 0 is read (liquid directly above).
-    /// - For non-liquid blocks: encodes the surrounding water for the shader's surface fill and interpolation.
-    ///   - bit 0: top (water of any depth directly above; fully submerges/fills the block)
-    ///   - bit 1: bottom (full liquid block directly below at HP=15)
-    ///   - bit 2: top ripple cutoff (adjacent water surface is exposed to air)
-    ///   - bits 3-6: left adjacent liquid volume (0-15; 0 means no liquid to the left)
-    ///   - bits 7-10: right adjacent liquid volume (0-15; 0 means no liquid to the right)
-    waterlogged: u12 = 0,
+    /// The water around this block, in the shape its own kind wants it.
+    /// See `water.WaterState`, which explains why `id` is what picks the view.
+    water: dw.water.WaterState = .dry,
 
     /// What this block was refined out of, once its own `id` no longer says so: the canopy of a shrub
     /// that is now leaf stone, or how far a vine cell hangs below its ceiling. See `refine.RefinedTag`.
     ///
     /// Derived, like the flag fields: regeneration rebuilds it, `ModCell` does not store it, and a
     /// cell the player edits keeps the edit and loses the tag.
-    /// The shader reads `word3` as `extractBits(word3, 0, 12)`, so everything above `waterlogged`
-    /// (this field included) is invisible to it.
+    /// The shader never reads it; it reads `water` below this field and `light_h` above it.
     tag: dw.refine.RefinedTag = .{},
-    /// Unused portion of block data.
-    _pad: u10 = 0,
+    /// Hue of the light reaching this block; see `BlockLight.h`.
+    light_h: LightChannel = 0,
+    /// Unused portion of word3.
+    _pad3: u4 = 0,
 
-    /// Makes a simple block of a certain type, with max light and no edge flags and mine level.
+    /// Makes a simple block of a certain type, with full light and no edge flags and mine level.
     /// Uses the BOTTOM 32 bits from `seed_bits` to place into `seed`.
     pub inline fn makeBasicBlock(sprite_type: Sprite, seed_bits: u64) Block {
         return .{
             .id = sprite_type,
             .hp = if (sprite_type.isLiquid()) MAX_HP else 0,
             .edge_flags = 0,
-            .light = 255,
+            .light_l = LIGHT_MAX,
             .seed = @truncate(seed_bits),
-            .waterlogged = 0,
+            .water = .dry,
         };
+    }
+
+    /// The light this block currently carries.
+    pub inline fn getLight(self: @This()) BlockLight {
+        return .{ .l = self.light_l, .c = self.light_c, .h = self.light_h };
+    }
+
+    /// Writes all three light channels at once, so no caller can set two of the three and forget one.
+    pub inline fn setLight(self: *@This(), value: BlockLight) void {
+        self.light_l = value.l;
+        self.light_c = value.c;
+        self.light_h = value.h;
     }
 
     /// Determines if the sprite's type is one that should interact with the edge flags and procedural generation.

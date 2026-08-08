@@ -170,6 +170,10 @@ pub const buttons = [_]ButtonDef{
         .toggle = &dw.lighting.IS_LIGHT_GLOBAL,
     },
     .{
+        .name = "Cycle lamp hue",
+        .toggle = &dw.lighting.CYCLE_PLAYER_HUE,
+    },
+    .{
         .name = "Log worldgen odds",
         .action = dw.audit.sampleWorldAroundPlayer,
     },

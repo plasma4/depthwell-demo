@@ -42,11 +42,11 @@ const CEILING_ROW: u4 = 0;
 
 /// What a block was refined out of, once its own sprite no longer says so.
 ///
-/// Deliberately tiny (a `Block` has room for 10 bits, see `memory.Block.tag`) and NOT saved: a tag is
+/// Deliberately tiny (a `Block` has room for 11 bits, see `memory.Block.tag`) and NOT saved: a tag is
 /// re-derived every time a chunk is generated, and a cell the player edits keeps the edit and loses
 /// the tag (`world.ModCell` stores only what generation cannot recover).
-pub const RefinedKind = enum(u4) {
-    /// No provenance; the overwhelmingly common case.
+pub const RefinedKind = enum(u5) {
+    /// No "origin" to care about; most common.
     none = 0,
     /// A cell of a hanging chain. `data` is how many cells below its ceiling this one sits
     /// (1 = directly below), which is what lets the next depth continue the chain and cap it.
@@ -59,7 +59,7 @@ pub const RefinedKind = enum(u4) {
 };
 
 /// A `RefinedKind` plus its 6 bits of kind-specific payload.
-pub const RefinedTag = packed struct(u10) {
+pub const RefinedTag = packed struct(u11) {
     kind: RefinedKind = .none,
     /// Kind-specific: a chain's run index, or the depths a plant tag has left.
     /// Saturates rather than wrapping, so a value of `DATA_MAX` means "at least this much".

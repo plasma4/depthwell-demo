@@ -910,7 +910,7 @@ fn resolveParentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {
 
 /// `resolveParentHood()` through the memo; see `ParentHoodCache`.
 ///
-/// A parent hood does NOT key on `mod_store.content_generation`, and must not start to.
+/// A hood is memoized across player edits, and must stay that way.
 /// `parent_key.depth` is always below `memory.game.depth`, so it is always below the frontier,
 /// and a depth below the frontier can no longer gain an edit that travels down (see `world.legacy_store`).
 /// The hoods are therefore fixed while the frontier is, and `world.clearCaches()` covers the moment it moves.

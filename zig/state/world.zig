@@ -273,8 +273,8 @@ fn computeColumnSeeds(comptime f: dw.decorations.ColumnFeature, key: DepthCoordi
 
 // Everything else in a Block is derived and is rebuilt by materializeChunk(), hence why ModCell is so simple!
 // - seed gets regenerated in block-index order (generateBaseChunk(), generateChunk()).
-// - light and lighting_color are written only into the per-frame render scratch buffer (applyLighting()).
-// - edge_flags, id_edge_flags, and waterlogged are recomputed from neighbor id+hp by the flag passes.
+// - the three light channels are written only into the per-frame render scratch buffer (applyLighting()).
+// - edge_flags, id_edge_flags, and water are recomputed from neighbor id+hp by the flag passes.
 
 /// One modified cell: the only `Block` fields that cannot be recovered by regenerating the chunk.
 /// In other words, only holds the "authoritative" fields within a block that can't be re-derived.
@@ -346,7 +346,7 @@ pub const ModEntry = struct {
     }
 
     /// Replays every modified cell over a freshly generated chunk.
-    /// The caller MUST then rerun the flag pass: replaying ids invalidates the generated edge/waterlogged flags.
+    /// The caller MUST then rerun the flag pass: replaying ids invalidates the generated edge and water flags.
     pub fn applyTo(self: *const @This(), chunk: *Chunk) void {
         var i: usize = 0;
         for (0..MODIFIED_WORDS) |w| {
@@ -409,13 +409,6 @@ pub const ModificationStore = struct {
     /// Incremented whenever `entries` is dropped (`init()`/`clear()`), invalidating any external index
     /// into it. A budgeted save snapshot compares this to detect a mid-save wipe and abort.
     generation: u64 = 0,
-    /// Incremented whenever the CONTENT of the store changes, which `generation` does not track
-    /// (that one only counts wipes). Anything that memoizes a value derived from a modified block
-    /// keys on this, so an edit retires it.
-    ///
-    /// `ancestor.ParentHoodCache` deliberately does NOT: a parent hood only reads depths below the
-    /// frontier, and those can no longer change (see `legacy_store`).
-    content_generation: u64 = 0,
     allocator: std.mem.Allocator = undefined,
     /// Whether the containers below hold real allocations. Guards `deinit()` before the first `init()`.
     live: bool = false,
@@ -427,7 +420,6 @@ pub const ModificationStore = struct {
             .allocator = allocator,
             .live = true,
             .generation = self.generation +% 1,
-            .content_generation = self.content_generation +% 1,
         };
     }
 
@@ -468,7 +460,6 @@ pub const ModificationStore = struct {
         self.allocator.free(entry.cells);
         entry.* = .{};
         self.free_entries.append(self.allocator, kv.value) catch memory.oom();
-        self.content_generation +%= 1;
     }
 
     /// Completely wipes all user modifications. Should be followed by `world.clearCaches(true)`.
@@ -482,7 +473,6 @@ pub const ModificationStore = struct {
         self.entries.clearRetainingCapacity();
         self.free_entries.clearRetainingCapacity();
         self.generation +%= 1;
-        self.content_generation +%= 1;
     }
 
     /// Reserves an entry slot, reusing a freed one when possible.
@@ -537,9 +527,6 @@ pub const ModificationStore = struct {
             break :blk new_idx;
         };
         dw.save.shadowEntryForSave(self == &legacy_store, idx);
-        // Every write to the store comes through here,
-        // so this is the one place a content change has to be announced.
-        self.content_generation +%= 1;
         return idx;
     }
 
@@ -558,7 +545,6 @@ pub const ModificationStore = struct {
         entry.cells = try self.allocator.alloc(ModCell, @max(cells.len, MIN_MOD_CELLS));
         @memcpy(entry.cells[0..cells.len], cells);
         try self.index.put(self.allocator, key, idx);
-        self.content_generation +%= 1;
     }
 
     /// Total bytes of live `ModCell` payload, for the debug HUD.
@@ -608,19 +594,41 @@ pub var mod_store: ModificationStore = .{};
 /// It is invisible to the depth it belongs to, which is what makes each depth its own world.
 pub var legacy_store: ModificationStore = .{};
 
+/// One rebuilt chunk, so a run of captures inside the same chunk pays for one materialization.
+/// Only ever read for cells `mod_store` says nothing about, so the edits it replays are irrelevant
+/// and the only thing that can retire it is the terrain itself changing (see `clearLegacyScratch()`).
+var legacy_scratch: Chunk align(memory.MAIN_ALIGN_BYTES) = undefined;
+var legacy_scratch_key: DepthCoordinate = DepthCoordinate.invalid;
+
+/// Drops the `captureLegacy()` scratch. Called by `clearCaches()`, since a depth change or a reseed
+/// leaves the same key naming different terrain.
+fn clearLegacyScratch() void {
+    legacy_scratch_key = DepthCoordinate.invalid;
+}
+
 /// Freezes block `i` of `key` into `legacy_store`, if it is not frozen already.
 ///
-/// The captured value is the cell as it reads RIGHT NOW.
-/// That is its `mod_store` value when it has one, and its procedural value when it does not.
-/// Both come back from `ancestor.getInheritedMaterial()`, which reads the resident chunk first.
+/// The captured value is the cell as of the last moment its depth was the frontier:
+/// its `mod_store` value when it has one, and its procedural value when it does not.
+///
+/// Neither of those is read from the RESIDENT chunk, and that is the whole point.
+/// Every hand edit writes the store before it touches the chunk, so the two agree there,
+/// but the water simulation moves volume through the resident chunks for a whole tick and persists
+/// the cells it moved only afterwards. By then the chunk holds this tick's move, and freezing from it
+/// would send one tick of water down to depths that were formed before the water ever got there.
 fn captureLegacy(key: DepthCoordinate, i: u8) void {
     if (legacy_store.get(key)) |e| {
         if (e.isModified(i)) return; // frozen already, and a frozen cell never changes
     }
-    const bx: u4 = @truncate(i);
-    const by: u4 = @truncate(i >> CHUNK_SIZE_LOG2);
-    const block = dw.ancestor.getInheritedMaterial(key, bx, by);
-    legacy_store.beginWriteRaw(key).setCell(i, .from(block));
+    if (mod_store.getCell(key, i)) |cell| {
+        legacy_store.beginWriteRaw(key).setCell(i, cell);
+        return;
+    }
+    if (!(legacy_scratch_key.depth != 0 and legacy_scratch_key.eql(key))) {
+        materializeChunk(&legacy_scratch, key);
+        legacy_scratch_key = key;
+    }
+    legacy_store.beginWriteRaw(key).setCell(i, .from(legacy_scratch.blocks[i]));
 }
 
 /// The value one cell contributes to the depths BELOW it, or null when it is still procedural.
@@ -2392,7 +2400,7 @@ fn addEdgeFlags(target_chunk: *Chunk, key: DepthCoordinate, mods: ?*const ModNei
 
             target_chunk.blocks[y * CHUNK_SIZE + x].edge_flags = flags;
             target_chunk.blocks[y * CHUNK_SIZE + x].id_edge_flags = id_flags;
-            target_chunk.blocks[y * CHUNK_SIZE + x].waterlogged = state.flags;
+            target_chunk.blocks[y * CHUNK_SIZE + x].water = state;
         }
     }
 }
@@ -2486,7 +2494,7 @@ fn addEdgeFlagsFractal(target_chunk: *Chunk, key: DepthCoordinate) void {
             }
             current_block.edge_flags = flags;
             current_block.id_edge_flags = id_flags;
-            current_block.waterlogged = state.flags;
+            current_block.water = state;
         }
     }
 }
@@ -2601,7 +2609,7 @@ fn writeBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, prev_bl
         block.hp = initial_hp;
         block.edge_flags = 0xFF;
         block.id_edge_flags = 0xFF;
-        block.waterlogged = 0;
+        block.water = .dry;
     }
 
     // Placing water must register the slot so the optimized `tickWater` scan picks it up.
@@ -2616,7 +2624,7 @@ fn writeBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, prev_bl
         block.hp = initial_hp;
         block.edge_flags = 0xFF;
         block.id_edge_flags = 0xFF;
-        block.waterlogged = 0;
+        block.water = .dry;
     }
 }
 
@@ -2633,7 +2641,7 @@ inline fn clearBlockFields(b: *Block) void {
     b.hp = 0;
     b.edge_flags = 0xFF;
     b.id_edge_flags = 0xFF;
-    b.waterlogged = 0;
+    b.water = .dry;
 }
 
 /// Clears a single cell to empty across `mod_store`, `SimBuffer`, and `chunk_cache` (no drop, no worklist).
@@ -2836,7 +2844,7 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                 // Recalculate flags for foundation blocks
                 var flags: u8 = 0;
                 var id_flags: u8 = 0;
-                var waterlogged: water.WaterloggedFlags = 0;
+                var water_state: water.WaterState = .dry;
 
                 const left_nb = window.get(nx - 1, ny);
                 const right_nb = window.get(nx + 1, ny);
@@ -2851,10 +2859,10 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                     flags = 0xFF;
                     id_flags = 0xFF;
                     if (current_sprite.isWaterloggable()) {
-                        waterlogged = state.flags;
+                        water_state = state;
                     }
                 } else {
-                    waterlogged = state.flags;
+                    water_state = state;
 
                     // Recalculate edge flags (same-sprite flags for all foundation blocks; see `addEdgeFlags()`)
                     const src_is_liquid = current_sprite.isLiquid();
@@ -2871,7 +2879,7 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                 // Most cells the cascade sweeps are unaffected; skipping the identical rewrite avoids two store lookups.
                 if (current_block.edge_flags == flags and
                     current_block.id_edge_flags == id_flags and
-                    current_block.waterlogged == waterlogged) continue;
+                    current_block.water.eql(water_state)) continue;
                 window.drop(nx, ny);
 
                 // Only the materialized caches are patched: flags are derived state, so `mod_store` does not store them,
@@ -2879,12 +2887,12 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                 if (SimBuffer.get(target_coord)) |c| {
                     c.blocks[block_id].edge_flags = flags;
                     c.blocks[block_id].id_edge_flags = id_flags;
-                    c.blocks[block_id].waterlogged = waterlogged;
+                    c.blocks[block_id].water = water_state;
                 }
                 if (chunk_cache.findIndex(target_coord)) |index| {
                     chunk_cache.chunks[index].blocks[block_id].edge_flags = flags;
                     chunk_cache.chunks[index].blocks[block_id].id_edge_flags = id_flags;
-                    chunk_cache.chunks[index].blocks[block_id].waterlogged = waterlogged;
+                    chunk_cache.chunks[index].blocks[block_id].water = water_state;
                 }
             }
         }
@@ -3030,6 +3038,7 @@ pub fn clearCaches(comptime clear_ancestors: bool) void {
     @memset(&quad_cache.seed_cache_keys, @splat(DepthCoordinate.invalid));
     dw.ancestor.clearChunkNoise();
     dw.ancestor.clearParentHoods();
+    clearLegacyScratch();
 
     // A debug slider changes what the terrain functions answer without changing the seed, so the
     // memoized terrain has to go with it. Bumping the epoch retires every entry of the base terrain

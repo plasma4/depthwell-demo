@@ -34,6 +34,21 @@ const SPRITE_H: f32 = TILE_SIZE / ATLAS_HEIGHT;
 const TEXTURE_BLEEDING_EPSILON = 0.5 / TILE_SIZE;
 
 // See EdgeFlags in zig/types/types.zig.
+// Light tuning. LIGHT_CHROMA_MAX and LIGHT_HUE_STEPS MUST match `lighting.LIGHT_CHROMA_MAX` and
+// `lighting.HUE_STEPS` in zig/render/lighting.zig, which is what quantizes into these bits.
+// OKLAB chroma a fully saturated light source adds at full lightness.
+const LIGHT_CHROMA_MAX: f32 = 0.09;
+// Steps a full hue turn is divided into. Hue WRAPS, so the last step is one step before the first.
+const LIGHT_HUE_STEPS: f32 = 64.0;
+// Lightness the light's own tint fades in over. Below it a cell goes achromatic, because the eye
+// cannot resolve hue near black and a purple-black corner reads as a bug.
+const LIGHT_CHROMA_FLOOR: f32 = 0.25;
+// Largest value of a packed light channel; the three of them are 6 bits each.
+const LIGHT_CHANNEL_MAX: f32 = 63.0;
+// How much of the light's tint water takes, against a solid sprite's full share.
+// Water already carries strong chroma, so a full share would flatten a pool into the lamp's colour.
+const WATER_TINT_STRENGTH: f32 = 0.55;
+
 const EDGE_TOP: u32 = 0x02u;
 const EDGE_BOTTOM: u32 = 0x40u;
 const EDGE_LEFT: u32 = 0x08u;
@@ -94,8 +109,9 @@ struct TileOutput {
     // seed2: murmurmix32'ed from seed1
     // seed3: murmurmix32'ed from seed2
     @location(7) @interpolate(flat) seeds: vec4u,
-    @location(8) @interpolate(flat) lighting_color: u32,
-    @location(9) @interpolate(flat) waterlogged: u32,
+    // Chroma of the light in OKLAB units, and its hue in radians. See LIGHT_CHROMA_MAX.
+    @location(8) @interpolate(flat) light_tint: vec2f,
+    @location(9) @interpolate(flat) water: u32,
     // base_id in bits 0-15, id_edge_flags (same-sprite edge flags) in bits 16-23
     @location(10) @interpolate(flat) base_data: u32,
 };
@@ -116,8 +132,8 @@ struct UnpackedTile {
     edge_flags: u32,
     base_id: u32,
     id_edge_flags: u32,
-    lighting_color: u32,
-    waterlogged: u32,
+    light_tint: vec2f,
+    water: u32,
 };
 
 // Unpacks 128-bit tile data into various properties.
@@ -128,7 +144,7 @@ fn unpack_tile(data: TileData) -> UnpackedTile {
     out.sprite_id = extractBits(data.word0, 0u, 16u);
     out.edge_flags = extractBits(data.word0, 16u, 8u);
     // out.edge_flags = 0u; // override test example
-    out.light = f32(extractBits(data.word0, 24u, 8u)) / 255.0;
+    out.light = f32(extractBits(data.word0, 24u, 6u)) / LIGHT_CHANNEL_MAX;
 
     // The HP is automatically folded into the 28-bit seed by accessing just this word!
     out.hp = extractBits(data.word1, 0u, 4u);
@@ -140,10 +156,13 @@ fn unpack_tile(data: TileData) -> UnpackedTile {
 
     out.base_id = extractBits(data.word2, 0u, 16u);
     out.id_edge_flags = extractBits(data.word2, 16u, 8u);
-    out.lighting_color = extractBits(data.word2, 24u, 8u);
+    // The light's colour: chroma beside the base id, hue above the water state. Both are 6 bits.
+    let light_chroma = f32(extractBits(data.word2, 24u, 6u)) / LIGHT_CHANNEL_MAX * LIGHT_CHROMA_MAX;
+    let light_hue = f32(extractBits(data.word3, 22u, 6u)) / LIGHT_HUE_STEPS * TAU;
+    out.light_tint = vec2f(light_chroma, light_hue);
 
-    out.waterlogged = extractBits(data.word3, 0u, 12u);
-    // remaining 20 bits unused
+    // Bits 11-21 of word3 are `Block.tag`, which is Zig-side only, and 28-31 are unused.
+    out.water = extractBits(data.word3, 0u, 11u);
     return out;
 }
 
@@ -215,8 +234,8 @@ fn vs_tile(
     out.tile_coords = tile_coords;
     out.light = tile.light;
     out.local_uv = local_pos;
-    out.lighting_color = tile.lighting_color;
-    out.waterlogged = tile.waterlogged;
+    out.light_tint = tile.light_tint;
+    out.water = tile.water;
     out.base_data = tile.base_id | (tile.id_edge_flags << 16u);
     return out;
 }
@@ -256,7 +275,7 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
     }
 
     if id == WATER_START || id == WATER_START + 1u {
-        let has_liquid_above = (in.waterlogged & 1u) != 0u;
+        let has_liquid_above = (in.water & 1u) != 0u;
         let has_solid_above = ((in.edge_flags & EDGE_TOP) != 0u) && !has_liquid_above;
         let has_top = has_liquid_above || (has_solid_above && (in.hp == 15u));
 
@@ -269,8 +288,8 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
             // Each tile edge sits at the midpoint between this cell and its neighbor,
             // so adjacent tiles agree on the shared edge height and the surface reads as continuous instead of stepped.
             // A dry side keeps the block's own level so the surface doesn't dip at the water's edge.
-            let left_vol = extractBits(in.waterlogged, 3u, 4u);
-            let right_vol = extractBits(in.waterlogged, 7u, 4u);
+            let left_vol = extractBits(in.water, 3u, 4u);
+            let right_vol = extractBits(in.water, 7u, 4u);
             let self_h = f32(in.hp);
             let left_edge_h = select(self_h, 0.5 * (self_h + f32(left_vol)), left_vol > 0u);
             let right_edge_h = select(self_h, 0.5 * (self_h + f32(right_vol)), right_vol > 0u);
@@ -302,8 +321,8 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
     let is_waterlogged_decor = is_decor && in.hp > 0u;
     var is_decor_pixel_underwater = false;
     if is_waterlogged_decor {
-        let wl_top = (in.waterlogged & 1u) != 0u;
-        let wl_ripple = (in.waterlogged & 4u) != 0u;
+        let wl_top = (in.water & 1u) != 0u;
+        let wl_ripple = (in.water & 4u) != 0u;
         let has_top = wl_top || (((in.edge_flags & EDGE_TOP) != 0u) && in.hp == 15u);
         var current_height = 1.0;
         if !has_top {
@@ -324,13 +343,13 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
     if in.edge_flags != 0xFFu && !is_decor {
         erode_mask = erosion(in.local_uv, in.edge_flags, in.seeds[2], in.seeds[3], 0u);
         if erode_mask == 0u {
-            if in.waterlogged != 0u {
-                let is_water_top = (in.waterlogged & 1u) != 0u;
-                let is_water_bottom = (in.waterlogged & 2u) != 0u;
-                let apply_ripple = (in.waterlogged & 4u) != 0u;
+            if in.water != 0u {
+                let is_water_top = (in.water & 1u) != 0u;
+                let is_water_bottom = (in.water & 2u) != 0u;
+                let apply_ripple = (in.water & 4u) != 0u;
                 // Left/right presence is implied by a nonzero adjacent volume (bits 3-6 / 7-10).
-                let left_vol = extractBits(in.waterlogged, 3u, 4u);
-                let right_vol = extractBits(in.waterlogged, 7u, 4u);
+                let left_vol = extractBits(in.water, 3u, 4u);
+                let right_vol = extractBits(in.water, 7u, 4u);
                 let is_water_left = left_vol > 0u;
                 let is_water_right = right_vol > 0u;
 
@@ -521,13 +540,15 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
 
     // Convert OKLCH result to OKLAB, then finally back to float-based RGB
     lab = oklch_to_oklab(lch);
-    if (in.lighting_color & 1) == 1 {
-        // warmth color shift
-        lab.y += 0.024; // +a channel (more red/magenta)
-        lab.z += 0.06; // +b channel (more yellow)
 
-        // slightly boost brightness
-        // lab.x *= 1.05;
+    // Tint by the colour of the light reaching this cell (resolved in zig/render/lighting.zig).
+    // ADDED rather than multiplied, so a block keeps its own material under a coloured lamp:
+    // stone under a violet lamp is still recognizably stone.
+    // Scaled by lightness so a dark corner never picks up a strong tint.
+    let tint_chroma = in.light_tint.x * smoothstep(0.0, LIGHT_CHROMA_FLOOR, in.light);
+    if tint_chroma > 0.0 {
+        lab.y += tint_chroma * cos(in.light_tint.y);
+        lab.z += tint_chroma * sin(in.light_tint.y);
     }
     final_rgb = oklab_to_linear_srgb(lab);
 
@@ -934,10 +955,13 @@ fn water_body_linear(in: TileOutput) -> vec4f {
 
     var lab = oklch_to_oklab(lch);
 
-    // Apply campfire warmth color shift (scaled by light intensity)
-    if (in.lighting_color & 1u) == 1u {
-        lab.y += 0.015 * light_val; // +a channel (more red/magenta)
-        lab.z += 0.04 * light_val;  // +b channel (more yellow)
+    // Tint by the colour of the light reaching the water, same rule as fs_tile() uses on a sprite.
+    // Water takes the tint at reduced strength: it has strong chroma of its own, and a lamp that
+    // overpowered it would turn a pool into a flat sheet of the lamp's colour.
+    let tint_chroma = in.light_tint.x * WATER_TINT_STRENGTH * smoothstep(0.0, LIGHT_CHROMA_FLOOR, light_val);
+    if tint_chroma > 0.0 {
+        lab.y += tint_chroma * cos(in.light_tint.y);
+        lab.z += tint_chroma * sin(in.light_tint.y);
     }
 
     let rgb = oklab_to_linear_srgb(lab);

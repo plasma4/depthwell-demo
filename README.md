@@ -172,10 +172,13 @@ But wait, what is a block? Here is `zig/memory.zig`:
 ```zig
 /// Contains a `Sprite` id and various packed properties; ready to be sent to the GPU or stored in caches.
 /// Field order keeps every field inside one aligned 32-bit word so the shader (`unpack_tile()` in src/shader.wgsl) extracts each with a single per-word `extractBits()`:
-/// - word0: `id` | `edge_flags` | `light`
+/// - word0: `id` | `edge_flags` | `light_l`
 /// - word1: `hp` | `seed` (the shader reads the whole word as seed0, so `hp` is folded into the seed for free)
-/// - word2: `base_id` | `id_edge_flags` | `lighting_color`
-/// - word3: `waterlogged` | `_pad`
+/// - word2: `base_id` | `id_edge_flags` | `light_c`
+/// - word3: `water` | `tag` | `light_h` (the shader reads `water` and `light_h`, never `tag`)
+///
+/// The three light channels are split across three words on purpose: 18 bits do not fit in any one
+/// word beside what already lives there, and the shader pays one `extractBits()` either way.
 pub const Block = packed struct(u128) {
     /// A block with an `id` of `none`.
     pub const empty: Block = .makeBasicBlock(.none, 0);
@@ -194,8 +197,10 @@ pub const Block = packed struct(u128) {
     /// - A 1 bit for a liquid block means that there is either solid or liquid adjacent.
     /// Edge flags must be reset to 255 for decorations (non-blocks or liquids) after a final decoration pass.
     edge_flags: u8,
-    /// The brightness of the tile.
-    light: u8,
+    /// Lightness of the light reaching this block; see `BlockLight.l`.
+    light_l: LightChannel = 0,
+    /// Unused portion of word0.
+    _pad0: u2 = 0,
 
     /// Dual-purpose field depending on block type (range 0-15, see `MAX_HP`):
     /// - For solid blocks: how "mined" the block is (0 means unmined, 15 is most mined).
@@ -212,27 +217,27 @@ pub const Block = packed struct(u128) {
     /// Drives the ore overlay mask so a vein reads as connected only to itself.
     /// Follows the same 0xFF reset rule as `edge_flags` for decorations/air.
     id_edge_flags: u8 = 0,
-    /// Type of color lighting should use.
-    /// - 0: default white
-    /// - 1: warm orange glow
-    lighting_color: u8 = 0,
+    /// Chroma of the light reaching this block; see `BlockLight.c`.
+    light_c: LightChannel = 0,
+    /// Unused portion of word2.
+    _pad2: u2 = 0,
 
-    /// Packed directional waterlogging field (bits 0-10 used; see `WaterloggedState` in zig/state/water.zig).
-    /// - For liquid blocks: only bit 0 is read (liquid directly above).
-    /// - For non-liquid blocks: encodes the surrounding water for the shader's surface fill and interpolation.
-    ///   - bit 0: top (water of any depth directly above; fully submerges/fills the block)
-    ///   - bit 1: bottom (full liquid block directly below at HP=15)
-    ///   - bit 2: top ripple cutoff (adjacent water surface is exposed to air)
-    ///   - bits 3-6: left adjacent liquid volume (0-15; 0 means no liquid to the left)
-    ///   - bits 7-10: right adjacent liquid volume (0-15; 0 means no liquid to the right)
-    waterlogged: u12 = 0,
-    /// Unused portion of block data.
-    _pad: u20 = 0,
+    /// The water around this block, in the shape its own kind wants it.
+    /// See `water.WaterState`, which explains why `id` is what picks the view.
+    water: dw.water.WaterState = .dry,
+    /// What this block was refined out of, once its own `id` no longer says so. See `refine.RefinedTag`.
+    tag: dw.refine.RefinedTag = .{},
+    /// Hue of the light reaching this block; see `BlockLight.h`.
+    light_h: LightChannel = 0,
+    /// Unused portion of word3.
+    _pad3: u4 = 0,
     ...
 }
 ```
 
 Well, now you know what a block contains. The `edge_flags`/`id_edge_flags` neighbor masks power a higher-level abstraction worth its own explanation; see "Edge flags" below.
+
+`water` is a **packed union**, not a plain bitfield: a liquid block only cares whether more liquid sits directly above it, a solid block needs the whole picture of the water beside and below it for the shader's surface fill, and a plant will eventually want its own moisture and growth state instead. The block's `id` decides which view is live. The three views deliberately agree on bit 0, so "is this cell submerged?" can be asked without knowing the kind at all.
 
 The most complex part of Depthwell's architecture, though, is ensuring that a hole mined at Depth 0 results in an empty 4-by-4 region at Depth 1, 16-by-16 at Depth 2, and so on. This is handled through a neat little **lineage check** during chunk generation.
 
@@ -449,7 +454,7 @@ The original goal with modifications was to ensure the following:
 
 Therefore, the current solution is to hash a `DepthCoordinate` and use it to index a per-chunk `ModEntry`. A `ModEntry` is _sparse_: rather than a full 4KiB `Chunk`, it stores only the cells the player (or the water sim) actually modified, as an `modified` bitmap (one bit per block) plus a packed `ModCell` array kept in ascending block-index order.
 
-A `ModCell` holds just the only three fields that cannot be recovered by regenerating the chunk: `id`, `base_id`, and `hp`. Everything else (`seed`, `edge_flags`, `light`, waterlogging) is _derived_ and is rebuilt by `materializeChunk()`, which replays every modified cell over a freshly generated chunk and then reruns the flag pass. So a chunk the player mined 30 blocks out of costs a few hundred bytes here, not 4KiB. See some definitions and more details:
+A `ModCell` holds just the only three fields that cannot be recovered by regenerating the chunk: `id`, `base_id`, and `hp`. Everything else (`seed`, `edge_flags`, the light channels, `water`, `tag`) is _derived_ and is rebuilt by `materializeChunk()`, which replays every modified cell over a freshly generated chunk and then reruns the flag pass. So a chunk the player mined 30 blocks out of costs a few hundred bytes here, not 4KiB. See some definitions and more details:
 
 ```zig
 /// One modified cell: the only `Block` fields that cannot be recovered by regenerating the chunk.
@@ -619,9 +624,31 @@ This system prevents frame spikes (as you may normally have to generate a whole 
 
 Chunks that get accessed from the `SimBuffer` do not update the `ChunkCache`, although chunks generated for the purpose of being placed into `SimBuffer` _do_ get placed into the cache.
 
+#### The cache layers
+
+Worldgen is a pure function: the same coordinate always gives the same block. That is what makes caching safe here. It is also what makes caching necessary, because the same coordinate gets asked for many times. A chunk needs a one-block halo around itself to work out edge flags, so every border block is computed twice. A structure has to know whether a bigger structure overlaps it, so its box gets re-derived by each neighbor that checks. A parent block is shared by the 16 child blocks below it. Without memoization the engine would redo the same noise and the same placement rolls again and again.
+
+The caches all sit in static WASM memory with a fixed budget, so none of them can grow without bound or fragment the heap. Most are **direct-mapped and tiled**: a coordinate maps to one slot by its position, not by a hash. Tiling matters because the access pattern is a sweep. A chunk and the halo around it land in different slots by construction, so they cannot evict each other. The ones that are not tiled are **set-associative with CLOCK second-chance eviction**, which is the right shape when several nearby keys are live at once.
+
+They fall into two families for invalidation. Some **self-invalidate**: each entry stores the identity it was computed under, and a read that does not match simply recomputes. Others are **dropped explicitly** by `world.clearCaches()`, which runs whenever the depth changes or the world is reseeded. Getting this wrong is the main hazard: any debug slider that moves terrain must set `regen = true`, or the sliders move but the cached samples do not.
+
+From shallowest to deepest:
+
+- **Base terrain cache** (`procedural.base_terrain_cache`) — the raw terrain sample at one base-depth block: which stone it is, and how much ore the spot wants. This is the expensive one, since each miss runs several FBM and Worley noise passes. Entries are 16 bytes and the whole bank is under 2 MiB. It self-invalidates against `terrainGeneration()`, the shared identity of "this seed and this tuning".
+- **Foundation cache** (`world.foundation_cache`) — the finished base-depth block: terrain, plus the ore or gem dispersed over it, plus any structure that claimed it. Decorations are excluded on purpose, since they are stamped later. Both the chunk generator and its edge-flag halo read through this, which is how an ore vein stays connected across a chunk border instead of being cut in half. Same self-invalidation as above.
+- **Structure bank** (`structures.struct_cache`) — one bank per structure kind, holding the box that stands in each cell of that kind's spawn grid, with the terrain rules already applied. A cached box is one that would really be built, which is what lets the collision scan trust it without redoing the work. Each entry carries its seed and its terrain generation, so it retires itself.
+- **Chunk candidate cache** (`structures.chunk_ctx`) — every structure that can reach into one chunk, resolved once for the whole chunk instead of once per block. The tile is one simulation row wide and four rows tall, so a left-to-right generation sweep keeps all the neighbors it needs.
+- **Chunk seed cache** (`QuadCache.seed_cache`) — the four seeds of one chunk, mixed from its quadrant seed, its suffix, and its depth. Cheap to compute but asked for constantly, so it is a small 4-way cache. Dropped by `clearCaches()`, since a reseed leaves the same key naming different seeds.
+- **Chunk noise memo** (`ancestor.chunk_noise`) — the two seed streams that every cell of one chunk shares. Exactly one entry, because generation finishes a chunk before it moves to the next, so one is all a sweep can use.
+- **Ancestor cache** (`ancestor.ancestor_cache`) — whole materialized chunks at parent depths, which is what recursive generation reads to know what a block is descended from. Indexed by distance from the current depth rather than by absolute depth: the two nearest depths get 128 slots each, and the rest get 8, because each depth up covers four times the area and so converges to a tiny footprint. That keeps the whole thing near 2 MiB instead of 8. A depth change clears it.
+- **Parent neighborhood cache** (`ancestor.parent_hood_cache`) — a parent block and its eight neighbors. All 16 child cells of a region share one parent cell, and each used to walk the same nine lookups, so this turns 144 resolutions into 9. Set-associative rather than tiled, because the nine cells of a neighborhood are adjacent and a tile would have them evict each other immediately.
+- **Chunk cache** (`world.chunk_cache`) — described under "Smart chunk preloading" above. Unlike the rest, it holds finished chunks for the current depth only, and it is the one the renderer falls back to when the camera outruns the `SimBuffer`.
+
+One rule ties them together, and it is the one to remember when adding a cache. Everything above memoizes _procedural_ output only: what the world would be before the player touched it. Player edits stay a separate overlay that `materializeChunk()` replays on top, which is why an edit never has to reach into any of these banks, and why none of them needs to watch the modification store. The parent neighborhood cache is the one that looks like an exception and is not, so it is worth stating why: it only ever reads depths below the frontier, and those are frozen for their descendants, so no edit can change what it holds while the frontier stands still. A cache that broke this rule would have to count store writes itself, which is a good sign it belongs somewhere else.
+
 #### Light system
 
-Lighting is computed on the CPU every frame in `zig/render/lighting.zig`, right after the visible block buffer is assembled and before it is handed to the GPU. Every block receives a `light` value from 0 to 255, and the WGSL shader multiplies that block's OKLAB lightness by `light / 255` (so 0 is pitch black and 255 is full brightness). A companion field, `lighting_color`, records whether the "winning" (strongest) light is warm/orange (fire) or neutral white.
+Lighting is computed on the CPU every frame in `zig/render/lighting.zig`, right after the visible block buffer is assembled and before it is handed to the GPU. Every block receives a full **OKLCH colour**, packed into three 6-bit channels (`light_l`, `light_c`, `light_h`). The shader _multiplies_ the block's own OKLAB lightness by the lightness, so 0 is pitch black, and _adds_ the chroma, so a violet lamp tints a block without replacing its material: stone under a violet lamp is still recognizably stone.
 
 This is not only used before rendering, but a version with _just_ the player is used to prevent the player from modifying blocks too far away!
 
@@ -630,17 +657,33 @@ By processing these buckets in strictly descending order (brightest to dimmest),
 
 How much light is lost per step (the "falloff") depends on what it passes through:
 
-- **Air** loses the least (`AIR_FALLOFF = 10`), so light carries far through open space.
-- **Solid** blocks lose the most (`SOLID_FALLOFF = 26`), but the cost scales with how mined the block is (its `hp`): a nearly-broken block lets through almost as much light as air.
-- **Liquid** sits in between (`LIQUID_FALLOFF = 18`), and a waterlogged block is capped so it never blocks light more than water would.
+- **Air** loses the least (`AIR_FALLOFF = 12`), so light carries far through open space.
+- **Solid** blocks lose the most (`SOLID_FALLOFF = 28`), but the cost scales with how mined the block is (its `hp`): a nearly-broken block lets through almost as much light as air.
+- **Liquid** sits in between (`LIQUID_FALLOFF`, 12 below solid), and a waterlogged block is capped so it never blocks light more than water would.
 
 A diagonal step costs `sqrt(2)` times the orthogonal falloff (approximated with integer math), turning the square 8-neighbor grid into a mostly circular-looking falloff (8-sided polygon).
 
-Light sources include the player (a bright, moving source seeded from their continuous sub-pixel position across the 2x2 blocks they overlap), campfires and furnaces (warm/orange), and glowing plates.
+Light sources include the player (a bright, moving source seeded from their continuous sub-pixel position across the 2x2 blocks they overlap), campfires and furnaces (warm orange), portals (violet), aquashard and electrit (cyan and gold), twinklemoss (green), and glowing plates (white). `blockEmission()` is the whole table.
 
-Because a source just off-screen can still spill onto visible blocks, the block buffer is padded by `CHUNK_MARGIN` (calculated at compile-time) so that the BFS flood is exactly wide enough to catch the furthest reachable bleed.
+Because a source just off-screen can still spill onto visible blocks, the block buffer is padded by `CHUNK_MARGIN` (calculated at compile-time) so that the flood is exactly wide enough to catch the furthest reachable bleed.
 
-Internally, the flood tracks warm and neutral light as two channels packed into one `u32`, so an orange campfire glow and a white plate glow can coexist and mix correctly; the final `lighting_color` is simply whichever channel wins at that block.
+##### How colour survives a shortest-path flood
+
+The awkward part of colouring a Dijkstra flood is that Dijkstra finalizes a cell once, at its brightest value. A second, dimmer light of a different hue reaching the same cell never gets to contribute, which is exactly the mixing you want. The old system dodged this with two channels and a hard "which one is brighter" test per block, and the line where that answer flipped was visible.
+
+The way out is that **falloff is a property of the medium, not of the light's colour**. Air, stone, and water each cost what they cost no matter what shines through them, so one colourless cost grid serves every colour and the only per-colour thing is how much light arrives.
+
+So light is split into three **lanes**: fixed hues spaced evenly around the OKLAB hue circle. A source states a hue and a saturation, and `laneWeights()` turns that into one weight per lane, scaled so the strongest lane always carries the full brightness. A white lamp lights all three lanes equally; a violet lamp lights mostly one. Each lane floods independently over the shared cost grid, and `resolveCell()` reads the colour back out of how the three lanes compare at that cell: the strongest lane is the brightness, and the other two say which way the hue leans.
+
+Three consequences fall out of that scaling, and they are the whole reason for it:
+
+- A violet lamp lights **exactly the same shape** as a white lamp of the same strength, because the dominant lane always carries the full value. Colour never changes reach.
+- Every lane's field is continuous, so their ratio is continuous, so hue varies smoothly. Two lamps of different colours blend through every hue between them, with no seam anywhere.
+- A lane costs only as much ground as its own light covers, so a mostly-warm scene costs barely more than the two channels it replaced. A lane with no sources at all costs nothing but its bucket sweep.
+
+Two limits are worth knowing. A lane cannot go negative, so the colours three lanes can state form a hexagon rather than a circle; `CHROMA_GAMUT` clamps to its inscribed circle so that saturation means the same thing at every hue. And because falloff is subtractive, the weak lanes of a saturated source hit zero before the strong one, so a lamp gets slightly _more_ saturated toward its fringe. `CHROMA_WHITE_MIX` caps that drift by pulling every source a little toward white before it is split.
+
+One thing deliberately stays colourless: the player-only flood behind `miningLightAt()`. Mining reach is a gameplay quantity, so it runs a single lane at the player's full strength and never sees the lamp's colour.
 
 #### Memory transfer
 

@@ -1,12 +1,31 @@
-//! CPU lighting pass over the visible block buffer. Writes 0..255 brightness each block's `light` prop.
-//! WGSL will then multiply the OKLAB lightness by `light / 255.0`; this logic handles both orange and white light types.
+//! CPU lighting pass over the visible block buffer. Resolves an OKLCH colour for every block and
+//! writes it into the block's `light_l`, `light_c` and `light_h` channels (see `memory.BlockLight`).
+//! `fs_tile()` in src/shader.wgsl then MULTIPLIES the sprite's own OKLAB lightness by the lightness,
+//! and ADDS the chroma, so a coloured lamp tints a block without replacing its material.
 //!
-//! Uses inverted Dial's algorithm (bucketed Dijkstra): each reachable cell is finalized exactly once at its brightest value,
-//! so overlapping light sources cost no extra relaxation (makes performance linear with some acceptable memory cost).
-//! Worst-case memory cost is reduced by using a dedicated arena that resets every time `applyLighting()` is called.
+//! # How the colour survives a shortest-path flood
 //!
-//! Light spreads to all 8 neighbors with a sqrt(2) diagonal cost for an approximated circular falloff.
-//! Based on the block type (air, solid, or liquid) and HP, the decay rate changes/interpolates as needed.
+//! Falloff is a property of the MEDIUM, not of the light's colour: air, stone and water each cost
+//! what they cost no matter what shines through them. So one colourless cost grid serves every colour,
+//! and the only thing that has to be per-colour is how much light arrives.
+//!
+//! Light is therefore split into `LANES` fixed hues, evenly spaced around the OKLAB hue circle.
+//! A source states a hue and a saturation; `laneWeights()` turns that into one weight per lane, scaled
+//! so the STRONGEST lane is always the full brightness. A white source lights all three lanes equally,
+//! a pure violet source lights mostly one. Each lane then floods on its own over the shared cost grid,
+//! and `resolveCell()` reads the colour back out of how the three lanes compare at that cell.
+//!
+//! Because every lane's field is continuous, so is their ratio, so hue varies smoothly across the map.
+//! Two lamps of different colours blend through every hue between them, with no seam anywhere.
+//! This is what the old two-channel version could not do: it picked a winner per cell, and the line
+//! where the winner changed was visible.
+//!
+//! # What the flood itself does
+//!
+//! `floodLane()` is an inverted Dial's algorithm (bucketed Dijkstra): buckets are walked brightest to
+//! dimmest, so each cell is finalized exactly once at its brightest value and overlapping sources cost
+//! no extra relaxation. Light spreads to all 8 neighbors with a sqrt(2) diagonal cost, which
+//! approximates a circular falloff.
 //!
 //! NOTE: In Debug builds, this code can be a significant contributor to lag.
 
@@ -17,13 +36,16 @@ const world = dw.world;
 
 const Block = memory.Block;
 const Sprite = dw.Sprite;
+const BlockLight = memory.BlockLight;
+const LightChannel = memory.LightChannel;
+const LIGHT_MAX = memory.LIGHT_MAX;
 
-/// Max brightness bound by `u8`.
-pub const MAX_LIGHT: u8 = 255;
+/// Flood value that means "as bright as a block can be drawn"; anything above it clamps.
+pub const MAX_LIGHT: u16 = 255;
 /// Min baseline brightness for unlit cells.
-pub const AMBIENT_LIGHT: u8 = 0;
+pub const AMBIENT_LIGHT: u16 = 0;
 /// Debug ambient light brightness if the debug boolean is enabled.
-pub const AMBIENT_LIGHT_DEBUG: u8 = 192;
+pub const AMBIENT_LIGHT_DEBUG: u16 = 192;
 
 /// Determines whether light should be global.
 pub var IS_LIGHT_GLOBAL = false;
@@ -41,12 +63,164 @@ pub const PLATE_LIGHT: u16 = 160;
 pub const ORE_GEM_LIGHT: u16 = 100; // some ores may glow
 pub const TWINKLEVINE_LIGHT: u16 = 80;
 
+// ---------------------------------------------------------------------------
+// Colour tuning. Everything an artist would want to turn is in this block.
+// ---------------------------------------------------------------------------
+
+/// OKLAB chroma that a fully saturated source adds at full lightness.
+///
+/// This is the ceiling on how far light can push a block's colour, and the single most important
+/// value here. Past about 0.12 the result leaves sRGB and clips to a flat, plastic colour;
+/// below about 0.04 every lamp reads as white. Mirror any change in `LIGHT_CHROMA_MAX` in
+/// src/shader.wgsl, which does the actual adding.
+pub const LIGHT_CHROMA_MAX: f32 = 0.09;
+
+/// How far every source colour is pulled toward white before it is split into lanes, 0 to 1.
+///
+/// Fixes the fringe artifact: falloff is subtractive, so the weak lanes of a saturated source hit
+/// zero before the strong one and the light gets MORE saturated the further it travels, which is
+/// backwards. Raising this caps that drift, at the cost of less colourful lamps. Start at 0.15 if the
+/// fringes bother you. Zero reproduces the old two-channel look exactly.
+pub const CHROMA_WHITE_MIX: f32 = 0.0;
+
+/// Hues in OKLAB radians, for the source table below. Named rather than inline so a palette change
+/// is one edit, and so two sources meant to match cannot drift apart.
+pub const Hue = struct {
+    pub const fire: f32 = 1.19;
+    pub const gold: f32 = 1.60;
+    pub const green: f32 = 2.60;
+    pub const cyan: f32 = 3.40;
+    pub const violet: f32 = 5.40;
+};
+
+/// A light source's colour, as an author states it.
+pub const LightColor = struct {
+    /// Hue angle in OKLAB radians. Ignored when `chroma` is 0.
+    hue: f32 = 0,
+    /// Saturation, 0 (white) to 1 (as colourful as `LIGHT_CHROMA_MAX` allows).
+    chroma: f32 = 0,
+
+    pub const white: LightColor = .{};
+    /// The warm glow of every flame. 0.72 is the value that reproduces the old hard-coded
+    /// OKLAB shift of (a = 0.024, b = 0.060) exactly, so fire looks unchanged.
+    pub const fire: LightColor = .{ .hue = Hue.fire, .chroma = 0.72 };
+};
+
+/// Everything one emitting block contributes.
+const Emission = struct {
+    strength: u16 = 0,
+    color: LightColor = .white,
+};
+
+/// What each emitting sprite gives off. A sprite absent from here emits nothing.
+fn blockEmission(id: Sprite) Emission {
+    return switch (id) {
+        .campfire => .{ .strength = CAMPFIRE_LIGHT, .color = .fire },
+        .forest_furnace, .lava_furnace => .{ .strength = FURNACE_LIGHT, .color = .fire },
+        .lava_stone, .molten_stone => .{ .strength = LAVA_LIGHT, .color = .fire },
+        .portal, .invportal => .{ .strength = PORTAL_LIGHT, .color = .{ .hue = Hue.violet, .chroma = 0.85 } },
+        .white_plate => .{ .strength = PLATE_LIGHT, .color = .white },
+        .aquashard => .{ .strength = ORE_GEM_LIGHT, .color = .{ .hue = Hue.cyan, .chroma = 0.8 } },
+        .electrit => .{ .strength = ORE_GEM_LIGHT, .color = .{ .hue = Hue.gold, .chroma = 0.65 } },
+        .twinklemoss => .{ .strength = TWINKLEVINE_LIGHT, .color = .{ .hue = Hue.green, .chroma = 0.7 } },
+        else => .{},
+    };
+}
+
+/// The colour of the player's own lamp. Kept apart from `blockEmission()` because the player is not a
+/// block, and because `miningLightAt()` deliberately ignores it (see `floodMiningLight()`).
+pub const PLAYER_COLOR: LightColor = .white;
+
+/// PREVIEW. Sweeps the player's lamp through every hue, one full turn per `HUE_CYCLE_SECONDS`.
+///
+/// The whole point of the lane split is that ARBITRARY colours mix, and nothing in the world emits an
+/// arbitrary colour yet. Turning this on walks the lamp past a campfire's fixed orange through every
+/// hue there is, which shows the mixing, the fringe saturation, and any banding in one pass.
+/// Delete it, or the button in `debug/debug_ui.zig`, once real coloured sources exist.
+pub var CYCLE_PLAYER_HUE = false;
+/// Seconds the preview sweep takes to walk the whole hue circle.
+const HUE_CYCLE_SECONDS: f64 = 12.0;
+
+/// The player's lamp colour this frame; see `CYCLE_PLAYER_HUE`.
+fn playerColor() LightColor {
+    if (!dw.dev_menu or !CYCLE_PLAYER_HUE) return PLAYER_COLOR;
+    const turns = memory.game.bg_time / HUE_CYCLE_SECONDS;
+    return .{
+        .hue = @floatCast((turns - @floor(turns)) * 2.0 * std.math.pi),
+        .chroma = 0.85,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Lanes
+// ---------------------------------------------------------------------------
+
+/// Fixed hues light is split into. Three is the smallest number that can reach every hue: with two,
+/// the colours between them would be reachable but the ones outside their arc would not.
+/// Raising it costs one whole flood per lane and buys nothing, since three already span the circle.
+pub const LANES = 3;
+
+/// Unit vector of lane `k` on the OKLAB (a, b) plane. The lanes are evenly spaced, so they sum to zero,
+/// which is exactly why three equal lanes read as achromatic.
+fn laneAxis(comptime k: usize) [2]f32 {
+    const angle = 2.0 * std.math.pi * @as(f32, @floatFromInt(k)) / @as(f32, LANES);
+    return .{ @cos(angle), @sin(angle) };
+}
+
+/// Most saturated colour three non-negative lanes can state without distorting it.
+///
+/// A lane cannot go negative, so what the lanes can reach is a HEXAGON with corners on the lane axes,
+/// not a circle. Past this radius a hue that sits between two lanes would need a negative third lane,
+/// and clamping that to zero pulls its saturation down: a violet lamp would come out less colourful
+/// than a green one asked for the same chroma. Clamping to the hexagon's INSCRIBED circle instead
+/// makes saturation mean the same thing at every hue, which is worth far more than the last 13%.
+///
+/// `LIGHT_CHROMA_MAX` is the value to raise if lamps come out too pale; this is not a tuning knob.
+pub const CHROMA_GAMUT: f32 = @sqrt(3.0) / 2.0;
+
+/// Splits a colour into one weight per lane, each 0 to 1, with the largest exactly 1.
+///
+/// Scaling to a largest-of-1 is what makes a violet lamp reach as far as a white one of the same
+/// strength: the dominant lane always carries the full brightness, so the light's SHAPE never depends
+/// on its colour. `resolveCell()` is the exact inverse of this, for any chroma up to `CHROMA_GAMUT`.
+fn laneWeights(color: LightColor) [LANES]f32 {
+    const sat = @min(CHROMA_GAMUT, @max(0.0, color.chroma)) * (1.0 - CHROMA_WHITE_MIX);
+    const target = [2]f32{ sat * @cos(color.hue), sat * @sin(color.hue) };
+
+    // Project the colour onto each lane. The 2/3 is what makes the projection round-trip:
+    // three evenly spaced unit vectors satisfy sum(u_k * u_k^T) = (3/2) * I.
+    var dots: [LANES]f32 = undefined;
+    var largest: f32 = -std.math.floatMax(f32);
+    inline for (0..LANES) |k| {
+        const axis = laneAxis(k);
+        dots[k] = (2.0 / 3.0) * (target[0] * axis[0] + target[1] * axis[1]);
+        largest = @max(largest, dots[k]);
+    }
+
+    // Lift the whole set so the strongest lane lands on exactly 1.
+    var out: [LANES]f32 = undefined;
+    inline for (0..LANES) |k| out[k] = @min(1.0, @max(0.0, 1.0 - largest + dots[k]));
+    return out;
+}
+
+/// Lane strengths of a source, ready to seed. Rounded, so a lane can never exceed `strength`
+/// and the bucket bound below stays true.
+fn laneStrengths(e: Emission) [LANES]u16 {
+    const weights = laneWeights(e.color);
+    var out: [LANES]u16 = undefined;
+    const strength: f32 = @floatFromInt(e.strength);
+    inline for (0..LANES) |k| out[k] = @intFromFloat(@round(strength * weights[k]));
+    return out;
+}
+
 // Orthogonal decay rates per block type. Air should always be the lowest (decays slowest)!
 pub const AIR_FALLOFF: u16 = 12;
 pub const SOLID_FALLOFF: u16 = 28;
 pub const LIQUID_FALLOFF: u16 = SOLID_FALLOFF - 12;
 
-/// Brightest possible seed value; bounds the number of Dial buckets.
+/// Brightest possible seed value, which is exactly what bounds the number of Dial buckets.
+/// Every source in `blockEmission()` must be covered here, or `seed()` can index past the end of
+/// `buckets`. Lane strengths never exceed the source strength, so listing the strengths is enough.
 const MAX_SOURCE: u16 = @max(
     MAX_PLAYER_LIGHT,
     CAMPFIRE_LIGHT,
@@ -57,30 +231,8 @@ const MAX_SOURCE: u16 = @max(
     TWINKLEVINE_LIGHT,
     LAVA_LIGHT,
 );
+
 const NUM_BUCKETS: usize = MAX_SOURCE + 1;
-
-fn blockEmission(id: Sprite) u16 {
-    return switch (id) {
-        .campfire => CAMPFIRE_LIGHT,
-        .forest_furnace, .lava_furnace => FURNACE_LIGHT,
-        .portal, .invportal => PORTAL_LIGHT,
-        .white_plate => PLATE_LIGHT,
-        .aquashard, .electrit => ORE_GEM_LIGHT,
-        .twinklemoss => TWINKLEVINE_LIGHT,
-        .lava_stone, .molten_stone => LAVA_LIGHT,
-        else => 0,
-    };
-}
-
-/// Returns true if the block is a warm light source, which creates an orange light glow in the shader.
-fn isOrangeSource(id: Sprite) bool {
-    return switch (id) {
-        .campfire => true,
-        .forest_furnace, .lava_furnace => true,
-        .lava_stone => true,
-        else => false,
-    };
-}
 
 comptime {
     // Orthogonal cost is stored per-cell as u8; every falloff must fit.
@@ -92,16 +244,13 @@ var arena = memory.makeArena();
 /// `Allocator` from `arena`.
 var alloc = arena.allocator();
 
-/// Sets up lighting algorithm `ArrayList`s. Discards all invalidated pointers to prevent use-after-free corruption.
-/// Called whenever `applyLighting()` is called to reset allocator.
+/// Drops every allocation the previous pass made, so a frame starts from an empty arena.
+/// The arena keeps its pages, so the grids below cost a bump each rather than a real allocation.
+///
+/// Every pointer into the arena dies here, the buckets included, which is why they are reset with it.
 fn resetArena() void {
     if (!arena.reset(.retain_capacity)) memory.oom();
-    @memset(&buckets_orange, .empty);
-    @memset(&buckets_white, .empty);
-
-    cost_buffer = std.array_list.Aligned(u8, .@"16").initCapacity(alloc, 2048) catch memory.oom();
-    orange_buffer = std.array_list.Aligned(u16, .@"16").initCapacity(alloc, 2048) catch memory.oom();
-    white_buffer = std.array_list.Aligned(u16, .@"16").initCapacity(alloc, 2048) catch memory.oom();
+    for (&buckets) |*lane| @memset(lane, .empty);
 }
 
 /// Orthogonal per-step light cost for entering `block`. Fits in u8 (<= SOLID_FALLOFF).
@@ -117,8 +266,8 @@ fn orthoCost(block: Block) u8 {
     const decay = (@as(u32, diff) * hp + 8) / 16;
     var falloff: u16 = SOLID_FALLOFF - @as(u16, @intCast(decay));
 
-    // Cap minimum at liquid falloff if the block is waterlogged.
-    if (block.waterlogged != 0) {
+    // Cap minimum at liquid falloff if the block has water around it.
+    if (block.water.bits != 0) {
         falloff = @max(falloff, LIQUID_FALLOFF);
     }
     return @intCast(falloff);
@@ -150,16 +299,12 @@ pub const CHUNK_MARGIN: u32 = @max(1, std.math.divCeil(
     dw.CHUNK_SIZE,
 ) catch unreachable);
 
-/// Precomputed orthogonal step cost per cell (u8 keeps the flood's neighbor reads cache-friendly).
-var cost_buffer: std.array_list.Aligned(u8, .@"16") = undefined;
-/// High-precision per-cell light, orange (warm) channel.
-var orange_buffer: std.array_list.Aligned(u16, .@"16") = undefined;
-/// High-precision per-cell light, white (player/plate) channel.
-var white_buffer: std.array_list.Aligned(u16, .@"16") = undefined;
+/// Dial buckets, one FIFO of packed coords per light level, per lane.
+/// Reset every pass by `resetArena()`, which owns the memory they append into.
+var buckets: [LANES]Buckets = undefined;
 
-/// Dial buckets, one FIFO of packed coords per light level, for each channel.
-var buckets_orange: [NUM_BUCKETS]std.array_list.Aligned(u32, .@"16") = undefined;
-var buckets_white: [NUM_BUCKETS]std.array_list.Aligned(u32, .@"16") = undefined;
+/// One lane's worth of Dial buckets.
+const Buckets = [NUM_BUCKETS]std.array_list.Aligned(u32, .@"16");
 
 inline fn packCoords(x: u16, y: u16) u32 {
     return @as(u32, x) | (@as(u32, y) << 16);
@@ -175,26 +320,36 @@ inline fn unpackY(p: u32) u16 {
 
 /// Seeds a cell into a channel: raises its light to `val` and enqueues it into that value's bucket.
 /// No-op if `val` does not improve the cell or does not clear ambient.
-inline fn seed(a: std.mem.Allocator, light: []u16, buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, .@"16"), i: usize, x: u16, y: u16, val: u16, ambient: u16) void {
+inline fn seed(a: std.mem.Allocator, light: []u16, bucket_list: *Buckets, i: usize, x: u16, y: u16, val: u16, ambient: u16) void {
     if (val > light[i] and val > ambient) {
         light[i] = val;
-        buckets[@as(usize, val)].append(a, packCoords(x, y)) catch memory.oom();
+        bucket_list[@as(usize, val)].append(a, packCoords(x, y)) catch memory.oom();
     }
 }
 
-/// Seeds the 2x2 cells surrounding the player using their continuous sub-pixel position.
-/// Light drops off similar to Euclidean distance through the cell's own medium cost.
-fn seedPlayerLight(
+/// Seeds ONE lane from a point source at the continuous position (`px`, `py`), covering the 2x2 cells
+/// it straddles. Light drops off similar to Euclidean distance through each cell's own medium cost.
+///
+/// `strength` is that lane's share of the source, which is the only thing colour changes here:
+/// `applyLighting()` passes a different share per lane, and `floodMiningLight()` passes the whole
+/// source to one lane because mining reach must not depend on the lamp's colour.
+fn seedPointLight(
     a: std.mem.Allocator,
     cost: []const u8,
-    light_white: []u16,
-    buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, .@"16"),
+    light: []u16,
+    bucket_list: *Buckets,
     w: i32,
     h: i32,
     ambient: u16,
     px: f32,
     py: f32,
+    strength: u16,
 ) void {
+    // A brighter source than the buckets were sized for would seed past the end of `bucket_list`,
+    // so every upgrade that raises `PLAYER_LIGHT` must raise `MAX_PLAYER_LIGHT` with it.
+    std.debug.assert(strength <= MAX_SOURCE);
+    if (strength == 0) return;
+
     const cx0: i32 = @intFromFloat(@floor(px - 0.5));
     const cy0: i32 = @intFromFloat(@floor(py - 0.5));
 
@@ -209,23 +364,29 @@ fn seedPlayerLight(
                 // use the cell's own medium rate, not air
                 const falloff: f32 = @floatFromInt(cost[i]);
                 const drop = @round(@sqrt(dx * dx + dy * dy) * falloff);
-                if (@as(f32, PLAYER_LIGHT) > drop) {
-                    const val: u16 = @intFromFloat(@as(f32, PLAYER_LIGHT) - drop);
-                    seed(a, light_white, buckets, i, @intCast(cx), @intCast(cy), val, ambient);
+                if (@as(f32, @floatFromInt(strength)) > drop) {
+                    const val: u16 = @intFromFloat(@as(f32, @floatFromInt(strength)) - drop);
+                    seed(a, light, bucket_list, i, @intCast(cx), @intCast(cy), val, ambient);
                 }
             }
         }
     }
 }
 
-/// One single-channel Dial flood: process buckets brightest -> dimmest, relaxing 8 neighbors.
+/// One lane's Dial flood: process buckets brightest -> dimmest, relaxing 8 neighbors.
 /// Because we descend and edge costs are strictly positive, appends only ever target strictly-lower
 /// buckets, so each cell is finalized exactly once at its brightest value regardless of source count.
-fn floodChannel(
+///
+/// TEMPORARY. This is the plain bucket sweep, kept so the colour pipeline around it runs and can be
+/// looked at. It walks every level from `MAX_SOURCE` down to `ambient` whether or not anything sits
+/// there, which is `MAX_SOURCE` empty probes per lane per frame, and three lanes now pay it instead
+/// of two. The radix heap replaces exactly this function and nothing else around it:
+/// same signature, same contract, `log2(MAX_SOURCE)` buckets instead of `MAX_SOURCE`.
+fn floodLane(
     a: std.mem.Allocator,
     cost: []const u8,
     light: []u16,
-    buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, .@"16"),
+    bucket_list: *Buckets,
     w: i32,
     h: i32,
     ambient: u16,
@@ -233,9 +394,9 @@ fn floodChannel(
     var b: u16 = MAX_SOURCE;
     while (b > ambient) : (b -= 1) {
         const bucket_id: usize = @intCast(b);
-        // Nothing appends to buckets[b] once we reach level b (relaxation only writes lower levels),
-        // so this backing slice is stable for the duration of the inner loop.
-        const items = buckets[bucket_id].items;
+        // Nothing appends to bucket_list[b] once we reach level b (relaxation only writes lower
+        // levels), so this backing slice is stable for the duration of the inner loop.
+        const items = bucket_list[bucket_id].items;
         for (items) |pc| {
             const x = @as(i32, unpackX(pc));
             const y = @as(i32, unpackY(pc));
@@ -259,7 +420,7 @@ fn floodChannel(
                         const nl = b - c;
                         if (nl > light[ni]) {
                             light[ni] = nl;
-                            buckets[@as(usize, nl)].append(a, packCoords(
+                            bucket_list[@as(usize, nl)].append(a, packCoords(
                                 @intCast(nx),
                                 @intCast(ny),
                             )) catch memory.oom();
@@ -271,42 +432,96 @@ fn floodChannel(
     }
 }
 
-/// Executes a bucketed Dijkstra light flood over the visible lbock array.
-/// Writes the final per-block `light` (0..255) and `lighting_color` (orange flag).
+/// Steps a full hue turn is divided into. One more than `LIGHT_MAX`, because hue wraps:
+/// the step after the last one is the first one again. Mirrored by `LIGHT_HUE_STEPS` in src/shader.wgsl.
+pub const HUE_STEPS: u32 = @as(u32, LIGHT_MAX) + 1;
+
+/// Quantizes a flood value onto a `LightChannel`. Values above `MAX_LIGHT` clamp rather than wrap,
+/// so a cell standing on top of a source is simply full brightness.
+inline fn quantizeLightness(value: u16) LightChannel {
+    const clamped: u32 = @min(value, MAX_LIGHT);
+    return @intCast((clamped * LIGHT_MAX + MAX_LIGHT / 2) / MAX_LIGHT);
+}
+
+/// Reads one cell's three lane values back out as a colour. The exact inverse of `laneWeights()`.
+///
+/// Lightness is the STRONGEST lane, which is what makes a coloured light reach exactly as far as a
+/// white one. Chroma and hue come from how the other two lanes compare to it: three equal lanes point
+/// nowhere and give white, and one lane alone points straight at its own hue and gives full chroma.
+fn resolveCell(lanes: [LANES]u16) BlockLight {
+    var strongest: u16 = 0;
+    inline for (0..LANES) |k| strongest = @max(strongest, lanes[k]);
+    if (strongest == 0) return .none;
+
+    const lightness = quantizeLightness(strongest);
+
+    // Fast path for the common cell: equal lanes are achromatic, so skip the trig entirely.
+    // Every ambient-only cell and every white-lit cell lands here.
+    var equal = true;
+    inline for (1..LANES) |k| equal = equal and (lanes[k] == lanes[0]);
+    if (equal) return .{ .l = lightness };
+
+    // Sum the lane axes, each weighted by that lane's share of the strongest.
+    const scale = 1.0 / @as(f32, @floatFromInt(strongest));
+    var vec = [2]f32{ 0, 0 };
+    inline for (0..LANES) |k| {
+        const axis = laneAxis(k);
+        const share = @as(f32, @floatFromInt(lanes[k])) * scale;
+        vec[0] += share * axis[0];
+        vec[1] += share * axis[1];
+    }
+
+    const magnitude = @min(1.0, @sqrt(vec[0] * vec[0] + vec[1] * vec[1]));
+    if (magnitude <= 0.0) return .{ .l = lightness };
+
+    // atan2 returns -pi..pi, and the block stores a full turn.
+    var angle = std.math.atan2(vec[1], vec[0]);
+    if (angle < 0) angle += 2.0 * std.math.pi;
+    const hue_fraction = angle / (2.0 * std.math.pi);
+
+    // Hue is CIRCULAR, so it quantizes onto `HUE_STEPS` steps that WRAP rather than onto 0..LIGHT_MAX
+    // that clamp: a hue rounding up to a full turn is the same hue as zero, and no code point is wasted.
+    const steps: f32 = @floatFromInt(HUE_STEPS);
+    const hue_step = @as(u32, @intFromFloat(@round(hue_fraction * steps))) % HUE_STEPS;
+
+    return .{
+        .l = lightness,
+        .c = @intFromFloat(@round(magnitude * @as(f32, @floatFromInt(LIGHT_MAX)))),
+        .h = @intCast(hue_step),
+    };
+}
+
+/// Floods every lane over the visible block array and writes each block's resolved OKLCH light.
+/// See the file header for how the lanes carry colour through a shortest-path flood.
 pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: f32) void {
     resetArena();
     const w: i32 = @intCast(wb);
     const h: i32 = @intCast(hb);
     const wbw: u16 = @intCast(wb);
 
-    // Recycle scratch: retain capacity, reset contents below.
-    for (&buckets_orange) |*bk| bk.clearRetainingCapacity();
-    for (&buckets_white) |*bk| bk.clearRetainingCapacity();
-    cost_buffer.resize(alloc, out.len) catch memory.oom();
-    orange_buffer.resize(alloc, out.len) catch memory.oom();
-    white_buffer.resize(alloc, out.len) catch memory.oom();
-
-    const cost_slice = cost_buffer.items;
-    const light_orange = orange_buffer.items;
-    const light_white = white_buffer.items;
+    // Orthogonal step cost per cell (u8 keeps the flood's neighbor reads cache-friendly), then the
+    // high-precision light of each lane. All of it lives in the arena `resetArena()` just cleared.
+    const cost_slice = alloc.alignedAlloc(u8, memory.MAIN_ALIGN, out.len) catch memory.oom();
+    var lane_light: [LANES][]u16 = undefined;
+    inline for (0..LANES) |k| {
+        lane_light[k] = alloc.alignedAlloc(u16, memory.MAIN_ALIGN, out.len) catch memory.oom();
+    }
 
     const ambient: u16 = if (dw.dev_menu and IS_LIGHT_GLOBAL) AMBIENT_LIGHT_DEBUG else AMBIENT_LIGHT;
 
-    // Single reset pass: precompute per-cell cost, initialize both channels to ambient
-    // then, "seed" (add) light-emitting blocks into their channel's appropriate buckets.
+    // Single reset pass: precompute per-cell cost, set every lane to ambient (which is achromatic
+    // precisely because all the lanes get the same value), then seed each emitting block.
     var sy: u16 = 0;
     var sx: u16 = 0;
     for (out, 0..) |block, i| {
         cost_slice[i] = orthoCost(block);
-        light_orange[i] = ambient;
-        light_white[i] = ambient;
+        inline for (0..LANES) |k| lane_light[k][i] = ambient;
 
         const emission = blockEmission(block.id);
-        if (emission > ambient) {
-            if (isOrangeSource(block.id)) {
-                seed(alloc, light_orange, &buckets_orange, i, sx, sy, emission, ambient);
-            } else {
-                seed(alloc, light_white, &buckets_white, i, sx, sy, emission, ambient);
+        if (emission.strength > ambient) {
+            const strengths = laneStrengths(emission);
+            inline for (0..LANES) |k| {
+                seed(alloc, lane_light[k], &buckets[k], i, sx, sy, strengths[k], ambient);
             }
         }
 
@@ -317,26 +532,35 @@ pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: 
         }
     }
 
-    // Seed the continuous player source into the white channel.
-    // This one is interpolated between logic ticks so the light does not snap block to block;
-    // anything that has to AGREE with the simulation reads `miningLightAt()` instead, never this.
-    seedPlayerLight(alloc, cost_slice, light_white, &buckets_white, w, h, ambient, player_bx, player_by);
+    // Seed the continuous player source. This one is interpolated between logic ticks so the light
+    // does not snap block to block; anything that has to AGREE with the simulation reads
+    // `miningLightAt()` instead, never this.
+    const player_strengths = laneStrengths(.{ .strength = PLAYER_LIGHT, .color = playerColor() });
+    inline for (0..LANES) |k| {
+        seedPointLight(
+            alloc,
+            cost_slice,
+            lane_light[k],
+            &buckets[k],
+            w,
+            h,
+            ambient,
+            player_bx,
+            player_by,
+            player_strengths[k],
+        );
+    }
 
-    // Two independent floods over the shared cost grid for each color!
-    floodChannel(alloc, cost_slice, light_orange, &buckets_orange, w, h, ambient);
-    floodChannel(alloc, cost_slice, light_white, &buckets_white, w, h, ambient);
+    // One independent flood per lane, all of them over the SAME cost grid, which is what keeps the
+    // grid hot in cache and what makes a lane cost only as much ground as its own light covers.
+    inline for (0..LANES) |k| {
+        floodLane(alloc, cost_slice, lane_light[k], &buckets[k], w, h, ambient);
+    }
 
-    // Combine channels and write final u8 values clamped to MAX_LIGHT.
-    for (out, light_orange, light_white) |*block, orange, white| {
-        const max_light = @max(orange, white);
-        block.light = @intCast(@min(max_light, @as(u16, MAX_LIGHT)));
-
-        // this fixes an issue where orange light overtakes normal white light if ambient light is at max
-        if (AMBIENT_LIGHT == 255 or (dw.dev_menu and IS_LIGHT_GLOBAL and AMBIENT_LIGHT_DEBUG == 255)) continue;
-
-        // block is orange if it receives more orange light than white, or is in the core radius (>= 255)
-        const is_orange = orange >= white or orange >= 255;
-        block.lighting_color = @intFromBool(is_orange and max_light > ambient);
+    for (out, 0..) |*block, i| {
+        var lanes: [LANES]u16 = undefined;
+        inline for (0..LANES) |k| lanes[k] = lane_light[k][i];
+        block.setLight(resolveCell(lanes));
     }
 }
 
@@ -397,7 +621,7 @@ fn currentMiningKey() MiningKey {
 /// reset the allocator out from under the other, whatever order a frame and a tick land in.
 var mining_arena = memory.makeArena();
 var mining_alloc = mining_arena.allocator();
-var buckets_mining: [NUM_BUCKETS]std.array_list.Aligned(u32, .@"16") = undefined;
+var buckets_mining: Buckets = undefined;
 
 /// Window index of the block (`dx`, `dy`) blocks from the one the player stands in, or null when that
 /// block is out of the window (which, per `MINING_RADIUS`, means the player's light cannot reach it).
@@ -487,8 +711,11 @@ fn floodMiningLight() void {
     const py = @as(f32, @floatFromInt(MINING_RADIUS)) + frac_y;
 
     const span: i32 = @intCast(MINING_SPAN);
-    seedPlayerLight(mining_alloc, &mining_cost, &mining_scratch, &buckets_mining, span, span, 0, px, py);
-    floodChannel(mining_alloc, &mining_cost, &mining_scratch, &buckets_mining, span, span, 0);
+    // ONE lane, seeded with the player's whole strength and no colour at all. Mining reach is a
+    // gameplay quantity, so it must answer the same whatever the lamp is tinted; a coloured lane
+    // split here would quietly shorten the reach of every lamp that is not white.
+    seedPointLight(mining_alloc, &mining_cost, &mining_scratch, &buckets_mining, span, span, 0, px, py, PLAYER_LIGHT);
+    floodLane(mining_alloc, &mining_cost, &mining_scratch, &buckets_mining, span, span, 0);
 
     for (&mining_light, mining_scratch) |*dst, light| {
         dst.* = @intCast(@min(light, @as(u16, MAX_LIGHT)));
@@ -517,4 +744,95 @@ pub fn miningLightAt(chunk_dx: i64, chunk_dy: i64, bx: u4, by: u4) u8 {
 /// which `world.clearCaches()` is the one thing that does.
 pub fn invalidateMiningLight() void {
     mining_key = null;
+}
+
+// ---------------------------------------------------------------------------
+// Tests. These cover the colour half only: the split into lanes and the read back out of them.
+// Neither depends on the flood, so they keep holding when `floodLane()` is replaced.
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+/// What `resolveCell()` recovers from a source seeded at `strength`, with no travel in between.
+fn roundTrip(color: LightColor, strength: u16) BlockLight {
+    return resolveCell(laneStrengths(.{ .strength = strength, .color = color }));
+}
+
+test "a coloured source reaches exactly as far as a white one" {
+    // The strongest lane IS the brightness, so the light's shape never depends on its colour.
+    // If this breaks, saturated lamps quietly light a smaller room than white ones.
+    for ([_]f32{ 0.0, 0.25, 0.5, 0.75, 1.0 }) |chroma| {
+        var hue: f32 = 0.0;
+        while (hue < 2.0 * std.math.pi) : (hue += 0.2) {
+            const lanes = laneStrengths(.{ .strength = 240, .color = .{ .hue = hue, .chroma = chroma } });
+            var strongest: u16 = 0;
+            for (lanes) |v| strongest = @max(strongest, v);
+            try testing.expectEqual(@as(u16, 240), strongest);
+        }
+    }
+}
+
+test "white light stays achromatic" {
+    const got = roundTrip(.white, 200);
+    try testing.expectEqual(@as(LightChannel, 0), got.c);
+    // Equal lanes must take the fast path in `resolveCell()` rather than fall into the trig.
+    const lanes = laneStrengths(.{ .strength = 200, .color = .white });
+    try testing.expectEqual(lanes[0], lanes[1]);
+    try testing.expectEqual(lanes[1], lanes[2]);
+}
+
+test "a source's hue survives the trip through the lanes" {
+    // Quantization bounds the error: hue lands on one of `HUE_STEPS`, so half a step is the floor.
+    const tolerance = 2.0 * (2.0 * std.math.pi / @as(f32, @floatFromInt(HUE_STEPS)));
+    for ([_]f32{ Hue.fire, Hue.gold, Hue.green, Hue.cyan, Hue.violet }) |hue| {
+        const got = roundTrip(.{ .hue = hue, .chroma = 0.8 }, 255);
+        const recovered = @as(f32, @floatFromInt(got.h)) /
+            @as(f32, @floatFromInt(HUE_STEPS)) * 2.0 * std.math.pi;
+
+        // Compare on the circle: 0 and 2pi are the same hue.
+        var delta = @abs(recovered - hue);
+        if (delta > std.math.pi) delta = 2.0 * std.math.pi - delta;
+        try testing.expect(delta <= tolerance);
+    }
+}
+
+test "chroma survives the trip at every hue inside the gamut" {
+    // The point of `CHROMA_GAMUT`: saturation must mean the same thing whatever the hue, so a violet
+    // lamp is exactly as colourful as a green one asked for the same chroma. Tolerance covers the
+    // rounding of the lane strengths and of `c` itself, which is one part in `LIGHT_MAX`.
+    var hue: f32 = 0.0;
+    while (hue < 2.0 * std.math.pi) : (hue += 0.1) {
+        for ([_]f32{ 0.25, 0.5, CHROMA_GAMUT }) |chroma| {
+            const got = roundTrip(.{ .hue = hue, .chroma = chroma }, 255);
+            const recovered = @as(f32, @floatFromInt(got.c)) / @as(f32, @floatFromInt(LIGHT_MAX));
+            try testing.expectApproxEqAbs(chroma * (1.0 - CHROMA_WHITE_MIX), recovered, 0.03);
+        }
+    }
+}
+
+test "chroma past the gamut clamps instead of bending the hue" {
+    // Asking for more saturation than the lanes can state must cost saturation only. If it moved the
+    // hue, a source would drift toward the nearest lane as it got more colourful.
+    const inside = roundTrip(.{ .hue = Hue.violet, .chroma = CHROMA_GAMUT }, 255);
+    const past = roundTrip(.{ .hue = Hue.violet, .chroma = 1.0 }, 255);
+    try testing.expectEqual(inside.c, past.c);
+    try testing.expectEqual(inside.h, past.h);
+}
+
+test "the campfire still shifts OKLAB by the (0.024, 0.060) it always did" {
+    // The one look this rewrite had to preserve exactly, since every existing screenshot has fire in it.
+    const got = roundTrip(.fire, CAMPFIRE_LIGHT);
+    const chroma = @as(f32, @floatFromInt(got.c)) / @as(f32, @floatFromInt(LIGHT_MAX)) * LIGHT_CHROMA_MAX;
+    const hue = @as(f32, @floatFromInt(got.h)) / @as(f32, @floatFromInt(HUE_STEPS)) * 2.0 * std.math.pi;
+    try testing.expectApproxEqAbs(@as(f32, 0.024), chroma * @cos(hue), 0.004);
+    try testing.expectApproxEqAbs(@as(f32, 0.060), chroma * @sin(hue), 0.004);
+}
+
+test "a lane below ambient washes the tint out instead of keeping it" {
+    // Ambient is achromatic and floors every lane, so a saturated source in a brightly lit room
+    // reads as a weak tint rather than as a full-strength one. Global light must not turn violet.
+    const dim = resolveCell(.{ 255, 192, 192 });
+    const dark = resolveCell(.{ 255, 0, 0 });
+    try testing.expect(dim.c < dark.c);
+    try testing.expectEqual(dim.h, dark.h);
 }
