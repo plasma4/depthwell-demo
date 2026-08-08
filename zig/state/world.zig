@@ -610,12 +610,21 @@ pub var legacy_store: ModificationStore = .{};
 
 /// Freezes block `i` of `key` into `legacy_store`, if it is not frozen already.
 ///
-/// The captured value is the cell as it reads RIGHT NOW.
-/// That is its `mod_store` value when it has one, and its procedural value when it does not.
-/// Both come back from `ancestor.getInheritedMaterial()`, which reads the resident chunk first.
+/// The captured value is the cell as of the last moment its depth was the frontier:
+/// its `mod_store` value when it has one, and its procedural value when it does not.
+///
+/// The STORE is asked first, and the resident chunk only after.
+/// The two normally agree, because every editor writes the store before it touches the chunk.
+/// The water simulation is the exception: it moves volume through the resident chunks for a whole tick
+/// and persists the cells it moved afterwards, so at that point the chunk already holds this tick's move
+/// and only the store still holds the value the depths below inherited.
 fn captureLegacy(key: DepthCoordinate, i: u8) void {
     if (legacy_store.get(key)) |e| {
         if (e.isModified(i)) return; // frozen already, and a frozen cell never changes
+    }
+    if (mod_store.getCell(key, i)) |cell| {
+        legacy_store.beginWriteRaw(key).setCell(i, cell);
+        return;
     }
     const bx: u4 = @truncate(i);
     const by: u4 = @truncate(i >> CHUNK_SIZE_LOG2);

@@ -46,7 +46,8 @@ pub const AIR_FALLOFF: u16 = 12;
 pub const SOLID_FALLOFF: u16 = 28;
 pub const LIQUID_FALLOFF: u16 = SOLID_FALLOFF - 12;
 
-/// Brightest possible seed value; bounds the number of Dial buckets.
+/// Brightest possible seed value, which is exactly what bounds the number of Dial buckets.
+/// Every source above must be listed here, or `seed()` can index past the end of `buckets`.
 const MAX_SOURCE: u16 = @max(
     MAX_PLAYER_LIGHT,
     CAMPFIRE_LIGHT,
@@ -92,16 +93,14 @@ var arena = memory.makeArena();
 /// `Allocator` from `arena`.
 var alloc = arena.allocator();
 
-/// Sets up lighting algorithm `ArrayList`s. Discards all invalidated pointers to prevent use-after-free corruption.
-/// Called whenever `applyLighting()` is called to reset allocator.
+/// Drops every allocation the previous pass made, so a frame starts from an empty arena.
+/// The arena keeps its pages, so the grids below cost a bump each rather than a real allocation.
+///
+/// Every pointer into the arena dies here, the buckets included, which is why they are reset with it.
 fn resetArena() void {
     if (!arena.reset(.retain_capacity)) memory.oom();
     @memset(&buckets_orange, .empty);
     @memset(&buckets_white, .empty);
-
-    cost_buffer = std.array_list.Aligned(u8, .@"16").initCapacity(alloc, 2048) catch memory.oom();
-    orange_buffer = std.array_list.Aligned(u16, .@"16").initCapacity(alloc, 2048) catch memory.oom();
-    white_buffer = std.array_list.Aligned(u16, .@"16").initCapacity(alloc, 2048) catch memory.oom();
 }
 
 /// Orthogonal per-step light cost for entering `block`. Fits in u8 (<= SOLID_FALLOFF).
@@ -150,13 +149,6 @@ pub const CHUNK_MARGIN: u32 = @max(1, std.math.divCeil(
     dw.CHUNK_SIZE,
 ) catch unreachable);
 
-/// Precomputed orthogonal step cost per cell (u8 keeps the flood's neighbor reads cache-friendly).
-var cost_buffer: std.array_list.Aligned(u8, .@"16") = undefined;
-/// High-precision per-cell light, orange (warm) channel.
-var orange_buffer: std.array_list.Aligned(u16, .@"16") = undefined;
-/// High-precision per-cell light, white (player/plate) channel.
-var white_buffer: std.array_list.Aligned(u16, .@"16") = undefined;
-
 /// Dial buckets, one FIFO of packed coords per light level, for each channel.
 var buckets_orange: [NUM_BUCKETS]std.array_list.Aligned(u32, .@"16") = undefined;
 var buckets_white: [NUM_BUCKETS]std.array_list.Aligned(u32, .@"16") = undefined;
@@ -195,6 +187,10 @@ fn seedPlayerLight(
     px: f32,
     py: f32,
 ) void {
+    // The one runtime-variable source. A brighter player than the buckets were sized for would seed
+    // past the end of `buckets`, so every upgrade that raises it must raise `MAX_PLAYER_LIGHT` too.
+    std.debug.assert(PLAYER_LIGHT <= MAX_PLAYER_LIGHT);
+
     const cx0: i32 = @intFromFloat(@floor(px - 0.5));
     const cy0: i32 = @intFromFloat(@floor(py - 0.5));
 
@@ -271,7 +267,7 @@ fn floodChannel(
     }
 }
 
-/// Executes a bucketed Dijkstra light flood over the visible lbock array.
+/// Executes a bucketed Dijkstra light flood over the visible block array.
 /// Writes the final per-block `light` (0..255) and `lighting_color` (orange flag).
 pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: f32) void {
     resetArena();
@@ -279,16 +275,11 @@ pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: 
     const h: i32 = @intCast(hb);
     const wbw: u16 = @intCast(wb);
 
-    // Recycle scratch: retain capacity, reset contents below.
-    for (&buckets_orange) |*bk| bk.clearRetainingCapacity();
-    for (&buckets_white) |*bk| bk.clearRetainingCapacity();
-    cost_buffer.resize(alloc, out.len) catch memory.oom();
-    orange_buffer.resize(alloc, out.len) catch memory.oom();
-    white_buffer.resize(alloc, out.len) catch memory.oom();
-
-    const cost_slice = cost_buffer.items;
-    const light_orange = orange_buffer.items;
-    const light_white = white_buffer.items;
+    // Orthogonal step cost per cell (u8 keeps the flood's neighbor reads cache-friendly),
+    // then the high-precision light of each channel. All three live in the arena `resetArena()` just cleared.
+    const cost_slice = alloc.alignedAlloc(u8, memory.MAIN_ALIGN, out.len) catch memory.oom();
+    const light_orange = alloc.alignedAlloc(u16, memory.MAIN_ALIGN, out.len) catch memory.oom();
+    const light_white = alloc.alignedAlloc(u16, memory.MAIN_ALIGN, out.len) catch memory.oom();
 
     const ambient: u16 = if (dw.dev_menu and IS_LIGHT_GLOBAL) AMBIENT_LIGHT_DEBUG else AMBIENT_LIGHT;
 

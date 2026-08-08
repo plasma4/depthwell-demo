@@ -619,6 +619,28 @@ This system prevents frame spikes (as you may normally have to generate a whole 
 
 Chunks that get accessed from the `SimBuffer` do not update the `ChunkCache`, although chunks generated for the purpose of being placed into `SimBuffer` _do_ get placed into the cache.
 
+#### The cache layers
+
+Worldgen is a pure function: the same coordinate always gives the same block. That is what makes caching safe here. It is also what makes caching necessary, because the same coordinate gets asked for many times. A chunk needs a one-block halo around itself to work out edge flags, so every border block is computed twice. A structure has to know whether a bigger structure overlaps it, so its box gets re-derived by each neighbor that checks. A parent block is shared by the 16 child blocks below it. Without memoization the engine would redo the same noise and the same placement rolls again and again.
+
+The caches all sit in static WASM memory with a fixed budget, so none of them can grow without bound or fragment the heap. Most are **direct-mapped and tiled**: a coordinate maps to one slot by its position, not by a hash. Tiling matters because the access pattern is a sweep. A chunk and the halo around it land in different slots by construction, so they cannot evict each other. The ones that are not tiled are **set-associative with CLOCK second-chance eviction**, which is the right shape when several nearby keys are live at once.
+
+They fall into two families for invalidation. Some **self-invalidate**: each entry stores the identity it was computed under, and a read that does not match simply recomputes. Others are **dropped explicitly** by `world.clearCaches()`, which runs whenever the depth changes or the world is reseeded. Getting this wrong is the main hazard: any debug slider that moves terrain must set `regen = true`, or the sliders move but the cached samples do not.
+
+From shallowest to deepest:
+
+- **Base terrain cache** (`procedural.base_terrain_cache`) — the raw terrain sample at one base-depth block: which stone it is, and how much ore the spot wants. This is the expensive one, since each miss runs several FBM and Worley noise passes. Entries are 16 bytes and the whole bank is under 2 MiB. It self-invalidates against `terrainGeneration()`, the shared identity of "this seed and this tuning".
+- **Foundation cache** (`world.foundation_cache`) — the finished base-depth block: terrain, plus the ore or gem dispersed over it, plus any structure that claimed it. Decorations are excluded on purpose, since they are stamped later. Both the chunk generator and its edge-flag halo read through this, which is how an ore vein stays connected across a chunk border instead of being cut in half. Same self-invalidation as above.
+- **Structure bank** (`structures.struct_cache`) — one bank per structure kind, holding the box that stands in each cell of that kind's spawn grid, with the terrain rules already applied. A cached box is one that would really be built, which is what lets the collision scan trust it without redoing the work. Each entry carries its seed and its terrain generation, so it retires itself.
+- **Chunk candidate cache** (`structures.chunk_ctx`) — every structure that can reach into one chunk, resolved once for the whole chunk instead of once per block. The tile is one simulation row wide and four rows tall, so a left-to-right generation sweep keeps all the neighbors it needs.
+- **Chunk seed cache** (`QuadCache.seed_cache`) — the four seeds of one chunk, mixed from its quadrant seed, its suffix, and its depth. Cheap to compute but asked for constantly, so it is a small 4-way cache. Dropped by `clearCaches()`, since a reseed leaves the same key naming different seeds.
+- **Chunk noise memo** (`ancestor.chunk_noise`) — the two seed streams that every cell of one chunk shares. Exactly one entry, because generation finishes a chunk before it moves to the next, so one is all a sweep can use.
+- **Ancestor cache** (`ancestor.ancestor_cache`) — whole materialized chunks at parent depths, which is what recursive generation reads to know what a block is descended from. Indexed by distance from the current depth rather than by absolute depth: the two nearest depths get 128 slots each, and the rest get 8, because each depth up covers four times the area and so converges to a tiny footprint. That keeps the whole thing near 2 MiB instead of 8. A depth change clears it.
+- **Parent neighborhood cache** (`ancestor.parent_hood_cache`) — a parent block and its eight neighbors. All 16 child cells of a region share one parent cell, and each used to walk the same nine lookups, so this turns 144 resolutions into 9. Set-associative rather than tiled, because the nine cells of a neighborhood are adjacent and a tile would have them evict each other immediately.
+- **Chunk cache** (`world.chunk_cache`) — described under "Smart chunk preloading" above. Unlike the rest, it holds finished chunks for the current depth only, and it is the one the renderer falls back to when the camera outruns the `SimBuffer`.
+
+One rule ties them together, and it is the one to remember when adding a cache. Everything above memoizes _procedural_ output only: what the world would be before the player touched it. Player edits stay a separate overlay that `materializeChunk()` replays on top, which is why an edit never has to reach into any of these banks. A cache that started to hold post-edit values would need `mod_store.content_generation` in its key, a counter that bumps on every write to the store and exists for exactly that purpose. Nothing needs it today. The parent neighborhood cache is the one that looks like it should and does not, so it is worth stating why: it only ever reads depths below the frontier, and those are frozen for their descendants, so no edit can change what it holds while the frontier stands still.
+
 #### Light system
 
 Lighting is computed on the CPU every frame in `zig/render/lighting.zig`, right after the visible block buffer is assembled and before it is handed to the GPU. Every block receives a `light` value from 0 to 255, and the WGSL shader multiplies that block's OKLAB lightness by `light / 255` (so 0 is pitch black and 255 is full brightness). A companion field, `lighting_color`, records whether the "winning" (strongest) light is warm/orange (fire) or neutral white.
@@ -630,17 +652,17 @@ By processing these buckets in strictly descending order (brightest to dimmest),
 
 How much light is lost per step (the "falloff") depends on what it passes through:
 
-- **Air** loses the least (`AIR_FALLOFF = 10`), so light carries far through open space.
-- **Solid** blocks lose the most (`SOLID_FALLOFF = 26`), but the cost scales with how mined the block is (its `hp`): a nearly-broken block lets through almost as much light as air.
-- **Liquid** sits in between (`LIQUID_FALLOFF = 18`), and a waterlogged block is capped so it never blocks light more than water would.
+- **Air** loses the least (`AIR_FALLOFF = 12`), so light carries far through open space.
+- **Solid** blocks lose the most (`SOLID_FALLOFF = 28`), but the cost scales with how mined the block is (its `hp`): a nearly-broken block lets through almost as much light as air.
+- **Liquid** sits in between (`LIQUID_FALLOFF`, 12 below solid), and a waterlogged block is capped so it never blocks light more than water would.
 
 A diagonal step costs `sqrt(2)` times the orthogonal falloff (approximated with integer math), turning the square 8-neighbor grid into a mostly circular-looking falloff (8-sided polygon).
 
 Light sources include the player (a bright, moving source seeded from their continuous sub-pixel position across the 2x2 blocks they overlap), campfires and furnaces (warm/orange), and glowing plates.
 
-Because a source just off-screen can still spill onto visible blocks, the block buffer is padded by `CHUNK_MARGIN` (calculated at compile-time) so that the BFS flood is exactly wide enough to catch the furthest reachable bleed.
+Because a source just off-screen can still spill onto visible blocks, the block buffer is padded by `CHUNK_MARGIN` (calculated at compile-time) so that the flood is exactly wide enough to catch the furthest reachable bleed.
 
-Internally, the flood tracks warm and neutral light as two channels packed into one `u32`, so an orange campfire glow and a white plate glow can coexist and mix correctly; the final `lighting_color` is simply whichever channel wins at that block.
+Warm and neutral light are two separate grids, flooded independently over one shared cost grid, so an orange campfire glow and a white plate glow never eat each other. A block's final `light` is the brighter of the two, and `lighting_color` records which one won.
 
 #### Memory transfer
 
