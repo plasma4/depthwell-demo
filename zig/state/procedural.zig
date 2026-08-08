@@ -93,7 +93,7 @@ const TerrainSampler = struct {
 
     /// Draws the three fields every terrain rule needs.
     fn init(wx: u32, wy: u32) TerrainSampler {
-        const density_seed = memory.game.getHashSeed(.density);
+        const density_seed = memory.getHashSeed(.density);
 
         var warp: Vec2f32 = .{ 0.0, 0.0 };
         const density_res = getFbmValueWarp(density_seed, wx, wy, 93.0, 28.0, &warp);
@@ -105,8 +105,8 @@ const TerrainSampler = struct {
             .warp = warp,
             .cell_hash = density_res.cell_hash,
             .density = density_res.value,
-            .cutoff = 0.75 + 0.3 * getHybridNoise(memory.game.getHashSeed(.cutoff), wx, wy, 20.5),
-            .moisture = fbm(getPerlinNoiseFixed, memory.game.getHashSeed(.moisture), wx, wy, 375.0, 3),
+            .cutoff = 0.75 + 0.3 * getHybridNoise(memory.getHashSeed(.cutoff), wx, wy, 20.5),
+            .moisture = fbm(getPerlinNoiseFixed, memory.getHashSeed(.moisture), wx, wy, 375.0, 3),
         };
     }
 
@@ -115,7 +115,7 @@ const TerrainSampler = struct {
         if (self.detail_ready) return;
         self.detail_ready = true;
 
-        self.weirdness = getBillowNoise(memory.game.getHashSeed(.weirdness), self.wx, self.wy, 140.8);
+        self.weirdness = getBillowNoise(memory.getHashSeed(.weirdness), self.wx, self.wy, 140.8);
         // reuse the density sample's domain warp instead of drawing a second one
         self.density2 = getFbmValuePrewarped(
             self.density_seed,
@@ -216,7 +216,7 @@ fn computeBaseSpriteType(wx: u32, wy: u32) TerrainData {
     return .{
         .sprite = sprite,
         .ore_density = if (sampler.deep)
-            fbm(getPerlinNoiseFixed, memory.game.getHashSeed(.ore_density), wx, wy, 122.0, 3)
+            fbm(getPerlinNoiseFixed, memory.getHashSeed(.ore_density), wx, wy, 122.0, 3)
         else
             0,
     };
@@ -452,7 +452,7 @@ pub fn invalidateTuning() void {
 
 /// Returns version key for current world seed and tuning state.
 pub inline fn terrainGeneration() u64 {
-    const seed = memory.game.getHashSeed(.moisture);
+    const seed = memory.getHashSeed(.moisture);
     return (seed[0] ^ seed[1]) +% tuning_epoch;
 }
 
@@ -788,8 +788,8 @@ pub const OreSeeds = struct {
     /// returns seed streams for base depth terrain
     pub inline fn atBaseDepth() OreSeeds {
         return .{
-            .field = memory.game.getHashSeed(.ores1),
-            .gem = memory.game.getHashSeed(.gems),
+            .field = memory.getHashSeed(.ores1),
+            .gem = memory.getHashSeed(.gems),
         };
     }
 
