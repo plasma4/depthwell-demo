@@ -14,7 +14,7 @@ const Sprite = dw.Sprite;
 const sprite = dw.sprite;
 
 const SHADER_PATH = "src/shader.wgsl";
-const START_MARKER = "// #CONSTANT REGION, DO NOT MODIFY MANUALLY#";
+const START_MARKER = "// #CONSTANT REGION START, DO NOT MODIFY CONTENTS MANUALLY#";
 const END_MARKER = "// #CONSTANT REGION END#";
 
 pub fn main(init: std.process.Init) !void {
@@ -38,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
     try writer.writeAll(src[0 .. start + START_MARKER.len]);
     try writer.print(
         \\
-        \\// Auto-generated from zig/types/sprite.zig by zig/generate_shader.zig (runs during `zig build`).
+        \\// Auto-generated from zig/types/sprite.zig by zig/update_shader.zig (runs during `zig build`).
         \\// Do NOT edit values between the markers by hand; edit the Sprite enum instead.
         \\const TILES_PER_ROW: f32 = {d}.0;
         \\const TILES_PER_COLUMN: f32 = {d}.0;
@@ -48,6 +48,11 @@ pub fn main(init: std.process.Init) !void {
         \\const GEM_MASK_START: u32 = {d}u;
         \\const WATER_START: u32 = {d}u;
         \\
+        \\// OKLAB chroma a fully saturated light source adds at full lightness.
+        \\const LIGHT_CHROMA_MAX: f32 = {d};
+        \\// Steps a full hue turn is divided into. Hue WRAPS, so the last step is one step before the first.
+        \\const LIGHT_HUE_STEPS: f32 = {d}.0;
+        \\
     , .{
         dw.getTilesPerRow(),
         dw.getTilesPerColumn(),
@@ -56,6 +61,8 @@ pub fn main(init: std.process.Init) !void {
         sprite.GEM_START,
         sprite.MASK_START,
         @intFromEnum(Sprite.water),
+        dw.lighting.LIGHT_CHROMA_MAX,
+        dw.lighting.HUE_STEPS,
     });
     try writer.writeAll(src[end..]);
 

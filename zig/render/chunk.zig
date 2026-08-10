@@ -180,11 +180,22 @@ fn overlayLayer() LayerPass {
 
 /// Adds visible chunk data for the live world to the scratch buffer, as well as properties.
 /// This is used in `render.prepareVisibleData()`.
-pub fn updateVisibleChunks(dt: f64, canvas_w: f64, canvas_h: f64) void {
+///
+/// Returns whether anything was rasterized. False means the layer is hidden outright
+/// (`portal.liveLayerHidden()`), and the caller must skip its draw calls: nothing was published for them
+/// to read. The player is still placed, since the entity pass draws them over both layers.
+pub fn updateVisibleChunks(dt: f64, canvas_w: f64, canvas_h: f64) bool {
     current_dt = dt;
     // rolled once per render frame, before either pass, so both layers are handed the same warp!
     updateShake(dw.portal.shakeIntensity());
-    rasterizeLayer(liveLayer(dt), canvas_w, canvas_h);
+
+    const pass = liveLayer(dt);
+    if (dw.portal.liveLayerHidden()) {
+        placePlayer(pass);
+        return false;
+    }
+    rasterizeLayer(pass, canvas_w, canvas_h);
+    return true;
 }
 
 /// Adds the portal descent's D+1 preview to the scratch buffer, ready for a second tile draw call.
@@ -339,6 +350,29 @@ fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
     }
 }
 
+/// Places the player sprite for the ENTITY pass (logical 480x270 px, sprite center).
+///
+/// This is the same world-to-screen mapping the tile grid uses (1 px = `CHUNK_SIZE` subpixels, scaled by
+/// zoom), so the player stays pixel-aligned with the blocks. `pass.zoom` is the logical
+/// (non-resolution-scaled) zoom, matching how every other entity is positioned.
+///
+/// Split out of `updateRenderProperties()` because the live layer is skipped once an ascent's overlay
+/// covers it, and the player is drawn over both layers either way.
+fn placePlayer(pass: LayerPass) void {
+    std.debug.assert(pass.source == .live);
+    player_screen_pos = .{
+        @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + (pass.player[0] - pass.cam[0]) * pass.zoom / CHUNK_SIZE_FLOAT),
+        @floatCast(@as(f64, dw.SCREEN_HEIGHT_HALF) + (pass.player[1] - pass.cam[1]) * pass.zoom / CHUNK_SIZE_FLOAT),
+    };
+    // A descent zooms the world in by exactly the factor that the next depth shrinks the player by,
+    // so the two cancel: holding the sprite at the committed scale keeps it from popping at either
+    // end. It shrinks further only as the portal swallows it.
+    player_screen_size = @floatCast(CHUNK_SIZE_FLOAT * if (dw.portal.hasMotionOverride())
+        memory.game.camera_scale * dw.portal.playerScale()
+    else
+        pass.zoom);
+}
+
 /// Sets scratch properties containing information to TypeScript for renderFrame.
 fn updateRenderProperties(
     pass: LayerPass,
@@ -362,26 +396,9 @@ fn updateRenderProperties(
     const player_interpolated_x = pass.player[0];
     const player_interpolated_y = pass.player[1];
 
-    // Player render position for the ENTITY pass (logical 480x270 px, sprite center).
-    // This is the same world->screen mapping the tile grid uses (1 px = CHUNK_SIZE subpixels, scaled by zoom),
-    // so the player entity stays pixel-aligned with the blocks. interpolated_zoom is the logical(non-resolution-scaled) zoom
-    // (matching how other entities are positioned),
-    //
-    // The overlay pass leaves these alone: the live pass already placed the player,
+    // The overlay pass leaves the player alone: the live pass already placed them,
     // and letting the D+1 layer restate them would move the sprite mid-descent.
-    if (pass.source == .live) {
-        player_screen_pos = .{
-            @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + (player_interpolated_x - interp_cam_x) * interpolated_zoom / CHUNK_SIZE_FLOAT),
-            @floatCast(@as(f64, dw.SCREEN_HEIGHT_HALF) + (player_interpolated_y - interp_cam_y) * interpolated_zoom / CHUNK_SIZE_FLOAT),
-        };
-        // A descent zooms the world in by exactly the factor that the next depth shrinks the player by,
-        // so the two cancel: holding the sprite at the committed scale keeps it from popping at either
-        // end. It shrinks further only as the portal swallows it.
-        player_screen_size = @floatCast(CHUNK_SIZE_FLOAT * if (dw.portal.hasMotionOverride())
-            memory.game.camera_scale * dw.portal.playerScale()
-        else
-            interpolated_zoom);
-    }
+    if (pass.source == .live) placePlayer(pass);
 
     // Position player in the middle of the screen plus their offset from the camera center
     const player_render_x = (player_interpolated_x - grid_origin_sub_x - CHUNK_SIZE_FLOAT * CHUNK_SIZE_FLOAT / 2) / CHUNK_SIZE_FLOAT;

@@ -102,10 +102,7 @@ pub fn init(new_game: bool) void {
     }
 
     const seed = memory.game.seed;
-    var temp_seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .seed2_init));
-    inline for (&memory.game.seed2) |*s| {
-        s.* = temp_seed.next();
-    }
+    memory.deriveHashSeeds();
 
     // Start off by determining where the player starts off exactly with layer pushing
     dw.sound.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .sound));
@@ -127,7 +124,6 @@ pub fn init(new_game: bool) void {
         });
 
         world.pushLayer(
-            .none,
             memory.game.getPlayerCoord(),
             memory.game.getBlockXInChunk(), // convert a subpixel (0-4095) in a chunk to a block in a chunk (0-15)
             memory.game.getBlockYInChunk(),

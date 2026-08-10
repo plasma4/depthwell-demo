@@ -130,7 +130,7 @@ pub fn canMine(tool_type: Tools, target_sprite: Sprite) bool {
 
 /// Least player-lit a block may be and still be mineable, on the same 0-255 scale as `Block.light`.
 /// Deliberately measured against JUST the player's light (see `lighting.miningLightAt()`).
-pub const MIN_MINING_LIGHT: u8 = 32;
+pub const MIN_MINING_LIGHT: u8 = 48;
 
 /// Whether the block the mouse is over is lit well enough by the player to be mined.
 /// Reads the logic-tick flood, never the rendered light, so the answer cannot vary with frame rate.
