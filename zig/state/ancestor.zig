@@ -314,6 +314,10 @@ const NON_ANCHOR_CELLS = dw.BLOCKS_PER_PARENT * dw.BLOCKS_PER_PARENT - 1;
 /// a gem is a speck, and a coherent field would make a region keep all of them or none.
 const GEM_KEEP_CHANCE = (GEM_COPIES_MEAN - 1.0) / @as(comptime_float, NON_ANCHOR_CELLS);
 
+/// Chance that one corner of a fully enclosed empty parent fills at the next depth.
+/// Each corner rolls separately, so enclosed pockets stop being fixed 4x4 squares.
+const INFILL_CORNER_CHANCE = 0.5;
+
 /// Total block width of the world across one dimension.
 const WORLD_BLOCKS_WIDE = @as(u32, dw.CHUNK_SIZE) << (STARTING_ZOOM_TIMES * dw.ZOOM_LOG2);
 
@@ -372,7 +376,36 @@ comptime {
         @compileError("A fully buried ore cell must keep its ore, or a big deposit gets holes.");
     if (GEM_COPIES_MEAN < 1 or GEM_COPIES_MEAN > 1 + NON_ANCHOR_CELLS)
         @compileError("A gem keeps its anchor cell, so its mean sits in [1, region size].");
+    if (INFILL_CORNER_CHANCE <= 0 or INFILL_CORNER_CHANCE >= 1)
+        @compileError("An infill corner chance must let a corner both fill and stay empty.");
 }
+
+/// Returns the diagonal parent material for one infill corner, if this parent is fully enclosed.
+/// The caller must use the returned material only for that matching child corner.
+fn infillCornerSource(n: [8]Block, lx: u4, ly: u4) ?Block {
+    if (lx != 0 and lx != dw.BLOCKS_PER_PARENT - 1) return null;
+    if (ly != 0 and ly != dw.BLOCKS_PER_PARENT - 1) return null;
+    for (n) |block| if (!block.isSolid()) return null;
+
+    // Neighbors are row-major with the center removed.
+    const index: usize = if (ly == 0)
+        if (lx == 0) 0 else 2
+    else if (lx == 0)
+        5
+    else
+        7;
+    return n[index];
+}
+
+/// Returns true when a candidate enclosed corner fills at this depth.
+/// `wx` and `wy` name the child cell, so adjacent chunks always agree on the roll.
+inline fn infillsCorner(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord) bool {
+    const roll = seeding.FastHash.hash2dWorld(noise_seed, wx +% INFILL_SALT, wy -% INFILL_SALT);
+    return roll <= seeding.oddsNum(INFILL_CORNER_CHANCE);
+}
+
+/// Keeps infill rolls separate from ore and gem retention.
+const INFILL_SALT: u64 = 0xA24BAED4963EE407;
 
 /// How much of a parent's own neighborhood backs one child cell,
 /// from 0 (an isolated parent) to 1 (a parent buried in the same overlay).
@@ -702,7 +735,21 @@ pub fn applyAncestorLogic(
     const parent_sprite = parent_block.id;
     // const parent_seed = parent_block.seed;
 
-    if (parent_sprite.isEmpty()) return .{};
+    if (parent_sprite.isEmpty()) {
+        const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
+        const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
+        const source = infillCornerSource(parent_neighbors, lx, ly) orelse return .{};
+        const chunk_noise = chunkNoise(key);
+        const wx = worldBlock(@intCast(key.quadrant % 2), key.suffix[0], bx);
+        const wy = worldBlock(@intCast(key.quadrant / 2), key.suffix[1], by);
+        if (!infillsCorner(chunk_noise.noise_seed, wx, wy)) return .{};
+        return .{
+            .id = source.id,
+            .base_id = source.base_id,
+            .seed = seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by),
+            .tag = source.tag,
+        };
+    }
     const chunk_noise = chunkNoise(key);
     const noise_hash_2 = seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by);
     if (parent_sprite == .edge_stone)
@@ -1102,6 +1149,45 @@ fn testNeighborhood(solid: [3][3]bool, seed_base: u64) struct { Block, [8]Block 
         }
     }
     return .{ center, n };
+}
+
+test "infill: only enclosed outer corners can source material" {
+    const enclosed: [8]Block = .{
+        .makeBasicBlock(.stone, 1),
+        .makeBasicBlock(.blue_stone, 2),
+        .makeBasicBlock(.mossy_stone, 3),
+        .makeBasicBlock(.lime_stone, 4),
+        .makeBasicBlock(.green_stone, 5),
+        .makeBasicBlock(.purple_stone, 6),
+        .makeBasicBlock(.bright_red_stone, 7),
+        .makeBasicBlock(.blue_strange_stone, 8),
+    };
+
+    try testing.expectEqual(Sprite.stone, infillCornerSource(enclosed, 0, 0).?.id);
+    try testing.expectEqual(Sprite.mossy_stone, infillCornerSource(enclosed, 3, 0).?.id);
+    try testing.expectEqual(Sprite.purple_stone, infillCornerSource(enclosed, 0, 3).?.id);
+    try testing.expectEqual(Sprite.blue_strange_stone, infillCornerSource(enclosed, 3, 3).?.id);
+    try testing.expect(infillCornerSource(enclosed, 1, 0) == null);
+
+    var open = enclosed;
+    open[1] = .empty;
+    try testing.expect(infillCornerSource(open, 0, 0) == null);
+}
+
+test "infill: corner rolls are deterministic and varied" {
+    const seed: dw.utils.Vec2u = .{ 0x517cc1b727220a95, 0x6c8e9cf570932bd5 };
+    var fills = false;
+    var stays_empty = false;
+    for (0..32) |y| {
+        for (0..32) |x| {
+            const fills_here = infillsCorner(seed, x, y);
+            try testing.expectEqual(fills_here, infillsCorner(seed, x, y));
+            fills = fills or fills_here;
+            stays_empty = stays_empty or !fills_here;
+        }
+    }
+    try testing.expect(fills);
+    try testing.expect(stays_empty);
 }
 
 /// Sweeps every noise cell the erosion field can offer, so a "never carved" claim covers the whole
