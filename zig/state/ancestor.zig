@@ -1,15 +1,9 @@
-//! Handles fractal ancestry and lookup logic.
-//! Contains the core procedural logic for infinite-depth zooming and recursive terrain logic, using various functions:
-//! - `getInheritedMaterial()` traces the "block lineage" up to parent depths,
-//!   preserving `mod_store` changes; caches results in `AncestorCache`.
-//! - `applyAncestorLogic()` and slope logic create continuous sloped surfaces,
-//!   based on parent blocks using bilinear 4-corner density
-//! - Ancestor logic also uses noise masks, displaces blocks (`warpField()`),
-//! and both inherits and produces new ores.
-//! `keepsInheritedOverlay()` splits the two kinds apart:
-//! an ore spreads with the vein around it, and a gem barely spreads at all.
+//! Resolves recursive block ancestry.
 //!
-//! Note that "ore" and "gem" are used interchangeably at times within this file.
+//! `getInheritedMaterial()` reads parent blocks and player edits.
+//! `applyAncestorLogic()` makes child blocks from that parent data.
+//! It shapes terrain with density and erosion fields.
+//! It also warps materials and spreads ores or gems.
 const std = @import("std");
 const dw = @import("../root.zig");
 const memory = dw.memory;
@@ -17,6 +11,7 @@ const world = dw.world;
 const procedural = dw.procedural;
 const seeding = dw.seeding;
 const WorldCoord = seeding.WorldCoord;
+const Vec2World = @Vector(2, WorldCoord);
 
 const Sprite = dw.Sprite;
 const Block = memory.Block;
@@ -27,8 +22,7 @@ const DepthCoordinate = world.DepthCoordinate;
 const HORIZON_DEPTH = dw.HORIZON_DEPTH;
 const STARTING_ZOOM_TIMES = dw.startup.STARTING_ZOOM_TIMES;
 
-/// Returns true if discrete coordinates are no longer tracked at this depth,
-/// (if so, the background `quad_cache` begins to be used).
+/// Returns true when this depth uses `quad_cache` instead of block coordinates.
 pub inline fn isHorizonDepth(depth: u64) bool {
     // The floor is NEVER a horizon depth.
     if (depth <= STARTING_ZOOM_TIMES) return false;
@@ -40,17 +34,9 @@ pub inline fn isHorizonDepth(depth: u64) bool {
     return (depth + horizon_limit) == memory.game.depth;
 }
 
-/// Set-associative chunk cache for chunk ancestors, indexed by distance from the current depth.
-/// Fully cleared whenever the game depth changes (see `world.clearCaches()`).
-///
-/// Tiers are RELATIVE: tier 0 is the current depth (D), tier 1 its parent, down to the horizon (H) at tier `NUM_TIERS - 1`.
-/// Relative indexing lets the hottest tiers sit at fixed slots so they can be sized larger.
-/// - The two tiers nearest the player (`HOT_TIERS`) are often queried:
-///   this is like a 4x4 chunk "group" collapsing into one seed with D-1 and 16x16 at D-2, and so on!
-/// - Deeper tiers converge geometrically (each ~4x smaller footprint) and only need a small 8-slot buffer.
-///   Really, you only need 4 to prevent quadrant boundary issues, but this provides a decent buffer.
-///
-/// This keeps the cache under ~2 MiB (vs 8 MiB uniform), fitting comfortably in L2/L3.
+/// Stores inherited chunks by their distance from the current depth.
+/// `world.clearCaches()` clears this cache when the game depth changes.
+/// Near tiers use more slots than distant tiers.
 pub const AncestorCache = struct {
     /// Total relative tiers tracked: one per live depth from the current depth down to the horizon.
     /// The `+1` covers the single transition frame at `depth == HORIZON_DEPTH + STARTING_ZOOM_TIMES`,
@@ -209,15 +195,15 @@ pub const AncestorCache = struct {
 
 pub var ancestor_cache: AncestorCache = .{};
 
-/// Parent coordinate and block offset info.
+/// Stores a parent coordinate and a block offset.
 pub const ParentInfo = struct {
     coord: Coordinate,
     bx: u4,
     by: u4,
 };
 
-/// Shifts the suffix and incorporates the local block position to find the exact parent chunk and block.
-/// Child's depth is described in the `DepthCoordinate`.
+/// Finds the parent chunk and block for a child block.
+/// `DepthCoordinate` gives the child depth.
 pub fn getParentInfo(key: DepthCoordinate, bx: u4, by: u4) ParentInfo {
     // getParent handles the 3-bit rebase origin reconstruction and quadrant shifts for D > 32.
     const parent = key.getParent();
@@ -237,9 +223,8 @@ pub fn getParentInfo(key: DepthCoordinate, bx: u4, by: u4) ParentInfo {
     };
 }
 
-/// Retrieves a full chunk at any depth, handling cache and procedural generation.
-/// The cache holds materialized chunks (`mod_store` carries no block data of its own), so a hit already
-/// includes the player's edits and a miss replays them as part of generating the slot.
+/// Returns a materialized chunk at any depth.
+/// Cache entries include edits from `mod_store`.
 pub fn getAncestorChunk(key: DepthCoordinate) *const Chunk {
     if (ancestor_cache.get(key)) |cached| return cached;
 
@@ -314,9 +299,11 @@ const NON_ANCHOR_CELLS = dw.BLOCKS_PER_PARENT * dw.BLOCKS_PER_PARENT - 1;
 /// a gem is a speck, and a coherent field would make a region keep all of them or none.
 const GEM_KEEP_CHANCE = (GEM_COPIES_MEAN - 1.0) / @as(comptime_float, NON_ANCHOR_CELLS);
 
-/// Chance that one corner of a fully enclosed empty parent fills at the next depth.
-/// Each corner rolls separately, so enclosed pockets stop being fixed 4x4 squares.
-const INFILL_CORNER_CHANCE = 0.5;
+/// Chance that an eligible child corner fills.
+/// Each corner rolls separately.
+const INFILL_CORNER_CHANCE = 0.75;
+/// Chance that a diagonal solid pair gains one bridge cell.
+const DIAGONAL_BRIDGE_CHANCE = 0.70;
 
 /// Total block width of the world across one dimension.
 const WORLD_BLOCKS_WIDE = @as(u32, dw.CHUNK_SIZE) << (STARTING_ZOOM_TIMES * dw.ZOOM_LOG2);
@@ -331,8 +318,8 @@ inline fn worldBlock(quadrant_bit: u1, chunk: u64, block: u4) WorldCoord {
     return chunk_index * dw.CHUNK_SIZE + block;
 }
 
-/// Bounds (inclusive) of the core that a solid parent ALWAYS keeps at the next depth:
-/// the center `BLOCKS_PER_PARENT / 2` square of its child region, so a 2x2 out of the standard 4x4.
+/// Inclusive bounds of the child core that a solid parent keeps.
+/// The core is a centered 2x2 region.
 ///
 /// (See diagram below: `o` is optional, `R` is required; this is meant for standard dupe-able solids.)
 /// ```
@@ -349,25 +336,27 @@ inline fn isParentCore(lx: u4, ly: u4) bool {
     return lx >= CORE_MIN and lx <= CORE_MAX and ly >= CORE_MIN and ly <= CORE_MAX;
 }
 
-/// Whether a child cell can't be carved; true if the block is the 2x2 core,
-/// OR if we want horizonta/vertical arms.
-inline fn isProtectedCell(n: [8]Block, lx: u4, ly: u4) bool {
-    const core_x = lx >= CORE_MIN and lx <= CORE_MAX;
-    const core_y = ly >= CORE_MIN and ly <= CORE_MAX;
+/// Returns true when solid neighbors give a parent two-dimensional support.
+/// Opposite neighbors alone are a thin line and do not give this support.
+inline fn hasAreaSupport(n: [8]Block) bool {
+    const above = n[1].isSolid();
+    const left = n[3].isSolid();
+    const right = n[4].isSolid();
+    const below = n[6].isSolid();
+    return (above and left) or (above and right) or (below and left) or (below and right);
+}
 
-    if (core_x and core_y) return true;
-    // Neighbor 1 is above, 3 left, 4 right, 6 below (due to edge flags)
-    if (core_x) return if (ly < CORE_MIN) n[1].isSolid() else n[6].isSolid();
-    if (core_y) return if (lx < CORE_MIN) n[3].isSolid() else n[4].isSolid();
-    // The region's corners belong to the silhouette, not to the guarantee.
-    return false;
+/// Returns true when a child cell is in a supported parent core.
+/// A parent with only a line of neighbors has no protected child cells.
+inline fn isProtectedCell(n: [8]Block, lx: u4, ly: u4) bool {
+    return isParentCore(lx, ly) and hasAreaSupport(n);
 }
 
 comptime {
-    // The mask must be able to take the exposed row of a face.
+    // the mask must be able to take the exposed row of a face!
     if (EROSION_DEPTH <= 0.5 * CELL_DENSITY_STEP)
         @compileError("A full erosion mask cannot even reach a face's exposed cell row.");
-    // How far past that row it reaches is free, since the core guard, not the mask, is what stops it.
+    // how far past that row it reaches is free, since the core guard, not the mask, is what stops it
     if (dw.BLOCKS_PER_PARENT % 2 != 0)
         @compileError("A parent's child region needs an even width for its core to sit at the center.");
     if (ORE_KEEP_ALONE <= 0 or ORE_KEEP_ALONE >= 1)
@@ -378,14 +367,22 @@ comptime {
         @compileError("A gem keeps its anchor cell, so its mean sits in [1, region size].");
     if (INFILL_CORNER_CHANCE <= 0 or INFILL_CORNER_CHANCE >= 1)
         @compileError("An infill corner chance must let a corner both fill and stay empty.");
+    if (DIAGONAL_BRIDGE_CHANCE <= 0 or DIAGONAL_BRIDGE_CHANCE >= 1)
+        @compileError("A diagonal bridge chance must let a pair both join and stay separate.");
 }
 
-/// Returns the diagonal parent material for one infill corner, if this parent is fully enclosed.
-/// The caller must use the returned material only for that matching child corner.
+/// Returns a diagonal donor for one enclosed or narrow infill corner.
+/// The caller must use the result only at that child corner.
 fn infillCornerSource(n: [8]Block, lx: u4, ly: u4) ?Block {
     if (lx != 0 and lx != dw.BLOCKS_PER_PARENT - 1) return null;
     if (ly != 0 and ly != dw.BLOCKS_PER_PARENT - 1) return null;
-    for (n) |block| if (!block.isSolid()) return null;
+
+    // The cardinal pairs are opposite walls of a one-parent-wide tunnel. All four diagonal
+    // donors must be solid, so an ordinary open surface cannot grow a loose corner into its air.
+    const has_horizontal_walls = n[3].isSolid() and n[4].isSolid();
+    const has_vertical_walls = n[1].isSolid() and n[6].isSolid();
+    if (!has_horizontal_walls and !has_vertical_walls) return null;
+    inline for (.{ 0, 2, 5, 7 }) |index| if (!n[index].isSolid()) return null;
 
     // Neighbors are row-major with the center removed.
     const index: usize = if (ly == 0)
@@ -397,8 +394,74 @@ fn infillCornerSource(n: [8]Block, lx: u4, ly: u4) ?Block {
     return n[index];
 }
 
-/// Returns true when a candidate enclosed corner fills at this depth.
-/// `wx` and `wy` name the child cell, so adjacent chunks always agree on the roll.
+/// Returns a cardinal donor for a diagonal gap.
+/// `lx == 0` selects one of the two bridge sides.
+fn diagonalBridgeSource(n: [8]Block, lx: u4, ly: u4) ?Block {
+    if (lx != 0 and lx != dw.BLOCKS_PER_PARENT - 1) return null;
+    if (ly != 0 and ly != dw.BLOCKS_PER_PARENT - 1) return null;
+
+    // Each case names an air parent's corner that lies between two diagonal solid parents.
+    if (lx == 0 and ly == 0 and n[1].isSolid() and n[3].isSolid()) return n[1];
+    if (lx == dw.BLOCKS_PER_PARENT - 1 and ly == 0 and n[1].isSolid() and n[4].isSolid()) return n[1];
+    if (lx == 0 and ly == dw.BLOCKS_PER_PARENT - 1 and n[3].isSolid() and n[6].isSolid()) return n[3];
+    if (lx == dw.BLOCKS_PER_PARENT - 1 and ly == dw.BLOCKS_PER_PARENT - 1 and n[4].isSolid() and n[6].isSolid()) return n[4];
+    return null;
+}
+
+/// Returns the parent-grid corner that a child corner touches.
+/// Diagonal parents and their bridge share this coordinate.
+inline fn parentGridCorner(wx: WorldCoord, wy: WorldCoord, lx: u4, ly: u4) Vec2World {
+    return .{
+        wx / dw.BLOCKS_PER_PARENT + @intFromBool(lx != 0),
+        wy / dw.BLOCKS_PER_PARENT + @intFromBool(ly != 0),
+    };
+}
+
+/// Returns the shared diagonal bridge hash for the parent-grid corner at `wx`, `wy`.
+inline fn diagonalBridgeRoll(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord, lx: u4, ly: u4) u64 {
+    const corner = parentGridCorner(wx, wy, lx, ly);
+    return seeding.FastHash.hash2dWorld(noise_seed, corner[0] +% DIAGONAL_SALT, corner[1] -% DIAGONAL_SALT);
+}
+
+/// Returns true when the parent-grid corner gets its diagonal bridge this depth.
+inline fn connectsDiagonal(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord, lx: u4, ly: u4) bool {
+    return diagonalBridgeRoll(noise_seed, wx, wy, lx, ly) <= seeding.oddsNum(DIAGONAL_BRIDGE_CHANCE);
+}
+
+/// Returns true for the selected side of a diagonal bridge.
+/// The other air parent stays empty, so a diagonal pair gains one bridge block rather than a wide fill.
+inline fn selectsDiagonalBridgeSide(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord, lx: u4, ly: u4) bool {
+    const roll = diagonalBridgeRoll(noise_seed, wx, wy, lx, ly);
+    return @intFromBool(lx == 0) == (roll & 1);
+}
+
+/// Returns true when this solid child corner must survive to join its diagonal peer.
+inline fn protectsDiagonalBridge(n: [8]Block, noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord, lx: u4, ly: u4) bool {
+    if (lx != 0 and lx != dw.BLOCKS_PER_PARENT - 1) return false;
+    if (ly != 0 and ly != dw.BLOCKS_PER_PARENT - 1) return false;
+
+    const diagonal: usize = if (ly == 0)
+        if (lx == 0) 0 else 2
+    else if (lx == 0)
+        5
+    else
+        7;
+    return n[diagonal].isSolid() and connectsDiagonal(noise_seed, wx, wy, lx, ly);
+}
+
+/// Compiles the material for an infill cell.
+/// Only an ore or gem may carry its `base_id`; ordinary materials must not use the overlay shader path.
+inline fn infillSpec(source: Block, seed: u64) memory.BlockSpec {
+    return .{
+        .id = source.id,
+        .base_id = if (source.id.isOverlay()) source.base_id else .none,
+        .seed = seed,
+        .tag = source.tag.aged(),
+    };
+}
+
+/// Returns true when a regular infill corner fills.
+/// `wx` and `wy` make the result stable across chunk borders.
 inline fn infillsCorner(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord) bool {
     const roll = seeding.FastHash.hash2dWorld(noise_seed, wx +% INFILL_SALT, wy -% INFILL_SALT);
     return roll <= seeding.oddsNum(INFILL_CORNER_CHANCE);
@@ -406,9 +469,11 @@ inline fn infillsCorner(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoo
 
 /// Keeps infill rolls separate from ore and gem retention.
 const INFILL_SALT: u64 = 0xA24BAED4963EE407;
+/// Keeps diagonal bridge rolls separate from every other terrain decision.
+const DIAGONAL_SALT: u64 = 0x9FB21C651E98DF25;
 
-/// How much of a parent's own neighborhood backs one child cell,
-/// from 0 (an isolated parent) to 1 (a parent buried in the same overlay).
+/// Returns overlay support for one child cell.
+/// The result is in the range 0 through 1.
 ///
 /// The 3x3 parent neighborhood is read as a coarse density field:
 /// 1 where a neighbor holds the same overlay, 0 where it does not, and 1 at the center.
@@ -440,16 +505,15 @@ fn overlaySupport(n: [8]Block, overlay: Sprite, lx: u4, ly: u4) f32 {
     return top + (bottom - top) * v;
 }
 
-/// Whether one child cell keeps the ore or gem its parent held.
+/// Returns true when a child keeps its parent ore or gem.
 ///
 /// The two kinds behave differently on purpose:
 /// - An ORE spreads. Its threshold rises with `overlaySupport()`, so a lone nugget frays into a
 ///   ragged clump and a wide vein comes through whole.
 /// - A GEM barely spreads. It keeps `GEM_COPIES_MEAN` cells of 16, so a gem stays a find.
 ///
-/// Both kinds keep an ANCHOR cell, so no deposit is ever wiped out by a descent.
-/// The anchor sits inside the parent's core (`isProtectedCell()`), the one part of a region the
-/// slope carve may never take, so the guarantee cannot be undone later in the same pass.
+/// Both kinds keep an ANCHOR cell.
+/// The anchor is in the parent core, where supported terrain keeps it through the carve.
 inline fn keepsInheritedOverlay(
     overlay: Sprite,
     n: [8]Block,
@@ -486,7 +550,7 @@ inline fn keepsInheritedOverlay(
 /// Keeps the gem draw off every other hash stream this file takes from `noise_seed`.
 const GEM_SALT: u64 = 0x632BE59BD9B4E019;
 
-/// Computes a continuous terrain erosion factor in [0, 1] using multi-octave ridged and undulating noise.
+/// Returns a continuous erosion value in the range 0 through 1.
 fn erosionMask(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord) f32 {
     // Value noise, NOT a folded gradient field.
     var gouges: f32 = 0;
@@ -520,7 +584,7 @@ fn erosionMask(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord) f32 {
     return std.math.clamp(mask, 0.0, 1.0);
 }
 
-/// Calculates density at parent block corners based on solid neighbors (ordered row-major, top-left to bottom-right).
+/// Returns parent-corner density from solid neighbors.
 fn cornerDensities(parent_block: Block, n: [8]Block) @Vector(4, f32) {
     // `isSolid()` rather than `isFoundation()`, so bedrock counts as the material it is. The two
     // differ only for edge stone, and reading the world border as open air would have the terrain
@@ -541,11 +605,9 @@ fn cornerDensities(parent_block: Block, n: [8]Block) @Vector(4, f32) {
 /// which is what lets `carvesSlope()` answer without sampling it when the corners already decide.
 const JITTER_SPAN = 0.4 * CORNER_UNIT;
 
-/// If true, a block is deleted based on bilinear corner density and erosion noise.
-///
-/// `warp` is the cell's own `warpField()`, passed in rather than sampled here:
-/// `applyAncestorLogic()` needs the same vector for `warpedMaterial()`,
-/// and the two MUST be the same sample or the carved silhouette and the material it is cut from disagree.
+/// Returns true when density and erosion carve a child block.
+/// `warp` must be the `warpField()` sample for this child.
+/// `applyAncestorLogic()` uses the same sample for `warpedMaterial()`.
 fn carvesSlope(
     parent_block: Block,
     n: [8]Block,
@@ -557,7 +619,7 @@ fn carvesSlope(
     ly: u4,
 ) bool {
     // The core and its bridges outrank every density and erosion term below; see `CORE_MIN`.
-    if (isProtectedCell(n, lx, ly)) return false;
+    if (isProtectedCell(n, lx, ly) or protectsDiagonalBridge(n, noise_seed, wx, wy, lx, ly)) return false;
 
     var buried = true;
     for (n) |b| buried = buried and b.isSolid();
@@ -723,8 +785,18 @@ fn chunkNoise(key: DepthCoordinate) ChunkNoise {
     return chunk_noise_value;
 }
 
-/// Evaluates child block evolution from its parent block and 8 parent neighbors.
-/// Handles water volume propagation, slope carving, material warping, and ore dispersal.
+/// Makes one child `BlockSpec` from a parent block and its eight neighbors.
+///
+/// Process:
+/// 1. Empty parents can make a regular infill corner or a diagonal bridge.
+/// 2. Edge stone, liquids, and non-foundation blocks use their special rules.
+/// 3. Foundation blocks can be carved, unless a portal or refinement protects the cell.
+/// 4. Surviving foundation blocks choose warped material and age their refinement tag.
+/// 5. Overlays keep or lose their underlay.
+/// 6. Other stone blocks evolve and can receive dispersed ore.
+///
+/// The function never creates ordinary solid terrain from an empty parent.
+/// Only `infillCornerSource()` and `diagonalBridgeSource()` can fill empty parent cells.
 pub fn applyAncestorLogic(
     parent_block: Block,
     parent_neighbors: [8]Block,
@@ -733,29 +805,30 @@ pub fn applyAncestorLogic(
     by: u4,
 ) memory.BlockSpec {
     const parent_sprite = parent_block.id;
-    // const parent_seed = parent_block.seed;
 
+    // Step 1. Handle the only allowed empty-parent fills.
     if (parent_sprite.isEmpty()) {
         const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
         const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
-        const source = infillCornerSource(parent_neighbors, lx, ly) orelse return .{};
+        const regular_source = infillCornerSource(parent_neighbors, lx, ly);
+        const source = regular_source orelse diagonalBridgeSource(parent_neighbors, lx, ly) orelse return .{};
         const chunk_noise = chunkNoise(key);
         const wx = worldBlock(@intCast(key.quadrant % 2), key.suffix[0], bx);
         const wy = worldBlock(@intCast(key.quadrant / 2), key.suffix[1], by);
-        if (!infillsCorner(chunk_noise.noise_seed, wx, wy)) return .{};
-        return .{
-            .id = source.id,
-            .base_id = source.base_id,
-            .seed = seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by),
-            .tag = source.tag,
-        };
+        const fills = if (regular_source != null)
+            infillsCorner(chunk_noise.noise_seed, wx, wy)
+        else
+            connectsDiagonal(chunk_noise.noise_seed, wx, wy, lx, ly) and
+                selectsDiagonalBridgeSide(chunk_noise.noise_seed, wx, wy, lx, ly);
+        if (!fills) return .{};
+        return infillSpec(source, seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by));
     }
     const chunk_noise = chunkNoise(key);
     const noise_hash_2 = seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by);
     if (parent_sprite == .edge_stone)
         return .{ .id = parent_sprite, .seed = noise_hash_2 };
 
-    // A submerged waterloggable parent must stay submerged in its children!
+    // Keep waterlogged parents submerged.
     const inherited_water: u4 = if (parent_sprite.isWaterloggable()) parent_block.hp else 0;
 
     const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
@@ -764,8 +837,7 @@ pub fn applyAncestorLogic(
     const wx = worldBlock(@intCast(key.quadrant % 2), key.suffix[0], bx);
     const wy = worldBlock(@intCast(key.quadrant / 2), key.suffix[1], by);
 
-    // Everything one child cell needs to be answered, built once: the plan below refines from it,
-    // and every evolution on the way down rolls its odds against it (see `refine.evolve()`).
+    // Build one shared context for later rules.
     const cell: dw.refine.Context = .{
         .parent = parent_block,
         .neighbors = parent_neighbors,
@@ -778,14 +850,13 @@ pub fn applyAncestorLogic(
         .water = inherited_water,
     };
 
-    // A macro block (decoration, installation, vine) states a plan for its whole region instead of
-    // filling it, so that one bush does not become sixteen. See `refine.zig`.
+    // Step 2. Macro blocks use their own child plan.
     if (dw.refine.ruleFor(parent_sprite)) |rule| {
         return dw.refine.refineChild(rule, cell);
     }
 
     if (parent_sprite.isLiquid()) {
-        // split the water
+        // Split liquid volume into child rows.
         if (parent_neighbors[1].id.isLiquid()) {
             return .{
                 .id = dw.refine.evolve(parent_sprite, cell).id,
@@ -799,7 +870,7 @@ pub fn applyAncestorLogic(
         return .{ .id = dw.refine.evolve(parent_sprite, cell).id, .seed = noise_hash_2, .water_volume = volume };
     }
 
-    // fallback for all other non-foundation blocks (decorations, chests, furnaces, liquids, etc.)
+    // Step 2. Evolve other non-foundation blocks.
     if (!parent_sprite.isFoundation()) {
         return .{
             .id = dw.refine.evolve(parent_sprite, cell).id,
@@ -808,35 +879,26 @@ pub fn applyAncestorLogic(
         };
     }
 
-    // Foundations from here on: only they carry a surface for the carve to shape.
-    // Nothing below may turn air into a solid, since the player could be standing in it.
-
-    // Geometry FIRST!
-    // A portal's anchor is the one surface the carve may not touch: a descent lands its player standing on
-    // the floor of the portal block's child region, and eroding that floor drops them straight through it.
-    //
-    // Every other refined decoration makes the same demand of the individual CELLS its own children
-    // land on (`refine.protectsSurfaceCell()`), rather than of a whole row: a region holds one or two
-    // copies, so everything else here still erodes normally.
-    // One sample for both the carve and the material pick; see `carvesSlope()`.
+    // Step 3. Only foundations carry terrain geometry.
+    // Portal anchors and refinement landing cells skip the carve.
+    // Use one warp sample for carving and material selection.
     const warp = warpField(noise_seed, wx, wy);
     if (!anchorsPortal(parent_neighbors) and
         !dw.refine.protectsSurfaceCell(parent_neighbors, noise_seed, wx, wy, lx, ly) and
         carvesSlope(parent_block, parent_neighbors, noise_seed, warp, wx, wy, lx, ly)) return .{};
 
-    // Now, resolve material domain warping for solid cells.
+    // Step 4. Choose material for the surviving child.
     const source = warpedMaterial(parent_block, parent_neighbors, warp, lx, ly);
 
-    // Provenance travels with the material the warp picked, and counts down as it goes: a shrub's
-    // canopy still reads as canopy for a couple of depths after its sprite became plain leaf stone.
+    // Age the tag from the selected material.
     const tag = source.tag.aged();
 
-    // Evaluate overlay retention on confirmed solid terrain
+    // Step 5. Resolve overlay retention on solid terrain.
     const is_overlay = source.id.isOverlay() or parent_sprite.isOverlay();
     if (is_overlay) {
         const overlay_id = if (source.id.isOverlay()) source.id else parent_sprite;
 
-        // fall back to the base material
+        // Use the source underlay when the overlay has one.
         const raw_base = if (source.id.isOverlay()) source.base_id else parent_block.base_id;
         const base_id: Sprite = if (raw_base != .none)
             raw_base
@@ -862,12 +924,11 @@ pub fn applyAncestorLogic(
         };
     }
 
-    // the odds and the anchor rules (such as vines needing suspension) both live in refine.evolve()
-    // the warped material is what evolves here, not the parent's own sprite
+    // Step 6. Evolve the selected material.
     const evolution = dw.refine.evolve(source.id, cell);
     var evolved_sprite: Sprite = evolution.id;
     var child_tag = tag;
-    // a fresh chain starts at run 1, so the next depth can continue and cap it from here
+    // Start a new chain tag at run one.
     if (evolution.starts_chain) child_tag = .make(.chain_run, 1);
 
     if (source.id.isStone()) {
@@ -892,13 +953,13 @@ pub fn applyAncestorLogic(
 
     if (evolved_sprite == .blue_strange_stone and warp[0] > 0.7) evolved_sprite = .blue_stone;
 
-    // preserve "underlay"
+    // Keep an underlay only for an overlay result.
     const base_id: Sprite = if (evolved_sprite.isOverlay())
         (if (source.base_id != .none) source.base_id else source.id)
     else
         .none;
 
-    // done! pass down the noise hash and the provenance as well.
+    // Return the stable seed and aged tag.
     return .{
         .id = evolved_sprite,
         .base_id = base_id,
@@ -916,8 +977,8 @@ pub const ParentHood = struct {
 /// Memo of `resolveParentHood()`, keyed by the PARENT cell rather than the child block.
 ///
 /// `BLOCKS_PER_PARENT` squared child cells (16) share one parent cell, and every one of them used to
-/// walk the same 3x3 parent neighborhood from scratch: 9 recursive resolutions each, 144 for a region
-/// that has exactly 9 distinct answers. The walk is chunk-granular (it resolves through `ancestor_cache`).
+/// walk the same 3x3 parent neighborhood from scratch: 9 recursive resolutions each,
+/// 144 for a region that has exactly 9 distinct answers. The walk is chunk-granular (it resolves through `ancestor_cache`).
 ///
 /// Set-associative rather than direct-mapped, because the 9 cells of one neighborhood are ADJACENT,
 /// and a direct-mapped tile would have them evict each other on the very next child cell.
@@ -1151,7 +1212,7 @@ fn testNeighborhood(solid: [3][3]bool, seed_base: u64) struct { Block, [8]Block 
     return .{ center, n };
 }
 
-test "infill: only enclosed outer corners can source material" {
+test "infill: enclosed pockets and narrow tunnels can source outer corners" {
     const enclosed: [8]Block = .{
         .makeBasicBlock(.stone, 1),
         .makeBasicBlock(.blue_stone, 2),
@@ -1169,9 +1230,73 @@ test "infill: only enclosed outer corners can source material" {
     try testing.expectEqual(Sprite.blue_strange_stone, infillCornerSource(enclosed, 3, 3).?.id);
     try testing.expect(infillCornerSource(enclosed, 1, 0) == null);
 
+    // An empty parent with walls above and below is a horizontal tunnel, even though its left and
+    // right neighbors are also air. Its corners may infill without growing loose blocks in caves.
+    var horizontal_tunnel = enclosed;
+    horizontal_tunnel[3] = .empty;
+    horizontal_tunnel[4] = .empty;
+    try testing.expect(infillCornerSource(horizontal_tunnel, 0, 0) != null);
+
+    // The vertical form is symmetric.
+    var vertical_tunnel = enclosed;
+    vertical_tunnel[1] = .empty;
+    vertical_tunnel[6] = .empty;
+    try testing.expect(infillCornerSource(vertical_tunnel, 0, 0) != null);
+
+    // A missing wall in both directions is an open cave, not a narrow tunnel.
     var open = enclosed;
     open[1] = .empty;
+    open[3] = .empty;
     try testing.expect(infillCornerSource(open, 0, 0) == null);
+}
+
+test "infill: ordinary solids never keep an ore underlay" {
+    const ordinary_solids = [_]Sprite{ .sand, .dirt, .clay, .red_clay, .stone, .diorite };
+    for (ordinary_solids) |id| {
+        var source = Block.makeBasicBlock(id, 1);
+        source.base_id = .stone;
+        const spec = infillSpec(source, 2);
+        try testing.expectEqual(id, spec.id);
+        try testing.expectEqual(Sprite.none, spec.base_id);
+    }
+
+    var ore = Block.makeBasicBlock(.copper, 3);
+    ore.base_id = .diorite;
+    const ore_spec = infillSpec(ore, 4);
+    try testing.expectEqual(Sprite.diorite, ore_spec.base_id);
+}
+
+test "infill: a diagonal bridge protects both ends and selects one air side" {
+    const seed: dw.utils.Vec2u = .{ 0x7f4a7c159e3779b9, 0xd1b54a32d192ed03 };
+    const solid: Block = .makeBasicBlock(.stone, 1);
+
+    // The upper-right air parent has its solid pair to the west and south.
+    var upper_right: [8]Block = @splat(.empty);
+    upper_right[3] = solid;
+    upper_right[6] = solid;
+    try testing.expectEqual(Sprite.stone, diagonalBridgeSource(upper_right, 0, 3).?.id);
+
+    // The lower-left air parent has the same pair to the north and east.
+    var lower_left: [8]Block = @splat(.empty);
+    lower_left[1] = solid;
+    lower_left[4] = solid;
+    try testing.expectEqual(Sprite.stone, diagonalBridgeSource(lower_left, 3, 0).?.id);
+
+    const upper_right_connects = connectsDiagonal(seed, 4, 3, 0, 3);
+    const lower_left_connects = connectsDiagonal(seed, 3, 4, 3, 0);
+    try testing.expectEqual(upper_right_connects, lower_left_connects);
+    try testing.expect(selectsDiagonalBridgeSide(seed, 4, 3, 0, 3) !=
+        selectsDiagonalBridgeSide(seed, 3, 4, 3, 0));
+
+    // The two solid parents at opposite corners use that same roll to keep their endpoints.
+    var northwest: [8]Block = @splat(.empty);
+    northwest[7] = solid;
+    var southeast: [8]Block = @splat(.empty);
+    southeast[0] = solid;
+    try testing.expectEqual(
+        protectsDiagonalBridge(northwest, seed, 3, 3, 3, 3),
+        protectsDiagonalBridge(southeast, seed, 4, 4, 0, 0),
+    );
 }
 
 test "infill: corner rolls are deterministic and varied" {
@@ -1194,7 +1319,7 @@ test "infill: corner rolls are deterministic and varied" {
 /// field rather than whichever offset one arbitrary position happens to land on.
 fn carvesAnywhere(parent_block: Block, n: [8]Block, lx: u4, ly: u4) bool {
     const seed: dw.utils.Vec2u = .{ 0x243f6a8885a308d3, 0x13198a2e03707344 };
-    // Sweeps whole parents, since a cell's position inside its parent is fixed by `lx`/`ly`.
+    // sweeps whole parents, since a cell's position inside its parent is fixed by lx/ly
     for (0..24) |py| {
         for (0..24) |px| {
             const wx = px * dw.BLOCKS_PER_PARENT + lx;
@@ -1254,65 +1379,43 @@ test "slope carve: a fully enclosed block is never touched" {
     }
 }
 
-test "slope carve: a parent always keeps its core, and only its core is unconditional" {
-    // The worst case there is: a lone block with nothing solid around it,
-    // so every corner of its region reads one solid neighbor and the density field wants the whole thing gone.
-    const parent: Block = .makeBasicBlock(.stone, 11);
+test "slope carve: a thin parent has no protected core" {
     const alone: [8]Block = @splat(.empty);
-
-    var carved_outside = false;
     for (0..dw.BLOCKS_PER_PARENT) |ly| {
         for (0..dw.BLOCKS_PER_PARENT) |lx| {
-            const carves = carvesAnywhere(parent, alone, @intCast(lx), @intCast(ly));
-            if (isParentCore(@intCast(lx), @intCast(ly))) {
-                // A descent onto this block has to have something to land on.
-                try testing.expect(!carves);
-            } else if (carves) carved_outside = true;
+            try testing.expect(!isProtectedCell(alone, @intCast(lx), @intCast(ly)));
         }
     }
-
-    // ...and the guard has to be a floor, not a blanket: the rest of the region must still erode,
-    // or every block in the world squares off into its full 4x4 and the slopes disappear.
-    try testing.expect(carved_outside);
 }
 
-test "slope carve: solid neighbors stay joined across the border they share" {
-    // Verify that line of blocks look joined together at D+1.
-    const parent: Block = .makeBasicBlock(.stone, 12345);
-    const solid: Block = .makeBasicBlock(.stone, 56789);
-
-    // .{ neighbor index, its opposite, whether the pair meets along x }
-    const pairs = .{
-        .{ 4, 3, true }, // east / west
-        .{ 3, 4, true },
-        .{ 6, 1, false }, // south / north
-        .{ 1, 6, false },
-    };
-
-    inline for (pairs) |pair| {
-        var n: [8]Block = @splat(.empty);
-        n[pair[0]] = solid;
-
-        // the border this parent shares with that neighbor: the far edge on the meeting axis
-        const near_edge = pair[0] == 3 or pair[0] == 1;
-        const edge: u4 = if (near_edge) 0 else dw.BLOCKS_PER_PARENT - 1;
-
-        var joined: usize = 0;
-        for (CORE_MIN..CORE_MAX + 1) |along| {
-            const lx: u4 = if (pair[2]) edge else @intCast(along);
-            const ly: u4 = if (pair[2]) @intCast(along) else edge;
-            try testing.expect(!carvesAnywhere(parent, n, lx, ly));
-            joined += 1;
+test "slope carve: only two-dimensional support protects a core" {
+    var corner: [8]Block = @splat(.empty);
+    corner[1] = .makeBasicBlock(.stone, 1);
+    corner[3] = .makeBasicBlock(.stone, 2);
+    for (CORE_MIN..CORE_MAX + 1) |ly| {
+        for (CORE_MIN..CORE_MAX + 1) |lx| {
+            try testing.expect(isProtectedCell(corner, @intCast(lx), @intCast(ly)));
         }
-        // both parents contribute this many cells, so the join is as thick as the core itself
-        try testing.expectEqual(@as(usize, dw.BLOCKS_PER_PARENT / 2), joined);
+    }
+}
 
-        // the opposite border has no neighbor to reach, so it stays part of the erodible silhouette
-        try testing.expect(!isProtectedCell(
-            n,
-            if (pair[2]) (if (near_edge) dw.BLOCKS_PER_PARENT - 1 else 0) else CORE_MIN,
-            if (pair[2]) CORE_MIN else (if (near_edge) dw.BLOCKS_PER_PARENT - 1 else 0),
-        ));
+test "slope carve: face links have no unconditional protection" {
+    const line: [8]Block = .{
+        .empty,
+        .empty,
+        .empty,
+        .makeBasicBlock(.stone, 1),
+        .makeBasicBlock(.stone, 2),
+        .empty,
+        .empty,
+        .empty,
+    };
+    for (0..dw.BLOCKS_PER_PARENT) |along| {
+        const cell: u4 = @intCast(along);
+        try testing.expect(!isProtectedCell(line, 0, cell));
+        try testing.expect(!isProtectedCell(line, dw.BLOCKS_PER_PARENT - 1, cell));
+        try testing.expect(!isProtectedCell(line, cell, 0));
+        try testing.expect(!isProtectedCell(line, cell, dw.BLOCKS_PER_PARENT - 1));
     }
 }
 
