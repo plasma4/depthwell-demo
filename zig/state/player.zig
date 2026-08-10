@@ -1,6 +1,7 @@
 //! Handles the main player movement and camera logic.
 const std = @import("std");
 const dw = @import("../root.zig");
+const mining = dw.mining;
 const memory = dw.memory;
 const logger = dw.logger;
 const KeyBits = dw.KeyBits;
@@ -411,54 +412,116 @@ fn handleLocalWrap(comptime axis: u1) bool {
     return false;
 }
 
-/// How far `escapeSolid()` looks for open space, in blocks.
-/// A parent block is `BLOCKS_PER_PARENT` squared child blocks,
-/// so a landing is never deep inside rock and this is already generous.
-const MAX_ESCAPE_BLOCKS: i64 = 24;
+/// How far `escapeSolid()` looks for a mineable route to open space, in blocks.
+const MAX_ESCAPE_BLOCKS: i64 = 100;
+const ESCAPE_DIAMETER: usize = @intCast(2 * MAX_ESCAPE_BLOCKS + 1);
+const MAX_ESCAPE_CELLS = ESCAPE_DIAMETER * ESCAPE_DIAMETER;
 
-/// Moves the player to the nearest open cell, if a depth change left them inside rock.
+const EscapeOffset = struct { x: i16, y: i16 };
+const ESCAPE_STEPS = [_]EscapeOffset{
+    .{ .x = 0, .y = -1 },
+    .{ .x = -1, .y = 0 },
+    .{ .x = 1, .y = 0 },
+    .{ .x = 0, .y = 1 },
+};
+
+comptime {
+    if (MAX_ESCAPE_BLOCKS > std.math.maxInt(i16))
+        @compileError("`MAX_ESCAPE_BLOCKS` must fit `EscapeOffset`.");
+}
+
+// Escape runs only during a spawn or a depth transition. Static scratch avoids a large WASM stack frame.
+var escape_queue: [MAX_ESCAPE_CELLS]EscapeOffset = undefined;
+var escape_seen: [MAX_ESCAPE_CELLS]bool = undefined;
+
+/// Moves the player to the nearest open cell through a mineable cardinal path.
 ///
-/// A block at D is a quarter of a block at D-1, so an ascent frequently lands in a wall.
-/// Free flight used to make that safe. Every depth now collides, so the player is moved instead.
+/// A block at D is a quarter of a block at D-1, so an ascent can land inside rock.
+/// A route may pass through blocks only when the active tool can remove every colliding block.
+/// Diagonal cells do not connect because the player cannot pass through their shared corner.
 /// Call after the `SimBuffer` holds the new depth: an absent chunk reads as solid.
 ///
-/// Does nothing when the player is already free, or when no open cell is within range.
+/// The landing cell is the conflict being resolved. Only a cell the route enters must be mineable.
+/// Does nothing when the player is already free or has no route in range.
 pub fn escapeSolid() void {
     const game = &memory.game;
     if (!isColliding(game.player_pos[0], game.player_pos[1])) return;
 
-    const step: i64 = dw.CHUNK_SIZE_SQ; // subpixels in one block
-    var r: i64 = 1;
-    while (r <= MAX_ESCAPE_BLOCKS) : (r += 1) {
-        // Rows run top to bottom, so an equally near cell above wins. Falling back down looks natural.
-        var dy: i64 = -r;
-        while (dy <= r) : (dy += 1) {
-            // Columns run outward from the center, so the player never slides sideways
-            // past a cell that was free directly above them.
-            var k: i64 = 0;
-            while (k <= 2 * r) : (k += 1) {
-                const dx: i64 = if (@mod(k, 2) == 0) @divTrunc(k, 2) else -@divTrunc(k + 1, 2);
-                // Only the ring this radius adds; a smaller one already rejected everything inside it.
-                if (@abs(dx) != r and @abs(dy) != r) continue;
+    @memset(&escape_seen, false);
+    escape_queue[0] = .{ .x = 0, .y = 0 };
+    escape_seen[escapeIndex(0, 0)] = true;
 
-                const px = game.player_pos[0] + dx * step;
-                const py = game.player_pos[1] + dy * step;
-                if (isColliding(px, py)) continue;
+    var read: usize = 0;
+    var write: usize = 1;
+    while (read < write) : (read += 1) {
+        const current = escape_queue[read];
+        for (ESCAPE_STEPS) |step| {
+            const next_x = @as(i64, current.x) + step.x;
+            const next_y = @as(i64, current.y) + step.y;
+            if (@abs(next_x) > MAX_ESCAPE_BLOCKS or @abs(next_y) > MAX_ESCAPE_BLOCKS) continue;
 
-                game.player_pos = .{ px, py };
-                // the offset can cross a chunk edge, and the world edge can refuse it
-                _ = handleLocalWrap(0);
-                _ = handleLocalWrap(1);
-                // snap the trailing position and the camera, exactly as teleport() does
-                game.last_player_pos = game.player_pos;
-                game.camera_pos = game.player_pos;
-                game.last_camera_pos = game.player_pos;
-                game.player_velocity = .{ 0.0, 0.0 };
-                resetMotionState();
+            const index = escapeIndex(next_x, next_y);
+            if (escape_seen[index]) continue;
+            escape_seen[index] = true;
+
+            const px = game.player_pos[0] + next_x * dw.CHUNK_SIZE_SQ;
+            const py = game.player_pos[1] + next_y * dw.CHUNK_SIZE_SQ;
+            if (!canExcavatePosition(px, py)) continue;
+            if (!isColliding(px, py)) {
+                moveOutOfSolid(.{ px, py });
                 return;
             }
+
+            std.debug.assert(write < escape_queue.len);
+            escape_queue[write] = .{ .x = @intCast(next_x), .y = @intCast(next_y) };
+            write += 1;
         }
     }
+}
+
+/// Maps an offset in the escape square to scratch storage. Call only inside its fixed range.
+inline fn escapeIndex(dx: i64, dy: i64) usize {
+    std.debug.assert(@abs(dx) <= MAX_ESCAPE_BLOCKS and @abs(dy) <= MAX_ESCAPE_BLOCKS);
+    return @as(usize, @intCast(dy + MAX_ESCAPE_BLOCKS)) * ESCAPE_DIAMETER +
+        @as(usize, @intCast(dx + MAX_ESCAPE_BLOCKS));
+}
+
+/// Returns whether every solid cell the player overlaps can be removed with the active tool.
+fn canExcavatePosition(px: i64, py: i64) bool {
+    const game = &memory.game;
+    const corners = playerCorners(px, py);
+    var last_coord: ?world.Coordinate = null;
+    var chunk: *const memory.Chunk = undefined;
+
+    for (corners) |corner| {
+        const cx_shift = @divFloor(corner[0], SUBPIXELS_IN_CHUNK);
+        const cy_shift = @divFloor(corner[1], SUBPIXELS_IN_CHUNK);
+        const coord = game.getPlayerCoord().move(.{ cx_shift, cy_shift }) orelse return false;
+        if (last_coord == null or !coord.eql(last_coord.?)) {
+            chunk = world.getChunkPtr(coord);
+            last_coord = coord;
+        }
+
+        const bx: u4 = @intCast(@as(u64, @bitCast(@divFloor(@mod(corner[0], SUBPIXELS_IN_CHUNK), dw.CHUNK_SIZE_SQ))));
+        const by: u4 = @intCast(@as(u64, @bitCast(@divFloor(@mod(corner[1], SUBPIXELS_IN_CHUNK), dw.CHUNK_SIZE_SQ))));
+        const block = chunk.blocks[@as(usize, by) * CHUNK_SIZE + @as(usize, bx)];
+        if (block.isSolid() and !mining.canMineForEscape(coord, bx, by, block)) return false;
+    }
+    return true;
+}
+
+/// Places the player at a proven open position and clears motion state.
+fn moveOutOfSolid(pos: Vec2i) void {
+    const game = &memory.game;
+    game.player_pos = pos;
+    // The offset can cross a chunk edge, and the world edge can refuse it.
+    _ = handleLocalWrap(0);
+    _ = handleLocalWrap(1);
+    game.last_player_pos = game.player_pos;
+    game.camera_pos = game.player_pos;
+    game.last_camera_pos = game.player_pos;
+    game.player_velocity = .{ 0.0, 0.0 };
+    resetMotionState();
 }
 
 /// Performs an AABB check (for the player's position) against the world grid.
@@ -467,12 +530,7 @@ pub fn isColliding(px: i64, py: i64) bool {
     if (isGhost()) return false;
 
     const game = &memory.game;
-    const corners = [4][2]i64{
-        .{ px - PLAYER_HITBOX_WIDTH / 2, py + CHUNK_SIZE_SQ / 2 - PLAYER_HITBOX_HEIGHT },
-        .{ px + PLAYER_HITBOX_WIDTH / 2 - 1, py + CHUNK_SIZE_SQ / 2 - PLAYER_HITBOX_HEIGHT },
-        .{ px - PLAYER_HITBOX_WIDTH / 2, py + CHUNK_SIZE_SQ / 2 },
-        .{ px + PLAYER_HITBOX_WIDTH / 2 - 1, py + CHUNK_SIZE_SQ / 2 },
-    };
+    const corners = playerCorners(px, py);
 
     const player_coord = game.getPlayerCoord();
     var last_coord: ?world.Coordinate = null;
@@ -497,6 +555,16 @@ pub fn isColliding(px: i64, py: i64) bool {
         if (chunk.blocks[@as(usize, ly) * CHUNK_SIZE + @as(usize, lx)].isSolid()) return true;
     }
     return false;
+}
+
+/// Returns the four world points that define the player's collision box.
+inline fn playerCorners(px: i64, py: i64) [4][2]i64 {
+    return .{
+        .{ px - PLAYER_HITBOX_WIDTH / 2, py + CHUNK_SIZE_SQ / 2 - PLAYER_HITBOX_HEIGHT },
+        .{ px + PLAYER_HITBOX_WIDTH / 2 - 1, py + CHUNK_SIZE_SQ / 2 - PLAYER_HITBOX_HEIGHT },
+        .{ px - PLAYER_HITBOX_WIDTH / 2, py + CHUNK_SIZE_SQ / 2 },
+        .{ px + PLAYER_HITBOX_WIDTH / 2 - 1, py + CHUNK_SIZE_SQ / 2 },
+    };
 }
 
 /// Updates the camera, handling deadzone and gradual panning.

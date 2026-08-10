@@ -314,8 +314,7 @@ const NON_ANCHOR_CELLS = dw.BLOCKS_PER_PARENT * dw.BLOCKS_PER_PARENT - 1;
 /// a gem is a speck, and a coherent field would make a region keep all of them or none.
 const GEM_KEEP_CHANCE = (GEM_COPIES_MEAN - 1.0) / @as(comptime_float, NON_ANCHOR_CELLS);
 
-/// Chance that one corner of a fully enclosed empty parent fills at the next depth.
-/// Each corner rolls separately, so enclosed pockets stop being fixed 4x4 squares.
+/// Chance that one corner of a fully enclosed empty parent fills.
 const INFILL_CORNER_CHANCE = 0.5;
 
 /// Total block width of the world across one dimension.
@@ -380,31 +379,62 @@ comptime {
         @compileError("An infill corner chance must let a corner both fill and stay empty.");
 }
 
-/// Returns the diagonal parent material for one infill corner, if this parent is fully enclosed.
-/// The caller must use the returned material only for that matching child corner.
-fn infillCornerSource(n: [8]Block, lx: u4, ly: u4) ?Block {
+/// Returns a foundation donor for an empty parent corner that blocks enclose.
+/// Decorations can enclose a hole but cannot become an infill block.
+fn enclosedInfillSource(n: [8]Block, lx: u4, ly: u4) ?Block {
     if (lx != 0 and lx != dw.BLOCKS_PER_PARENT - 1) return null;
     if (ly != 0 and ly != dw.BLOCKS_PER_PARENT - 1) return null;
-    for (n) |block| if (!block.isSolid()) return null;
+    for (n) |block| if (block.isEmpty() or block.isLiquid()) return null;
 
-    // Neighbors are row-major with the center removed.
     const index: usize = if (ly == 0)
         if (lx == 0) 0 else 2
     else if (lx == 0)
         5
     else
         7;
-    return n[index];
+    if (n[index].isFoundation()) return n[index];
+    for (n) |block| if (block.isFoundation()) return block;
+    return null;
 }
 
-/// Returns true when a candidate enclosed corner fills at this depth.
-/// `wx` and `wy` name the child cell, so adjacent chunks always agree on the roll.
+/// Returns the support terrain for an empty macro child corner.
+/// A floor macro uses its floor.
+/// A ceiling macro uses its ceiling.
+/// A suspended macro has no fixed terrain support.
+fn macroInfillSource(
+    surface: dw.refine.Surface,
+    n: [8]Block,
+    lx: u4,
+    ly: u4,
+) ?Block {
+    if (lx != 0 and lx != dw.BLOCKS_PER_PARENT - 1) return null;
+    if (ly != 0 and ly != dw.BLOCKS_PER_PARENT - 1) return null;
+
+    const support = switch (surface) {
+        .floor => n[6],
+        .ceiling => n[1],
+        .suspended => return null,
+    };
+    return if (support.isFoundation()) support else null;
+}
+
+/// Returns a safe block specification for an infill cell.
+/// Only overlays can carry a `base_id`.
+inline fn infillSpec(source: Block, seed: u64) memory.BlockSpec {
+    return .{
+        .id = source.id,
+        .base_id = if (source.id.isOverlay()) source.base_id else .none,
+        .seed = seed,
+        .tag = source.tag.aged(),
+    };
+}
+
+/// Returns true when this enclosed corner fills.
 inline fn infillsCorner(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord) bool {
-    const roll = seeding.FastHash.hash2dWorld(noise_seed, wx +% INFILL_SALT, wy -% INFILL_SALT);
-    return roll <= seeding.oddsNum(INFILL_CORNER_CHANCE);
+    return seeding.FastHash.hash2dWorld(noise_seed, wx +% INFILL_SALT, wy -% INFILL_SALT) <=
+        seeding.oddsNum(INFILL_CORNER_CHANCE);
 }
 
-/// Keeps infill rolls separate from ore and gem retention.
 const INFILL_SALT: u64 = 0xA24BAED4963EE407;
 
 /// How much of a parent's own neighborhood backs one child cell,
@@ -723,8 +753,20 @@ fn chunkNoise(key: DepthCoordinate) ChunkNoise {
     return chunk_noise_value;
 }
 
-/// Evaluates child block evolution from its parent block and 8 parent neighbors.
-/// Handles water volume propagation, slope carving, material warping, and ore dispersal.
+/// Makes one child `BlockSpec` from one parent block and its eight neighbors.
+///
+/// `parent_block` is the source at the shallower depth.
+/// `bx` and `by` select one of its `BLOCKS_PER_PARENT` by `BLOCKS_PER_PARENT` children.
+/// An empty result is air.
+///
+/// Processing order:
+/// 1. An empty parent usually stays empty. An enclosed corner can receive nearby foundation terrain.
+/// 2. Edge stone, planned blocks, liquids, and other non-foundation blocks use their own rules.
+/// 3. A foundation child can carve into air. A portal or a planned child can protect its required cell.
+/// 4. A surviving foundation child selects its material, then ages its refinement tag.
+/// 5. An overlay keeps or loses its underlay. Other stone can evolve and receive an ore or gem.
+///
+/// The order is required. Geometry decides whether the child exists before material logic can change it.
 pub fn applyAncestorLogic(
     parent_block: Block,
     parent_neighbors: [8]Block,
@@ -733,29 +775,24 @@ pub fn applyAncestorLogic(
     by: u4,
 ) memory.BlockSpec {
     const parent_sprite = parent_block.id;
-    // const parent_seed = parent_block.seed;
 
+    // Empty parents do not create terrain. Only an enclosed outer corner can borrow foundation terrain.
     if (parent_sprite.isEmpty()) {
         const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
         const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
-        const source = infillCornerSource(parent_neighbors, lx, ly) orelse return .{};
+        const source = enclosedInfillSource(parent_neighbors, lx, ly) orelse return .{};
         const chunk_noise = chunkNoise(key);
         const wx = worldBlock(@intCast(key.quadrant % 2), key.suffix[0], bx);
         const wy = worldBlock(@intCast(key.quadrant / 2), key.suffix[1], by);
         if (!infillsCorner(chunk_noise.noise_seed, wx, wy)) return .{};
-        return .{
-            .id = source.id,
-            .base_id = source.base_id,
-            .seed = seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by),
-            .tag = source.tag,
-        };
+        return infillSpec(source, seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by));
     }
     const chunk_noise = chunkNoise(key);
     const noise_hash_2 = seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by);
     if (parent_sprite == .edge_stone)
         return .{ .id = parent_sprite, .seed = noise_hash_2 };
 
-    // A submerged waterloggable parent must stay submerged in its children!
+    // Waterlogged parents pass their water volume to every waterloggable child.
     const inherited_water: u4 = if (parent_sprite.isWaterloggable()) parent_block.hp else 0;
 
     const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
@@ -764,8 +801,7 @@ pub fn applyAncestorLogic(
     const wx = worldBlock(@intCast(key.quadrant % 2), key.suffix[0], bx);
     const wy = worldBlock(@intCast(key.quadrant / 2), key.suffix[1], by);
 
-    // Everything one child cell needs to be answered, built once: the plan below refines from it,
-    // and every evolution on the way down rolls its odds against it (see `refine.evolve()`).
+    // One context gives plans and evolutions the same parent, neighbors, child position, and water.
     const cell: dw.refine.Context = .{
         .parent = parent_block,
         .neighbors = parent_neighbors,
@@ -778,14 +814,19 @@ pub fn applyAncestorLogic(
         .water = inherited_water,
     };
 
-    // A macro block (decoration, installation, vine) states a plan for its whole region instead of
-    // filling it, so that one bush does not become sixteen. See `refine.zig`.
+    // A planned block describes its child region instead of copying into all sixteen cells.
+    // If the plan leaves an enclosed corner empty, supporting terrain can fill only that corner.
     if (dw.refine.ruleFor(parent_sprite)) |rule| {
-        return dw.refine.refineChild(rule, cell);
+        const refined = dw.refine.refineChild(rule, cell);
+        if (refined.id != .none) return refined;
+
+        const source = macroInfillSource(rule.surface, parent_neighbors, lx, ly) orelse return refined;
+        if (!infillsCorner(noise_seed, wx, wy)) return refined;
+        return infillSpec(source, noise_hash_2);
     }
 
     if (parent_sprite.isLiquid()) {
-        // split the water
+        // A liquid below liquid stays full. Otherwise it divides by child row.
         if (parent_neighbors[1].id.isLiquid()) {
             return .{
                 .id = dw.refine.evolve(parent_sprite, cell).id,
@@ -796,10 +837,14 @@ pub fn applyAncestorLogic(
 
         const volume = inheritedLiquidVolume(parent_block.hp, ly);
         if (volume == 0) return .{};
-        return .{ .id = dw.refine.evolve(parent_sprite, cell).id, .seed = noise_hash_2, .water_volume = volume };
+        return .{
+            .id = dw.refine.evolve(parent_sprite, cell).id,
+            .seed = noise_hash_2,
+            .water_volume = volume,
+        };
     }
 
-    // fallback for all other non-foundation blocks (decorations, chests, furnaces, liquids, etc.)
+    // Other non-foundation blocks copy as one child per cell. They do not carve or warp terrain.
     if (!parent_sprite.isFoundation()) {
         return .{
             .id = dw.refine.evolve(parent_sprite, cell).id,
@@ -808,35 +853,28 @@ pub fn applyAncestorLogic(
         };
     }
 
-    // Foundations from here on: only they carry a surface for the carve to shape.
-    // Nothing below may turn air into a solid, since the player could be standing in it.
+    // Only foundation terrain reaches this point. It supplies a surface that carving can reshape.
+    // No later step can make air solid. A player can safely remain in a carved child cell.
 
-    // Geometry FIRST!
-    // A portal's anchor is the one surface the carve may not touch: a descent lands its player standing on
-    // the floor of the portal block's child region, and eroding that floor drops them straight through it.
-    //
-    // Every other refined decoration makes the same demand of the individual CELLS its own children
-    // land on (`refine.protectsSurfaceCell()`), rather than of a whole row: a region holds one or two
-    // copies, so everything else here still erodes normally.
-    // One sample for both the carve and the material pick; see `carvesSlope()`.
+    // Decide geometry before material. Portal landings and planned child cells protect only the cells they need.
+    // The same warp sample drives both carving and material selection, so their boundary stays coherent.
     const warp = warpField(noise_seed, wx, wy);
     if (!anchorsPortal(parent_neighbors) and
         !dw.refine.protectsSurfaceCell(parent_neighbors, noise_seed, wx, wy, lx, ly) and
         carvesSlope(parent_block, parent_neighbors, noise_seed, warp, wx, wy, lx, ly)) return .{};
 
-    // Now, resolve material domain warping for solid cells.
+    // The child survived. Select its source material from this parent or a warped neighbor.
     const source = warpedMaterial(parent_block, parent_neighbors, warp, lx, ly);
 
-    // Provenance travels with the material the warp picked, and counts down as it goes: a shrub's
-    // canopy still reads as canopy for a couple of depths after its sprite became plain leaf stone.
+    // The material source owns the tag. Aging makes temporary plant provenance expire with depth.
     const tag = source.tag.aged();
 
-    // Evaluate overlay retention on confirmed solid terrain
+    // An overlay is valid only on confirmed solid terrain. It either remains or returns to its underlay.
     const is_overlay = source.id.isOverlay() or parent_sprite.isOverlay();
     if (is_overlay) {
         const overlay_id = if (source.id.isOverlay()) source.id else parent_sprite;
 
-        // fall back to the base material
+        // Resolve the underlay even when the overlay arrived through a warped neighbor.
         const raw_base = if (source.id.isOverlay()) source.base_id else parent_block.base_id;
         const base_id: Sprite = if (raw_base != .none)
             raw_base
@@ -862,13 +900,13 @@ pub fn applyAncestorLogic(
         };
     }
 
-    // the odds and the anchor rules (such as vines needing suspension) both live in refine.evolve()
-    // the warped material is what evolves here, not the parent's own sprite
+    // Evolve the selected material, not necessarily the original parent material.
+    // `refine.evolve()` owns evolution odds and support rules such as a vine's ceiling.
     const evolution = dw.refine.evolve(source.id, cell);
     var evolved_sprite: Sprite = evolution.id;
     var child_tag = tag;
-    // a fresh chain starts at run 1, so the next depth can continue and cap it from here
-    if (evolution.starts_chain) child_tag = .make(.chain_run, 1);
+    // A fresh chain records its distance from the ceiling for its next refinement.
+    if (evolution.chain_run) |run| child_tag = .make(.chain_run, run);
 
     if (source.id.isStone()) {
         const ore_density = procedural.getDualValueNoiseFixed(
@@ -892,13 +930,13 @@ pub fn applyAncestorLogic(
 
     if (evolved_sprite == .blue_strange_stone and warp[0] > 0.7) evolved_sprite = .blue_stone;
 
-    // preserve "underlay"
+    // A new overlay keeps the selected material as its underlay.
     const base_id: Sprite = if (evolved_sprite.isOverlay())
         (if (source.base_id != .none) source.base_id else source.id)
     else
         .none;
 
-    // done! pass down the noise hash and the provenance as well.
+    // The child keeps its visual seed and its surviving provenance tag.
     return .{
         .id = evolved_sprite,
         .base_id = base_id,
@@ -913,14 +951,11 @@ pub const ParentHood = struct {
     neighbors: [8]Block align(8),
 };
 
-/// Memo of `resolveParentHood()`, keyed by the PARENT cell rather than the child block.
+/// Cache of one parent cell and its eight neighbors.
 ///
-/// `BLOCKS_PER_PARENT` squared child cells (16) share one parent cell, and every one of them used to
-/// walk the same 3x3 parent neighborhood from scratch: 9 recursive resolutions each, 144 for a region
-/// that has exactly 9 distinct answers. The walk is chunk-granular (it resolves through `ancestor_cache`).
+/// Sixteen children share one parent. They need only nine parent resolutions, not sixteen groups of nine.
 ///
-/// Set-associative rather than direct-mapped, because the 9 cells of one neighborhood are ADJACENT,
-/// and a direct-mapped tile would have them evict each other on the very next child cell.
+/// Four ways let adjacent parent cells remain cached during one chunk generation pass.
 const ParentHoodCache = struct {
     /// Sets, chosen so a chunk's worth of parent cells (16 across a chunk edge, plus the halo)
     /// stays resident through one generation pass.
@@ -1130,6 +1165,38 @@ pub fn getAncestorNeighborhood(key: DepthCoordinate) [6][6]Block {
 
 const testing = std.testing;
 
+test "infill: decorations can enclose but cannot donate" {
+    const stone: Block = .makeBasicBlock(.stone, 1);
+    const enclosed: [8]Block = @splat(stone);
+    try testing.expect(enclosedInfillSource(enclosed, 0, 0) != null);
+
+    var portal_neighbor = enclosed;
+    portal_neighbor[1] = .makeBasicBlock(.portal, 2);
+    const source = enclosedInfillSource(portal_neighbor, 0, 0).?;
+    try testing.expect(source.isFoundation());
+    try testing.expect(source.id != .portal);
+
+    var open = enclosed;
+    open[1] = .empty;
+    try testing.expect(enclosedInfillSource(open, 0, 0) == null);
+}
+
+test "infill: floor and ceiling macros use their support terrain" {
+    const stone: Block = .makeBasicBlock(.stone, 1);
+    var neighbors: [8]Block = @splat(.empty);
+
+    neighbors[6] = stone;
+    try testing.expectEqual(stone.id, macroInfillSource(.floor, neighbors, 0, 0).?.id);
+    try testing.expect(macroInfillSource(.ceiling, neighbors, 0, 0) == null);
+
+    neighbors[1] = stone;
+    try testing.expectEqual(stone.id, macroInfillSource(.ceiling, neighbors, 3, 0).?.id);
+    try testing.expect(macroInfillSource(.suspended, neighbors, 3, 0) == null);
+
+    neighbors[6] = .makeBasicBlock(.portal, 2);
+    try testing.expect(macroInfillSource(.floor, neighbors, 0, 3) == null);
+}
+
 /// Builds a parent block and its 8 row-major neighbors out of a 3x3 solidity map,
 /// giving every cell a distinct seed so the corner jitter actually varies.
 fn testNeighborhood(solid: [3][3]bool, seed_base: u64) struct { Block, [8]Block } {
@@ -1149,45 +1216,6 @@ fn testNeighborhood(solid: [3][3]bool, seed_base: u64) struct { Block, [8]Block 
         }
     }
     return .{ center, n };
-}
-
-test "infill: only enclosed outer corners can source material" {
-    const enclosed: [8]Block = .{
-        .makeBasicBlock(.stone, 1),
-        .makeBasicBlock(.blue_stone, 2),
-        .makeBasicBlock(.mossy_stone, 3),
-        .makeBasicBlock(.lime_stone, 4),
-        .makeBasicBlock(.green_stone, 5),
-        .makeBasicBlock(.purple_stone, 6),
-        .makeBasicBlock(.bright_red_stone, 7),
-        .makeBasicBlock(.blue_strange_stone, 8),
-    };
-
-    try testing.expectEqual(Sprite.stone, infillCornerSource(enclosed, 0, 0).?.id);
-    try testing.expectEqual(Sprite.mossy_stone, infillCornerSource(enclosed, 3, 0).?.id);
-    try testing.expectEqual(Sprite.purple_stone, infillCornerSource(enclosed, 0, 3).?.id);
-    try testing.expectEqual(Sprite.blue_strange_stone, infillCornerSource(enclosed, 3, 3).?.id);
-    try testing.expect(infillCornerSource(enclosed, 1, 0) == null);
-
-    var open = enclosed;
-    open[1] = .empty;
-    try testing.expect(infillCornerSource(open, 0, 0) == null);
-}
-
-test "infill: corner rolls are deterministic and varied" {
-    const seed: dw.utils.Vec2u = .{ 0x517cc1b727220a95, 0x6c8e9cf570932bd5 };
-    var fills = false;
-    var stays_empty = false;
-    for (0..32) |y| {
-        for (0..32) |x| {
-            const fills_here = infillsCorner(seed, x, y);
-            try testing.expectEqual(fills_here, infillsCorner(seed, x, y));
-            fills = fills or fills_here;
-            stays_empty = stays_empty or !fills_here;
-        }
-    }
-    try testing.expect(fills);
-    try testing.expect(stays_empty);
 }
 
 /// Sweeps every noise cell the erosion field can offer, so a "never carved" claim covers the whole

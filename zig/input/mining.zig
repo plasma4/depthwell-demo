@@ -128,6 +128,21 @@ pub fn canMine(tool_type: Tools, target_sprite: Sprite) bool {
     return pickaxe.capabilities.satisfies(block_props.required_capabilities);
 }
 
+/// Returns whether the player can remove this block while escaping a solid landing.
+///
+/// `coord`, `bx`, and `by` identify `block` in the live world.
+/// This uses the active tool and installation protection rules, but not cursor range or light.
+/// A valid escape route is mined one adjacent block at a time, so the player light moves with it.
+pub fn canMineForEscape(coord: world.Coordinate, bx: u4, by: u4, block: memory.Block) bool {
+    if (!block.isSolid() or inventory.isInCreative()) return true;
+    if (!canMine(pickaxe_type, block.id)) return false;
+    if (!has_structure_tool and restsOnProtectedInstallation(coord, bx, by)) return false;
+
+    var strength = getSpriteStrength(block.id) orelse return false;
+    if (has_structure_tool and isToolBreakable(block.id)) strength = STRUCTURE_STRENGTH;
+    return strength != std.math.maxInt(u64);
+}
+
 /// Least player-lit a block may be and still be mineable, on the same 0-255 scale as `Block.light`.
 /// Deliberately measured against JUST the player's light (see `lighting.miningLightAt()`).
 pub const MIN_MINING_LIGHT: u8 = 48;

@@ -134,7 +134,9 @@ pub fn init(new_game: bool) void {
 
     if (SET_PLAYER_SPAWN_RANDOMLY) {
         findSafeSpawn();
-        // world.SimBuffer.sync(memory.game.getPlayerCoord(), .{ 16, 16 });
+        // The collision scan reads the live buffer. Fill it before the spawn escape check.
+        world.SimBuffer.sync(memory.game.getPlayerCoord());
+        dw.player.escapeSolid();
     }
 }
 
