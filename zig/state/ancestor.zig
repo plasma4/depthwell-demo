@@ -5,10 +5,11 @@
 //! - `applyAncestorLogic()` and slope logic create continuous sloped surfaces,
 //!   based on parent blocks using bilinear 4-corner density
 //! - Ancestor logic also uses noise masks, displaces blocks (`warpField()`),
-//! and both inherits and produces new ores (`keepsInheritedOverlay()`) while thinning out older ones!
+//! and both inherits and produces new ores.
+//! `keepsInheritedOverlay()` splits the two kinds apart:
+//! an ore spreads with the vein around it, and a gem barely spreads at all.
 //!
 //! Note that "ore" and "gem" are used interchangeably at times within this file.
-
 const std = @import("std");
 const dw = @import("../root.zig");
 const memory = dw.memory;
@@ -45,7 +46,7 @@ pub inline fn isHorizonDepth(depth: u64) bool {
 /// Tiers are RELATIVE: tier 0 is the current depth (D), tier 1 its parent, down to the horizon (H) at tier `NUM_TIERS - 1`.
 /// Relative indexing lets the hottest tiers sit at fixed slots so they can be sized larger.
 /// - The two tiers nearest the player (`HOT_TIERS`) are often queried:
-///   you can think to a 4x4 chunk "group" collapsing into one seed with D-1 and 16x16 chunk "groups" with D-2.
+///   this is like a 4x4 chunk "group" collapsing into one seed with D-1 and 16x16 at D-2, and so on!
 /// - Deeper tiers converge geometrically (each ~4x smaller footprint) and only need a small 8-slot buffer.
 ///   Really, you only need 4 to prevent quadrant boundary issues, but this provides a decent buffer.
 ///
@@ -243,7 +244,7 @@ pub fn getAncestorChunk(key: DepthCoordinate) *const Chunk {
     if (ancestor_cache.get(key)) |cached| return cached;
 
     const slot = ancestor_cache.allocateSlot(key);
-    world.materializeChunk(slot, key);
+    world.materializeInheritedChunk(slot, key);
     return slot;
 }
 
@@ -289,9 +290,29 @@ const MATERIAL_WARP_STRENGTH = 1.2;
 
 /// Scale of coherent ore/gem thinning noise, in child block units.
 const ORE_THINNING_SCALE = 3.0; // 0.75 parent blocks
-/// Chance of an ore/gem still remaining from the previous depth after all warping/erosion interactions.
-/// Not a hash; instead passed through a noise function.
-const INHERITED_ORE_KEEP_CHANCE = 0.73;
+
+/// Chance an ORE cell keeps its ore when NO neighbor of its parent held the same ore.
+///
+/// Read as a threshold on the thinning noise, NOT as a percentage:
+/// value noise piles up around its midpoint, so a threshold of 0.5 keeps about half the cells
+/// and the ends move the count far less than the middle does.
+const ORE_KEEP_ALONE = 0.30;
+/// Extra threshold an ore cell gains as its parent's own neighbors fill in around it
+/// (see `overlaySupport()`).
+///
+/// `ORE_KEEP_ALONE + ORE_KEEP_SUPPORT` is above 1 on purpose:
+/// a cell buried inside a vein keeps its ore unconditionally, so a big deposit stays a solid mass
+/// while the rim of the same deposit frays.
+const ORE_KEEP_SUPPORT = 0.75;
+
+/// Cells an inherited GEM keeps out of its region's 16, on average, counting the anchor.
+/// This is THE gem knob; the chance below follows from it.
+const GEM_COPIES_MEAN = 2.0;
+/// Cells of a region that are not the anchor.
+const NON_ANCHOR_CELLS = dw.BLOCKS_PER_PARENT * dw.BLOCKS_PER_PARENT - 1;
+/// Chance each non-anchor cell keeps the gem. A flat hash rather than the thinning noise:
+/// a gem is a speck, and a coherent field would make a region keep all of them or none.
+const GEM_KEEP_CHANCE = (GEM_COPIES_MEAN - 1.0) / @as(comptime_float, NON_ANCHOR_CELLS);
 
 /// Total block width of the world across one dimension.
 const WORLD_BLOCKS_WIDE = @as(u32, dw.CHUNK_SIZE) << (STARTING_ZOOM_TIMES * dw.ZOOM_LOG2);
@@ -345,31 +366,80 @@ comptime {
     // How far past that row it reaches is free, since the core guard, not the mask, is what stops it.
     if (dw.BLOCKS_PER_PARENT % 2 != 0)
         @compileError("A parent's child region needs an even width for its core to sit at the center.");
-    if (INHERITED_ORE_KEEP_CHANCE <= 0 or INHERITED_ORE_KEEP_CHANCE >= 1)
-        @compileError("Inherited ore keep chance must be strictly between zero and one.");
+    if (ORE_KEEP_ALONE <= 0 or ORE_KEEP_ALONE >= 1)
+        @compileError("An ore with no support must still be able to both keep and lose a cell.");
+    if (ORE_KEEP_ALONE + ORE_KEEP_SUPPORT < 1)
+        @compileError("A fully buried ore cell must keep its ore, or a big deposit gets holes.");
+    if (GEM_COPIES_MEAN < 1 or GEM_COPIES_MEAN > 1 + NON_ANCHOR_CELLS)
+        @compileError("A gem keeps its anchor cell, so its mean sits in [1, region size].");
 }
 
-/// Determines whether a specified ore/gem deposit should remain.
+/// How much of a parent's own neighborhood backs one child cell,
+/// from 0 (an isolated parent) to 1 (a parent buried in the same overlay).
+///
+/// The 3x3 parent neighborhood is read as a coarse density field:
+/// 1 where a neighbor holds the same overlay, 0 where it does not, and 1 at the center.
+/// The 16 child cells sample it bilinearly, so a cell that faces more of its own vein keeps
+/// its ore more often than a cell that faces bare stone.
+/// This is what makes a vein grow ALONG itself instead of into a square.
+///
+/// Reads the neighbor blocks rather than the parent's `id_edge_flags`, because the material warp
+/// can hand a cell an overlay its own parent never had (see `warpedMaterial()`).
+/// Neighbors are row-major with the center removed, so index 1 is above and 6 below.
+fn overlaySupport(n: [8]Block, overlay: Sprite, lx: u4, ly: u4) f32 {
+    var same: [8]f32 = undefined;
+    inline for (0..8) |i| same[i] = if (n[i].id == overlay) 1.0 else 0.0;
+
+    // Four blocks meet at each corner of the region: the parent itself, two edge neighbors, and one
+    // diagonal. The parent holds the overlay by definition, hence the constant 1.
+    const top_left = (1.0 + same[1] + same[3] + same[0]) * 0.25;
+    const top_right = (1.0 + same[1] + same[4] + same[2]) * 0.25;
+    const bottom_left = (1.0 + same[6] + same[3] + same[5]) * 0.25;
+    const bottom_right = (1.0 + same[6] + same[4] + same[7]) * 0.25;
+
+    // Cell centers, so the two outer columns and rows never sit exactly on a corner.
+    const inv: f32 = 1.0 / @as(f32, dw.BLOCKS_PER_PARENT);
+    const u = (@as(f32, @floatFromInt(lx)) + 0.5) * inv;
+    const v = (@as(f32, @floatFromInt(ly)) + 0.5) * inv;
+
+    const top = top_left + (top_right - top_left) * u;
+    const bottom = bottom_left + (bottom_right - bottom_left) * u;
+    return top + (bottom - top) * v;
+}
+
+/// Whether one child cell keeps the ore or gem its parent held.
+///
+/// The two kinds behave differently on purpose:
+/// - An ORE spreads. Its threshold rises with `overlaySupport()`, so a lone nugget frays into a
+///   ragged clump and a wide vein comes through whole.
+/// - A GEM barely spreads. It keeps `GEM_COPIES_MEAN` cells of 16, so a gem stays a find.
+///
+/// Both kinds keep an ANCHOR cell, so no deposit is ever wiped out by a descent.
+/// The anchor sits inside the parent's core (`isProtectedCell()`), the one part of a region the
+/// slope carve may never take, so the guarantee cannot be undone later in the same pass.
 inline fn keepsInheritedOverlay(
+    overlay: Sprite,
+    n: [8]Block,
     noise_seed: dw.utils.Vec2u,
     wx: WorldCoord,
     wy: WorldCoord,
     lx: u4,
     ly: u4,
 ) bool {
-    _ = lx;
-    _ = ly;
-    // if (INHERITED_ORE_KEEP_CHANCE < 1.0) {
-    //     // guarantee at least 1 of the ore/gem survives
-    //     const parent_hash = seeding.FastHash.hash2d(
-    //         noise_seed,
-    //         wx / dw.BLOCKS_PER_PARENT,
-    //         wy / dw.BLOCKS_PER_PARENT,
-    //     );
-    //     const anchor_x: u4 = @intCast(parent_hash & (dw.BLOCKS_PER_PARENT - 1));
-    //     const anchor_y: u4 = @intCast((parent_hash >> 2) & (dw.BLOCKS_PER_PARENT - 1));
-    //     if (lx == anchor_x and ly == anchor_y) return true;
-    // }
+    const parent_hash = seeding.FastHash.hash2dWorld(
+        noise_seed,
+        wx / dw.BLOCKS_PER_PARENT,
+        wy / dw.BLOCKS_PER_PARENT,
+    );
+    const anchor_x: u4 = CORE_MIN + @as(u4, @intCast(parent_hash & 1));
+    const anchor_y: u4 = CORE_MIN + @as(u4, @intCast((parent_hash >> 1) & 1));
+    if (lx == anchor_x and ly == anchor_y) return true;
+
+    if (overlay.isGem()) {
+        // A separate stream from the anchor, or the two would agree cell for cell.
+        const roll = seeding.FastHash.hash2dWorld(noise_seed, wx +% GEM_SALT, wy -% GEM_SALT);
+        return roll < seeding.oddsNum(GEM_KEEP_CHANCE);
+    }
 
     const coherent_roll = procedural.getDualValueNoiseFixed(
         noise_seed,
@@ -377,9 +447,11 @@ inline fn keepsInheritedOverlay(
         wy,
         1.0 / ORE_THINNING_SCALE,
     )[0];
-
-    return coherent_roll < INHERITED_ORE_KEEP_CHANCE;
+    return coherent_roll < ORE_KEEP_ALONE + ORE_KEEP_SUPPORT * overlaySupport(n, overlay, lx, ly);
 }
+
+/// Keeps the gem draw off every other hash stream this file takes from `noise_seed`.
+const GEM_SALT: u64 = 0x632BE59BD9B4E019;
 
 /// Computes a continuous terrain erosion factor in [0, 1] using multi-octave ridged and undulating noise.
 fn erosionMask(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord) f32 {
@@ -606,10 +678,9 @@ pub fn clearChunkNoise() void {
 fn chunkNoise(key: DepthCoordinate) ChunkNoise {
     if (chunk_noise_key.depth != 0 and chunk_noise_key.eql(key)) return chunk_noise_value;
 
-    const seeds = world.quad_cache.getChunkSeeds(key);
     const quadrant_seed = world.quad_cache.getQuadrantSeed(@intCast(key.quadrant), key.depth);
     chunk_noise_value = .{
-        .hash_lane = .{ seeds.value[0].value[2], seeds.value[0].value[3] },
+        .hash_lane = world.seedLane(key),
         .noise_seed = .{
             seeding.NoiseMix.lane(quadrant_seed.value[0], key.depth),
             seeding.NoiseMix.lane(quadrant_seed.value[1], ~key.depth),
@@ -727,7 +798,7 @@ pub fn applyAncestorLogic(
         else
             .stone;
 
-        if (!keepsInheritedOverlay(noise_seed, wx, wy, lx, ly)) {
+        if (!keepsInheritedOverlay(overlay_id, parent_neighbors, noise_seed, wx, wy, lx, ly)) {
             return .{
                 .id = base_id,
                 .seed = noise_hash_2,
@@ -821,10 +892,6 @@ const ParentHoodCache = struct {
     /// Round-robin victim per set. No CLOCK here: the access pattern is a sweep, not a working set,
     /// so recency buys nothing over plain rotation.
     hand: [SETS]std.math.Log2Int(std.meta.Int(.unsigned, WAYS)) = @splat(0),
-    /// `mod_store.content_generation` these entries were resolved under. A parent hood is derived from
-    /// blocks the player can edit, so ANY store write retires the whole cache.
-    generation: u64 = 0,
-
     comptime {
         if (!std.math.isPowerOfTwo(SETS) or !std.math.isPowerOfTwo(WAYS))
             @compileError("ParentHoodCache set and way counts must be powers of two.");
@@ -913,14 +980,16 @@ fn resolveParentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {
 }
 
 /// `resolveParentHood()` through the memo; see `ParentHoodCache`.
+///
+/// A hood is memoized across player edits, and must stay that way.
+/// `parent_key.depth` is always below `memory.game.depth`, so it is always below the frontier,
+/// and a depth below the frontier can no longer gain an edit that travels down (see `world.legacy_store`).
+/// The hoods are therefore fixed while the frontier is, and `world.clearCaches()` covers the moment it moves.
 fn parentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {
-    const generation = world.mod_store.content_generation;
-    if (parent_hood_cache.generation != generation) {
-        parent_hood_cache.clear();
-        parent_hood_cache.generation = generation;
-    } else if (parent_hood_cache.get(parent_key, bx, by)) |hit| {
-        return hit.*;
-    }
+    // The structural half of the invariant above. The other half is `game.depth <= max_depth_reached`,
+    // which `world.commitLayer()` keeps.
+    std.debug.assert(parent_key.depth < memory.game.depth);
+    if (parent_hood_cache.get(parent_key, bx, by)) |hit| return hit.*;
 
     const hood = resolveParentHood(parent_key, bx, by);
     parent_hood_cache.put(parent_key, bx, by, hood);
@@ -951,7 +1020,7 @@ pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
     // the base depth has no parent to inherit from, so just materialize
     if (target_depth == STARTING_ZOOM_TIMES) {
         const slot = ancestor_cache.allocateSlot(key);
-        world.materializeChunk(slot, key);
+        world.materializeInheritedChunk(slot, key);
         return slot.blocks[block_idx];
     }
 
@@ -961,7 +1030,8 @@ pub fn getInheritedMaterial(key: DepthCoordinate, bx: u4, by: u4) Block {
     const hood = parentHood(p.coord.asDepthCoordinate(target_depth - 1), p.bx, p.by);
 
     var block = applyAncestorLogic(hood.parent, hood.neighbors, key, bx, by).compile();
-    if (world.mod_store.getCell(key, @intCast(block_idx))) |cell| cell.applyTo(&block);
+    // `inheritedCell()`, not `mod_store`: an edit made after this depth was left stays at this depth.
+    if (world.inheritedCell(key, @intCast(block_idx))) |cell| cell.applyTo(&block);
     return block;
 }
 
@@ -1257,5 +1327,92 @@ test "material warp: a cell keeps its own material unless the warp reaches a nei
     try testing.expectEqual(
         grid[0].id,
         warpedMaterial(grid[0], neighbors, pulled, 3, 1).id,
+    );
+}
+
+/// Cells of one parent's region that keep the parent's overlay.
+fn sweepOverlay(overlay: Sprite, n: [8]Block, noise_seed: dw.utils.Vec2u, px: u64, py: u64) usize {
+    var kept: usize = 0;
+    for (0..dw.BLOCKS_PER_PARENT) |ly| {
+        for (0..dw.BLOCKS_PER_PARENT) |lx| {
+            if (keepsInheritedOverlay(
+                overlay,
+                n,
+                noise_seed,
+                px * dw.BLOCKS_PER_PARENT + lx,
+                py * dw.BLOCKS_PER_PARENT + ly,
+                @intCast(lx),
+                @intCast(ly),
+            )) kept += 1;
+        }
+    }
+    return kept;
+}
+
+test "a gem keeps one cell plus a couple, and an ore keeps far more" {
+    const noise_seed: dw.utils.Vec2u = .{ 0x243f6a8885a308d3, 0x13198a2e03707344 };
+    const alone: [8]Block = @splat(.empty);
+    const N = 4000;
+
+    var gem_total: usize = 0;
+    for (0..N) |i| {
+        const kept = sweepOverlay(.quartz, alone, noise_seed, 17, i);
+        try testing.expect(kept >= 1); // the anchor never leaves
+        gem_total += kept;
+    }
+    const gem_mean = @as(f64, @floatFromInt(gem_total)) / @as(f64, N);
+    try testing.expectApproxEqAbs(@as(f64, GEM_COPIES_MEAN), gem_mean, 0.1);
+
+    // An ore has no neighbors here either, and still spreads over a good part of its region.
+    var ore_total: usize = 0;
+    for (0..N) |i| ore_total += sweepOverlay(.copper, alone, noise_seed, 17, i);
+    const ore_mean = @as(f64, @floatFromInt(ore_total)) / @as(f64, N);
+    try testing.expect(ore_mean > gem_mean * 2.0);
+}
+
+test "an ore spreads with the vein around it, and a buried one keeps every cell" {
+    const noise_seed: dw.utils.Vec2u = .{ 0x9e3779b97f4a7c15, 0xbf58476d1ce4e5b9 };
+    const N = 2000;
+
+    const alone: [8]Block = @splat(.empty);
+    var vein: [8]Block = @splat(.empty);
+    vein[3] = .makeBasicBlock(.copper, 1); // left
+    vein[4] = .makeBasicBlock(.copper, 2); // right
+    const buried: [8]Block = @splat(.makeBasicBlock(.copper, 3));
+
+    var totals: [3]usize = @splat(0);
+    for (0..N) |i| {
+        totals[0] += sweepOverlay(.copper, alone, noise_seed, 40, i);
+        totals[1] += sweepOverlay(.copper, vein, noise_seed, 40, i);
+        // A parent surrounded by its own ore is past the threshold everywhere, so nothing is lost.
+        try testing.expectEqual(
+            @as(usize, dw.BLOCKS_PER_PARENT * dw.BLOCKS_PER_PARENT),
+            sweepOverlay(.copper, buried, noise_seed, 40, i),
+        );
+        totals[2] += dw.BLOCKS_PER_PARENT * dw.BLOCKS_PER_PARENT;
+    }
+    // More of the parent's own ore around it means more of it survives.
+    try testing.expect(totals[0] < totals[1]);
+    try testing.expect(totals[1] < totals[2]);
+}
+
+test "overlay support runs from an isolated parent to a buried one" {
+    const alone: [8]Block = @splat(.empty);
+    const buried: [8]Block = @splat(.makeBasicBlock(.copper, 1));
+
+    for (0..dw.BLOCKS_PER_PARENT) |ly| {
+        for (0..dw.BLOCKS_PER_PARENT) |lx| {
+            const low = overlaySupport(alone, .copper, @intCast(lx), @intCast(ly));
+            const high = overlaySupport(buried, .copper, @intCast(lx), @intCast(ly));
+            try testing.expectApproxEqAbs(@as(f32, 0.25), low, 0.001);
+            try testing.expectApproxEqAbs(@as(f32, 1.0), high, 0.001);
+        }
+    }
+
+    // With ore only to the left, the left column of the region is better supported than the right.
+    var left_only: [8]Block = @splat(.empty);
+    left_only[3] = .makeBasicBlock(.copper, 1);
+    try testing.expect(
+        overlaySupport(left_only, .copper, 0, 1) > overlaySupport(left_only, .copper, 3, 1),
     );
 }
