@@ -17,6 +17,7 @@ const world = dw.world;
 const procedural = dw.procedural;
 const seeding = dw.seeding;
 const WorldCoord = seeding.WorldCoord;
+const Vec2World = @Vector(2, WorldCoord);
 
 const Sprite = dw.Sprite;
 const Block = memory.Block;
@@ -314,9 +315,15 @@ const NON_ANCHOR_CELLS = dw.BLOCKS_PER_PARENT * dw.BLOCKS_PER_PARENT - 1;
 /// a gem is a speck, and a coherent field would make a region keep all of them or none.
 const GEM_KEEP_CHANCE = (GEM_COPIES_MEAN - 1.0) / @as(comptime_float, NON_ANCHOR_CELLS);
 
-/// Chance that one corner of a fully enclosed empty parent fills at the next depth.
-/// Each corner rolls separately, so enclosed pockets stop being fixed 4x4 squares.
-const INFILL_CORNER_CHANCE = 0.5;
+/// Chance that an enclosed or narrow empty parent smooths its solid-facing child edges.
+/// One decision covers a whole parent region, so it produces bands instead of static.
+const INFILL_MACRO_CHANCE = 0.90;
+/// Width of the coherent infill field in child blocks.
+/// It spans several parent regions, so adjacent bands form patches rather than static.
+const INFILL_CLUSTER_SCALE = 14.0;
+/// Chance that a diagonally touching solid pair gains one one-cell bridge at the next depth.
+/// The bridge is gentler than a shared face because it adds only one air-parent child cell.
+const DIAGONAL_BRIDGE_CHANCE = 0.70;
 
 /// Total block width of the world across one dimension.
 const WORLD_BLOCKS_WIDE = @as(u32, dw.CHUNK_SIZE) << (STARTING_ZOOM_TIMES * dw.ZOOM_LOG2);
@@ -376,36 +383,117 @@ comptime {
         @compileError("A fully buried ore cell must keep its ore, or a big deposit gets holes.");
     if (GEM_COPIES_MEAN < 1 or GEM_COPIES_MEAN > 1 + NON_ANCHOR_CELLS)
         @compileError("A gem keeps its anchor cell, so its mean sits in [1, region size].");
-    if (INFILL_CORNER_CHANCE <= 0 or INFILL_CORNER_CHANCE >= 1)
-        @compileError("An infill corner chance must let a corner both fill and stay empty.");
+    if (INFILL_MACRO_CHANCE <= 0 or INFILL_MACRO_CHANCE >= 1)
+        @compileError("An infill macro chance must let a region both fill and stay empty.");
+    if (INFILL_CLUSTER_SCALE <= dw.BLOCKS_PER_PARENT)
+        @compileError("The infill field must span more than one parent region to connect adjacent cells.");
+    if (DIAGONAL_BRIDGE_CHANCE <= 0 or DIAGONAL_BRIDGE_CHANCE >= 1)
+        @compileError("A diagonal bridge chance must let a pair both join and stay separate.");
 }
 
-/// Returns the diagonal parent material for one infill corner, if this parent is fully enclosed.
-/// The caller must use the returned material only for that matching child corner.
-fn infillCornerSource(n: [8]Block, lx: u4, ly: u4) ?Block {
+/// Returns the cardinal parent material for one macro infill band in an enclosed pocket or narrow tunnel.
+/// The caller must use the returned material only for the solid-facing child edge.
+fn infillBandSource(n: [8]Block, lx: u4, ly: u4) ?Block {
+    const outer: u4 = dw.BLOCKS_PER_PARENT - 1;
+
+    // The cardinal pairs are opposite walls of a one-parent-wide tunnel. All four diagonal
+    // donors must be solid, so an ordinary open surface cannot grow a loose band into its air.
+    const has_horizontal_walls = n[3].isSolid() and n[4].isSolid();
+    const has_vertical_walls = n[1].isSolid() and n[6].isSolid();
+    if (!has_horizontal_walls and !has_vertical_walls) return null;
+    inline for (.{ 0, 2, 5, 7 }) |index| if (!n[index].isSolid()) return null;
+
+    // Neighbors are row-major with the center removed. Prefer horizontal bands at their corners,
+    // so a fully enclosed parent gets one continuous outer ring instead of competing materials.
+    if (has_vertical_walls and ly == 0) return n[1];
+    if (has_vertical_walls and ly == outer) return n[6];
+    if (has_horizontal_walls and lx == 0) return n[3];
+    if (has_horizontal_walls and lx == outer) return n[4];
+    return null;
+}
+
+/// Returns one cardinal donor where two solids meet only through a diagonal gap.
+/// `lx == 0` identifies one of the two possible bridge sides; the shared roll picks one side.
+fn diagonalBridgeSource(n: [8]Block, lx: u4, ly: u4) ?Block {
     if (lx != 0 and lx != dw.BLOCKS_PER_PARENT - 1) return null;
     if (ly != 0 and ly != dw.BLOCKS_PER_PARENT - 1) return null;
-    for (n) |block| if (!block.isSolid()) return null;
 
-    // Neighbors are row-major with the center removed.
-    const index: usize = if (ly == 0)
+    // Each case names an air parent's corner that lies between two diagonal solid parents.
+    if (lx == 0 and ly == 0 and n[1].isSolid() and n[3].isSolid()) return n[1];
+    if (lx == dw.BLOCKS_PER_PARENT - 1 and ly == 0 and n[1].isSolid() and n[4].isSolid()) return n[1];
+    if (lx == 0 and ly == dw.BLOCKS_PER_PARENT - 1 and n[3].isSolid() and n[6].isSolid()) return n[3];
+    if (lx == dw.BLOCKS_PER_PARENT - 1 and ly == dw.BLOCKS_PER_PARENT - 1 and n[4].isSolid() and n[6].isSolid()) return n[4];
+    return null;
+}
+
+/// Returns the parent-grid corner that a child corner touches.
+/// Diagonal parents and their selected air bridge share this coordinate.
+inline fn parentGridCorner(wx: WorldCoord, wy: WorldCoord, lx: u4, ly: u4) Vec2World {
+    return .{
+        wx / dw.BLOCKS_PER_PARENT + @intFromBool(lx != 0),
+        wy / dw.BLOCKS_PER_PARENT + @intFromBool(ly != 0),
+    };
+}
+
+/// Returns the shared diagonal bridge hash for the parent-grid corner at `wx`, `wy`.
+inline fn diagonalBridgeRoll(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord, lx: u4, ly: u4) u64 {
+    const corner = parentGridCorner(wx, wy, lx, ly);
+    return seeding.FastHash.hash2dWorld(noise_seed, corner[0] +% DIAGONAL_SALT, corner[1] -% DIAGONAL_SALT);
+}
+
+/// Returns true when the parent-grid corner gets its diagonal bridge this depth.
+inline fn connectsDiagonal(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord, lx: u4, ly: u4) bool {
+    return diagonalBridgeRoll(noise_seed, wx, wy, lx, ly) <= seeding.oddsNum(DIAGONAL_BRIDGE_CHANCE);
+}
+
+/// Returns true for the selected side of a diagonal bridge.
+/// The other air parent stays empty, so a diagonal pair gains one bridge block rather than a wide fill.
+inline fn selectsDiagonalBridgeSide(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord, lx: u4, ly: u4) bool {
+    const roll = diagonalBridgeRoll(noise_seed, wx, wy, lx, ly);
+    return @intFromBool(lx == 0) == (roll & 1);
+}
+
+/// Returns true when this solid child corner must survive to join its diagonal peer.
+inline fn protectsDiagonalBridge(n: [8]Block, noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord, lx: u4, ly: u4) bool {
+    if (lx != 0 and lx != dw.BLOCKS_PER_PARENT - 1) return false;
+    if (ly != 0 and ly != dw.BLOCKS_PER_PARENT - 1) return false;
+
+    const diagonal: usize = if (ly == 0)
         if (lx == 0) 0 else 2
     else if (lx == 0)
         5
     else
         7;
-    return n[index];
+    return n[diagonal].isSolid() and connectsDiagonal(noise_seed, wx, wy, lx, ly);
 }
 
-/// Returns true when a candidate enclosed corner fills at this depth.
-/// `wx` and `wy` name the child cell, so adjacent chunks always agree on the roll.
-inline fn infillsCorner(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord) bool {
-    const roll = seeding.FastHash.hash2dWorld(noise_seed, wx +% INFILL_SALT, wy -% INFILL_SALT);
-    return roll <= seeding.oddsNum(INFILL_CORNER_CHANCE);
+/// Compiles the material for an infill cell.
+/// Only an ore or gem may carry its `base_id`; ordinary materials must not use the overlay shader path.
+inline fn infillSpec(source: Block, seed: u64) memory.BlockSpec {
+    return .{
+        .id = source.id,
+        .base_id = if (source.id.isOverlay()) source.base_id else .none,
+        .seed = seed,
+        .tag = source.tag.aged(),
+    };
 }
 
-/// Keeps infill rolls separate from ore and gem retention.
-const INFILL_SALT: u64 = 0xA24BAED4963EE407;
+/// Returns true when one regular infill region smooths its solid-facing child edges.
+/// Every child cell of a parent region samples its center, so one accepted region fills full bands.
+inline fn infillsRegion(noise_seed: dw.utils.Vec2u, wx: WorldCoord, wy: WorldCoord) bool {
+    const region_center = dw.BLOCKS_PER_PARENT / 2;
+    const sample_x = (wx / dw.BLOCKS_PER_PARENT) * dw.BLOCKS_PER_PARENT + region_center;
+    const sample_y = (wy / dw.BLOCKS_PER_PARENT) * dw.BLOCKS_PER_PARENT + region_center;
+    const field = procedural.getDualValueNoiseFixed(
+        noise_seed,
+        sample_x,
+        sample_y,
+        1.0 / INFILL_CLUSTER_SCALE,
+    )[0];
+    return field <= INFILL_MACRO_CHANCE;
+}
+/// Keeps diagonal bridge rolls separate from every other terrain decision.
+const DIAGONAL_SALT: u64 = 0x9FB21C651E98DF25;
 
 /// How much of a parent's own neighborhood backs one child cell,
 /// from 0 (an isolated parent) to 1 (a parent buried in the same overlay).
@@ -557,7 +645,7 @@ fn carvesSlope(
     ly: u4,
 ) bool {
     // The core and its bridges outrank every density and erosion term below; see `CORE_MIN`.
-    if (isProtectedCell(n, lx, ly)) return false;
+    if (isProtectedCell(n, lx, ly) or protectsDiagonalBridge(n, noise_seed, wx, wy, lx, ly)) return false;
 
     var buried = true;
     for (n) |b| buried = buried and b.isSolid();
@@ -738,17 +826,18 @@ pub fn applyAncestorLogic(
     if (parent_sprite.isEmpty()) {
         const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
         const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
-        const source = infillCornerSource(parent_neighbors, lx, ly) orelse return .{};
+        const regular_source = infillBandSource(parent_neighbors, lx, ly);
+        const source = regular_source orelse diagonalBridgeSource(parent_neighbors, lx, ly) orelse return .{};
         const chunk_noise = chunkNoise(key);
         const wx = worldBlock(@intCast(key.quadrant % 2), key.suffix[0], bx);
         const wy = worldBlock(@intCast(key.quadrant / 2), key.suffix[1], by);
-        if (!infillsCorner(chunk_noise.noise_seed, wx, wy)) return .{};
-        return .{
-            .id = source.id,
-            .base_id = source.base_id,
-            .seed = seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by),
-            .tag = source.tag,
-        };
+        const fills = if (regular_source != null)
+            infillsRegion(chunk_noise.noise_seed, wx, wy)
+        else
+            connectsDiagonal(chunk_noise.noise_seed, wx, wy, lx, ly) and
+                selectsDiagonalBridgeSide(chunk_noise.noise_seed, wx, wy, lx, ly);
+        if (!fills) return .{};
+        return infillSpec(source, seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by));
     }
     const chunk_noise = chunkNoise(key);
     const noise_hash_2 = seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by);
@@ -1151,7 +1240,7 @@ fn testNeighborhood(solid: [3][3]bool, seed_base: u64) struct { Block, [8]Block 
     return .{ center, n };
 }
 
-test "infill: only enclosed outer corners can source material" {
+test "infill: enclosed pockets and narrow tunnels can source solid-facing bands" {
     const enclosed: [8]Block = .{
         .makeBasicBlock(.stone, 1),
         .makeBasicBlock(.blue_stone, 2),
@@ -1163,25 +1252,121 @@ test "infill: only enclosed outer corners can source material" {
         .makeBasicBlock(.blue_strange_stone, 8),
     };
 
-    try testing.expectEqual(Sprite.stone, infillCornerSource(enclosed, 0, 0).?.id);
-    try testing.expectEqual(Sprite.mossy_stone, infillCornerSource(enclosed, 3, 0).?.id);
-    try testing.expectEqual(Sprite.purple_stone, infillCornerSource(enclosed, 0, 3).?.id);
-    try testing.expectEqual(Sprite.blue_strange_stone, infillCornerSource(enclosed, 3, 3).?.id);
-    try testing.expect(infillCornerSource(enclosed, 1, 0) == null);
+    try testing.expectEqual(Sprite.blue_stone, infillBandSource(enclosed, 0, 0).?.id);
+    try testing.expectEqual(Sprite.blue_stone, infillBandSource(enclosed, 3, 0).?.id);
+    try testing.expectEqual(Sprite.bright_red_stone, infillBandSource(enclosed, 0, 3).?.id);
+    try testing.expectEqual(Sprite.bright_red_stone, infillBandSource(enclosed, 3, 3).?.id);
+    try testing.expect(infillBandSource(enclosed, 1, 1) == null);
 
+    // An empty parent with walls above and below is a horizontal tunnel, even though its left and
+    // right neighbors are also air. Its top and bottom bands may infill without growing loose blocks in caves.
+    var horizontal_tunnel = enclosed;
+    horizontal_tunnel[3] = .empty;
+    horizontal_tunnel[4] = .empty;
+    try testing.expect(infillBandSource(horizontal_tunnel, 0, 0) != null);
+    try testing.expect(infillBandSource(horizontal_tunnel, 1, 0) != null);
+    try testing.expect(infillBandSource(horizontal_tunnel, 1, 1) == null);
+
+    // The vertical form is symmetric.
+    var vertical_tunnel = enclosed;
+    vertical_tunnel[1] = .empty;
+    vertical_tunnel[6] = .empty;
+    try testing.expect(infillBandSource(vertical_tunnel, 0, 0) != null);
+    try testing.expect(infillBandSource(vertical_tunnel, 1, 1) == null);
+
+    // A missing wall in both directions is an open cave, not a narrow tunnel.
     var open = enclosed;
     open[1] = .empty;
-    try testing.expect(infillCornerSource(open, 0, 0) == null);
+    open[3] = .empty;
+    try testing.expect(infillBandSource(open, 0, 0) == null);
 }
 
-test "infill: corner rolls are deterministic and varied" {
+test "infill: a two-cell horizontal slot fills both parent regions" {
+    const solid: Block = .makeBasicBlock(.stone, 1);
+
+    // S S S S
+    // S . . S
+    // S S S S
+    //
+    // Each empty parent sees solid top and bottom walls. Its inner neighbor is air, but all four
+    // diagonal donors stay solid, so each top and bottom child cell is an infill candidate.
+    var left: [8]Block = @splat(solid);
+    left[4] = .empty;
+    var right: [8]Block = @splat(solid);
+    right[3] = .empty;
+
+    inline for (.{ 0, 3 }) |ly| {
+        inline for (0..dw.BLOCKS_PER_PARENT) |lx| {
+            try testing.expect(infillBandSource(left, @intCast(lx), ly) != null);
+            try testing.expect(infillBandSource(right, @intCast(lx), ly) != null);
+        }
+    }
+}
+
+test "infill: ordinary solids never keep an ore underlay" {
+    const ordinary_solids = [_]Sprite{ .sand, .dirt, .clay, .red_clay, .stone, .diorite };
+    for (ordinary_solids) |id| {
+        var source = Block.makeBasicBlock(id, 1);
+        source.base_id = .stone;
+        const spec = infillSpec(source, 2);
+        try testing.expectEqual(id, spec.id);
+        try testing.expectEqual(Sprite.none, spec.base_id);
+    }
+
+    var ore = Block.makeBasicBlock(.copper, 3);
+    ore.base_id = .diorite;
+    const ore_spec = infillSpec(ore, 4);
+    try testing.expectEqual(Sprite.diorite, ore_spec.base_id);
+}
+
+test "infill: a diagonal bridge protects both ends and selects one air side" {
+    const seed: dw.utils.Vec2u = .{ 0x7f4a7c159e3779b9, 0xd1b54a32d192ed03 };
+    const solid: Block = .makeBasicBlock(.stone, 1);
+
+    // The upper-right air parent has its solid pair to the west and south.
+    var upper_right: [8]Block = @splat(.empty);
+    upper_right[3] = solid;
+    upper_right[6] = solid;
+    try testing.expectEqual(Sprite.stone, diagonalBridgeSource(upper_right, 0, 3).?.id);
+
+    // The lower-left air parent has the same pair to the north and east.
+    var lower_left: [8]Block = @splat(.empty);
+    lower_left[1] = solid;
+    lower_left[4] = solid;
+    try testing.expectEqual(Sprite.stone, diagonalBridgeSource(lower_left, 3, 0).?.id);
+
+    const upper_right_connects = connectsDiagonal(seed, 4, 3, 0, 3);
+    const lower_left_connects = connectsDiagonal(seed, 3, 4, 3, 0);
+    try testing.expectEqual(upper_right_connects, lower_left_connects);
+    try testing.expect(selectsDiagonalBridgeSide(seed, 4, 3, 0, 3) !=
+        selectsDiagonalBridgeSide(seed, 3, 4, 3, 0));
+
+    // The two solid parents at opposite corners use that same roll to keep their endpoints.
+    var northwest: [8]Block = @splat(.empty);
+    northwest[7] = solid;
+    var southeast: [8]Block = @splat(.empty);
+    southeast[0] = solid;
+    try testing.expectEqual(
+        protectsDiagonalBridge(northwest, seed, 3, 3, 3, 3),
+        protectsDiagonalBridge(southeast, seed, 4, 4, 0, 0),
+    );
+}
+
+test "infill: coherent field is deterministic and varied by parent region" {
     const seed: dw.utils.Vec2u = .{ 0x517cc1b727220a95, 0x6c8e9cf570932bd5 };
+    const one_region = infillsRegion(seed, 40, 84);
+    for (0..dw.BLOCKS_PER_PARENT) |ly| {
+        for (0..dw.BLOCKS_PER_PARENT) |lx| {
+            try testing.expectEqual(one_region, infillsRegion(seed, 40 + lx, 84 + ly));
+        }
+    }
+
     var fills = false;
     var stays_empty = false;
     for (0..32) |y| {
         for (0..32) |x| {
-            const fills_here = infillsCorner(seed, x, y);
-            try testing.expectEqual(fills_here, infillsCorner(seed, x, y));
+            const fills_here = infillsRegion(seed, x, y);
+            try testing.expectEqual(fills_here, infillsRegion(seed, x, y));
             fills = fills or fills_here;
             stays_empty = stays_empty or !fills_here;
         }
