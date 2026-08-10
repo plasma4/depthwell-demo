@@ -314,8 +314,8 @@ const NON_ANCHOR_CELLS = dw.BLOCKS_PER_PARENT * dw.BLOCKS_PER_PARENT - 1;
 /// a gem is a speck, and a coherent field would make a region keep all of them or none.
 const GEM_KEEP_CHANCE = (GEM_COPIES_MEAN - 1.0) / @as(comptime_float, NON_ANCHOR_CELLS);
 
-/// Chance that one corner of a fully enclosed empty parent fills at the next depth.
-/// Each corner rolls separately, so enclosed pockets stop being fixed 4x4 squares.
+/// Chance that one corner of an enclosed or narrow empty parent fills at the next depth.
+/// Each corner rolls separately, so pockets and one-parent-wide tunnels stop being fixed 4x4 shapes.
 const INFILL_CORNER_CHANCE = 0.5;
 
 /// Total block width of the world across one dimension.
@@ -380,12 +380,18 @@ comptime {
         @compileError("An infill corner chance must let a corner both fill and stay empty.");
 }
 
-/// Returns the diagonal parent material for one infill corner, if this parent is fully enclosed.
+/// Returns the diagonal parent material for one infill corner in an enclosed pocket or narrow tunnel.
 /// The caller must use the returned material only for that matching child corner.
 fn infillCornerSource(n: [8]Block, lx: u4, ly: u4) ?Block {
     if (lx != 0 and lx != dw.BLOCKS_PER_PARENT - 1) return null;
     if (ly != 0 and ly != dw.BLOCKS_PER_PARENT - 1) return null;
-    for (n) |block| if (!block.isSolid()) return null;
+
+    // The cardinal pairs are opposite walls of a one-parent-wide tunnel. All four diagonal
+    // donors must be solid, so an ordinary open surface cannot grow a loose corner into its air.
+    const has_horizontal_walls = n[3].isSolid() and n[4].isSolid();
+    const has_vertical_walls = n[1].isSolid() and n[6].isSolid();
+    if (!has_horizontal_walls and !has_vertical_walls) return null;
+    inline for (.{ 0, 2, 5, 7 }) |index| if (!n[index].isSolid()) return null;
 
     // Neighbors are row-major with the center removed.
     const index: usize = if (ly == 0)
@@ -395,6 +401,17 @@ fn infillCornerSource(n: [8]Block, lx: u4, ly: u4) ?Block {
     else
         7;
     return n[index];
+}
+
+/// Compiles the material for an infill cell.
+/// Only an ore or gem may carry its `base_id`; ordinary materials must not use the overlay shader path.
+inline fn infillSpec(source: Block, seed: u64) memory.BlockSpec {
+    return .{
+        .id = source.id,
+        .base_id = if (source.id.isOverlay()) source.base_id else .none,
+        .seed = seed,
+        .tag = source.tag.aged(),
+    };
 }
 
 /// Returns true when a candidate enclosed corner fills at this depth.
@@ -743,12 +760,7 @@ pub fn applyAncestorLogic(
         const wx = worldBlock(@intCast(key.quadrant % 2), key.suffix[0], bx);
         const wy = worldBlock(@intCast(key.quadrant / 2), key.suffix[1], by);
         if (!infillsCorner(chunk_noise.noise_seed, wx, wy)) return .{};
-        return .{
-            .id = source.id,
-            .base_id = source.base_id,
-            .seed = seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by),
-            .tag = source.tag,
-        };
+        return infillSpec(source, seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by));
     }
     const chunk_noise = chunkNoise(key);
     const noise_hash_2 = seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by);
@@ -1151,7 +1163,7 @@ fn testNeighborhood(solid: [3][3]bool, seed_base: u64) struct { Block, [8]Block 
     return .{ center, n };
 }
 
-test "infill: only enclosed outer corners can source material" {
+test "infill: enclosed pockets and narrow tunnels can source outer corners" {
     const enclosed: [8]Block = .{
         .makeBasicBlock(.stone, 1),
         .makeBasicBlock(.blue_stone, 2),
@@ -1169,9 +1181,40 @@ test "infill: only enclosed outer corners can source material" {
     try testing.expectEqual(Sprite.blue_strange_stone, infillCornerSource(enclosed, 3, 3).?.id);
     try testing.expect(infillCornerSource(enclosed, 1, 0) == null);
 
+    // An empty parent with walls above and below is a horizontal tunnel, even though its left and
+    // right neighbors are also air. Its corners may infill without growing loose blocks in caves.
+    var horizontal_tunnel = enclosed;
+    horizontal_tunnel[3] = .empty;
+    horizontal_tunnel[4] = .empty;
+    try testing.expect(infillCornerSource(horizontal_tunnel, 0, 0) != null);
+
+    // The vertical form is symmetric.
+    var vertical_tunnel = enclosed;
+    vertical_tunnel[1] = .empty;
+    vertical_tunnel[6] = .empty;
+    try testing.expect(infillCornerSource(vertical_tunnel, 0, 0) != null);
+
+    // A missing wall in both directions is an open cave, not a narrow tunnel.
     var open = enclosed;
     open[1] = .empty;
+    open[3] = .empty;
     try testing.expect(infillCornerSource(open, 0, 0) == null);
+}
+
+test "infill: ordinary solids never keep an ore underlay" {
+    const ordinary_solids = [_]Sprite{ .sand, .dirt, .clay, .red_clay, .stone, .diorite };
+    for (ordinary_solids) |id| {
+        var source = Block.makeBasicBlock(id, 1);
+        source.base_id = .stone;
+        const spec = infillSpec(source, 2);
+        try testing.expectEqual(id, spec.id);
+        try testing.expectEqual(Sprite.none, spec.base_id);
+    }
+
+    var ore = Block.makeBasicBlock(.copper, 3);
+    ore.base_id = .diorite;
+    const ore_spec = infillSpec(ore, 4);
+    try testing.expectEqual(Sprite.diorite, ore_spec.base_id);
 }
 
 test "infill: corner rolls are deterministic and varied" {
