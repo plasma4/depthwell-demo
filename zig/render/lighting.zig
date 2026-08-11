@@ -1,15 +1,15 @@
-//! CPU lighting pass over the visible block buffer. Writes 0..255 brightness each block's `light` prop.
-//! WGSL will then multiply the OKLAB lightness by `light / 255.0`; this logic handles both orange and white light types.
+//! This code calculates light for the visible blocks; it writes an OKLCH color to each block!
+//! Light loss depends on the medium (air/liquid/solid) and not on the light color; solid HP interpolates loss.
 //!
-//! Uses inverted Dial's algorithm (bucketed Dijkstra): each reachable cell is finalized exactly once at its brightest value,
-//! so overlapping light sources cost no extra relaxation (makes performance linear with some acceptable memory cost).
-//! Worst-case memory cost is reduced by using a dedicated arena that resets every time `applyLighting()` is called.
+//! Light is divided in to three fixed hues; hues are equal distances apart on the OKLAB hue circle.
+//! The system calculates a weight for each lane and the strongest lane always has the maximum brightness!
+//! Each lane floods through the shared cost grid; afterward the system reads the color back by comparing the lanes.
 //!
-//! Light spreads to all 8 neighbors with a sqrt(2) diagonal cost for an approximated circular falloff.
-//! Based on the block type (air, solid, or liquid) and HP, the decay rate changes/interpolates as needed.
+//! The flood uses radix heaps to run Dijkstra's algorithm for each "color lane" (in OKLCH).
+//! We represent light propagation as decay; a cell with high light has low decay.
+//! The radix heap processes cells from lowest decay to highest decay.
 //!
-//! NOTE: In Debug builds, this code can be a significant contributor to lag.
-
+//! NOTE: This code lags in debug bulids!
 const std = @import("std");
 const dw = @import("../root.zig");
 const memory = dw.memory;
@@ -17,122 +17,168 @@ const world = dw.world;
 
 const Block = memory.Block;
 const Sprite = dw.Sprite;
+const BlockLight = memory.BlockLight;
+const LightChannel = memory.LightChannel;
+const LIGHT_MAX = memory.LIGHT_MAX;
 
-/// Max brightness bound by `u8`.
-pub const MAX_LIGHT: u8 = 255;
-/// Min baseline brightness for unlit cells.
-pub const AMBIENT_LIGHT: u8 = 0;
-/// Debug ambient light brightness if the debug boolean is enabled.
-pub const AMBIENT_LIGHT_DEBUG: u8 = 192;
+/// The maximum brightness for block rendering.
+pub const MAX_LIGHT: u16 = 255;
+/// The lowest light level for unlit blocks.
+pub const AMBIENT_LIGHT: u16 = 0;
+/// The debug light level when global light is active.
+pub const AMBIENT_LIGHT_DEBUG: u16 = 192;
 
-/// Determines whether light should be global.
+/// Determine if light must be global.
 pub var IS_LIGHT_GLOBAL = false;
 
-// Light strength values for various sources:
+/// The player light strength.
 pub var PLAYER_LIGHT: u16 = 255;
+/// The limit for the player light strength.
 pub const MAX_PLAYER_LIGHT: u16 = 400;
-// ----
-pub const CAMPFIRE_LIGHT: u16 = 240;
-pub const FURNACE_LIGHT: u16 = AMBIENT_LIGHT;
-pub const LAVA_LIGHT: u16 = 60;
-// ----
-pub const PORTAL_LIGHT: u16 = 200;
-pub const PLATE_LIGHT: u16 = 160;
-pub const ORE_GEM_LIGHT: u16 = 100; // some ores may glow
-pub const TWINKLEVINE_LIGHT: u16 = 80;
 
-// Orthogonal decay rates per block type. Air should always be the lowest (decays slowest)!
+/// The maximum possible light strength from any source.
+pub const MAX_SOURCE_LIGHT: u16 = 400;
+
+/// The limit for chroma values.
+pub const LIGHT_CHROMA_MAX: f32 = 0.16;
+/// The number of steps in a full hue turn.
+pub const HUE_STEPS: u32 = @as(u32, LIGHT_MAX) + 1; // 64
+/// The mix factor to pull colors toward white.
+pub const CHROMA_WHITE_MIX: f32 = 0.0;
+
+/// These are the OKLAB hue angles in radians.
+pub const Hue = struct {
+    pub const fire: f32 = 1.19;
+    pub const gold: f32 = 1.60;
+    pub const green: f32 = 2.60;
+    pub const cyan: f32 = 3.40;
+    pub const cyan_blue: f32 = 3.80;
+    pub const violet: f32 = 5.40;
+};
+
+/// Defnes a source color through hue and chroma.
+pub const LightColor = struct {
+    /// The angle of the hue in radians.
+    hue: f32,
+    /// The saturation value from 0 to 1.
+    chroma: f32,
+
+    pub const white: LightColor = .{ .hue = 0, .chroma = 0 };
+    /// This is the warm color of fire.
+    pub const fire: LightColor = .{ .hue = Hue.fire, .chroma = 0.72 };
+};
+
+/// Describes a light emitter's strength and color (hue and chroma).
+const Emission = struct {
+    strength: u16 = 0,
+    color: LightColor = .white,
+};
+
+/// Returns the light emission of a sprite (strength and color).
+fn blockEmission(id: Sprite) Emission {
+    return switch (id) {
+        .campfire => .{ .strength = 240, .color = .fire },
+        .forest_furnace, .lava_furnace => .{ .strength = 0, .color = .fire },
+        .lava_stone, .molten_stone => .{ .strength = 60, .color = .fire },
+        .portal => .{ .strength = 200, .color = .{ .hue = Hue.violet, .chroma = 0.75 } },
+        .invportal => .{ .strength = 200, .color = .{ .hue = Hue.green, .chroma = 0.75 } },
+        .white_plate => .{ .strength = 160, .color = .white },
+        .electrit => .{ .strength = 100, .color = .{ .hue = Hue.gold, .chroma = 0.55 } },
+        .twinklemoss => .{ .strength = 80, .color = .{ .hue = Hue.cyan_blue, .chroma = 0.45 } },
+        else => .{},
+    };
+}
+
+/// The color of the player light.
+pub const PLAYER_COLOR: LightColor = .white;
+
+/// The number of color lanes.
+pub const LANES = 3;
+
+/// Returns the axis vector for a lane.
+fn laneAxis(comptime k: usize) [2]f32 {
+    const angle = 2.0 * std.math.pi * @as(f32, @floatFromInt(k)) / @as(f32, LANES);
+    return .{ @cos(angle), @sin(angle) };
+}
+
+/// The maximum saturation value.
+pub const CHROMA_GAMUT: f32 = @sqrt(3.0) / 2.0;
+
+/// Splits a color into lane weights.
+/// Each weight is between 0 and 1 and the largest weight is exactly 1.
+fn laneWeights(color: LightColor) [LANES]f32 {
+    const sat = @min(CHROMA_GAMUT, @max(0.0, color.chroma)) * (1.0 - CHROMA_WHITE_MIX);
+    const target = [2]f32{ sat * @cos(color.hue), sat * @sin(color.hue) };
+
+    var dots: [LANES]f32 = undefined;
+    var largest: f32 = -std.math.floatMax(f32);
+    inline for (0..LANES) |k| {
+        const axis = laneAxis(k);
+        dots[k] = (2.0 / 3.0) * (target[0] * axis[0] + target[1] * axis[1]);
+        largest = @max(largest, dots[k]);
+    }
+
+    var out: [LANES]f32 = undefined;
+    inline for (0..LANES) |k| out[k] = @min(1.0, @max(0.0, 1.0 - largest + dots[k]));
+    return out;
+}
+
+/// Calculates the lane light strengths.
+fn laneStrengths(e: Emission) [LANES]u16 {
+    const weights = laneWeights(e.color);
+    var out: [LANES]u16 = undefined;
+    const strength: f32 = @floatFromInt(e.strength);
+    inline for (0..LANES) |k| out[k] = @intFromFloat(@round(strength * weights[k]));
+    return out;
+}
+
+// These are decay rates for each block type; air must have the lowest rate!
 pub const AIR_FALLOFF: u16 = 12;
 pub const SOLID_FALLOFF: u16 = 28;
 pub const LIQUID_FALLOFF: u16 = SOLID_FALLOFF - 12;
 
-/// Brightest possible seed value; bounds the number of Dial buckets.
-const MAX_SOURCE: u16 = @max(
-    MAX_PLAYER_LIGHT,
-    CAMPFIRE_LIGHT,
-    FURNACE_LIGHT,
-    PORTAL_LIGHT,
-    PLATE_LIGHT,
-    ORE_GEM_LIGHT,
-    TWINKLEVINE_LIGHT,
-    LAVA_LIGHT,
-);
-const NUM_BUCKETS: usize = MAX_SOURCE + 1;
-
-fn blockEmission(id: Sprite) u16 {
-    return switch (id) {
-        .campfire => CAMPFIRE_LIGHT,
-        .forest_furnace, .lava_furnace => FURNACE_LIGHT,
-        .portal, .invportal => PORTAL_LIGHT,
-        .white_plate => PLATE_LIGHT,
-        .aquashard, .electrit => ORE_GEM_LIGHT,
-        .twinklemoss => TWINKLEVINE_LIGHT,
-        .lava_stone, .molten_stone => LAVA_LIGHT,
-        else => 0,
-    };
-}
-
-/// Returns true if the block is a warm light source, which creates an orange light glow in the shader.
-fn isOrangeSource(id: Sprite) bool {
-    return switch (id) {
-        .campfire => true,
-        .forest_furnace, .lava_furnace => true,
-        .lava_stone => true,
-        else => false,
-    };
-}
-
 comptime {
-    // Orthogonal cost is stored per-cell as u8; every falloff must fit.
+    // orthogonal cost is stored per-cell as u8
     std.debug.assert(SOLID_FALLOFF <= 255 and LIQUID_FALLOFF <= 255 and AIR_FALLOFF <= 255);
 }
 
-/// `ArenaAllocator` instance used for lighting logic.
+/// The arena allocator for the light calculations.
 var arena = memory.makeArena();
-/// `Allocator` from `arena`.
+/// The main allocator from the arena.
 var alloc = arena.allocator();
 
-/// Sets up lighting algorithm `ArrayList`s. Discards all invalidated pointers to prevent use-after-free corruption.
-/// Called whenever `applyLighting()` is called to reset allocator.
+/// Resets the arena allocator used for all the lighting calculations.
 fn resetArena() void {
     if (!arena.reset(.retain_capacity)) memory.oom();
-    @memset(&buckets_orange, .empty);
-    @memset(&buckets_white, .empty);
-
-    cost_buffer = std.array_list.Aligned(u8, .@"16").initCapacity(alloc, 2048) catch memory.oom();
-    orange_buffer = std.array_list.Aligned(u16, .@"16").initCapacity(alloc, 2048) catch memory.oom();
-    white_buffer = std.array_list.Aligned(u16, .@"16").initCapacity(alloc, 2048) catch memory.oom();
 }
 
-/// Orthogonal per-step light cost for entering `block`. Fits in u8 (<= SOLID_FALLOFF).
-/// Diagonals are derived from this at flood time via the fast sqrt(2) approximation.
+/// Returns the light cost for entering a block.
 fn orthoCost(block: Block) u8 {
     if (block.isLiquid()) return @intCast(LIQUID_FALLOFF);
 
-    // Treat empty/air blocks as hp = 16, solid blocks use their actual hp value (0..15).
+    // treat air blocks as if HP is 16 to smoothly interpolate lighting based on HP when mining!
+    // solid blocks use their real HP value from 0 to 15
     const hp: u16 = if (block.isSolid()) block.hp else 16;
 
-    // Linearly interpolate between SOLID_FALLOFF (hp = 0) and AIR_FALLOFF (hp = 16).
     const diff = SOLID_FALLOFF - AIR_FALLOFF;
     const decay = (@as(u32, diff) * hp + 8) / 16;
     var falloff: u16 = SOLID_FALLOFF - @as(u16, @intCast(decay));
 
-    // Cap minimum at liquid falloff if the block is waterlogged.
-    if (block.waterlogged != 0) {
+    if (block.water.bits != 0) {
         falloff = @max(falloff, LIQUID_FALLOFF);
     }
     return @intCast(falloff);
 }
 
-/// Fast, 100% accurate integer approximation of round(ortho * sqrt(2)) for diagonal steps.
+/// Returns the diagonal step cost (an 8-sided polygon visually).
 inline fn diagCost(ortho: u16) u16 {
     return (ortho * 181 + 64) >> 7;
 }
 
-/// Simulates the worst-case (straight line, air) light path to find max reach distance in blocks.
+/// Calculates the maximum reach distance in blocks.
 fn maxAirReachBlocks() comptime_int {
     comptime {
-        var brightness: u16 = MAX_SOURCE;
+        var brightness: u16 = MAX_SOURCE_LIGHT;
         var blocks: comptime_int = 0;
         const light = @min(AMBIENT_LIGHT, AMBIENT_LIGHT_DEBUG);
         while (brightness > AIR_FALLOFF and (brightness - AIR_FALLOFF) > light) {
@@ -143,23 +189,12 @@ fn maxAirReachBlocks() comptime_int {
     }
 }
 
-/// Buffer padding margin (in chunks) to capture off-screen light bleed.
+/// The padding margin in chunks.
 pub const CHUNK_MARGIN: u32 = @max(1, std.math.divCeil(
     u32,
     maxAirReachBlocks(),
     dw.CHUNK_SIZE,
 ) catch unreachable);
-
-/// Precomputed orthogonal step cost per cell (u8 keeps the flood's neighbor reads cache-friendly).
-var cost_buffer: std.array_list.Aligned(u8, .@"16") = undefined;
-/// High-precision per-cell light, orange (warm) channel.
-var orange_buffer: std.array_list.Aligned(u16, .@"16") = undefined;
-/// High-precision per-cell light, white (player/plate) channel.
-var white_buffer: std.array_list.Aligned(u16, .@"16") = undefined;
-
-/// Dial buckets, one FIFO of packed coords per light level, for each channel.
-var buckets_orange: [NUM_BUCKETS]std.array_list.Aligned(u32, .@"16") = undefined;
-var buckets_white: [NUM_BUCKETS]std.array_list.Aligned(u32, .@"16") = undefined;
 
 inline fn packCoords(x: u16, y: u16) u32 {
     return @as(u32, x) | (@as(u32, y) << 16);
@@ -173,28 +208,113 @@ inline fn unpackY(p: u32) u16 {
     return @as(u16, @intCast(p >> 16));
 }
 
-/// Seeds a cell into a channel: raises its light to `val` and enqueues it into that value's bucket.
-/// No-op if `val` does not improve the cell or does not clear ambient.
-inline fn seed(a: std.mem.Allocator, light: []u16, buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, .@"16"), i: usize, x: u16, y: u16, val: u16, ambient: u16) void {
-    if (val > light[i] and val > ambient) {
-        light[i] = val;
-        buckets[@as(usize, val)].append(a, packCoords(x, y)) catch memory.oom();
+/// Acts as a priority queue with integer keys using a small number of buckets to store elements.
+/// This data structure is faster than a standard Dial bucket sweep and uses `@clz()` (fancy optimization).
+const RadixHeap = struct {
+    const Entry = struct {
+        key: u16,
+        value: u32,
+    };
+
+    const BUCKETS_COUNT = 12;
+
+    buckets: [BUCKETS_COUNT]std.ArrayList(Entry),
+    t: u16,
+    size: usize,
+    allocator: std.mem.Allocator,
+
+    fn init(allocator: std.mem.Allocator) RadixHeap {
+        var self = RadixHeap{
+            .buckets = undefined,
+            .t = 0,
+            .size = 0,
+            .allocator = allocator,
+        };
+        inline for (0..BUCKETS_COUNT) |i| {
+            self.buckets[i] = .empty;
+        }
+        return self;
+    }
+
+    fn insert(self: *RadixHeap, key: u16, value: u32) void {
+        std.debug.assert(key >= self.t);
+        const b_idx = self.getBucketIndex(key);
+        self.buckets[b_idx].append(
+            self.allocator,
+            .{ .key = key, .value = value },
+        ) catch memory.oom();
+        self.size += 1;
+    }
+
+    fn getBucketIndex(self: *const RadixHeap, key: u16) usize {
+        const diff = key ^ self.t;
+        if (diff == 0) return 0;
+        const bit = 16 - @clz(diff);
+        return bit;
+    }
+
+    fn pop(self: *RadixHeap) ?Entry {
+        if (self.size == 0) return null;
+
+        if (self.buckets[0].items.len == 0) {
+            var j: usize = 1;
+            while (j < BUCKETS_COUNT) : (j += 1) {
+                if (self.buckets[j].items.len > 0) break;
+            }
+            std.debug.assert(j < BUCKETS_COUNT);
+
+            var min_key: u16 = std.math.maxInt(u16);
+            for (self.buckets[j].items) |entry| {
+                if (entry.key < min_key) {
+                    min_key = entry.key;
+                }
+            }
+
+            self.t = min_key;
+
+            var temp: std.ArrayList(Entry) = .empty;
+            const old_bucket = self.buckets[j];
+            self.buckets[j] = temp;
+            temp = old_bucket;
+
+            for (temp.items) |entry| {
+                const b_idx = self.getBucketIndex(entry.key);
+                std.debug.assert(b_idx < j);
+                self.buckets[b_idx].append(self.allocator, entry) catch memory.oom();
+            }
+            temp.deinit(self.allocator);
+        }
+
+        const entry = self.buckets[0].pop();
+        self.size -= 1;
+        return entry;
+    }
+};
+
+/// Adds a cell to the heap and updates the decay grid if the new decay value is lower.
+inline fn seed(heap: *RadixHeap, decay_grid: []u16, i: usize, x: u16, y: u16, decay_val: u16, max_decay: u16) void {
+    if (decay_val < decay_grid[i] and decay_val < max_decay) {
+        decay_grid[i] = decay_val;
+        heap.insert(decay_val, packCoords(x, y));
     }
 }
 
-/// Seeds the 2x2 cells surrounding the player using their continuous sub-pixel position.
-/// Light drops off similar to Euclidean distance through the cell's own medium cost.
-fn seedPlayerLight(
-    a: std.mem.Allocator,
+/// Seeds a point light source by converting the light strength into a decay value.
+fn seedPointLight(
+    heap: *RadixHeap,
     cost: []const u8,
-    light_white: []u16,
-    buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, .@"16"),
+    decay_grid: []u16,
     w: i32,
     h: i32,
-    ambient: u16,
+    max_decay: u16,
     px: f32,
     py: f32,
+    strength: u16,
 ) void {
+    std.debug.assert(strength <= MAX_SOURCE_LIGHT);
+    if (strength == 0) return;
+
+    const source_decay = MAX_SOURCE_LIGHT - strength;
     const cx0: i32 = @intFromFloat(@floor(px - 0.5));
     const cy0: i32 = @intFromFloat(@floor(py - 0.5));
 
@@ -206,107 +326,133 @@ fn seedPlayerLight(
                 const i: usize = @intCast(cy * w + cx);
                 const dx = px - (@as(f32, @floatFromInt(cx)) + 0.5);
                 const dy = py - (@as(f32, @floatFromInt(cy)) + 0.5);
-                // use the cell's own medium rate, not air
                 const falloff: f32 = @floatFromInt(cost[i]);
-                const drop = @round(@sqrt(dx * dx + dy * dy) * falloff);
-                if (@as(f32, PLAYER_LIGHT) > drop) {
-                    const val: u16 = @intFromFloat(@as(f32, PLAYER_LIGHT) - drop);
-                    seed(a, light_white, buckets, i, @intCast(cx), @intCast(cy), val, ambient);
-                }
+                const drop: f32 = @round(@sqrt(dx * dx + dy * dy) * falloff);
+                const decay_val: u16 = @intFromFloat(@as(f32, @floatFromInt(source_decay)) + drop);
+                seed(heap, decay_grid, i, @intCast(cx), @intCast(cy), decay_val, max_decay);
             }
         }
     }
 }
 
-/// One single-channel Dial flood: process buckets brightest -> dimmest, relaxing 8 neighbors.
-/// Because we descend and edge costs are strictly positive, appends only ever target strictly-lower
-/// buckets, so each cell is finalized exactly once at its brightest value regardless of source count.
-fn floodChannel(
-    a: std.mem.Allocator,
+/// Runs Dijkstra's algorithm for one lane.
+/// Uses the radix heap to pop the cell with the minimum decay.
+fn floodLane(
     cost: []const u8,
-    light: []u16,
-    buckets: *[NUM_BUCKETS]std.array_list.Aligned(u32, .@"16"),
+    decay_grid: []u16,
+    heap: *RadixHeap,
     w: i32,
     h: i32,
-    ambient: u16,
+    max_decay: u16,
 ) void {
-    var b: u16 = MAX_SOURCE;
-    while (b > ambient) : (b -= 1) {
-        const bucket_id: usize = @intCast(b);
-        // Nothing appends to buckets[b] once we reach level b (relaxation only writes lower levels),
-        // so this backing slice is stable for the duration of the inner loop.
-        const items = buckets[bucket_id].items;
-        for (items) |pc| {
-            const x = @as(i32, unpackX(pc));
-            const y = @as(i32, unpackY(pc));
-            const idx: usize = @intCast(y * w + x);
+    while (heap.pop()) |entry| {
+        const u_decay = entry.key;
+        const pc = entry.value;
+        const x = @as(i32, unpackX(pc));
+        const y = @as(i32, unpackY(pc));
+        const idx: usize = @intCast(y * w + x);
 
-            // Skip stale entries: this cell was later relaxed to a brighter bucket and already handled.
-            if (light[idx] != b) continue;
+        if (decay_grid[idx] != u_decay) continue;
 
-            inline for ([_][2]i32{
-                .{ -1, -1 }, .{ 0, -1 }, .{ 1, -1 },
-                .{ -1, 0 },  .{ 1, 0 },  .{ -1, 1 },
-                .{ 0, 1 },   .{ 1, 1 },
-            }) |d| {
-                const nx = x + d[0];
-                const ny = y + d[1];
-                if (nx >= 0 and nx < w and ny >= 0 and ny < h) {
-                    const ni: usize = @intCast(ny * w + nx);
-                    const oc: u16 = cost[ni];
-                    const c: u16 = if (d[0] != 0 and d[1] != 0) diagCost(oc) else oc;
-                    if (b > c) {
-                        const nl = b - c;
-                        if (nl > light[ni]) {
-                            light[ni] = nl;
-                            buckets[@as(usize, nl)].append(a, packCoords(
-                                @intCast(nx),
-                                @intCast(ny),
-                            )) catch memory.oom();
-                        }
-                    }
+        inline for ([_][2]i32{
+            .{ -1, -1 }, .{ 0, -1 }, .{ 1, -1 },
+            .{ -1, 0 },  .{ 1, 0 },  .{ -1, 1 },
+            .{ 0, 1 },   .{ 1, 1 },
+        }) |d| {
+            const nx = x + d[0];
+            const ny = y + d[1];
+            if (nx >= 0 and nx < w and ny >= 0 and ny < h) {
+                const ni: usize = @intCast(ny * w + nx);
+                const oc: u16 = cost[ni];
+                const c: u16 = if (d[0] != 0 and d[1] != 0) diagCost(oc) else oc;
+                const n_decay = u_decay + c;
+                if (n_decay < decay_grid[ni] and n_decay < max_decay) {
+                    decay_grid[ni] = n_decay;
+                    heap.insert(n_decay, packCoords(@intCast(nx), @intCast(ny)));
                 }
             }
         }
     }
 }
 
-/// Executes a bucketed Dijkstra light flood over the visible lbock array.
-/// Writes the final per-block `light` (0..255) and `lighting_color` (orange flag).
+/// Maps a light value to the channel type!
+inline fn quantizeLightness(value: u16) LightChannel {
+    const clamped: u32 = @min(value, MAX_LIGHT);
+    return @intCast((clamped * LIGHT_MAX + MAX_LIGHT / 2) / MAX_LIGHT);
+}
+
+/// Calculates the light color of a cell from the lane values.
+fn resolveCell(lanes: [LANES]u16) BlockLight {
+    var strongest: u16 = 0;
+    inline for (0..LANES) |k| strongest = @max(strongest, lanes[k]);
+    if (strongest == 0) return .none;
+
+    const lightness = quantizeLightness(strongest);
+
+    var equal = true;
+    inline for (1..LANES) |k| equal = equal and (lanes[k] == lanes[0]);
+    if (equal) return .{ .l = lightness };
+
+    const scale = 1.0 / @as(f32, @floatFromInt(strongest));
+    var vec = [2]f32{ 0, 0 };
+    inline for (0..LANES) |k| {
+        const axis = laneAxis(k);
+        const share = @as(f32, @floatFromInt(lanes[k])) * scale;
+        vec[0] += share * axis[0];
+        vec[1] += share * axis[1];
+    }
+
+    const magnitude = @min(1.0, @sqrt(vec[0] * vec[0] + vec[1] * vec[1]));
+    if (magnitude <= 0.0) return .{ .l = lightness };
+
+    var angle = std.math.atan2(vec[1], vec[0]);
+    if (angle < 0) angle += 2.0 * std.math.pi;
+    const hue_fraction = angle / (2.0 * std.math.pi);
+
+    const steps: f32 = @floatFromInt(HUE_STEPS);
+    const hue_step = @as(u32, @intFromFloat(@round(hue_fraction * steps))) % HUE_STEPS;
+
+    return .{
+        .l = lightness,
+        .c = @intFromFloat(@round(magnitude * @as(f32, @floatFromInt(LIGHT_MAX)))),
+        .h = @intCast(hue_step),
+    };
+}
+
+/// Calculates light values for all visible blocks.
 pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: f32) void {
+    @setFloatMode(.optimized);
     resetArena();
     const w: i32 = @intCast(wb);
     const h: i32 = @intCast(hb);
     const wbw: u16 = @intCast(wb);
 
-    // Recycle scratch: retain capacity, reset contents below.
-    for (&buckets_orange) |*bk| bk.clearRetainingCapacity();
-    for (&buckets_white) |*bk| bk.clearRetainingCapacity();
-    cost_buffer.resize(alloc, out.len) catch memory.oom();
-    orange_buffer.resize(alloc, out.len) catch memory.oom();
-    white_buffer.resize(alloc, out.len) catch memory.oom();
+    const cost_slice = alloc.alignedAlloc(u8, memory.MAIN_ALIGN, out.len) catch memory.oom();
+    var lane_decay: [LANES][]u16 = undefined;
+    inline for (0..LANES) |k| {
+        lane_decay[k] = alloc.alignedAlloc(u16, memory.MAIN_ALIGN, out.len) catch memory.oom();
+    }
 
-    const cost_slice = cost_buffer.items;
-    const light_orange = orange_buffer.items;
-    const light_white = white_buffer.items;
+    var lane_heap: [LANES]RadixHeap = undefined;
+    inline for (0..LANES) |k| {
+        lane_heap[k] = RadixHeap.init(alloc);
+    }
 
     const ambient: u16 = if (dw.dev_menu and IS_LIGHT_GLOBAL) AMBIENT_LIGHT_DEBUG else AMBIENT_LIGHT;
+    const max_decay = MAX_SOURCE_LIGHT - ambient;
 
-    // Single reset pass: precompute per-cell cost, initialize both channels to ambient
-    // then, "seed" (add) light-emitting blocks into their channel's appropriate buckets.
     var sy: u16 = 0;
     var sx: u16 = 0;
     for (out, 0..) |block, i| {
         cost_slice[i] = orthoCost(block);
-        light_orange[i] = ambient;
-        light_white[i] = ambient;
+        inline for (0..LANES) |k| lane_decay[k][i] = max_decay;
 
         const emission = blockEmission(block.id);
-        if (emission > ambient) {
-            if (isOrangeSource(block.id)) {
-                seed(alloc, light_orange, &buckets_orange, i, sx, sy, emission, ambient);
-            } else {
-                seed(alloc, light_white, &buckets_white, i, sx, sy, emission, ambient);
+        if (emission.strength > ambient) {
+            const strengths = laneStrengths(emission);
+            inline for (0..LANES) |k| {
+                const decay_val = MAX_SOURCE_LIGHT - strengths[k];
+                seed(&lane_heap[k], lane_decay[k], i, sx, sy, decay_val, max_decay);
             }
         }
 
@@ -317,54 +463,40 @@ pub fn applyLighting(out: []Block, wb: u32, hb: u32, player_bx: f32, player_by: 
         }
     }
 
-    // Seed the continuous player source into the white channel.
-    // This one is interpolated between logic ticks so the light does not snap block to block;
-    // anything that has to AGREE with the simulation reads `miningLightAt()` instead, never this.
-    seedPlayerLight(alloc, cost_slice, light_white, &buckets_white, w, h, ambient, player_bx, player_by);
+    const player_strengths = laneStrengths(.{ .strength = PLAYER_LIGHT, .color = PLAYER_COLOR });
+    inline for (0..LANES) |k| {
+        seedPointLight(
+            &lane_heap[k],
+            cost_slice,
+            lane_decay[k],
+            w,
+            h,
+            max_decay,
+            player_bx,
+            player_by,
+            player_strengths[k],
+        );
+    }
 
-    // Two independent floods over the shared cost grid for each color!
-    floodChannel(alloc, cost_slice, light_orange, &buckets_orange, w, h, ambient);
-    floodChannel(alloc, cost_slice, light_white, &buckets_white, w, h, ambient);
+    inline for (0..LANES) |k| {
+        floodLane(cost_slice, lane_decay[k], &lane_heap[k], w, h, max_decay);
+    }
 
-    // Combine channels and write final u8 values clamped to MAX_LIGHT.
-    for (out, light_orange, light_white) |*block, orange, white| {
-        const max_light = @max(orange, white);
-        block.light = @intCast(@min(max_light, @as(u16, MAX_LIGHT)));
-
-        // this fixes an issue where orange light overtakes normal white light if ambient light is at max
-        if (AMBIENT_LIGHT == 255 or (dw.dev_menu and IS_LIGHT_GLOBAL and AMBIENT_LIGHT_DEBUG == 255)) continue;
-
-        // block is orange if it receives more orange light than white, or is in the core radius (>= 255)
-        const is_orange = orange >= white or orange >= 255;
-        block.lighting_color = @intFromBool(is_orange and max_light > ambient);
+    for (out, 0..) |*block, i| {
+        var lanes: [LANES]u16 = undefined;
+        inline for (0..LANES) |k| lanes[k] = MAX_SOURCE_LIGHT - lane_decay[k][i];
+        block.setLight(resolveCell(lanes));
     }
 }
 
-// This is the end of render (visual-only) light logic.
-// ----
-// This is the start, now, of logic for the player's ability to mine.
-// Based on actual PLAYER_LIGHT and visual light decay values.
-
-/// Farthest a player-lit block can be, in blocks: the brightest possible player source (`MAX_PLAYER_LIGHT`)
-/// spending the cheapest possible cost per step (`AIR_FALLOFF`).
 const PLAYER_LIGHT_REACH: i32 = MAX_PLAYER_LIGHT / AIR_FALLOFF;
-/// Half-width of the flooded window: the reach, plus the one block the player's 2x2 seed straddles into.
-/// Nothing outside it can take any of the player's light, so clipping the flood at the window loses none:
-/// a path that leaves the window has already spent more than `MAX_PLAYER_LIGHT` getting there.
 const MINING_RADIUS: i32 = PLAYER_LIGHT_REACH + 1;
-/// Window edge in blocks, centered on the block the player stands in.
 const MINING_SPAN: usize = @intCast(2 * MINING_RADIUS + 1);
 
-/// Player-only light (no ambient, no other source) of the window around the player, clamped to `MAX_LIGHT`.
-/// Indexed by `miningIndex()`; only describes the world `mining_key` was recorded for.
 var mining_light: [MINING_SPAN * MINING_SPAN]u8 = @splat(0);
-/// Cost grid the window was flooded over, and the high-precision light it was flooded into.
 var mining_cost: [MINING_SPAN * MINING_SPAN]u8 = @splat(0);
 var mining_scratch: [MINING_SPAN * MINING_SPAN]u16 = @splat(0);
 
-/// Everything the flooded window is a function of, besides the blocks themselves.
-/// A query that does not match re-floods, so the window can never describe a place the player has left:
-/// the tick alone would not catch a teleport, which moves the player without advancing it.
 const MiningKey = struct {
     frame: u32,
     depth: u64,
@@ -381,7 +513,6 @@ const MiningKey = struct {
 /// What `mining_light` currently holds, or null when it holds nothing usable.
 var mining_key: ?MiningKey = null;
 
-/// The window `mining_light` would be flooded for right now.
 fn currentMiningKey() MiningKey {
     const game = &memory.game;
     return .{
@@ -393,30 +524,24 @@ fn currentMiningKey() MiningKey {
     };
 }
 
-/// Buckets and arena of the mining flood, kept apart from the render pass's so that neither can
-/// reset the allocator out from under the other, whatever order a frame and a tick land in.
 var mining_arena = memory.makeArena();
 var mining_alloc = mining_arena.allocator();
-var buckets_mining: [NUM_BUCKETS]std.array_list.Aligned(u32, .@"16") = undefined;
 
-/// Window index of the block (`dx`, `dy`) blocks from the one the player stands in, or null when that
-/// block is out of the window (which, per `MINING_RADIUS`, means the player's light cannot reach it).
 inline fn miningIndex(dx: i64, dy: i64) ?usize {
     if (dx < -MINING_RADIUS or dx > MINING_RADIUS or dy < -MINING_RADIUS or dy > MINING_RADIUS) return null;
     return @intCast((dy + MINING_RADIUS) * @as(i64, MINING_SPAN) + (dx + MINING_RADIUS));
 }
 
-/// Floods the player's own light over the window around them, from committed simulation state only:
-/// the block they stand in, their subpixel position within it, and the blocks currently in the world.
-/// No interpolation, no camera, no zoom, so every tick answers the same regardless of frame rate.
+/// Floods the player's own light over the area around them.
 fn floodMiningLight() void {
     const game = &memory.game;
     if (!mining_arena.reset(.retain_capacity)) memory.oom();
-    @memset(&buckets_mining, .empty);
-    @memset(&mining_scratch, 0);
+
+    var heap = RadixHeap.init(mining_alloc);
+    @memset(&mining_scratch, MAX_SOURCE_LIGHT);
 
     // Fill the cost grid chunk by chunk rather than block by block, so a chunk is resolved once.
-    // An unreachable chunk (past the world edge) reads as solid, which is what the world edge is.
+    // An unreachable chunk (past the world edge) reads as solid!
     const player_coord = game.getPlayerCoord();
     const base_bx: i32 = game.getBlockXInChunk();
     const base_by: i32 = game.getBlockYInChunk();
@@ -437,8 +562,6 @@ fn floodMiningLight() void {
                 break :blk &scratch_chunk;
             };
 
-            // Player-relative block offset of this chunk's own (0, 0), so only the part of the chunk
-            // that lands inside the window is walked. The corner chunks are mostly outside it.
             const chunk_x0 = cx * dw.CHUNK_SIZE - base_bx;
             const chunk_y0 = cy * dw.CHUNK_SIZE - base_by;
             const lx_end = @min(dw.CHUNK_SIZE - 1, MINING_RADIUS - chunk_x0);
@@ -448,7 +571,6 @@ fn floodMiningLight() void {
             while (ly <= ly_end) : (ly += 1) {
                 var lx = @max(0, -MINING_RADIUS - chunk_x0);
                 while (lx <= lx_end) : (lx += 1) {
-                    // `.?` rather than a skip: the ranges above are exactly the in-window part.
                     const i = miningIndex(chunk_x0 + lx, chunk_y0 + ly).?;
                     mining_cost[i] = if (chunk) |c|
                         orthoCost(c.blocks[@intCast((ly << dw.CHUNK_SIZE_LOG2) | lx)])
@@ -478,8 +600,6 @@ fn floodMiningLight() void {
         }
     }
 
-    // The player's own position within their block, in window-cell units: the block they stand in sits at MINING_RADIUS,
-    // and the subpixel remainder places them continuously inside it.
     const subpixels_per_block: f32 = @floatFromInt(dw.CHUNK_SIZE_SQ);
     const frac_x = @as(f32, @floatFromInt(game.player_pos[0])) / subpixels_per_block - @as(f32, @floatFromInt(base_bx));
     const frac_y = @as(f32, @floatFromInt(game.player_pos[1])) / subpixels_per_block - @as(f32, @floatFromInt(base_by));
@@ -487,21 +607,17 @@ fn floodMiningLight() void {
     const py = @as(f32, @floatFromInt(MINING_RADIUS)) + frac_y;
 
     const span: i32 = @intCast(MINING_SPAN);
-    seedPlayerLight(mining_alloc, &mining_cost, &mining_scratch, &buckets_mining, span, span, 0, px, py);
-    floodChannel(mining_alloc, &mining_cost, &mining_scratch, &buckets_mining, span, span, 0);
+    seedPointLight(&heap, &mining_cost, &mining_scratch, span, span, MAX_SOURCE_LIGHT, px, py, PLAYER_LIGHT);
+    floodLane(&mining_cost, &mining_scratch, &heap, span, span, MAX_SOURCE_LIGHT);
 
-    for (&mining_light, mining_scratch) |*dst, light| {
+    for (&mining_light, mining_scratch) |*dst, decay| {
+        const light = MAX_SOURCE_LIGHT - decay;
         dst.* = @intCast(@min(light, @as(u16, MAX_LIGHT)));
     }
     mining_key = currentMiningKey();
 }
 
-/// How much of the player's OWN light reaches the block `chunk_dx`/`chunk_dy` chunks and (`bx`, `by`)
-/// blocks from the player's chunk, on the current logic tick. Zero past the window, where no light reaches.
-///
-/// Floods on demand and memoizes for the rest of the tick, so a tick that never asks never pays,
-/// and one that asks twice gets the same answer both times.
-/// Only valid to call from logic (`handleTick()`), where `game.frame` and the player position agree.
+/// Calculates the mining light value for a given (relative) chunk and block location.
 pub fn miningLightAt(chunk_dx: i64, chunk_dy: i64, bx: u4, by: u4) u8 {
     const key = currentMiningKey();
     if (mining_key == null or !mining_key.?.eql(key)) floodMiningLight();
@@ -512,9 +628,71 @@ pub fn miningLightAt(chunk_dx: i64, chunk_dy: i64, bx: u4, by: u4) u8 {
     return mining_light[i];
 }
 
-/// Drops the memoized mining light, forcing the next query to flood again.
-/// The key catches the player moving; this is for the world changing under a player who did not,
-/// which `world.clearCaches()` is the one thing that does.
+/// Invalidates the current mining light cache.
 pub fn invalidateMiningLight() void {
     mining_key = null;
+}
+
+const testing = std.testing;
+
+fn roundTrip(color: LightColor, strength: u16) BlockLight {
+    return resolveCell(laneStrengths(.{ .strength = strength, .color = color }));
+}
+
+test "a colored source reaches exactly as far as a white one" {
+    for ([_]f32{ 0.0, 0.25, 0.5, 0.75, 1.0 }) |chroma| {
+        var hue: f32 = 0.0;
+        while (hue < 2.0 * std.math.pi) : (hue += 0.2) {
+            const lanes = laneStrengths(.{ .strength = 240, .color = .{ .hue = hue, .chroma = chroma } });
+            var strongest: u16 = 0;
+            for (lanes) |v| strongest = @max(strongest, v);
+            try testing.expectEqual(@as(u16, 240), strongest);
+        }
+    }
+}
+
+test "white light stays achromatic" {
+    const got = roundTrip(.white, 200);
+    try testing.expectEqual(@as(LightChannel, 0), got.c);
+    const lanes = laneStrengths(.{ .strength = 200, .color = .white });
+    try testing.expectEqual(lanes[0], lanes[1]);
+    try testing.expectEqual(lanes[1], lanes[2]);
+}
+
+test "a source's hue survives the trip through the lanes" {
+    const tolerance = 2.0 * (2.0 * std.math.pi / @as(f32, @floatFromInt(HUE_STEPS)));
+    for ([_]f32{ Hue.fire, Hue.gold, Hue.green, Hue.cyan, Hue.cyan_blue, Hue.violet }) |hue| {
+        const got = roundTrip(.{ .hue = hue, .chroma = 0.8 }, 255);
+        const recovered = @as(f32, @floatFromInt(got.h)) /
+            @as(f32, @floatFromInt(HUE_STEPS)) * 2.0 * std.math.pi;
+
+        var delta = @abs(recovered - hue);
+        if (delta > std.math.pi) delta = 2.0 * std.math.pi - delta;
+        try testing.expect(delta <= tolerance);
+    }
+}
+
+test "chroma survives the trip at every hue inside the gamut" {
+    var hue: f32 = 0.0;
+    while (hue < 2.0 * std.math.pi) : (hue += 0.1) {
+        for ([_]f32{ 0.25, 0.5, CHROMA_GAMUT }) |chroma| {
+            const got = roundTrip(.{ .hue = hue, .chroma = chroma }, 255);
+            const recovered = @as(f32, @floatFromInt(got.c)) / @as(f32, @floatFromInt(LIGHT_MAX));
+            try testing.expectApproxEqAbs(chroma * (1.0 - CHROMA_WHITE_MIX), recovered, 0.03);
+        }
+    }
+}
+
+test "chroma past the gamut clamps instead of bending the hue" {
+    const inside = roundTrip(.{ .hue = Hue.violet, .chroma = CHROMA_GAMUT }, 255);
+    const past = roundTrip(.{ .hue = Hue.violet, .chroma = 1.0 }, 255);
+    try testing.expectEqual(inside.c, past.c);
+    try testing.expectEqual(inside.h, past.h);
+}
+
+test "a lane below ambient washes the tint out instead of keeping it" {
+    const dim = resolveCell(.{ 255, 192, 192 });
+    const dark = resolveCell(.{ 255, 0, 0 });
+    try testing.expect(dim.c < dark.c);
+    try testing.expectEqual(dim.h, dark.h);
 }
