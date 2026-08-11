@@ -11,7 +11,7 @@
 //! - `.chain`: a hanging chain (vines): deduped to a couple of columns and capped in total length
 //!   (preventing edge flags/traversal freeze).
 //! - `.stamp`: a hard-coded macro shape spanning one or more parents (the 2x1 moss shrub becomes a little tree).
-//!   Used for anything the three other generic options can't specify!
+//!   Should be extended for anything the three other generic options can't specify!
 //!
 //! Three properties hold to keep things procedurally interesting:
 //! 1. AT LEAST ONE copy survives (`.scatter` will draw from 1),
@@ -42,11 +42,11 @@ const CEILING_ROW: u4 = 0;
 
 /// What a block was refined out of, once its own sprite no longer says so.
 ///
-/// Deliberately tiny (a `Block` has room for 10 bits, see `memory.Block.tag`) and NOT saved: a tag is
+/// Deliberately tiny (a `Block` has room for 11 bits, see `memory.Block.tag`) and NOT saved: a tag is
 /// re-derived every time a chunk is generated, and a cell the player edits keeps the edit and loses
 /// the tag (`world.ModCell` stores only what generation cannot recover).
-pub const RefinedKind = enum(u4) {
-    /// No provenance; the overwhelmingly common case.
+pub const RefinedKind = enum(u9) {
+    /// No "origin" to care about; most common.
     none = 0,
     /// A cell of a hanging chain. `data` is how many cells below its ceiling this one sits
     /// (1 = directly below), which is what lets the next depth continue the chain and cap it.
@@ -59,7 +59,7 @@ pub const RefinedKind = enum(u4) {
 };
 
 /// A `RefinedKind` plus its 6 bits of kind-specific payload.
-pub const RefinedTag = packed struct(u10) {
+pub const RefinedTag = packed struct(u15) {
     kind: RefinedKind = .none,
     /// Kind-specific: a chain's run index, or the depths a plant tag has left.
     /// Saturates rather than wrapping, so a value of `DATA_MAX` means "at least this much".
@@ -186,7 +186,7 @@ pub const Chain = struct {
     copies: Count = count(2.5, 4),
 };
 
-/// A hard-coded macro shape, for anything the generic plans cannot express.
+/// A hard-coded plant shape, for anything the generic plans cannot express.
 /// The pattern is read as a picture: `'.'` empty, `'T'` trunk, `'L'` leaf.
 pub const Stamp = struct {
     /// Rows top to bottom. Each row must be `BLOCKS_PER_PARENT * halves` characters wide, and there
@@ -267,11 +267,12 @@ const SHRUB_ROWS = [_][]const u8{
     "...TT...",
 };
 
-fn shrubStamp(comptime half: u2) Rule {
+inline fn shrubStamp(half: u2, wood_type: Sprite) Rule {
     return .{ .surface = .floor, .plan = .{ .stamp = .{
         .rows = &SHRUB_ROWS,
         .half = half,
         .halves = 2,
+        .trunk = wood_type,
     } } };
 }
 
@@ -314,10 +315,10 @@ const rules = [_]struct { Sprite, Rule }{
     .{ .invportal, invportal_single },
 
     // The 2x1 shrub becomes one 8x4 tree, split across the two parents that made it.
-    .{ .moss_shrub1, shrubStamp(0) },
-    .{ .moss_shrub1_right, shrubStamp(1) },
-    .{ .moss_shrub2, shrubStamp(0) },
-    .{ .moss_shrub2_right, shrubStamp(1) },
+    .{ .moss_shrub1, shrubStamp(0, .wood) },
+    .{ .moss_shrub1_right, shrubStamp(1, .wood) },
+    .{ .moss_shrub2, shrubStamp(0, .purple_stone) },
+    .{ .moss_shrub2_right, shrubStamp(1, .purple_stone) },
 };
 
 /// Sparse-to-dense lookup: sprite ID -> its rule, or null. One indexed load at runtime.
@@ -415,7 +416,7 @@ pub inline fn ruleFor(sprite: Sprite) ?Rule {
 /// Check whether a cell in region row `ly` can hold `sprite` based on the parent neighbors.
 ///
 /// Use this for a block that arrives by EVOLUTION, not by plan.
-/// `more_mossy_stone` changes to vine, and terrain fills the whole region.
+/// A normal hanging evolution changes one ceiling row into vine, and terrain fills the whole region.
 /// Without this check, a vein can become a wall or a line of vine that hangs in the air.
 /// Only the row that touches the required surface may take the sprite, and only when that surface exists.
 ///
@@ -438,8 +439,9 @@ pub inline fn startsChain(sprite: Sprite) bool {
 pub const Evolved = struct {
     /// The sprite the cell takes: the evolution, or the sprite it started as.
     id: Sprite,
-    /// Whether this cell is the top of a fresh hanging chain, so the caller can tag its run.
-    starts_chain: bool = false,
+    /// A fresh chain's distance from its ceiling. Null means this is not a fresh chain cell.
+    /// A moss sprout can begin with two cells, so this is not always one.
+    chain_run: ?u64 = null,
 };
 
 /// Resolves a sprite's `Evolution` for ONE child cell: roll the odds, then ask the anchor gate.
@@ -451,12 +453,60 @@ pub const Evolved = struct {
 ///
 /// A sprite with no `Evolution` comes back unchanged, so this is safe to call on anything.
 pub fn evolve(source: Sprite, ctx: Context) Evolved {
+    if ((source == .mossy_stone or source == .more_mossy_stone) and rollsMossDecay(source, ctx))
+        return .{ .id = .stone };
+    if (source == .more_mossy_stone) return evolveMossSprout(ctx);
+
     const ev = source.evolution() orelse return .{ .id = source };
     if (!rollsEvolution(ev, ctx)) return .{ .id = source };
     // The gate reads the PARENT's neighbors: what a hanging or standing sprite needs is a property of
     // the region it lands in, not of the cell's own children.
     if (!canEvolveInto(ev.into, ctx.neighbors, ctx.ly)) return .{ .id = source };
-    return .{ .id = ev.into, .starts_chain = startsChain(ev.into) };
+    return .{ .id = ev.into, .chain_run = if (startsChain(ev.into)) 1 else null };
+}
+
+/// Fraction of either moss variant that returns to plain stone at each depth.
+const MOSS_DECAY_CHANCE = 0.22;
+/// Fraction of moss columns that begin a hanging vine.
+const MOSS_SPROUT_CHANCE = 0.60;
+/// Fraction of moss columns that begin with a second vine cell.
+const MOSS_TALL_SPROUT_CHANCE = 0.22;
+
+/// Resolves the moss branch with a separate hash stream from its spread roll.
+///
+/// Moss becomes plain stone in small holes. This prevents a moss band from staying unbroken
+/// as it descends. `more_mossy_stone` uses one roll per parent column, so its two-cell sprout
+/// either decays together or stays supported.
+fn rollsMossDecay(source: Sprite, ctx: Context) bool {
+    const decay_x, const decay_y = if (source == .more_mossy_stone) blk: {
+        const px, const py = ctx.parentCell();
+        break :blk .{ px +% ctx.lx, py };
+    } else .{ ctx.wx, ctx.wy };
+    const roll = FastHash.float2d_32(
+        ctx.noise_seed,
+        seeding.foldWorld(decay_x +% @intFromEnum(Salt.moss_decay)),
+        seeding.foldWorld(decay_y -% @intFromEnum(Salt.moss_decay)),
+    );
+    return roll < MOSS_DECAY_CHANCE;
+}
+
+/// Begins an irregular one- or two-cell vine sprout below a mossy ceiling.
+///
+/// Both rows use one column roll from the parent cell. Thus a lower vine always has its
+/// supporting top cell, and its `chain_run` stays correct when the chain refines again.
+fn evolveMossSprout(ctx: Context) Evolved {
+    if (!ctx.neighbors[1].isSolid() or ctx.ly > 1) return .{ .id = .more_mossy_stone };
+
+    const px, const py = ctx.parentCell();
+    const roll = FastHash.float2d_32(
+        ctx.noise_seed,
+        seeding.foldWorld(px +% ctx.lx +% @intFromEnum(Salt.moss_sprout)),
+        seeding.foldWorld(py -% @intFromEnum(Salt.moss_sprout)),
+    );
+    if (roll >= MOSS_SPROUT_CHANCE) return .{ .id = .more_mossy_stone };
+    if (ctx.ly == 1 and roll >= MOSS_TALL_SPROUT_CHANCE) return .{ .id = .more_mossy_stone };
+
+    return .{ .id = .spiralvine, .chain_run = ctx.ly + 1 };
 }
 
 /// Multiplier on the blob field before it biases the roll.
@@ -569,6 +619,10 @@ const Salt = enum(u64) {
     /// Whether a cell takes its sprite's evolution. Per CELL, not per region: a mottled vein is the
     /// point, and sharing the carve's stream would tie a cell's material to its shape.
     evolution = 0x2545F4914F6CDD1D,
+    /// Whether ordinary moss returns to stone instead of spreading.
+    moss_decay = 0x6E624EB7F2076C4E,
+    /// Which columns in a moss region begin a one- or two-cell vine sprout.
+    moss_sprout = 0xBF58476D1CE4E5B9,
 };
 
 /// One region-wide hash: a pure function of the PARENT's cell, so no two cells of a region disagree.
@@ -1107,7 +1161,7 @@ test "an evolution's odds hold over the world, and only its arrangement changes"
     // Both kinds are terrain (no plan), so the anchor gate passes and only the roll is under test.
     inline for (.{
         .{ Sprite.lava_stone, 0.2 }, // blobbed
-        .{ Sprite.mossy_stone, 0.6 }, // per cell
+        .{ Sprite.mossy_stone, 0.688 }, // spread plus the independent return-to-stone roll
     }) |case| {
         const src: Sprite = case[0];
         var converted: usize = 0;
@@ -1154,6 +1208,56 @@ test "an evolution's odds hold over the world, and only its arrangement changes"
             try testing.expect(neighbor_rate > rate * 1.3);
         }
     }
+}
+
+test "moss sprouts have irregular one- and two-cell starts" {
+    const seed: Vec2u = .{ 0x9e3779b97f4a7c15, 0xbf58476d1ce4e5b9 };
+    var under_rock: [8]Block = @splat(.empty);
+    under_rock[1] = .makeBasicBlock(.stone, 1);
+
+    var none: usize = 0;
+    var short: usize = 0;
+    var tall: usize = 0;
+    for (0..100) |py| {
+        for (0..BLOCKS_PER_PARENT) |lx| {
+            const child_x = @as(WorldCoord, @intCast(lx));
+            const top = evolve(.more_mossy_stone, .{
+                .parent = .makeBasicBlock(.more_mossy_stone, 1),
+                .neighbors = under_rock,
+                .noise_seed = seed,
+                .wx = child_x,
+                .wy = @intCast(py * BLOCKS_PER_PARENT),
+                .lx = @intCast(lx),
+                .ly = 0,
+                .seed = 0,
+                .water = 0,
+            });
+            const lower = evolve(.more_mossy_stone, .{
+                .parent = .makeBasicBlock(.more_mossy_stone, 1),
+                .neighbors = under_rock,
+                .noise_seed = seed,
+                .wx = child_x,
+                .wy = @intCast(py * BLOCKS_PER_PARENT + 1),
+                .lx = @intCast(lx),
+                .ly = 1,
+                .seed = 0,
+                .water = 0,
+            });
+            if (top.id != .spiralvine) {
+                try testing.expectEqual(top.id, lower.id);
+                none += 1;
+            } else if (lower.id == .spiralvine) {
+                try testing.expectEqual(@as(?u64, 1), top.chain_run);
+                try testing.expectEqual(@as(?u64, 2), lower.chain_run);
+                tall += 1;
+            } else {
+                try testing.expectEqual(@as(?u64, 1), top.chain_run);
+                short += 1;
+            }
+        }
+    }
+
+    try testing.expect(none > 0 and short > 0 and tall > 0);
 }
 
 test "the terrain only pushes up under the cells a decoration really lands on" {

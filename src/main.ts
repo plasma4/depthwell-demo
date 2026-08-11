@@ -251,6 +251,14 @@ if (CONFIG.verbose) {
     console.log("Exported functions and memory:", engine.exports);
 }
 
+/** Keeps a focused native button selectable without treating a held key as repeated actions. */
+function preventHeldButtonRepeat(button: HTMLButtonElement): void {
+    button.addEventListener("keydown", (event) => {
+        if (!event.repeat) return;
+        if (event.key === "Enter" || event.key === " ") event.preventDefault();
+    });
+}
+
 const past60SlowestLogicLoops = Array(60).fill(0);
 const past60SlowestRenders = Array(60).fill(0);
 const past60SlowestZigRenders = Array(60).fill(0);
@@ -452,6 +460,7 @@ if (is_dev && engine.isDebug) {
         btn.textContent = b.name;
         btn.onclick = () =>
             (engine.exports.clickDebugUiButton as (id: number) => void)(b.id);
+        preventHeldButtonRepeat(btn);
         container.appendChild(btn);
     });
 
@@ -492,12 +501,22 @@ if (is_dev && engine.isDebug) {
         const btn = document.createElement("button");
         btn.textContent = name;
         btn.onclick = onClick;
+        // TODO: better async-aware solution (probably going to queue debug button events to be resolved per-tick)
+        preventHeldButtonRepeat(btn);
         container.appendChild(btn);
     };
     addSaveButton("Force save", () => engine.saveManager.save());
-    addSaveButton("Force load", async () => await engine.saveManager.load());
-    addSaveButton("Reset", async () => {
-        engine.start();
+    addSaveButton("Force load", () => engine.saveManager.load());
+    let resetInFlight = false;
+    addSaveButton("Reset", () => {
+        if (resetInFlight) return;
+        resetInFlight = true;
+        void engine
+            .start()
+            .catch((error: unknown) => console.error("Reset failed:", error))
+            .finally(() => {
+                resetInFlight = false;
+            });
     });
     addSaveButton("Export file", () => downloadSaveFile());
     addSaveButton("Import file", () => uploadSaveFile());

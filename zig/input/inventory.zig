@@ -176,7 +176,7 @@ fn dropSingleItem(id: Sprite, chunk: Coordinate, block_x: u4, block_y: u4) void 
     const py = @as(i32, block_y) * 256 + 256;
     // use the visual seed: not secure, tied to specific block coordinate
     const seed = dw.seeding.FastHash.hash2d(
-        memory.game.getHashSeed(.visual),
+        memory.getHashSeed(.visual),
         memory.game.frame,
         item_count,
     );
