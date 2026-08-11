@@ -399,7 +399,8 @@ test "main_tests" {
         @import("state/structures.zig"),
         @import("state/template.zig"),
         @import("render/particles.zig"),
-        // Not registered in the `structures` tuple on purpose; listed here only so its test still runs.
+        @import("render/lighting.zig"),
+        // not registered in the structures tuple on purpose; listed here only so its test still runs!
         @import("state/structures/Example.zig"),
     };
 
