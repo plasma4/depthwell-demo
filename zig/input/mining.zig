@@ -128,19 +128,50 @@ pub fn canMine(tool_type: Tools, target_sprite: Sprite) bool {
     return pickaxe.capabilities.satisfies(block_props.required_capabilities);
 }
 
-/// Returns whether the player can remove this block while escaping a solid landing.
+/// Returns whether the active tools can remove this block.
 ///
 /// `coord`, `bx`, and `by` identify `block` in the live world.
-/// This uses the active tool and installation protection rules, but not cursor range or light.
-/// A valid escape route is mined one adjacent block at a time, so the player light moves with it.
-pub fn canMineForEscape(coord: world.Coordinate, bx: u4, by: u4, block: memory.Block) bool {
-    if (!block.isSolid() or inventory.isInCreative()) return true;
+/// This applies pickaxe capability and installation protection rules.
+/// It does not apply cursor range or light, because callers can supply their own reach rule.
+/// The bounded escape search mines one cardinal block at a time, so its light follows the player.
+pub fn canBreak(coord: world.Coordinate, bx: u4, by: u4, block: memory.Block) bool {
+    return canBreakWithLookup({}, liveBlockAt, coord, bx, by, block);
+}
+
+/// Returns whether the active tools can remove `block` with a supplied current-depth block lookup.
+///
+/// `block_at()` must return the same world state that contains `block`.
+/// This lets the softlock probe include a placement that has not yet written to `mod_store`.
+/// Cursor range and light are still outside this rule.
+pub fn canBreakWithLookup(
+    context: anytype,
+    comptime block_at: anytype,
+    coord: world.Coordinate,
+    bx: u4,
+    by: u4,
+    block: memory.Block,
+) bool {
+    if (inventory.isInCreative()) return true;
     if (!canMine(pickaxe_type, block.id)) return false;
-    if (!has_structure_tool and restsOnProtectedInstallation(coord, bx, by)) return false;
+    if (!has_structure_tool and restsOnProtectedInstallationWithLookup(context, block_at, coord, bx, by)) return false;
 
     var strength = getSpriteStrength(block.id) orelse return false;
     if (has_structure_tool and isToolBreakable(block.id)) strength = STRUCTURE_STRENGTH;
     return strength != std.math.maxInt(u64);
+}
+
+/// Returns whether an installation makes its floor or ceiling support require the structure tool.
+///
+/// This is true only for an unmineable floor- or ceiling-anchored sprite.
+pub inline fn protectsSupport(sprite_type: Sprite) bool {
+    const anchor = sprite_type.anchor();
+    return (anchor == .floor or anchor == .ceiling) and
+        sprite.getSpriteProps(sprite_type).strength == sprite.UNMINEABLE_STRENGTH;
+}
+
+/// Reads a live block for `canBreak()`.
+fn liveBlockAt(_: void, coord: world.Coordinate, bx: u4, by: u4) memory.Block {
+    return world.getBlockAt(coord, bx, by, memory.game.depth);
 }
 
 /// Least player-lit a block may be and still be mineable, on the same 0-255 scale as `Block.light`.
@@ -219,7 +250,12 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
             else
                 @as(u64, @intFromFloat(@as(f64, @floatFromInt(mining_speed)) * logic_speed));
 
-            const can_mine_block = in_creative or (canMine(pickaxe_type, block.id) and !is_protected);
+            const can_mine_block = in_creative or canBreak(
+                mouse.mouse_chunk_coord.?,
+                mouse.mouse_block_x,
+                mouse.mouse_block_y,
+                block,
+            );
             const near_enough = in_creative or isLitForMining();
 
             var strength = getSpriteStrength(block.id) orelse std.math.maxInt(u64);
@@ -335,16 +371,23 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                         // Only auto-replace if the block being mined is different from the held item.
                         if (sprite_type.isInWorld()) {
                             if (inventory.removeFromInventory(sprite_type)) { // make sure it's possible to use
-                                if (world.modifyBlockType(
+                                switch (world.modifyBlockType(
                                     mouse.mouse_chunk_coord.?, // mouse block successful already
                                     mouse.mouse_block_x,
                                     mouse.mouse_block_y,
                                     sprite_type,
                                     block, // pre-mined block seeds the ore's underlay/base
                                 )) {
-                                    // If TRUE, then the block was NOT successfully modified, so revert the selection.
-                                    // This fixes funny issues involving de-selection due to invalid placement.
-                                    inventory.selected_sprite = sprite_type;
+                                    .placed => {},
+                                    .collapsed => {
+                                        // The anchor cascade returned the item as a drop.
+                                        inventory.selected_sprite = sprite_type;
+                                    },
+                                    .rejected_softlock => {
+                                        // No world write happened, so return the consumed placement item directly.
+                                        inventory.addToInventory(sprite_type, 1);
+                                        inventory.selected_sprite = sprite_type;
+                                    },
                                 }
 
                                 mining_progress = 0;
@@ -365,24 +408,28 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
         } else if (block.isEmpty() and (in_creative or isLitForMining())) {
             // placing into empty air!
             if (inventory.removeFromInventory(sprite_type)) {
-                if (world.modifyBlockType(
+                switch (world.modifyBlockType(
                     mouse.mouse_chunk_coord.?,
                     mouse.mouse_block_x,
                     mouse.mouse_block_y,
                     sprite_type,
                     block, // empty here (placing into air), so ores fall back to a plain-stone underlay
                 )) {
-                    // If TRUE, then the block was NOT successfully modified. Revert selection if so.
-                    // This fixes funny issues involving instant deselection with invalid placement
-                    // (for example: placing your last ceiling flower in an invalid spot would deselect without this)
-                    inventory.selected_sprite = sprite_type;
-                } else {
-                    dw.sound.playSound(
+                    .placed => dw.sound.playSound(
                         9,
                         if (sprite_type.isFoundation()) 0.75 else 0.2,
                         0.1,
                         0.2,
-                    );
+                    ),
+                    .collapsed => {
+                        // The anchor cascade returned the item as a drop.
+                        inventory.selected_sprite = sprite_type;
+                    },
+                    .rejected_softlock => {
+                        // No world write happened, so return the consumed placement item directly.
+                        inventory.addToInventory(sprite_type, 1);
+                        inventory.selected_sprite = sprite_type;
+                    },
                 }
                 selected_hp = 0;
                 mining_progress = 0;
@@ -415,17 +462,120 @@ inline fn isToolBreakable(s: Sprite) bool {
 /// Either way, breaking the support would cascade the installation out
 /// (see `Sprite.supports()`), which the structure tool exists to gate.
 fn restsOnProtectedInstallation(coord: world.Coordinate, bx: u4, by: u4) bool {
+    return restsOnProtectedInstallationWithLookup({}, liveBlockAt, coord, bx, by);
+}
+
+/// Tests installation support with a supplied current-depth block lookup.
+///
+/// `block_at()` must include every pending block change that can affect a support rule.
+fn restsOnProtectedInstallationWithLookup(
+    context: anytype,
+    comptime block_at: anytype,
+    coord: world.Coordinate,
+    bx: u4,
+    by: u4,
+) bool {
     const above = if (by > 0)
-        world.getBlockAt(coord, bx, by - 1, memory.game.depth)
-    else
-        world.getBlockAt(coord.moveY(-1) orelse return false, bx, dw.CHUNK_SIZE - 1, memory.game.depth);
-    if (above.anchor() == .floor and isToolBreakable(above.id)) return true;
+        block_at(context, coord, bx, by - 1)
+    else blk: {
+        const above_coord = coord.moveY(-1) orelse return false;
+        break :blk block_at(context, above_coord, bx, dw.CHUNK_SIZE - 1);
+    };
+    if (above.anchor() == .floor and protectsSupport(above.id)) return true;
 
     const below = if (by < dw.CHUNK_SIZE - 1)
-        world.getBlockAt(coord, bx, by + 1, memory.game.depth)
-    else
-        world.getBlockAt(coord.moveY(1) orelse return false, bx, 0, memory.game.depth);
-    return below.anchor() == .ceiling and isToolBreakable(below.id);
+        block_at(context, coord, bx, by + 1)
+    else blk: {
+        const below_coord = coord.moveY(1) orelse return false;
+        break :blk block_at(context, below_coord, bx, 0);
+    };
+    return below.anchor() == .ceiling and protectsSupport(below.id);
+}
+
+test "canBreakWithLookup protects a pending installation support" {
+    const saved_pickaxe = pickaxe_type;
+    const saved_structure_tool = has_structure_tool;
+    const saved_creative = inventory.IN_CREATIVE;
+    defer {
+        pickaxe_type = saved_pickaxe;
+        has_structure_tool = saved_structure_tool;
+        inventory.IN_CREATIVE = saved_creative;
+    }
+
+    const PendingInstallation = struct {
+        fn blockAt(_: *const @This(), _: world.Coordinate, _: u4, by: u4) memory.Block {
+            return .makeBasicBlock(if (by == 4) .portal else .stone, 0);
+        }
+    };
+
+    pickaxe_type = .stone;
+    has_structure_tool = false;
+    inventory.IN_CREATIVE = false;
+    const installation = PendingInstallation{};
+    const coord: world.Coordinate = .{ .suffix = .{ 1, 1 }, .quadrant = 0 };
+    const support = memory.Block.makeBasicBlock(.stone, 0);
+
+    try std.testing.expect(!canBreakWithLookup(
+        &installation,
+        PendingInstallation.blockAt,
+        coord,
+        6,
+        5,
+        support,
+    ));
+
+    has_structure_tool = true;
+    try std.testing.expect(canBreakWithLookup(
+        &installation,
+        PendingInstallation.blockAt,
+        coord,
+        6,
+        5,
+        support,
+    ));
+}
+
+test "canBreakWithLookup honors the active tool tier" {
+    const saved_pickaxe = pickaxe_type;
+    const saved_structure_tool = has_structure_tool;
+    const saved_creative = inventory.IN_CREATIVE;
+    defer {
+        pickaxe_type = saved_pickaxe;
+        has_structure_tool = saved_structure_tool;
+        inventory.IN_CREATIVE = saved_creative;
+    }
+
+    const NoInstallation = struct {
+        fn blockAt(_: *const @This(), _: world.Coordinate, _: u4, _: u4) memory.Block {
+            return .empty;
+        }
+    };
+
+    has_structure_tool = false;
+    inventory.IN_CREATIVE = false;
+    const lookup = NoInstallation{};
+    const coord: world.Coordinate = .{ .suffix = .{ 1, 1 }, .quadrant = 0 };
+    const amethyst = memory.Block.makeBasicBlock(.amethyst, 0);
+
+    pickaxe_type = .stone;
+    try std.testing.expect(!canBreakWithLookup(
+        &lookup,
+        NoInstallation.blockAt,
+        coord,
+        6,
+        5,
+        amethyst,
+    ));
+
+    pickaxe_type = .bronze;
+    try std.testing.expect(canBreakWithLookup(
+        &lookup,
+        NoInstallation.blockAt,
+        coord,
+        6,
+        5,
+        amethyst,
+    ));
 }
 
 comptime {

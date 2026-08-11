@@ -61,8 +61,9 @@ pub fn prepareVisibleData(dt: f64, time_diff: f64, canvas_w: f64, canvas_h: f64)
     // where D is stretched over (ZOOM_FACTOR / OVERLAY_ZOOM)^2 times its usual chunks!
     if (dw.chunks.updateVisibleChunks(dt, canvas_w, canvas_h)) {
         const world_opacity = dw.portal.worldOpacity();
+        const chunk_opacity = world_opacity * @as(f64, dw.player.softlockFadeOpacity());
         drawBackground(world_opacity);
-        handleVisibleChunks(world_opacity, WIREFRAME_BRIGHTNESS);
+        handleVisibleChunks(chunk_opacity, WIREFRAME_BRIGHTNESS);
     }
 
     if (dw.portal.isActive()) {

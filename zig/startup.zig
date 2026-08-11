@@ -74,6 +74,7 @@ fn resetAfterStart() void {
     dw.chunks.shake_seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, .screen_shake));
     // Frees the descent's preview buffer; `memory.game` above already cleared its saved fields.
     dw.portal.reset();
+    dw.player.resetSoftlockFade();
 
     // dropped item ring buffer lives in the world arena reset above; detach instead of freeing
     dw.inventory.dropped_items = .{};
@@ -136,7 +137,7 @@ pub fn init(new_game: bool) void {
         findSafeSpawn();
         // The collision scan reads the live buffer. Fill it before the spawn escape check.
         world.SimBuffer.sync(memory.game.getPlayerCoord());
-        dw.player.escapeSolid();
+        _ = dw.player.escapeSolid();
     }
 }
 
