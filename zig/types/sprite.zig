@@ -678,13 +678,12 @@ const rules = [_]SpriteRule{
     },
 
     // evolution rules on depth increase!
-    // moss spreads rather than converts: 40% of it is still plain moss one depth down
+    // Moss spreads through the child terrain. refine.evolve() also returns small holes to stone.
     .{
         .{ .single = .mossy_stone },
         .{ .evolution = .{ .into = .more_mossy_stone, .chance = 0.6 } },
     },
-    // No odds needed here: `spiralvine` hangs, so the anchor gate already refuses every cell that is
-    // not a ceiling with rock above it, and the rest of the vein simply stays moss.
+    // refine.evolve() starts per-column one- or two-cell sprouts below a solid ceiling.
     .{
         .{ .single = .more_mossy_stone },
         .{ .evolution = .{ .into = .spiralvine } },

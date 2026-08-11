@@ -88,15 +88,20 @@ fn resolveBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
     return data;
 }
 
-/// Uncached foundation evaluation. Call `resolveBaseFoundation()` instead outside of the cache itself.
+/// Uncached foundation evaluation.
+/// Call `resolveBaseFoundation()` instead outside of the cache itself.
 fn computeBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
     const max_suffix = getMaxSuffixAtDepth(STARTING_ZOOM_TIMES);
     const on_edge_x = (cx == 0 and bx < 2) or (cx == max_suffix and bx >= (CHUNK_SIZE - 2));
     const on_edge_y = (cy == 0 and by < 2) or (cy == max_suffix and by >= (CHUNK_SIZE - 2));
     if (on_edge_x or on_edge_y) return .{ .id = .edge_stone, .base = .none };
 
-    const game = &memory.game;
-    const base_data = procedural.getBaseSpriteType(@intCast(cx), @intCast(cy), bx, by);
+    const base_data = procedural.getBaseSpriteType(
+        @intCast(cx),
+        @intCast(cy),
+        bx,
+        by,
+    );
     const wx: u32 = @intCast(cx * CHUNK_SIZE + bx);
     const wy: u32 = @intCast(cy * CHUNK_SIZE + by);
 
@@ -106,7 +111,13 @@ fn computeBaseFoundation(cx: u64, cy: u64, bx: u4, by: u4) BaseFoundation {
         wx,
         wy,
     );
-    const structured = dw.structures.addStructures(sprite, wx, wy, game.getHashSeed(.structures));
+
+    const structured = dw.structures.addStructures(
+        sprite,
+        wx,
+        wy,
+        memory.getHashSeed(.structures),
+    );
     // A structure that places an overlay such as a Geode gem carries its own stone underlay;
     // fall back to the natural terrain only when it doesn't (.none).
     return .{
@@ -141,7 +152,7 @@ fn resolveFoundationSolid(cx: u64, cy: u64, bx: u4, by: u4) bool {
     const base_sprite = procedural.getBaseSprite(@intCast(cx), @intCast(cy), bx, by);
     const wx: u32 = @intCast(cx * CHUNK_SIZE + bx);
     const wy: u32 = @intCast(cy * CHUNK_SIZE + by);
-    const structured = dw.structures.addStructures(base_sprite, wx, wy, memory.game.getHashSeed(.structures));
+    const structured = dw.structures.addStructures(base_sprite, wx, wy, memory.getHashSeed(.structures));
     return structured.id.isFoundation();
 }
 
@@ -274,8 +285,8 @@ fn computeColumnSeeds(comptime f: dw.decorations.ColumnFeature, key: DepthCoordi
 
 // Everything else in a Block is derived and is rebuilt by materializeChunk(), hence why ModCell is so simple!
 // - seed gets regenerated in block-index order (generateBaseChunk(), generateChunk()).
-// - light and lighting_color are written only into the per-frame render scratch buffer (applyLighting()).
-// - edge_flags, id_edge_flags, and waterlogged are recomputed from neighbor id+hp by the flag passes.
+// - the three light channels are written only into the per-frame render scratch buffer (applyLighting()).
+// - edge_flags, id_edge_flags, and water are recomputed from neighbor id+hp by the flag passes.
 
 /// One modified cell: the only `Block` fields that cannot be recovered by regenerating the chunk.
 /// In other words, only holds the "authoritative" fields within a block that can't be re-derived.
@@ -311,11 +322,10 @@ const MIN_MOD_CELLS = 8;
 pub const ModEntry = struct {
     /// Cells whose value came from a player edit or water simulation rather than from procedural generation.
     /// Bit `i` (block index `by * CHUNK_SIZE + bx`) set means `cells[rank(i)]` holds that cell's value.
+    ///
+    /// NOTE: intentional simplistic choice to not use `StaticBitSet`:
+    /// `u64` consistency+rank() access just make it not worth
     modified: [MODIFIED_WORDS]u64 = @splat(0),
-    /// Blocks whose descendant region holds a modification at some deeper depth, same bit layout as `modified`.
-    /// Grown one depth per ascent by `markDescendantsFromChild()` and never cleared,
-    /// which holds because ascent is read-only (see `isSpectating()`).
-    descendants: [MODIFIED_WORDS]u64 = @splat(0),
     /// Modified cells in ascending block-index order. The first `count` are live; the rest is spare capacity.
     cells: []ModCell = &.{},
     /// Live entries in `cells`. Always equals the population count of `modified`.
@@ -336,16 +346,10 @@ pub const ModEntry = struct {
         return (self.modified[i >> 6] >> @as(u6, @truncate(i))) & 1 != 0;
     }
 
-    /// Whether block index `i` has a modification somewhere in its descendant region.
-    pub inline fn hasDescendantMods(self: *const @This(), i: u8) bool {
-        return (self.descendants[i >> 6] >> @as(u6, @truncate(i))) & 1 != 0;
-    }
-
-    /// Whether this entry says anything at all, either directly or about the depths below it.
-    /// Both bitmaps matter: a marker-only entry is what carries a deep edit up through the layers.
+    /// Whether this entry says anything at all.
     pub fn anySet(self: *const @This()) bool {
-        for (self.modified, self.descendants) |m, d| {
-            if (m | d != 0) return true;
+        for (self.modified) |m| {
+            if (m != 0) return true;
         }
         return false;
     }
@@ -357,15 +361,30 @@ pub const ModEntry = struct {
     }
 
     /// Replays every modified cell over a freshly generated chunk.
-    /// The caller MUST then rerun the flag pass: replaying ids invalidates the generated edge/waterlogged flags.
-    pub fn applyTo(self: *const @This(), chunk: *Chunk) void {
+    /// The caller MUST then rerun the flag pass: replaying ids invalidates the generated edge and water flags.
+    ///
+    /// A replayed cell also takes a FRESH `Block.seed` from `seedLane()`.
+    /// `ModCell` does not store a seed, so a cell keeps whatever the generator left there,
+    /// and an empty cell is left with a seed of zero at every recursive depth
+    /// (`ancestor.applyAncestorLogic()` returns early for air).
+    /// Without this, every block the player builds into open space picks the same
+    /// seed-driven variant (see `variation.seedPick()`).
+    pub fn applyTo(self: *const @This(), chunk: *Chunk, key: DepthCoordinate) void {
+        const lane = seedLane(key);
         var i: usize = 0;
         for (0..MODIFIED_WORDS) |w| {
             var bits = self.modified[w];
             while (bits != 0) : (i += 1) {
                 const bit = @ctz(bits);
                 bits &= bits - 1;
-                self.cells[i].applyTo(&chunk.blocks[(w << 6) | bit]);
+                const index = (w << 6) | bit;
+                const block = &chunk.blocks[index];
+                self.cells[i].applyTo(block);
+                block.seed = @truncate(seeding.FastHash.hash2d(
+                    lane,
+                    index & (CHUNK_SIZE - 1),
+                    index >> CHUNK_SIZE_LOG2,
+                ));
             }
         }
     }
@@ -420,10 +439,6 @@ pub const ModificationStore = struct {
     /// Incremented whenever `entries` is dropped (`init()`/`clear()`), invalidating any external index
     /// into it. A budgeted save snapshot compares this to detect a mid-save wipe and abort.
     generation: u64 = 0,
-    /// Incremented whenever the CONTENT of the store changes, which `generation` does not track
-    /// (that one only counts wipes). Anything that memoizes a value derived from a modified block
-    /// keys on this, so an edit retires it. See `ancestor.ParentHoodCache`.
-    content_generation: u64 = 0,
     allocator: std.mem.Allocator = undefined,
     /// Whether the containers below hold real allocations. Guards `deinit()` before the first `init()`.
     live: bool = false,
@@ -435,7 +450,6 @@ pub const ModificationStore = struct {
             .allocator = allocator,
             .live = true,
             .generation = self.generation +% 1,
-            .content_generation = self.content_generation +% 1,
         };
     }
 
@@ -476,7 +490,6 @@ pub const ModificationStore = struct {
         self.allocator.free(entry.cells);
         entry.* = .{};
         self.free_entries.append(self.allocator, kv.value) catch memory.oom();
-        self.content_generation +%= 1;
     }
 
     /// Completely wipes all user modifications. Should be followed by `world.clearCaches(true)`.
@@ -490,7 +503,6 @@ pub const ModificationStore = struct {
         self.entries.clearRetainingCapacity();
         self.free_entries.clearRetainingCapacity();
         self.generation +%= 1;
-        self.content_generation +%= 1;
     }
 
     /// Reserves an entry slot, reusing a freed one when possible.
@@ -507,20 +519,29 @@ pub const ModificationStore = struct {
     /// This is the ONLY correct way to mutate the store!
     /// This preserves the entry's pre-edit contents for an in-flight budgeted save before handing back a writer.
     pub fn beginWrite(self: *@This(), key: DepthCoordinate) ModWriter {
-        std.debug.assert(!isSpectating()); // of course, you can't modify if spectating the world!
-        // A transition froze the layer its preview was generated from; editing it now would leave the
-        // depth we land on disagreeing with the one we left (see `portal.beginTransition()`).
+        // sanity: not in animation, not in impossible depth
         std.debug.assert(!dw.portal.isActive());
-        return .{ .entry = self.entries.at(self.reserve(key, .edit)) };
+        std.debug.assert(key.depth <= frontier());
+        return .{
+            .entry = self.entries.at(self.reserve(key, .edit)),
+            .key = key,
+            // below the frontier this depth is frozen for its descendants,
+            // so each cell must give up its inherited value before the edit lands.
+            .capture_legacy = self == &mod_store and key.depth < frontier(),
+        };
+    }
+
+    /// `beginWrite()` without the legacy capture or the transition guards.
+    /// Only `captureLegacy()` and the save loader may use this.
+    fn beginWriteRaw(self: *@This(), key: DepthCoordinate) ModWriter {
+        return .{ .entry = self.entries.at(self.reserve(key, .edit)), .key = key };
     }
 
     /// Why an entry is being opened, for `TRACE_NEW_ENTRIES`. The store itself does not care.
-    const WriteKind = enum { edit, marker };
+    const WriteKind = enum { edit };
 
     /// Logs every chunk that becomes modified for the first time, and what opened it.
-    /// A modification the player did not make is the signature of a generator that produces terrain out
-    /// of equilibrium with the simulation, so this is the fastest way to catch one in the act.
-    /// Debug builds only, and off by default because a session's normal mining floods it.
+    /// Debug builds only.
     const TRACE_NEW_ENTRIES = false;
 
     /// `entries` index for `key`, creating the entry if new, with any in-flight save's copy preserved.
@@ -535,20 +556,8 @@ pub const ModificationStore = struct {
             );
             break :blk new_idx;
         };
-        dw.save.shadowEntryForSave(idx);
-        // Every write to the store comes through here (`beginWrite()` and `markDescendant()` both),
-        // so this is the one place a content change has to be announced.
-        self.content_generation +%= 1;
+        dw.save.shadowEntryForSave(self == &legacy_store, idx);
         return idx;
-    }
-
-    /// Records that block `block_idx` of `key` has a modification below it.
-    ///
-    /// Deliberately outside `beginWrite()`: a marker is not a modification of the layer it sits on,
-    /// so it is the one write an ascent is allowed to make.
-    pub fn markDescendant(self: *@This(), key: DepthCoordinate, block_idx: u8) void {
-        const entry = self.entries.at(self.reserve(key, .marker));
-        entry.descendants[block_idx >> 6] |= @as(u64, 1) << @truncate(block_idx);
     }
 
     /// Rebuilds an entry straight from a save, bypassing the copy-on-write shadow (nothing can be mid-save during a load).
@@ -557,18 +566,15 @@ pub const ModificationStore = struct {
         self: *@This(),
         key: DepthCoordinate,
         modified: [MODIFIED_WORDS]u64,
-        descendants: [MODIFIED_WORDS]u64,
         cells: []const ModCell,
     ) !void {
         const idx = self.allocEntry();
         const entry: *ModEntry = self.entries.at(idx);
         entry.modified = modified;
-        entry.descendants = descendants;
         entry.count = @intCast(cells.len);
         entry.cells = try self.allocator.alloc(ModCell, @max(cells.len, MIN_MOD_CELLS));
         @memcpy(entry.cells[0..cells.len], cells);
         try self.index.put(self.allocator, key, idx);
-        self.content_generation +%= 1;
     }
 
     /// Total bytes of live `ModCell` payload, for the debug HUD.
@@ -585,14 +591,20 @@ pub const ModificationStore = struct {
 pub const ModWriter = struct {
     // (abstractions and types do be cool like this sometimes)
     entry: *ModEntry,
+    /// The chunk being written, which `captureLegacy()` needs to resolve the cell being replaced.
+    key: DepthCoordinate,
+    /// Whether each cell must be frozen into `legacy_store` before the edit lands.
+    capture_legacy: bool = false,
 
     /// Marks block `i` as modified and stores its value.
     pub inline fn setCell(self: ModWriter, i: u8, cell: ModCell) void {
+        if (self.capture_legacy) captureLegacy(self.key, i);
         self.entry.setCellRaw(i, cell);
     }
 
     /// Captures a materialized block's authoritative fields as block `i`'s modified value.
     pub inline fn setBlock(self: ModWriter, i: u8, block: Block) void {
+        if (self.capture_legacy) captureLegacy(self.key, i);
         self.entry.setCellRaw(i, .from(block));
     }
 };
@@ -600,6 +612,67 @@ pub const ModWriter = struct {
 /// Stores and handles modifications of chunks across various depths.
 /// Initialized in `main()`.
 pub var mod_store: ModificationStore = .{};
+
+/// The material each cell had when its depth stopped being the frontier.
+///
+/// A cell can need two values at once:
+/// the one the depths below it inherited, and the one its own depth shows now.
+/// `mod_store` holds the second; this holds the first.
+/// A cell enters here on its FIRST edit below the frontier, and is never written again.
+///
+/// Only ancestor lookups read this (see `inheritedCell()`).
+/// It is invisible to the depth it belongs to, which is what makes each depth its own world.
+pub var legacy_store: ModificationStore = .{};
+
+/// One rebuilt chunk, so a run of captures inside the same chunk pays for one materialization.
+/// Only ever read for cells `mod_store` says nothing about, so the edits it replays are irrelevant
+/// and the only thing that can retire it is the terrain itself changing (see `clearLegacyScratch()`).
+var legacy_scratch: Chunk align(memory.MAIN_ALIGN_BYTES) = undefined;
+var legacy_scratch_key: DepthCoordinate = DepthCoordinate.invalid;
+
+/// Drops the `captureLegacy()` scratch. Called by `clearCaches()`, since a depth change or a reseed
+/// leaves the same key naming different terrain.
+fn clearLegacyScratch() void {
+    legacy_scratch_key = DepthCoordinate.invalid;
+}
+
+/// Freezes block `i` of `key` into `legacy_store`, if it is not frozen already.
+///
+/// The captured value is the cell as of the last moment its depth was the frontier:
+/// its `mod_store` value when it has one, and its procedural value when it does not.
+///
+/// Neither of those is read from the RESIDENT chunk, and that is the whole point.
+/// Every hand edit writes the store before it touches the chunk, so the two agree there,
+/// but the water simulation moves volume through the resident chunks for a whole tick and persists
+/// the cells it moved only afterwards. By then the chunk holds this tick's move, and freezing from it
+/// would send one tick of water down to depths that were formed before the water ever got there.
+fn captureLegacy(key: DepthCoordinate, i: u8) void {
+    if (legacy_store.get(key)) |e| {
+        if (e.isModified(i)) return; // frozen already, and a frozen cell never changes
+    }
+    if (mod_store.getCell(key, i)) |cell| {
+        legacy_store.beginWriteRaw(key).setCell(i, cell);
+        return;
+    }
+    if (!(legacy_scratch_key.depth != 0 and legacy_scratch_key.eql(key))) {
+        materializeChunk(&legacy_scratch, key);
+        legacy_scratch_key = key;
+    }
+    legacy_store.beginWriteRaw(key).setCell(i, .from(legacy_scratch.blocks[i]));
+}
+
+/// The value one cell contributes to the depths BELOW it, or null when it is still procedural.
+///
+/// The one lookup every ancestor path must use, so the two call sites cannot drift.
+/// A frozen value wins over the live one:
+/// an edit made after the depth was left is local to that depth and must not travel down.
+pub inline fn inheritedCell(key: DepthCoordinate, block_idx: u8) ?ModCell {
+    // Almost every session never edits below the frontier, so this keeps the store off the hot path.
+    if (legacy_store.index.count() != 0) {
+        if (legacy_store.getCell(key, block_idx)) |cell| return cell;
+    }
+    return mod_store.getCell(key, block_idx);
+}
 
 /// One depth the player has ascended past, recording the block they went up through.
 ///
@@ -615,8 +688,8 @@ pub const AscentStep = struct {
     /// `computeRetraceLayer()` reads the recorded frame back instead, exactly as `computeParentLayer()` does going the other way.
     suffix: Vec2u,
     quadrant: u2,
-    /// Subpixels within `suffix`'s chunk. The invportal is only the way up; where you come back to is
-    /// where you were standing.
+    /// Subpixels within `suffix`'s chunk: the stand position on the portal block itself.
+    /// A return puts the player back on the portal they went up through, at both ends of the move.
     origin_pos: Vec2i,
 
     pub inline fn coord(self: @This()) Coordinate {
@@ -628,14 +701,38 @@ pub const AscentStep = struct {
 /// Lives on `main_allocator` because it can be pushed or popped.
 pub var ascent_stack: std.ArrayList(AscentStep) = .empty;
 
-/// Whether the player is above the deepest depth they have reached, looking down at it.
-pub inline fn isSpectating() bool {
+/// Whether a recorded ascent step is available to descend back through.
+///
+/// This is the ONLY way down while above the frontier.
+/// A fresh descent frame would renumber every suffix below and orphan its `mod_store` keys
+/// (see `AscentStep`).
+pub inline fn canRetrace() bool {
     return ascent_stack.items.len != 0;
 }
 
-/// The deepest depth the player has reached, which is the only depth they may modify.
+/// The deepest depth the player has reached: the FRONTIER.
+///
+/// Floored at the current depth, which can never be deeper than the deepest one reached.
+/// Read this rather than `max_depth_reached` directly:
+/// the floor holds the invariant even when the depth is set without a `commitLayer()`.
+pub inline fn frontier() u64 {
+    return @max(memory.game.max_depth_reached, memory.game.depth);
+}
+
+/// Whether the current depth is above the frontier, so its edits stay local to it.
+///
+/// The player has already descended past this depth,
+/// so the depths below it hold the material they inherited at that moment.
+/// See `legacy_store` for how that material is kept.
+pub inline fn isAboveFrontier() bool {
+    return memory.game.depth < frontier();
+}
+
+/// The deepest depth the player has reached.
+/// Retrace is the only descent above the frontier, so this also equals
+/// `game.depth + ascent_stack.items.len` during play.
 pub inline fn deepestDepth() u64 {
-    return memory.game.depth + ascent_stack.items.len;
+    return frontier();
 }
 
 /// Whether there is a depth above the current one to ascend into.
@@ -645,12 +742,12 @@ pub inline fn canAscend() bool {
 
 /// The step a descent must retrace, or null when the player is already at their deepest depth.
 pub inline fn retraceStep() ?AscentStep {
-    return if (isSpectating()) ascent_stack.items[ascent_stack.items.len - 1] else null;
+    return if (canRetrace()) ascent_stack.items[ascent_stack.items.len - 1] else null;
 }
 
 /// Drops the top ascent step, once the descent that retraced it has committed.
 pub fn popAscentStep() void {
-    std.debug.assert(isSpectating());
+    std.debug.assert(canRetrace());
     _ = ascent_stack.pop();
 }
 
@@ -712,17 +809,14 @@ pub const Coordinate = struct {
         if (dx == 0 and dy == 0) return self;
         var res = self;
 
-        // X Axis
+        // X axis
         if (dx != 0) {
             const is_pos = dx > 0;
             const delta: u64 = if (is_pos) @intCast(dx) else @intCast(-%dx);
             const ov = if (is_pos) @addWithOverflow(res.suffix[0], delta) else @subWithOverflow(res.suffix[0], delta);
             if (ov[1] != 0) {
+                // world-edge :(
                 if (depth < HORIZON_DEPTH) return null;
-                // Past the horizon the quadrant bit IS the world's top coordinate bit, so a suffix that
-                // runs off the OUTER quadrant has left the world: there is no quadrant to flip into.
-                // Flipping anyway wraps the world edge to edge and hands back a coordinate 2^64 chunks away,
-                // which `refineHorizonWindow()` reads as an enormous parent delta.
                 if (is_pos == ((res.quadrant & 1) != 0)) return null;
                 res.quadrant ^= 1;
             }
@@ -731,14 +825,14 @@ pub const Coordinate = struct {
             res.suffix[0] = ov[0];
         }
 
-        // Y Axis
+        // Y axis
         if (dy != 0) {
             const is_pos = dy > 0;
             const delta: u64 = if (is_pos) @intCast(dy) else @intCast(-%dy);
             const ov = if (is_pos) @addWithOverflow(res.suffix[1], delta) else @subWithOverflow(res.suffix[1], delta);
             if (ov[1] != 0) {
                 if (depth < HORIZON_DEPTH) return null;
-                // Same world-edge rule as the X axis above, on the quadrant's Y bit.
+                // world-edge :(
                 if (is_pos == ((res.quadrant & 2) != 0)) return null;
                 res.quadrant ^= 2;
             }
@@ -1437,8 +1531,7 @@ pub const SimBuffer = struct {
             if (generated_count >= budget) break;
             if (player_coord.move(off)) |c| {
                 if (get(c) == null and chunk_cache.findIndex(c) == null) {
-                    const slot = chunk_cache.allocateIndex(c);
-                    materializeChunk(&chunk_cache.chunks[slot], c.asDepthCoordinate(memory.game.depth));
+                    _ = chunk_cache.fill(c);
                     generated_count += 1;
                 }
             }
@@ -1451,8 +1544,7 @@ pub const SimBuffer = struct {
             bg_scan_id = (bg_scan_id + 1) % RING_SIZE;
             if (player_coord.move(off)) |c| {
                 if (get(c) == null and chunk_cache.findIndex(c) == null) {
-                    const slot = chunk_cache.allocateIndex(c);
-                    materializeChunk(&chunk_cache.chunks[slot], c.asDepthCoordinate(memory.game.depth));
+                    _ = chunk_cache.fill(c);
                     generated_count += 1;
                 }
             }
@@ -1476,104 +1568,107 @@ pub fn getSimBlockPtr(x: i32, y: i32) ?*Block {
     return &chunk.blocks[(@as(usize, by) << CHUNK_SIZE_LOG2) | bx];
 }
 
-/// The safe cache size is dynamically calculated based on minimum zoom and screen resolution.
-/// Also handles chunks considered by `SimBuffer` already and adds some buffer room.
-const CHUNK_CACHE_SIZE: usize = blk: {
+/// Widest render window, in chunks, that the camera can ask for.
+///
+/// The window is the visible chunk grid at the most zoomed-out camera scale (`CAMERA_MIN_ZOOM`),
+/// plus the border `rasterizeLayer()` adds: `CHUNK_MARGIN` chunks each side for light bleed,
+/// plus 1 for the floor-alignment straddle.
+/// This must track `lighting.CHUNK_MARGIN`, so widening the light range grows the cache.
+///
+/// A portal ASCENT is the one thing that reaches past this. `portal.zoomFactor()` pulls the live layer
+/// out until `portal.coverCurve()` hides it, which caps that layer's window at
+/// `(ZOOM_FACTOR / OVERLAY_ZOOM)^2` (about 7) times the area here.
+const CHUNK_WINDOW = blk: {
     const W: f64 = @floatFromInt(dw.SCREEN_WIDTH);
     const H: f64 = @floatFromInt(dw.SCREEN_HEIGHT);
     const Z: f64 = player.CAMERA_MIN_ZOOM;
 
-    // Per-side border, in chunks, of the render/lighting window (see `chunk.zig` and
-    // `lighting.CHUNK_MARGIN`): `margin` chunks each side for light bleed, plus 1 for the
-    // floor-alignment straddle. Must track CHUNK_MARGIN so widening light range grows the cache.
     const margin: f64 = @floatFromInt(dw.lighting.CHUNK_MARGIN);
     const border = 2.0 * margin + 1.0;
 
-    // Maximum possible visible chunk grid dimensions (at the most zoomed-out camera scale).
-    const C_w = @ceil(W / (256.0 * Z)) + border;
-    const C_h = @ceil(H / (256.0 * Z)) + border;
-
-    // Provision for the ENTIRE visible window,
-    // rather than only the part that spills outside the SimBuffer with a significant extra buffer.
-    const windowed = (C_w + 2.0) * (C_h + 2.0);
-    const raw_cache_size = windowed * 2.0 + 32.0;
-
-    const integer_cache_size: usize = @intFromFloat(@ceil(raw_cache_size));
-    const aligned_size = ((integer_cache_size + (CHUNK_CACHE_WAYS - 1)) / CHUNK_CACHE_WAYS) * CHUNK_CACHE_WAYS;
-
-    // Add a very conservative minimum baseline for safety!
-    break :blk @max(aligned_size, 256);
+    // The 2 extra chunks an axis are for the readers that probe just outside the window:
+    // precacheChunks(), the mining light grid, and the collision scan.
+    break :blk .{
+        .w = @as(usize, @intFromFloat(@ceil(W / (256.0 * Z)) + border + 2.0)),
+        .h = @as(usize, @intFromFloat(@ceil(H / (256.0 * Z)) + border + 2.0)),
+    };
 };
 
-/// Ways that the cache is split (must be a power of two).
-/// Modifying this WILL break things.
-const CHUNK_CACHE_WAYS = 4;
-const CHUNK_CACHE_SETS = CHUNK_CACHE_SIZE / CHUNK_CACHE_WAYS;
+/// Tile the cache wraps a chunk coordinate into, in chunks. Powers of two, and each axis is at least
+/// as wide as `CHUNK_WINDOW`, which is what makes the whole window collision-free.
+const CHUNK_CACHE_TILE_W = std.math.ceilPowerOfTwoAssert(usize, CHUNK_WINDOW.w);
+const CHUNK_CACHE_TILE_H = std.math.ceilPowerOfTwoAssert(usize, CHUNK_WINDOW.h);
+/// Slot count of the direct-mapped chunk cache (a power of two by construction).
+const CHUNK_CACHE_SIZE: usize = CHUNK_CACHE_TILE_W * CHUNK_CACHE_TILE_H;
 
-/// A static cache that caches chunks when a generation is attempted.
+comptime {
+    // The window must FIT the tile on both axes, or two visible chunks share a slot and each one
+    // evicts the other every frame; see the `ChunkCache` header.
+    if (CHUNK_CACHE_TILE_W < CHUNK_WINDOW.w or CHUNK_CACHE_TILE_H < CHUNK_WINDOW.h)
+        @compileError("The chunk cache tile must cover the widest render window on both axes.");
+}
+
+/// A static cache holding every chunk the renderer touches that the `SimBuffer` does not own.
+///
+/// DIRECT-MAPPED AND TILED, not hashed: the slot IS the chunk position, wrapped into a
+/// `CHUNK_CACHE_TILE_W` x `CHUNK_CACHE_TILE_H` tile (see `dw.utils.tileIndex()`).
+/// Two chunks share a slot only when they sit a whole tile apart on an axis, and the tile is wider than
+/// the widest window, so no two chunks that are visible at the same time can ever collide.
+///
+/// This layout is not an optimization, it is the only one that works here.
+/// The renderer rescans the SAME rectangle in the SAME order every frame. Against a hashed
+/// set-associative cache, that is the pattern that defeats a clock or LRU policy outright:
+/// total capacity says nothing, because any set that happens to draw 5 window chunks for its 4 ways
+/// misses on EVERY access forever, and a chunk miss is a full `materializeChunk()`.
+/// Doubling capacity only makes such a set rarer; a tile removes it.
 pub const ChunkCache = struct {
-    /// Keys storing `Coordinate` values structured as a 4-way set-associative cache.
+    /// Coordinate resident in each slot, indexed by `slotOf()`.
     ///
     /// NOTE: `@splat()` is for the DEFAULT only, where it is a comptime value. Clearing at runtime goes
     /// through `@memset()` instead (see `clear()`): assigning a whole array this size builds the value in
     /// the stack frame and copies it, which is both code waste and most of the frame in Debug.
-    keys: [CHUNK_CACHE_SETS][CHUNK_CACHE_WAYS]?Coordinate = @splat(@splat(null)),
+    keys: [CHUNK_CACHE_SIZE]?Coordinate = @splat(null),
     /// Chunks referenced by `keys` at the current depth.
     chunks: *[CHUNK_CACHE_SIZE]Chunk = chunk_pool[0..CHUNK_CACHE_SIZE],
 
-    // crazy int-type creation tech (unused for simplicity)
-    // const WaysBitType = std.meta.Int(.unsigned, CHUNK_CACHE_WAYS);
-    // const WaysIndexType = std.meta.Int(.unsigned, std.math.log2(CHUNK_CACHE_WAYS));
+    /// The one slot a `Coordinate` can ever occupy.
+    ///
+    /// The quadrant is deliberately NOT mixed in. Past the horizon the quadrant bit is the coordinate's
+    /// top bit, and below it a quadrant is `max_suffix + 1` chunks wide, which is a multiple of the tile
+    /// on both axes. So the low bits run continuously across a quadrant edge either way,
+    /// and two chunks that neighbor each other across one land in neighboring slots.
+    inline fn slotOf(coord: Coordinate) usize {
+        return utils.tileIndex(CHUNK_CACHE_TILE_W, CHUNK_CACHE_TILE_H, coord.suffix[0], coord.suffix[1]);
+    }
 
-    /// Data for clock data structure implementation per set.
-    clock_bits: [CHUNK_CACHE_SETS]u4 = @splat(0),
-    /// Where the hand is located in the clock data structure per set.
-    hands: [CHUNK_CACHE_SETS]u2 = @splat(0),
-
-    /// Finds the index of a `Coordinate` in the cache, marking it as "recently used."
+    /// Finds the index of a `Coordinate` in the cache.
     /// Returns null if non-existent.
     pub fn findIndex(self: *@This(), coord: Coordinate) ?usize {
-        const h = coord.hash();
-        const set_idx: usize = @intCast(h % CHUNK_CACHE_SETS);
-
-        inline for (0..CHUNK_CACHE_WAYS) |way| {
-            if (self.keys[set_idx][way]) |k| {
-                if (k.eql(coord)) {
-                    self.clock_bits[set_idx] |= (@as(u4, 1) << way);
-                    return set_idx * CHUNK_CACHE_WAYS + way;
-                }
-            }
+        const slot = slotOf(coord);
+        if (self.keys[slot]) |k| {
+            if (k.eql(coord)) return slot;
         }
         return null;
     }
 
-    /// Evicts an entry using the clock algorithm and returns the index for the new `Coordinate` inside the cache.
-    pub fn allocateIndex(self: *@This(), coord: Coordinate) usize {
-        const h = coord.hash();
-        const set_idx: usize = @intCast(h % CHUNK_CACHE_SETS);
-        var hand_val = self.hands[set_idx];
-
-        while (true) {
-            const way = hand_val;
-            hand_val +%= 1;
-
-            const mask = @as(u4, 1) << way;
-            if ((self.clock_bits[set_idx] & mask) != 0) {
-                self.clock_bits[set_idx] &= ~mask;
-            } else {
-                self.keys[set_idx][way] = coord;
-                self.clock_bits[set_idx] |= mask;
-                self.hands[set_idx] = hand_val;
-                return set_idx * CHUNK_CACHE_WAYS + way;
-            }
-        }
+    /// Materializes `coord` into the slot it maps to, evicting whatever held it, and returns the index.
+    ///
+    /// The key is claimed AFTER the chunk is built, which is the same order every other cache here writes
+    /// in and is load-bearing rather than stylistic. The cache is direct-mapped, so a nested fill of any
+    /// coordinate a whole tile away lands on this very slot; claiming the key first would let that nested
+    /// fill finish, then let this one overwrite the blocks underneath it, leaving the key naming one chunk
+    /// while the data belongs to another. Nothing in generation re-enters this cache today, and writing
+    /// the key last means nothing has to keep proving it.
+    pub fn fill(self: *@This(), coord: Coordinate) usize {
+        const slot = slotOf(coord);
+        materializeChunk(&self.chunks[slot], coord.asDepthCoordinate(memory.game.depth));
+        self.keys[slot] = coord;
+        return slot;
     }
 
     /// Clears the whole `ChunkCache`, invalidating previous data.
     pub inline fn clear(self: *@This()) void {
-        @memset(&self.keys, @splat(null));
-        @memset(&self.clock_bits, 0);
-        @memset(&self.hands, 0);
+        @memset(&self.keys, null);
     }
 
     /// The `SimBuffer.validateAgainstMaterialization()` invariant, for the cache one ring further out:
@@ -1586,33 +1681,31 @@ pub const ChunkCache = struct {
         var scratch: Chunk = undefined;
         var reports: usize = 0;
 
-        for (&self.keys, 0..) |*set, set_idx| {
-            for (set, 0..) |maybe_key, way| {
-                const coord = maybe_key orelse continue;
-                // A resident chunk is the SimBuffer's to own; the cached copy is allowed to lag it.
-                if (SimBuffer.get(coord) != null) continue;
-                materializeChunk(&scratch, coord.asDepthCoordinate(memory.game.depth));
+        for (&self.keys, 0..) |maybe_key, slot| {
+            const coord = maybe_key orelse continue;
+            // A resident chunk is the SimBuffer's to own; the cached copy is allowed to lag it.
+            if (SimBuffer.get(coord) != null) continue;
+            materializeChunk(&scratch, coord.asDepthCoordinate(memory.game.depth));
 
-                const cached = &self.chunks[set_idx * CHUNK_CACHE_WAYS + way];
-                for (0..CHUNK_SIZE_SQ) |i| {
-                    const live = cached.blocks[i];
-                    const rebuilt = scratch.blocks[i];
-                    if (live.id == rebuilt.id and live.hp == rebuilt.hp and live.base_id == rebuilt.base_id) continue;
+            const cached = &self.chunks[slot];
+            for (0..CHUNK_SIZE_SQ) |i| {
+                const live = cached.blocks[i];
+                const rebuilt = scratch.blocks[i];
+                if (live.id == rebuilt.id and live.hp == rebuilt.hp and live.base_id == rebuilt.base_id) continue;
 
-                    if (reports >= SimBuffer.MAX_DIVERGENCE_REPORTS) return false;
-                    reports += 1;
-                    dw.logger.err(
-                        @src(),
-                        "ChunkCache diverges from materialization at chunk ({d},{d}) q{d} block ({d},{d}): cached {s} hp={d} / rebuilt {s} hp={d}",
-                        .{
-                            coord.suffix[0],      coord.suffix[1],
-                            coord.quadrant,       i & (CHUNK_SIZE - 1),
-                            i >> CHUNK_SIZE_LOG2, @tagName(live.id),
-                            live.hp,              @tagName(rebuilt.id),
-                            rebuilt.hp,
-                        },
-                    );
-                }
+                if (reports >= SimBuffer.MAX_DIVERGENCE_REPORTS) return false;
+                reports += 1;
+                dw.logger.err(
+                    @src(),
+                    "ChunkCache diverges from materialization at chunk ({d},{d}) q{d} block ({d},{d}): cached {s} hp={d} / rebuilt {s} hp={d}",
+                    .{
+                        coord.suffix[0],      coord.suffix[1],
+                        coord.quadrant,       i & (CHUNK_SIZE - 1),
+                        i >> CHUNK_SIZE_LOG2, @tagName(live.id),
+                        live.hp,              @tagName(rebuilt.id),
+                        rebuilt.hp,
+                    },
+                );
             }
         }
         return reports == 0;
@@ -1945,6 +2038,16 @@ pub var quad_cache: QuadCache = .{
     .ancestor_materials = undefined,
 };
 
+/// The `hash2d()` lane a chunk draws every `Block.seed` from.
+///
+/// One definition, so a replayed player edit (`ModEntry.applyTo()`) and the terrain beside it
+/// (`ancestor.chunkNoise()`) pick their render variants out of the same stream.
+/// `Block.seed` is cosmetic only, so this lane is deliberately the weakest of the chunk's four.
+pub fn seedLane(key: DepthCoordinate) Vec2u {
+    const seeds = quad_cache.getChunkSeeds(key);
+    return .{ seeds.value[0].value[2], seeds.value[0].value[3] };
+}
+
 /// Represents the answer to the question "what is the largest possible suffix value"?
 /// 15 at depth 1, 255 at depth 2, capped at 2**64-1 at depth 16 and beyond.
 ///
@@ -1991,9 +2094,7 @@ pub fn writeChunkSimless(chunk: *Chunk, coord: Coordinate) void {
         return;
     }
 
-    const slot_index = chunk_cache.allocateIndex(coord);
-    materializeChunk(&chunk_cache.chunks[slot_index], coord.asDepthCoordinate(memory.game.depth));
-    chunk.* = chunk_cache.chunks[slot_index];
+    chunk.* = chunk_cache.chunks[chunk_cache.fill(coord)];
 }
 
 /// Gets a new instance of a `Chunk` at the current depth.
@@ -2014,9 +2115,7 @@ pub fn getChunkPtr(coord: Coordinate) *const Chunk {
     if (SimBuffer.get(coord)) |resident| return resident;
     if (chunk_cache.findIndex(coord)) |i| return &chunk_cache.chunks[i];
 
-    const slot_index = chunk_cache.allocateIndex(coord);
-    materializeChunk(&chunk_cache.chunks[slot_index], coord.asDepthCoordinate(memory.game.depth));
-    return &chunk_cache.chunks[slot_index];
+    return &chunk_cache.chunks[chunk_cache.fill(coord)];
 }
 
 /// Builds the chunk the player actually sees: procedural generation, then every modified cell replayed on top,
@@ -2032,10 +2131,28 @@ pub fn getChunkPtr(coord: Coordinate) *const Chunk {
 /// stays a separate OVERLAY replayed on top, which is also what lets a save hold a handful of edited
 /// cells instead of the chunks, and what lets a worldgen fix repair an existing save.
 pub fn materializeChunk(chunk: *Chunk, key: DepthCoordinate) void {
+    materializeChunkInner(chunk, key, .live);
+}
+
+/// `materializeChunk()` for a chunk that serves as an ANCESTOR of a deeper depth.
+///
+/// Replays the frozen values over the live ones, exactly as `inheritedCell()` chooses between them,
+/// so the whole-chunk route and the cell-by-cell route agree.
+/// A chunk built by this must never reach the player: it is the depth as its descendants remember it.
+pub fn materializeInheritedChunk(chunk: *Chunk, key: DepthCoordinate) void {
+    materializeChunkInner(chunk, key, .inherited);
+}
+
+/// Which of the two stores a materialization replays.
+/// `.inherited` replays `mod_store` and then `legacy_store` ON TOP, since a frozen value wins.
+const StoreView = enum { live, inherited };
+
+fn materializeChunkInner(chunk: *Chunk, key: DepthCoordinate, comptime view: StoreView) void {
     // Asked BEFORE generating so the flag pass can be skipped when it is about to be redone below.
     // A bool rather than the entry itself: generation is a long call and nothing should hold a store
     // pointer across it.
-    const modified = mod_store.contains(key);
+    const frozen = view == .inherited and legacy_store.contains(key);
+    const modified = mod_store.contains(key) or frozen;
     const is_base = key.depth == STARTING_ZOOM_TIMES;
 
     // The generator derives flags from the ids it just wrote. Replaying an edit changes those ids, so
@@ -2045,17 +2162,10 @@ pub fn materializeChunk(chunk: *Chunk, key: DepthCoordinate) void {
 
     const entry = mod_store.get(key);
     // Generation must never touch the store, or the flag pass skipped above would never be made up for.
-    std.debug.assert((entry != null) == modified);
-    if (entry) |e| {
-        e.applyTo(chunk);
-        // Only meaningful while looking down at a deeper depth; at the deepest depth the markers left
-        // behind by an earlier ascent describe modifications that ARE this layer.
-        if (isSpectating()) {
-            for (0..CHUNK_SIZE_SQ) |idx| {
-                chunk.blocks[idx].descendant_mods = e.hasDescendantMods(@intCast(idx));
-            }
-        }
-    }
+    std.debug.assert((entry != null) == (mod_store.contains(key)));
+    if (entry) |e| e.applyTo(chunk, key);
+    // A frozen value beats the live one, so it goes on last.
+    if (frozen) legacy_store.get(key).?.applyTo(chunk, key);
 
     if (!is_base) {
         // Exactly the pass `generateChunkInner()` was told to skip, now that the ids are final.
@@ -2322,7 +2432,7 @@ fn addEdgeFlags(target_chunk: *Chunk, key: DepthCoordinate, mods: ?*const ModNei
 
             target_chunk.blocks[y * CHUNK_SIZE + x].edge_flags = flags;
             target_chunk.blocks[y * CHUNK_SIZE + x].id_edge_flags = id_flags;
-            target_chunk.blocks[y * CHUNK_SIZE + x].waterlogged = state.flags;
+            target_chunk.blocks[y * CHUNK_SIZE + x].water = state;
         }
     }
 }
@@ -2416,7 +2526,7 @@ fn addEdgeFlagsFractal(target_chunk: *Chunk, key: DepthCoordinate) void {
             }
             current_block.edge_flags = flags;
             current_block.id_edge_flags = id_flags;
-            current_block.waterlogged = state.flags;
+            current_block.water = state;
         }
     }
 }
@@ -2444,49 +2554,88 @@ inline fn rightNeighborCell(coord: Coordinate, bx: u4) ?RightCell {
     return .{ .coord = coord.move(.{ 1, 0 }) orelse return null, .bx = 0 };
 }
 
-/// Applies a block modification, changing the `Sprite` type and resetting `hp`. Mutates `mod_store` and caches in-place.
-/// Returns whether `update_local_edge_flags` instantly removed the current block due to being in an invalid position.
+const BlockTypeCell = struct {
+    coord: Coordinate,
+    bx: u4,
+    sprite: Sprite,
+    prev: Block,
+};
+
+/// Exact cells a `modifyBlockType()` action will write before support validation.
+const BlockTypePlan = struct {
+    first: BlockTypeCell,
+    second: ?BlockTypeCell = null,
+};
+
+/// Result of a `modifyBlockType()` request.
+pub const ModifyBlockTypeResult = enum {
+    /// The requested primary block stayed in the world.
+    placed,
+    /// Support validation removed the requested primary block after it was written.
+    collapsed,
+    /// Normal-play safety rejected a placement before any world state changed.
+    rejected_softlock,
+};
+
+/// Works out the exact primary and paired cells that a block placement will write.
+fn planBlockTypeChange(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, prev_block: Block) BlockTypePlan {
+    var plan: BlockTypePlan = .{
+        .first = .{ .coord = coord, .bx = bx, .sprite = new_sprite, .prev = prev_block },
+    };
+
+    const partner = new_sprite.pairedRight();
+    if (partner == .none) return plan;
+
+    const right = rightNeighborCell(coord, bx) orelse return plan;
+    const right_block = getBlockAt(right.coord, right.bx, by, memory.game.depth);
+    if (!dw.inventory.isInCreative() and !right_block.isEmpty()) return plan;
+
+    // Only place the right half if the block underneath it is solid.
+    const ny = @as(i32, by) + 1;
+    const under_coord = if (ny >= CHUNK_SIZE) right.coord.moveY(1) else right.coord;
+    const uc = under_coord orelse return plan;
+    const under_by: u4 = @intCast(@mod(ny, CHUNK_SIZE));
+    const under_block = getBlockAt(uc, right.bx, under_by, memory.game.depth);
+    if (!under_block.isSolid()) return plan;
+
+    plan.second = .{ .coord = right.coord, .bx = right.bx, .sprite = partner, .prev = .empty };
+    return plan;
+}
+
+/// Applies a block modification, changing the `Sprite` type and resetting `hp`.
 ///
-/// `prev_block` is the block that occupied this cell BEFORE this action began.
-/// The caller must pass the original block (for example, mining reads it before deleting).
-pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, prev_block: Block) bool {
-    // a block that spans two cells includes its right half
-    var cell: struct { Coordinate, u4 } = .{ coord, bx };
-    var sprite = new_sprite;
-    var prev = prev_block;
-    var second_cell: ?struct { Coordinate, u4 } = null;
+/// Normal-play callers must use this function for every placement.
+/// It gives `player.permitsPlacement()` the exact cells that will persist before it writes `mod_store`.
+/// `prev_block` is the block that occupied the primary cell before this action began.
+/// The caller must pass the original block when mining replaces a cell.
+pub fn modifyBlockType(
+    coord: Coordinate,
+    bx: u4,
+    by: u4,
+    new_sprite: Sprite,
+    prev_block: Block,
+) ModifyBlockTypeResult {
+    const plan = planBlockTypeChange(coord, bx, by, new_sprite, prev_block);
 
-    while (true) {
-        const partner = sprite.pairedRight();
-        writeBlockType(cell[0], cell[1], by, sprite, prev);
-        if (partner == .none) break;
-
-        const right = rightNeighborCell(cell[0], cell[1]) orelse break;
-
-        // stop placement if the right cell is not empty in non-creative
-        const right_block = getBlockAt(right.coord, right.bx, by, memory.game.depth);
-        if (!dw.inventory.isInCreative() and !right_block.isEmpty()) break;
-
-        // only place the right half if the block underneath it is solid
-        const ny = @as(i32, by) + 1;
-        const under_coord = if (ny >= CHUNK_SIZE) right.coord.moveY(1) else right.coord;
-        if (under_coord) |uc| {
-            const under_by: u4 = @intCast(@mod(ny, CHUNK_SIZE));
-            const under_block = getBlockAt(uc, right.bx, under_by, memory.game.depth);
-            if (!under_block.isSolid()) break;
-        } else break;
-
-        cell = .{ right.coord, right.bx };
-        second_cell = cell;
-        sprite = partner;
-        prev = .empty;
+    if (!dw.inventory.isInCreative()) {
+        var pending: [2]player.PendingPlacement = .{
+            .{ .coord = plan.first.coord, .bx = plan.first.bx, .by = by, .sprite = plan.first.sprite },
+            undefined,
+        };
+        var pending_len: usize = 1;
+        if (plan.second) |second| {
+            pending[pending_len] = .{ .coord = second.coord, .bx = second.bx, .by = by, .sprite = second.sprite };
+            pending_len += 1;
+        }
+        if (!player.permitsPlacement(pending[0..pending_len])) return .rejected_softlock;
     }
 
-    // Update edge flags for both cells when a two-cell block is placed.
-    if (second_cell) |c2| {
-        _ = updateLocalEdgeFlags(c2[0], c2[1], by);
+    writeBlockType(plan.first.coord, plan.first.bx, by, plan.first.sprite, plan.first.prev);
+    if (plan.second) |second| {
+        writeBlockType(second.coord, second.bx, by, second.sprite, second.prev);
+        _ = updateLocalEdgeFlags(second.coord, second.bx, by);
     }
-    return updateLocalEdgeFlags(coord, bx, by);
+    return if (updateLocalEdgeFlags(coord, bx, by)) .collapsed else .placed;
 }
 
 /// The write half of `modifyBlockType()`: updates `mod_store` and every live cache, WITHOUT validating
@@ -2531,7 +2680,7 @@ fn writeBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, prev_bl
         block.hp = initial_hp;
         block.edge_flags = 0xFF;
         block.id_edge_flags = 0xFF;
-        block.waterlogged = 0;
+        block.water = .dry;
     }
 
     // Placing water must register the slot so the optimized `tickWater` scan picks it up.
@@ -2546,7 +2695,7 @@ fn writeBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, prev_bl
         block.hp = initial_hp;
         block.edge_flags = 0xFF;
         block.id_edge_flags = 0xFF;
-        block.waterlogged = 0;
+        block.water = .dry;
     }
 }
 
@@ -2563,7 +2712,7 @@ inline fn clearBlockFields(b: *Block) void {
     b.hp = 0;
     b.edge_flags = 0xFF;
     b.id_edge_flags = 0xFF;
-    b.waterlogged = 0;
+    b.water = .dry;
 }
 
 /// Clears a single cell to empty across `mod_store`, `SimBuffer`, and `chunk_cache` (no drop, no worklist).
@@ -2766,7 +2915,7 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                 // Recalculate flags for foundation blocks
                 var flags: u8 = 0;
                 var id_flags: u8 = 0;
-                var waterlogged: water.WaterloggedFlags = 0;
+                var water_state: water.WaterState = .dry;
 
                 const left_nb = window.get(nx - 1, ny);
                 const right_nb = window.get(nx + 1, ny);
@@ -2781,10 +2930,10 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                     flags = 0xFF;
                     id_flags = 0xFF;
                     if (current_sprite.isWaterloggable()) {
-                        waterlogged = state.flags;
+                        water_state = state;
                     }
                 } else {
-                    waterlogged = state.flags;
+                    water_state = state;
 
                     // Recalculate edge flags (same-sprite flags for all foundation blocks; see `addEdgeFlags()`)
                     const src_is_liquid = current_sprite.isLiquid();
@@ -2801,7 +2950,7 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                 // Most cells the cascade sweeps are unaffected; skipping the identical rewrite avoids two store lookups.
                 if (current_block.edge_flags == flags and
                     current_block.id_edge_flags == id_flags and
-                    current_block.waterlogged == waterlogged) continue;
+                    current_block.water.eql(water_state)) continue;
                 window.drop(nx, ny);
 
                 // Only the materialized caches are patched: flags are derived state, so `mod_store` does not store them,
@@ -2809,12 +2958,12 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
                 if (SimBuffer.get(target_coord)) |c| {
                     c.blocks[block_id].edge_flags = flags;
                     c.blocks[block_id].id_edge_flags = id_flags;
-                    c.blocks[block_id].waterlogged = waterlogged;
+                    c.blocks[block_id].water = water_state;
                 }
                 if (chunk_cache.findIndex(target_coord)) |index| {
                     chunk_cache.chunks[index].blocks[block_id].edge_flags = flags;
                     chunk_cache.chunks[index].blocks[block_id].id_edge_flags = id_flags;
-                    chunk_cache.chunks[index].blocks[block_id].waterlogged = waterlogged;
+                    chunk_cache.chunks[index].blocks[block_id].water = water_state;
                 }
             }
         }
@@ -2960,6 +3109,7 @@ pub fn clearCaches(comptime clear_ancestors: bool) void {
     @memset(&quad_cache.seed_cache_keys, @splat(DepthCoordinate.invalid));
     dw.ancestor.clearChunkNoise();
     dw.ancestor.clearParentHoods();
+    clearLegacyScratch();
 
     // A debug slider changes what the terrain functions answer without changing the seed, so the
     // memoized terrain has to go with it. Bumping the epoch retires every entry of the base terrain
@@ -2981,6 +3131,7 @@ pub fn clearCaches(comptime clear_ancestors: bool) void {
 pub fn initArenaAllocatedStructures() void {
     flag_worklist = std.ArrayList(UpdateItem).initCapacity(alloc, 256) catch memory.oom();
     mod_store.init(memory.main_allocator);
+    legacy_store.init(memory.main_allocator);
     ascent_stack.clearRetainingCapacity();
     quad_cache.reset();
 }
@@ -3244,24 +3395,23 @@ pub fn installLayer(t: LayerTransition) void {
 /// which filled that cache with the very D parents the new depth needs,
 /// and tiered them relative to D+1 already (the preview installs that depth while it generates).
 pub fn commitLayer(t: LayerTransition, keep_ancestors: bool) void {
-    // Every menu is bound to a block at the depth being left, and the loot menu WRITES to that block
-    // when it is emptied, so a menu that survives the change would edit an unrelated cell at the new
-    // depth. Closed here rather than at each caller: this is the one point every depth change routes
-    // through, hotkeys included (`portal.beginTransition()` closes them earlier still, because the
-    // animation has to hold them shut for its whole length).
+    // prevent menu interactions (such as obtaining chest items deleting the chest) from corrupting
     dw.indicators.closeAllMenus();
 
     if (keep_ancestors) clearCaches(false) else clearCaches(true);
     dw.inventory.dropped_items.clear(null);
     memory.game.teleport(null, t.new_pos); // make sure to teleport!
     installLayer(t);
+
+    // (increase max depth reached: the depth just left is now frozen for its descendants):
+    // later edits go to legacy_store
+    if (t.depth > memory.game.max_depth_reached) memory.game.max_depth_reached = t.depth;
 }
 
 /// Increases the game's depth by 1, invalidates caches, moves the player, and handles data modification.
 /// `coord` is the chunk the portal is in or where the depth should take place.
 /// `bx` and `by` represent the specific block within a chunk the zoom should be in.
-pub fn pushLayer(parent_id: Sprite, coord: Coordinate, bx: u4, by: u4) void {
-    _ = parent_id;
+pub fn pushLayer(coord: Coordinate, bx: u4, by: u4) void {
     commitLayer(computeLayer(coord, bx, by, .player), false);
 }
 
@@ -3327,6 +3477,19 @@ pub fn blockStandPos(bx: u4, by: u4) Vec2i {
     };
 }
 
+/// Snaps a landing onto the block it falls in, using `blockStandPos()`.
+///
+/// An ascent scales the player's POINT down but not the player.
+/// A raw scaled point puts the feet part-way up a cell and the head in the cell ABOVE it,
+/// so the landing reads as blocked by a cell the player never came up through.
+/// The player is under one block tall, so one cell always has room for the whole hitbox.
+pub fn snapToBlock(pos: Vec2i) Vec2i {
+    return blockStandPos(
+        @intCast(@divFloor(pos[0], CHUNK_SIZE_SQ)),
+        @intCast(@divFloor(pos[1], CHUNK_SIZE_SQ)),
+    );
+}
+
 /// Works out the D to D-1 transition that carries the point `pos` inside chunk `coord` up a layer.
 ///
 /// The straight scale-down: a child chunk covers `SUBPIXELS_IN_CHUNK / ZOOM_FACTOR` of its parent,
@@ -3352,10 +3515,13 @@ pub fn computeParentLayer(coord: Coordinate, pos: Vec2i) LayerTransition {
     // Subpixels one child chunk covers inside its parent. The scaled point cannot leave the parent chunk:
     // cell is at most ZOOM_FACTOR - 1 and pos / ZOOM_FACTOR stays under one span.
     const child_span: i64 = @divExact(@as(i64, dw.SUBPIXELS_IN_CHUNK), ZOOM_FACTOR);
-    const new_pos: Vec2i = .{
+    const scaled: Vec2i = .{
         cell_x * child_span + @divFloor(pos[0], ZOOM_FACTOR),
         cell_y * child_span + @divFloor(pos[1], ZOOM_FACTOR),
     };
+    // The player keeps its size across the change while a block gets 4x bigger,
+    // so the landing sits in the block the scaled point falls in (see `snapToBlock()`).
+    const new_pos = snapToBlock(scaled);
 
     var t: LayerTransition = .{
         .depth = depth,
@@ -3386,8 +3552,7 @@ pub fn computeParentLayer(coord: Coordinate, pos: Vec2i) LayerTransition {
 
 /// Decreases the game's depth by 1, moving the player into the block they were standing in.
 ///
-/// Records the step on `ascent_stack`, which both puts the world into its read-only spectating mode and pins the block a later descent has to retrace.
-/// The descendant markers are propagated first, while the deeper depth is still the current one and its parents are still one hop away.
+/// Records the step on `ascent_stack`, which pins the block a later descent has to retrace.
 pub fn popLayer() void {
     const g = &memory.game;
     // apply instantly
@@ -3396,7 +3561,6 @@ pub fn popLayer() void {
     // reads it. Matches `retraceInstant()`; without it the world is momentarily absent, and an absent
     // chunk reads as solid to collision (see `getBlockPtr()`).
     SimBuffer.sync(g.getPlayerCoord());
-    applyDescendantMarkersToSim();
 }
 
 /// Commits an already-computed ascent transition: rolls the deeper depth's modifications up into markers,
@@ -3404,12 +3568,11 @@ pub fn popLayer() void {
 /// so both leave the exact same state behind.
 ///
 /// `origin_coord`/`origin_pos` are where at the DEEPER depth a later return should put the player:
-/// where they were standing, not the block they rose through.
+/// the portal block they rose through.
 ///
 /// Asserts `t.depth == game.depth - 1` (the world is still at the depth being left).
 pub fn applyAscent(t: LayerTransition, origin_coord: Coordinate, origin_pos: Vec2i) void {
     std.debug.assert(t.depth == memory.game.depth - 1);
-    markDescendantsFromChild(memory.game.depth);
 
     ascent_stack.append(memory.main_allocator, .{
         .suffix = origin_coord.suffix,
@@ -3455,11 +3618,11 @@ pub fn computeRetraceLayer(step: AscentStep) LayerTransition {
 }
 
 /// Instantly descends back through the block the player last ascended past, popping the ascent stack.
-/// The only descent allowed while spectating (see `isSpectating()`).
+/// The only descent allowed above the frontier (see `canRetrace()`).
 ///
-/// The block only picks the depth's coordinate frame; the player is put back on the exact spot they left from,
-/// so a return lands where they were rather than on the target block's floor.
-/// Still spectating afterwards if more steps remain, since the depth reached is still above the deepest.
+/// The block picks the depth's coordinate frame AND the landing spot,
+/// so a return lands on the portal that the ascent went up through.
+/// Still above the frontier afterwards if more steps remain.
 pub fn retraceInstant() void {
     // No preview warmed the ancestor cache here (unlike the animated return),
     // and its entries are tiered relative to the old depth, so they must be dropped rather than kept.
@@ -3473,60 +3636,6 @@ pub fn retraceInstant() void {
 pub fn commitRetrace(t: LayerTransition) void {
     commitLayer(t, true);
     popAscentStep();
-}
-
-/// Sets `descendant_mods` on every resident `SimBuffer` chunk from its `mod_store` descendants bitmap.
-pub fn applyDescendantMarkersToSim() void {
-    var it = mod_store.index.iterator();
-    while (it.next()) |kv| {
-        const key = kv.key_ptr.*;
-        if (key.depth != memory.game.depth) continue;
-        const entry = mod_store.entries.at(kv.value_ptr.*);
-        var any: u64 = 0;
-        for (entry.descendants) |w| any |= w;
-        if (any == 0) continue;
-
-        const chunk = SimBuffer.get(key.asCoord()) orelse continue;
-        for (0..CHUNK_SIZE_SQ) |i| {
-            if (entry.hasDescendantMods(@intCast(i))) chunk.blocks[i].descendant_mods = true;
-        }
-    }
-}
-
-/// Rolls every modification at `child_depth` up into a descendant marker on its parent block.
-///
-/// Only ever one level: an entry at `child_depth` already summarises everything below it,
-/// because this ran when that depth was itself ascended past.
-fn markDescendantsFromChild(child_depth: u64) void {
-    std.debug.assert(child_depth == memory.game.depth); // `getParent()` resolves against the live depth
-    const parent_depth = child_depth - 1;
-
-    // collect child keys first
-    // entry ptrs stay valid because of SegmentedList
-    var mark_arena = memory.makeArena();
-    defer mark_arena.deinit();
-    var children: std.ArrayList(DepthCoordinate) = .empty;
-
-    var it = mod_store.index.iterator();
-    while (it.next()) |kv| {
-        const key = kv.key_ptr.*;
-        if (key.depth != child_depth) continue;
-        if (!mod_store.entries.at(kv.value_ptr.*).anySet()) continue;
-        children.append(mark_arena.allocator(), key) catch memory.oom();
-    }
-
-    for (children.items) |key| {
-        const entry = mod_store.get(key).?;
-        for (0..CHUNK_SIZE_SQ) |i| {
-            const idx: u8 = @intCast(i);
-            if (!entry.isModified(idx) and !entry.hasDescendantMods(idx)) continue;
-            const p = dw.ancestor.getParentInfo(key, @intCast(idx & (CHUNK_SIZE - 1)), @intCast(idx >> CHUNK_SIZE_LOG2));
-            mod_store.markDescendant(
-                p.coord.asDepthCoordinate(parent_depth),
-                (@as(u8, p.by) << CHUNK_SIZE_LOG2) | p.bx,
-            );
-        }
-    }
 }
 
 /// Works out the D to D+1 transition without leaving any lasting change behind.
@@ -3833,7 +3942,8 @@ fn refineHorizonWindow(prev: *const HorizonWindow, trace: HorizonTrace, target_h
 
                 // the traces above are purely procedural, so the player's edit at this exact cell (if any) wins
                 const block_idx: u8 = @intCast((@as(usize, local_by) << 4) | local_bx);
-                if (mod_store.getCell(child_key, block_idx)) |cell| {
+                // `inheritedCell()`, as in `ancestor.getInheritedMaterial()`: this trace feeds deeper depths.
+                if (inheritedCell(child_key, block_idx)) |cell| {
                     cell.applyTo(&next[y_idx][x_idx]);
                 }
                 // forced world edge
@@ -3876,6 +3986,34 @@ test "moveAtDepth: the world ends at the outer quadrants rather than wrapping" {
     );
 }
 
+test "chunk cache: no two chunks of one render window can share a slot" {
+    // The property the tile exists for. A window that outgrows the tile does not merely run a little
+    // colder: the renderer rescans the same rectangle every frame, so a colliding pair regenerates
+    // BOTH chunks every frame, for as long as the camera holds still.
+    var seen = std.AutoHashMap(usize, Coordinate).init(testing.allocator);
+    defer seen.deinit();
+
+    // A corner start, so the window straddles a quadrant edge in both axes as well as a tile edge.
+    const base: u64 = std.math.maxInt(u64) - CHUNK_WINDOW.w / 2;
+    for (0..CHUNK_WINDOW.h) |gy| {
+        for (0..CHUNK_WINDOW.w) |gx| {
+            const coord: Coordinate = .{
+                .suffix = .{ base +% gx, base +% gy },
+                .quadrant = 0,
+            };
+            const slot = ChunkCache.slotOf(coord);
+            if (try seen.fetchPut(slot, coord)) |clash| {
+                std.debug.print("slot {d}: ({d},{d}) collides with ({d},{d})\n", .{
+                    slot,                  coord.suffix[0],
+                    coord.suffix[1],       clash.value.suffix[0],
+                    clash.value.suffix[1],
+                });
+                return error.WindowChunksShareASlot;
+            }
+        }
+    }
+}
+
 test "the horizon window can hold every block a chunk's generation asks of it" {
     const per_chunk_window = 6;
     const neighbor_shift = dw.BLOCKS_PER_PARENT; // one chunk over at H+1 is this many blocks at H
@@ -3894,6 +4032,7 @@ test "computeLayer: works out a transition without disturbing the live world" {
     const saved_suffix = max_possible_suffix;
     defer {
         memory.game = saved_game;
+        memory.deriveHashSeeds();
         max_possible_suffix = saved_suffix;
     }
 
@@ -3933,6 +4072,7 @@ test "computeLayer: a block_floor landing leaves the feet clear of the floor" {
     const saved_suffix = max_possible_suffix;
     defer {
         memory.game = saved_game;
+        memory.deriveHashSeeds();
         max_possible_suffix = saved_suffix;
     }
 
@@ -3972,12 +4112,15 @@ test "horizon window: a replay from the base reproduces every stored window" {
     const saved_suffix = max_possible_suffix;
     defer {
         memory.game = saved_game;
+        memory.deriveHashSeeds();
         max_possible_suffix = saved_suffix;
     }
 
     memory.game = .{};
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     // A handful of arbitrary but fixed traces, standing in for a descent path.
     const traces = [_]HorizonTrace{
@@ -4041,6 +4184,7 @@ test "horizon window: a checkpointed rebuild matches replaying from the base" {
     const saved_path = quad_cache.left_path.len;
     defer {
         memory.game = saved_game;
+        memory.deriveHashSeeds();
         max_possible_suffix = saved_suffix;
         quad_cache.materials_path.len = saved_len;
         quad_cache.materials_windows.len = saved_windows;
@@ -4051,6 +4195,8 @@ test "horizon window: a checkpointed rebuild matches replaying from the base" {
     memory.game = .{};
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     const count = 2 * QuadCache.MATERIALS_CHECKPOINT_STRIDE + 3;
     quad_cache.materials_windows.len = 0;
@@ -4112,11 +4258,16 @@ test "refineHorizonWindow: leaves the game depth exactly as it found it" {
     // It installs depth - 1 to resolve parent quadrants against the old threshold.
     // A transition computes several of these in a row, so leaking that install would shift every later lookup.
     const saved_game = memory.game;
-    defer memory.game = saved_game;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+    }
 
     memory.game = .{};
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     memory.game.depth = 61;
     const before = memory.game.depth;
@@ -4138,6 +4289,7 @@ test "computeParentLayer: scales a point into its parent chunk with no pivot" {
     const saved_suffix = max_possible_suffix;
     defer {
         memory.game = saved_game;
+        memory.deriveHashSeeds();
         max_possible_suffix = saved_suffix;
     }
 
@@ -4154,10 +4306,17 @@ test "computeParentLayer: scales a point into its parent chunk with no pivot" {
     // Zooming out shifts the suffix right by one cell.
     try testing.expectEqual(@as(Vec2u, .{ 3, 5 }), up.player_chunk);
 
-    // The chunk keeps its place inside the parent: cell * span + pos / ZOOM_FACTOR.
+    // The chunk keeps its place inside the parent: cell * span + pos / ZOOM_FACTOR,
+    // then the landing snaps onto the block that point falls in (see `snapToBlock()`).
     const span = @divExact(@as(i64, dw.SUBPIXELS_IN_CHUNK), ZOOM_FACTOR);
-    try testing.expectEqual(@as(i64, 13 % ZOOM_FACTOR) * span + @divFloor(@as(i64, 1000), ZOOM_FACTOR), up.new_pos[0]);
-    try testing.expectEqual(@as(i64, 21 % ZOOM_FACTOR) * span + @divFloor(@as(i64, 500), ZOOM_FACTOR), up.new_pos[1]);
+    const scaled: Vec2i = .{
+        @as(i64, 13 % ZOOM_FACTOR) * span + @divFloor(@as(i64, 1000), ZOOM_FACTOR),
+        @as(i64, 21 % ZOOM_FACTOR) * span + @divFloor(@as(i64, 500), ZOOM_FACTOR),
+    };
+    try testing.expectEqual(snapToBlock(scaled), up.new_pos);
+    // The snap must not move the landing out of the block the point was in.
+    try testing.expectEqual(@divFloor(scaled[0], CHUNK_SIZE_SQ), @divFloor(up.new_pos[0], CHUNK_SIZE_SQ));
+    try testing.expectEqual(@divFloor(scaled[1], CHUNK_SIZE_SQ), @divFloor(up.new_pos[1], CHUNK_SIZE_SQ));
 
     // The landing must stay inside the parent chunk, since `player_pos` is chunk-relative.
     try testing.expect(up.new_pos[0] >= 0 and up.new_pos[0] < dw.SUBPIXELS_IN_CHUNK);
@@ -4172,6 +4331,7 @@ test "AscentStep: a return reads the frame back rather than recomputing it" {
     const saved_suffix = max_possible_suffix;
     defer {
         memory.game = saved_game;
+        memory.deriveHashSeeds();
         max_possible_suffix = saved_suffix;
     }
     ascent_stack.clearRetainingCapacity();
@@ -4216,43 +4376,31 @@ test "AscentStep: a return reads the frame back rather than recomputing it" {
     try testing.expectEqual(child_pos, down.new_pos);
 }
 
-test "markDescendantsFromChild: rolls a deep edit into a parent marker, idempotently" {
-    const saved_game = memory.game;
-    defer memory.game = saved_game;
-
-    mod_store.init(testing.allocator);
-    defer mod_store.deinit();
-    ascent_stack.clearRetainingCapacity();
-
-    memory.game = .{};
-    memory.game.depth = 10; // <= HORIZON_DEPTH so getParent() is a pure shift, no quad_cache needed
-
-    const child: DepthCoordinate = .{ .suffix = .{ 12, 8 }, .depth = 10, .quadrant = 0 };
-    const block_idx: u8 = (3 << CHUNK_SIZE_LOG2) | 6; // by=3, bx=6
-    mod_store.beginWrite(child).setCell(block_idx, .{ .id = .stone, .base_id = .none, .hp = 0 });
-
-    const p = dw.ancestor.getParentInfo(child, 6, 3);
-    const parent_key = p.coord.asDepthCoordinate(9);
-    const parent_idx: u8 = (@as(u8, p.by) << CHUNK_SIZE_LOG2) | p.bx;
-
-    markDescendantsFromChild(10);
-    try testing.expect(mod_store.get(parent_key).?.hasDescendantMods(parent_idx));
-
-    // A second pass (a re-ascent of the same route) must leave the marker exactly as it was.
-    markDescendantsFromChild(10);
-    try testing.expect(mod_store.get(parent_key).?.hasDescendantMods(parent_idx));
-}
-
 /// A distinct `ModCell` per block index, so a misplaced cell is always detectable.
 fn testCell(i: u8) ModCell {
     return .{ .id = @enumFromInt(@as(u16, i) + 1), .base_id = @enumFromInt(@as(u16, i) + 300), .hp = i % 16 };
 }
 
+/// Puts the player at `depth` so a storage test can write there.
+/// `beginWrite()` refuses a depth below the frontier, and these tests use arbitrary keys.
+pub fn testEnterDepth(depth: u64) void {
+    memory.game.depth = depth;
+    memory.game.max_depth_reached = depth;
+}
+
 test "ModEntry: cells stay indexable by block index regardless of insertion order" {
+    const saved_game = memory.game;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+    }
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     const key: DepthCoordinate = .{ .suffix = .{ 1, 2 }, .depth = 7, .quadrant = 0 };
+    testEnterDepth(key.depth);
 
     // Insert scrambled so every insert lands in the middle of the packed array and exercises the shift!
     var n: u32 = 0;
@@ -4282,10 +4430,18 @@ test "ModEntry: cells stay indexable by block index regardless of insertion orde
 }
 
 test "ModEntry: unmodified cells read as null and rewrites do not grow the entry" {
+    const saved_game = memory.game;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+    }
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     const key: DepthCoordinate = .{ .suffix = .{ 0, 0 }, .depth = 6, .quadrant = 3 };
+    testEnterDepth(key.depth);
     const modified = [_]u8{ 0, 1, 63, 64, 65, 127, 128, 200, 255 };
 
     for (modified) |i| mod_store.beginWrite(key).setCell(i, testCell(i));
@@ -4309,21 +4465,42 @@ test "ModEntry: unmodified cells read as null and rewrites do not grow the entry
 }
 
 test "ModEntry: applyTo overwrites exactly the modified cells" {
+    const saved_game = memory.game;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+    }
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
-    const key: DepthCoordinate = .{ .suffix = .{ 9, 9 }, .depth = 8, .quadrant = 1 };
+    const key: DepthCoordinate = .{ .suffix = .{ 9, 9 }, .depth = 8, .quadrant = 0 };
+    testEnterDepth(key.depth);
     mod_store.beginWrite(key).setCell(5, .{ .id = .none, .base_id = .none, .hp = 0 });
     mod_store.beginWrite(key).setCell(200, .{ .id = .water, .base_id = .none, .hp = 9 });
 
     var chunk: Chunk = undefined;
     for (&chunk.blocks) |*b| b.* = .makeBasicBlock(.stone, 0xABCD);
 
-    mod_store.get(key).?.applyTo(&chunk);
+    mod_store.get(key).?.applyTo(&chunk, key);
 
+    const lane = seedLane(key);
     for (chunk.blocks, 0..) |b, i| {
-        // seed is regenerated by the procedural pass, never stored, so replay must leave it untouched
-        try testing.expectEqual(@as(u28, 0xABCD), b.seed);
+        switch (i) {
+            5, 200 => {
+                // A replayed cell takes a fresh position-hashed seed, since `ModCell` stores none
+                // and the cell under it may have generated as air (seed zero).
+                const want: u28 = @truncate(seeding.FastHash.hash2d(
+                    lane,
+                    i & (CHUNK_SIZE - 1),
+                    i >> CHUNK_SIZE_LOG2,
+                ));
+                try testing.expectEqual(want, b.seed);
+            },
+            // Everything the replay does not touch keeps the seed the generator gave it.
+            else => try testing.expectEqual(@as(u28, 0xABCD), b.seed),
+        }
         switch (i) {
             5 => try testing.expectEqual(Sprite.none, b.id),
             200 => {
@@ -4333,13 +4510,24 @@ test "ModEntry: applyTo overwrites exactly the modified cells" {
             else => try testing.expectEqual(Sprite.stone, b.id),
         }
     }
+
+    // Two cells of one chunk must not agree on a variant just because both were placed by hand.
+    try testing.expect(chunk.blocks[5].seed != chunk.blocks[200].seed);
 }
 
 test "ModificationStore: remove drops the chunk and recycles its slot" {
+    const saved_game = memory.game;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+    }
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     const a: DepthCoordinate = .{ .suffix = .{ 1, 1 }, .depth = 6, .quadrant = 0 };
+    testEnterDepth(a.depth);
     const b: DepthCoordinate = .{ .suffix = .{ 2, 2 }, .depth = 6, .quadrant = 0 };
 
     mod_store.beginWrite(a).setCell(10, testCell(10));
@@ -4376,17 +4564,19 @@ test "coordinate consistency: a block is the same whatever route reached it" {
     const saved_suffix = max_possible_suffix;
     defer {
         memory.game = saved_game;
+        memory.deriveHashSeeds();
         max_possible_suffix = saved_suffix;
         clearCaches(true);
     }
 
     memory.game = .{};
-    var rng = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, .seed2_init));
-    for (&memory.game.seed2) |*v| v.* = rng.next();
+    memory.deriveHashSeeds();
     quad_cache.path_hashes.value[0] = memory.game.seed;
 
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
 
     // Two depths of refinement above the base, so the ancestry is a chain rather than a single step.
     const depth = STARTING_ZOOM_TIMES + 2;
@@ -4430,8 +4620,12 @@ test "coordinate consistency: a block is the same whatever route reached it" {
     memory.game.depth = depth;
     max_possible_suffix = getMaxSuffixAtDepth(depth);
     const parent_key = key.getParent().asCoord().asDepthCoordinate(depth - 1);
+    // The edit has to be frontier-era to reach the depth below it. An edit made after the player
+    // descended past the parent stays at the parent (see `legacy_store`), which is a different test.
+    testEnterDepth(depth - 1);
     mod_store.beginWrite(parent_key).setCell(37, .{ .id = .lava_stone, .base_id = .none, .hp = 0 });
     mod_store.beginWrite(parent_key).setCell(38, .{ .id = .none, .base_id = .none, .hp = 0 });
+    testEnterDepth(depth);
     clearCaches(true);
 
     var edited: Chunk = undefined;
@@ -4448,24 +4642,32 @@ test "coordinate consistency: a block is the same whatever route reached it" {
     }
 }
 
-test "a 2x1 pair is placed and validated as one unit" {
+test "placement guard blocks self-encasement and keeps pairs coherent" {
     const saved_game = memory.game;
     const saved_suffix = max_possible_suffix;
+    const saved_pickaxe = dw.mining.pickaxe_type;
+    const saved_structure_tool = dw.mining.has_structure_tool;
+    const saved_creative = dw.inventory.IN_CREATIVE;
     defer {
         memory.game = saved_game;
+        memory.deriveHashSeeds();
         max_possible_suffix = saved_suffix;
+        dw.mining.pickaxe_type = saved_pickaxe;
+        dw.mining.has_structure_tool = saved_structure_tool;
+        dw.inventory.IN_CREATIVE = saved_creative;
         clearCaches(true);
     }
 
     memory.game = .{};
-    var rng = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, .seed2_init));
-    for (&memory.game.seed2) |*v| v.* = rng.next();
+    memory.deriveHashSeeds();
     quad_cache.path_hashes.value[0] = memory.game.seed;
     memory.game.depth = STARTING_ZOOM_TIMES;
     max_possible_suffix = getMaxSuffixAtDepth(memory.game.depth);
 
     mod_store.init(testing.allocator);
     defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
     flag_worklist = try std.ArrayList(UpdateItem).initCapacity(testing.allocator, 256);
     defer {
         flag_worklist.deinit(testing.allocator);
@@ -4484,8 +4686,8 @@ test "a 2x1 pair is placed and validated as one unit" {
         key = coord.asDepthCoordinate(memory.game.depth);
         materializeChunk(&chunk, key);
 
-        for (0..CHUNK_SIZE - 1) |by| {
-            for (0..CHUNK_SIZE - 1) |bx| {
+        for (1..CHUNK_SIZE - 1) |by| {
+            for (1..CHUNK_SIZE - 1) |bx| {
                 const here = chunk.blocks[by * CHUNK_SIZE + bx];
                 const right = chunk.blocks[by * CHUNK_SIZE + bx + 1];
                 const under = chunk.blocks[(by + 1) * CHUNK_SIZE + bx];
@@ -4499,10 +4701,98 @@ test "a 2x1 pair is placed and validated as one unit" {
         }
     }
     const at = spot orelse return error.TestUnexpectedResult; // 20 chunks with no ledge at all is a bug
+    std.debug.assert(at.bx > 0 and at.bx < CHUNK_SIZE - 1 and at.by > 0 and at.by < CHUNK_SIZE - 1);
+
+    // The full hitbox fits in the empty cell. A solid replacement must be refused before it writes the store.
+    memory.game.player_quadrant = coord.quadrant;
+    memory.game.player_chunk = coord.suffix;
+    memory.game.player_pos = .{
+        @as(i64, at.bx) * CHUNK_SIZE_SQ + CHUNK_SIZE_SQ / 2,
+        @as(i64, at.by) * CHUNK_SIZE_SQ + 100,
+    };
+    SimBuffer.sync(memory.game.getPlayerCoord());
+    try testing.expectEqual(
+        ModifyBlockTypeResult.rejected_softlock,
+        modifyBlockType(coord, at.bx, at.by, .stone, .empty),
+    );
+    try testing.expect(mod_store.get(key) == null);
+
+    // Three unbreakable gems leave a one-cell cardinal exit. The fourth must not close it.
+    dw.mining.pickaxe_type = .stone;
+    dw.mining.has_structure_tool = false;
+    dw.inventory.IN_CREATIVE = false;
+    const lower_by: u4 = @intCast(@as(u5, at.by) + 1);
+    const ring = [_]struct { bx: u4, by: u4 }{
+        .{ .bx = at.bx - 1, .by = at.by },
+        .{ .bx = at.bx + 1, .by = at.by },
+        .{ .bx = at.bx, .by = at.by - 1 },
+    };
+    for (ring) |cell| {
+        mod_store.beginWrite(key).setCell(@intCast(@as(usize, cell.by) * CHUNK_SIZE + cell.bx), .{
+            .id = .amethyst,
+            .base_id = .stone,
+            .hp = 0,
+        });
+    }
+    const lower_idx: u8 = @intCast(@as(usize, lower_by) * CHUNK_SIZE + at.bx);
+    mod_store.beginWrite(key).setCell(lower_idx, .{ .id = .none, .base_id = .none, .hp = 0 });
+    clearCaches(true);
+    SimBuffer.sync(memory.game.getPlayerCoord());
+
+    try testing.expectEqual(
+        ModifyBlockTypeResult.rejected_softlock,
+        modifyBlockType(coord, at.bx, lower_by, .amethyst, .empty),
+    );
+    try testing.expectEqual(Sprite.none, mod_store.getCell(key, lower_idx).?.id);
+
+    // A portal correction moves a player out of the equivalent completed four-gem cage.
+    const trapped_pos = memory.game.player_pos;
+    mod_store.beginWrite(key).setCell(lower_idx, .{ .id = .amethyst, .base_id = .stone, .hp = 0 });
+    clearCaches(true);
+    SimBuffer.sync(memory.game.getPlayerCoord());
+    try testing.expect(player.escapeSolid());
+    try testing.expect(@reduce(.Or, memory.game.player_pos != trapped_pos));
+    memory.game.player_quadrant = coord.quadrant;
+    memory.game.player_chunk = coord.suffix;
+    memory.game.player_pos = trapped_pos;
+    memory.game.last_player_pos = trapped_pos;
+    memory.game.camera_pos = trapped_pos;
+    memory.game.last_camera_pos = trapped_pos;
+
+    // A portal is non-solid, but it makes this last breakable exit support unbreakable.
+    mod_store.beginWrite(key).setCell(lower_idx, .{ .id = .stone, .base_id = .none, .hp = 0 });
+    clearCaches(true);
+    SimBuffer.sync(memory.game.getPlayerCoord());
+    const center_idx: u8 = @intCast(@as(usize, at.by) * CHUNK_SIZE + at.bx);
+    try testing.expectEqual(Sprite.amethyst, getBlockAt(coord, at.bx - 1, at.by, memory.game.depth).id);
+    try testing.expectEqual(Sprite.amethyst, getBlockAt(coord, at.bx + 1, at.by, memory.game.depth).id);
+    try testing.expectEqual(Sprite.amethyst, getBlockAt(coord, at.bx, at.by - 1, memory.game.depth).id);
+    try testing.expectEqual(Sprite.stone, getBlockAt(coord, at.bx, lower_by, memory.game.depth).id);
+    try testing.expect(player.isColliding(memory.game.player_pos[0] - CHUNK_SIZE_SQ, memory.game.player_pos[1]));
+    try testing.expect(player.isColliding(memory.game.player_pos[0] + CHUNK_SIZE_SQ, memory.game.player_pos[1]));
+    try testing.expect(player.isColliding(memory.game.player_pos[0], memory.game.player_pos[1] - CHUNK_SIZE_SQ));
+    try testing.expect(player.isColliding(memory.game.player_pos[0], memory.game.player_pos[1] + CHUNK_SIZE_SQ));
+    const portal_pending = [_]player.PendingPlacement{
+        .{ .coord = coord, .bx = at.bx, .by = at.by, .sprite = .portal },
+    };
+    try testing.expect(!player.permitsPlacement(&portal_pending));
+    try testing.expectEqual(
+        ModifyBlockTypeResult.rejected_softlock,
+        modifyBlockType(coord, at.bx, at.by, .portal, .empty),
+    );
+    try testing.expect(mod_store.getCell(key, center_idx) == null);
+
+    // The pair case below needs its original procedural ledge, not the synthetic test cage.
+    mod_store.clear();
+    legacy_store.clear();
+    clearCaches(true);
 
     // Placing the left half alone must leave BOTH halves standing: each demands the other,
     // so a pass that validated the first before writing the second would clear the pair right back out.
-    try testing.expect(!modifyBlockType(coord, at.bx, at.by, .moss_shrub1, .empty));
+    try testing.expectEqual(
+        ModifyBlockTypeResult.placed,
+        modifyBlockType(coord, at.bx, at.by, .moss_shrub1, .empty),
+    );
 
     const idx: u8 = @intCast(@as(usize, at.by) * CHUNK_SIZE + at.bx);
     const entry = mod_store.get(key) orelse return error.TestUnexpectedResult;
@@ -4515,13 +4805,110 @@ test "a 2x1 pair is placed and validated as one unit" {
     try testing.expectEqual(Sprite.moss_shrub1_right, chunk.blocks[idx + 1].id);
 }
 
-test "coordinate consistency: refinement reads a coordinate, not a route" {
+test "frozen ancestry: an edit made after a depth is left never reaches the depths below it" {
     const saved_game = memory.game;
-    defer memory.game = saved_game;
+    const saved_suffix = max_possible_suffix;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+        max_possible_suffix = saved_suffix;
+        clearCaches(true);
+    }
 
     memory.game = .{};
-    var rng = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, .seed2_init));
-    for (&memory.game.seed2) |*v| v.* = rng.next();
+    memory.deriveHashSeeds();
+    quad_cache.path_hashes.value[0] = memory.game.seed;
+
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
+
+    const depth = STARTING_ZOOM_TIMES + 2;
+    const coord: Coordinate = .{ .suffix = .{ 37, 52 }, .quadrant = 0 };
+    const key = coord.asDepthCoordinate(depth);
+
+    memory.game.depth = depth;
+    max_possible_suffix = getMaxSuffixAtDepth(depth);
+    const parent_key = key.getParent().asCoord().asDepthCoordinate(depth - 1);
+    const parent_idx: u8 = 37;
+
+    // The player is at the parent, which is the deepest depth reached: this edit shapes what comes below.
+    testEnterDepth(depth - 1);
+    max_possible_suffix = getMaxSuffixAtDepth(depth - 1);
+    mod_store.beginWrite(parent_key).setCell(parent_idx, .{ .id = .lava_stone, .base_id = .none, .hp = 0 });
+    try testing.expectEqual(@as(usize, 0), legacy_store.index.count()); // frontier edits never freeze
+
+    // Descend. The child inherits the edit.
+    testEnterDepth(depth);
+    max_possible_suffix = getMaxSuffixAtDepth(depth);
+    clearCaches(true);
+    var inherited: Chunk = undefined;
+    generateChunk(&inherited, key);
+
+    // Go back up and undo the edit. The parent is below the frontier now, so this stays at the parent.
+    memory.game.depth = depth - 1;
+    max_possible_suffix = getMaxSuffixAtDepth(depth - 1);
+    mod_store.beginWrite(parent_key).setCell(parent_idx, .{ .id = .stone, .base_id = .none, .hp = 0 });
+    try testing.expectEqual(@as(usize, 1), legacy_store.index.count()); // the old value was frozen
+
+    // The parent itself shows the new value...
+    try testing.expectEqual(Sprite.stone, mod_store.getCell(parent_key, parent_idx).?.id);
+    // ...while everything below it still sees the value it inherited.
+    try testing.expectEqual(Sprite.lava_stone, inheritedCell(parent_key, parent_idx).?.id);
+
+    // And the child regenerates byte for byte the same, however many times the parent is edited.
+    memory.game.depth = depth;
+    max_possible_suffix = getMaxSuffixAtDepth(depth);
+    clearCaches(true);
+    var again: Chunk = undefined;
+    generateChunk(&again, key);
+    for (0..CHUNK_SIZE_SQ) |i| try testing.expectEqual(inherited.blocks[i], again.blocks[i]);
+
+    // A second edit at the parent must not overwrite the frozen value.
+    memory.game.depth = depth - 1;
+    mod_store.beginWrite(parent_key).setCell(parent_idx, .{ .id = .none, .base_id = .none, .hp = 0 });
+    try testing.expectEqual(Sprite.lava_stone, inheritedCell(parent_key, parent_idx).?.id);
+}
+
+test "frozen ancestry: an edit below the frontier is playable at its own depth" {
+    const saved_game = memory.game;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+    }
+
+    memory.game = .{};
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
+
+    // A deep ascent: the frontier stays far below, and the shallow depth is still fully writable.
+    const shallow = STARTING_ZOOM_TIMES + 1;
+    memory.game.depth = shallow;
+    memory.game.max_depth_reached = shallow + 100;
+    try testing.expect(isAboveFrontier());
+
+    const key: DepthCoordinate = .{ .suffix = .{ 3, 4 }, .depth = shallow, .quadrant = 0 };
+    try testing.expectEqual(@as(u64, shallow + 100), frontier());
+
+    // A cell that was never modified freezes as its procedural value, so the depths below keep it.
+    mod_store.beginWrite(key).setCell(11, .{ .id = .sand, .base_id = .none, .hp = 0 });
+    try testing.expectEqual(Sprite.sand, mod_store.getCell(key, 11).?.id);
+    try testing.expect(legacy_store.getCell(key, 11) != null);
+    try testing.expect(legacy_store.getCell(key, 11).?.id != .sand);
+}
+
+test "coordinate consistency: refinement reads a coordinate, not a route" {
+    const saved_game = memory.game;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+    }
+
+    memory.game = .{};
+    memory.deriveHashSeeds();
     quad_cache.path_hashes.value[0] = memory.game.seed;
     memory.game.depth = STARTING_ZOOM_TIMES + 1;
 

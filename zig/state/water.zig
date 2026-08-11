@@ -108,7 +108,7 @@ pub inline fn setVolume(ptr: *Block, vol: u32) void {
             ptr.hp = 0;
             ptr.edge_flags = 0xFF;
             ptr.id_edge_flags = 0xFF;
-            ptr.waterlogged = 0;
+            ptr.water = .dry;
         }
     } else {
         if (ptr.isWaterloggable()) {
@@ -131,35 +131,86 @@ inline fn setVolumeAt(ptr: *Block, vol: u32, grid_idx: usize) void {
     cells_changed.set(grid_idx);
 }
 
-/// Bit width of the packed `Block.waterlogged` field; only bits 0-10 carry data.
-/// Keep in sync with `unpack_tile()` in src/shader.wgsl (reads bits 0-11 of word3).
-pub const WaterloggedFlags = u12;
+/// Backing integer of `Block.water`, and the exact width of every view of it.
+/// Keep in sync with `unpack_tile()` in src/shader.wgsl, which reads bits 0-10 of word3.
+pub const WaterBits = u11;
 
-/// bit 0: water directly above (liquid or a waterlogged decor, at any depth); fully submerges the block.
-const FLAG_TOP: WaterloggedFlags = 1 << 0;
-/// bit 1: full liquid block directly below (at HP = 15).
-const FLAG_BOTTOM: WaterloggedFlags = 1 << 1;
-/// bit 2: top ripple cutoff; the adjacent water surface is exposed to air.
-const FLAG_RIPPLE: WaterloggedFlags = 1 << 2;
-/// bits 3-6: 4-bit left adjacent liquid volume.
-const LEFT_VOL_SHIFT = 3;
-/// bits 7-10: 4-bit right adjacent liquid volume.
-const RIGHT_VOL_SHIFT = 7;
+/// What a block knows about the water around it, in the shape its own kind wants it.
+///
+/// One field of `Block`, read three ways. The block's `id` decides which view is live and nothing
+/// else does, so the views deliberately agree on bit 0: "is there water directly above me?" can be
+/// asked without knowing the kind at all, which is what the shader's submersion test does.
+///
+/// The union never grows past `WaterBits`. A view that needs more than that does not belong here.
+pub const WaterState = packed union {
+    /// The whole field as one integer, for the paths that only copy, compare, or clear it.
+    bits: WaterBits,
+    /// View for a liquid block.
+    liquid: Liquid,
+    /// View for a solid or waterloggable block.
+    solid: Solid,
+    /// View for a plant. Not written by anything yet; see `Plant`.
+    plant: Plant,
 
-pub const WaterloggedState = struct {
-    /// Packed directional waterlogging data written verbatim to `Block.waterlogged`:
-    /// - bit 0: top (water of any depth directly above; fully submerges/fills the block)
-    /// - bit 1: bottom (full liquid block directly below at HP = 15)
-    /// - bit 2: top ripple cutoff (adjacent water surface is exposed to air)
-    /// - bits 3-6: left adjacent liquid volume (0-15; 0 means no liquid to the left)
-    /// - bits 7-10: right adjacent liquid volume (0-15; 0 means no liquid to the right)
-    ///
-    /// Left/right presence is implied by a nonzero volume, so no separate presence bit exists.
-    /// The shader interpolates the water surface height across the block between these two volumes.
-    flags: WaterloggedFlags,
+    /// Nothing around this block holds water. The state every block generates in.
+    pub const dry: WaterState = .{ .bits = 0 };
+
+    /// A liquid only has to know whether more liquid sits directly above it,
+    /// which is what decides whether it draws a surface or a full body.
+    pub const Liquid = packed struct(WaterBits) {
+        /// Liquid of any depth directly above.
+        above: bool = false,
+        _unused: u10 = 0,
+    };
+
+    /// Everything the shader needs to draw the water AROUND a block that is not itself liquid.
+    /// Presence on the left or right is implied by a nonzero volume, so neither needs its own bit.
+    /// The shader interpolates the water surface across the block between the two volumes.
+    pub const Solid = packed struct(WaterBits) {
+        /// Water of any depth directly above; fully submerges the block.
+        above: bool = false,
+        /// A FULL liquid block directly below (at `MAX_HP`).
+        below: bool = false,
+        /// An adjacent water surface is exposed to air, so it ripples.
+        ripple: bool = false,
+        /// Volume of the liquid to the left, 0 for none.
+        left_volume: u4 = 0,
+        /// Volume of the liquid to the right, 0 for none.
+        right_volume: u4 = 0,
+    };
+
+    /// TODO: the gardening mechanic will write this. A plant cares about the water it has TAKEN UP,
+    /// not about the water beside it, so it wants a different question answered than `Solid` does.
+    /// Nothing reads or writes it yet, and a plant still uses the `solid` view until it does.
+    pub const Plant = packed struct(WaterBits) {
+        /// The one bit every view shares; see `WaterState`.
+        above: bool = false,
+        /// TODO: how wet the soil under this plant is, 0 for bone dry.
+        moisture: u4 = 0,
+        /// TODO: progress toward the next growth stage.
+        age: u6 = 0,
+    };
+
+    /// Whether water sits directly above, whichever view is live. See `WaterState`.
+    pub inline fn submerged(self: WaterState) bool {
+        return self.liquid.above;
+    }
+
+    /// Whether the two states are the same bit for bit. A union has no `==`.
+    pub inline fn eql(self: WaterState, other: WaterState) bool {
+        return self.bits == other.bits;
+    }
 };
 
-/// Computes the directional waterlogged flags and adjacent water volumes for a Block.
+comptime {
+    // The shared bit 0 that `submerged()` and the shader both depend on.
+    const probe: WaterState = .{ .solid = .{ .above = true } };
+    if (!probe.liquid.above or !probe.plant.above or probe.bits != 1)
+        @compileError("Every WaterState view must put `above` in bit 0; see WaterState.");
+}
+
+/// The water state of a block, from the neighbors around it. Returns the `solid` view,
+/// which is the one every non-liquid block uses (a liquid reads bit 0 of it as `liquid.above`).
 pub fn getWaterFlags(
     top_nb: ?Block,
     bottom_nb: ?Block,
@@ -167,40 +218,40 @@ pub fn getWaterFlags(
     right_nb: ?Block,
     above_left_nb: ?Block,
     above_right_nb: ?Block,
-) WaterloggedState {
-    var flags: WaterloggedFlags = 0;
+) WaterState {
+    var state: WaterState.Solid = .{};
 
     if (top_nb) |top| {
         // Any water above (liquid or a waterlogged decor, at any depth) fully submerges the block.
-        if (getVolume(top) > 0) flags |= FLAG_TOP;
+        if (getVolume(top) > 0) state.above = true;
     }
 
     if (bottom_nb) |bottom| {
-        if (bottom.isLiquid() and getVolume(bottom) == MAX_HP) flags |= FLAG_BOTTOM;
+        if (bottom.isLiquid() and getVolume(bottom) == MAX_HP) state.below = true;
     }
 
     if (left_nb) |left| {
         if (left.isLiquid()) {
-            flags |= @as(WaterloggedFlags, getVolume(left)) << LEFT_VOL_SHIFT;
+            state.left_volume = @intCast(getVolume(left));
             if (above_left_nb == null or (!above_left_nb.?.isSolid() and !above_left_nb.?.isLiquid())) {
-                flags |= FLAG_RIPPLE;
+                state.ripple = true;
             }
         }
     }
 
     if (right_nb) |right| {
         if (right.isLiquid()) {
-            flags |= @as(WaterloggedFlags, getVolume(right)) << RIGHT_VOL_SHIFT;
+            state.right_volume = @intCast(getVolume(right));
             if (above_right_nb == null or (!above_right_nb.?.isSolid() and !above_right_nb.?.isLiquid())) {
-                flags |= FLAG_RIPPLE;
+                state.ripple = true;
             }
         }
     }
 
-    return .{ .flags = flags };
+    return .{ .solid = state };
 }
 
-/// Sibling helper to compute waterlogged state for halo Sprites during base chunk generation.
+/// Sibling of `getWaterFlags()` for the halo Sprites of base chunk generation.
 /// Procedural water blocks default to full HP, so adjacent volumes are stored as `MAX_HP`.
 pub fn getWaterloggedStateSprites(
     top_nb: Sprite,
@@ -209,21 +260,21 @@ pub fn getWaterloggedStateSprites(
     right_nb: Sprite,
     above_left_nb: Sprite,
     above_right_nb: Sprite,
-) WaterloggedState {
-    var flags: WaterloggedFlags = 0;
+) WaterState {
+    var state: WaterState.Solid = .{};
 
-    if (top_nb.isLiquid()) flags |= FLAG_TOP;
-    if (bottom_nb.isLiquid()) flags |= FLAG_BOTTOM;
+    if (top_nb.isLiquid()) state.above = true;
+    if (bottom_nb.isLiquid()) state.below = true;
     if (left_nb.isLiquid()) {
-        flags |= @as(WaterloggedFlags, MAX_HP) << LEFT_VOL_SHIFT;
-        if (!above_left_nb.isSolid() and !above_left_nb.isLiquid()) flags |= FLAG_RIPPLE;
+        state.left_volume = MAX_HP;
+        if (!above_left_nb.isSolid() and !above_left_nb.isLiquid()) state.ripple = true;
     }
     if (right_nb.isLiquid()) {
-        flags |= @as(WaterloggedFlags, MAX_HP) << RIGHT_VOL_SHIFT;
-        if (!above_right_nb.isSolid() and !above_right_nb.isLiquid()) flags |= FLAG_RIPPLE;
+        state.right_volume = MAX_HP;
+        if (!above_right_nb.isSolid() and !above_right_nb.isLiquid()) state.ripple = true;
     }
 
-    return .{ .flags = flags };
+    return .{ .solid = state };
 }
 
 /// Computes the water volume for a cell dynamically.
@@ -337,7 +388,7 @@ fn applyCellWaterFlags(
     if (getVolume(ptr.*) == 0 and !world.shouldHaveEdgeFlags(ptr.id)) return;
 
     var flags: u8 = 0;
-    var waterlogged: WaterloggedFlags = 0;
+    var water_state: WaterState = .dry;
 
     if (ptr.isEmpty()) {
         flags = 0xFF;
@@ -356,8 +407,7 @@ fn applyCellWaterFlags(
         const above_left_nb = if (above_left_ptr) |b| b.* else null;
         const above_right_nb = if (above_right_ptr) |b| b.* else null;
 
-        const state = getWaterFlags(top_nb, bottom_nb, left_nb, right_nb, above_left_nb, above_right_nb);
-        waterlogged = state.flags;
+        water_state = getWaterFlags(top_nb, bottom_nb, left_nb, right_nb, above_left_nb, above_right_nb);
 
         const src_is_liquid = ptr.isLiquid();
         inline for (.{ -1, 0, 1 }) |dy| {
@@ -369,7 +419,7 @@ fn applyCellWaterFlags(
     }
 
     ptr.edge_flags = flags;
-    ptr.waterlogged = waterlogged;
+    ptr.water = water_state;
 }
 
 /// Recalculates water edge flags and packages neighbor heights using the local cache.
