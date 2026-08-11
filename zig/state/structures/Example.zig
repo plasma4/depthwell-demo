@@ -8,7 +8,6 @@
 //!     #########     <- floor rests on terrain surface
 //!
 //! `#` is wall, `.` is carved air, `c` is chest
-
 const std = @import("std");
 const dw = @import("../../root.zig");
 const HashState = dw.seeding.HashState;

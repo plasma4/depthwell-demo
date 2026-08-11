@@ -152,6 +152,7 @@ inline fn effectColors() []const Vec4f32 {
 comptime {
     if (PULL_FRAMES >= TOTAL_FRAMES) @compileError("The player must finish being drawn in before the descent lands.");
     if (OVERLAY_ZOOM <= 1.0 or OVERLAY_ZOOM >= dw.ZOOM_FACTOR) @compileError("OVERLAY_ZOOM must sit between 1x and ZOOM_FACTOR.");
+    if (OVERLAY_ZOOM >= @sqrt(@as(f64, dw.ZOOM_FACTOR))) @compileError("OVERLAY_ZOOM must stay below sqrt(ZOOM_FACTOR), or the reveal outruns the cover.");
 }
 
 /// Which transition is running. Stored in `GameState` as its integer tag.
@@ -283,11 +284,6 @@ var effect_center: [2]f64 = .{ 0.0, 0.0 };
 /// Only meaningful while an ascent runs.
 var ascend_origin: dw.utils.Vec2i = .{ 0, 0 };
 
-/// Where the player was standing when the ascent began, which is where a later return brings them back to.
-/// Captured at trigger time, before the pull moves them.
-var ascend_from_coord: Coordinate = undefined;
-var ascend_from_pos: dw.utils.Vec2i = .{ 0, 0 };
-
 /// The descent's shards. Held in a fixed-sized array rather than a dynamic allocation.
 var debris: [SHARD_COUNT]Shard = undefined;
 /// How many shards are currently active in the array.
@@ -387,19 +383,38 @@ inline fn pastReveal(zoom: f64) bool {
     return if (isDescending()) zoom > revealZoom() else zoom < revealZoom();
 }
 
-/// Opacity the D+1 layer (chunks and background alike) is drawn at.
+/// Zoom-curve exponent at which the overlay has completely covered the live layer.
+/// Only used on depth increase for the second chunk batch drawing!
+fn coverCurve() f64 {
+    @setFloatMode(.optimized);
+    if (!isAscending()) return 1.0;
+    // The zoom is ZOOM_FACTOR raised to the curve, so the crossing is a plain change of base.
+    return 1.0 - @log(OVERLAY_ZOOM) / @log(@as(f64, dw.ZOOM_FACTOR));
+}
+
+/// Opacity the overlay layer (chunks and background alike) is drawn at.
 ///
-/// D is never faded: it stays at full strength for the whole descent and this is the only knob moved,
-/// so D+1 arrives *over* a solid image rather than the two meeting in the middle as a dissolve.
+/// The live layer is never faded: it stays at full strength and this is the only knob moved,
+/// so the new depth arrives *over* a solid image rather than the two meeting in the middle as a dissolve.
 pub fn overlayOpacity() f64 {
     @setFloatMode(.optimized);
     if (!isZooming()) return 0.0;
     const start = zoomCurve(@as(f64, @floatFromInt(fill_deadline)) / @as(f64, @floatFromInt(TOTAL_FRAMES)));
+    const end = coverCurve();
+    std.debug.assert(end > start);
+
     const now = zoomCurve(progress());
     if (now <= start) return 0.0;
+    if (now >= end) return 1.0;
 
-    const t = easeOut((now - start) / (1.0 - start));
+    const t = easeOut((now - start) / (end - start));
     return t * t;
+}
+
+/// Whether to skip rendering the live layer. The player must still be rendered!
+pub fn liveLayerHidden() bool {
+    if (!isActive()) return false;
+    return worldOpacity() <= 0.0 or overlayOpacity() >= 1.0;
 }
 
 /// How far the player has been drawn into the portal, 0 to 1.
@@ -452,8 +467,8 @@ pub fn triggerAscend(coord: Coordinate, bx: u4, by: u4) void {
     beginTransition(.ascending, coord, bx, by);
 }
 
-/// Starts a return: dives back through the portal at `coord`, landing on the spot the last ascent was
-/// taken from. The player is drawn into the portal exactly as a descent draws them in, so nothing
+/// Starts a return: dives back through the portal at `coord`, landing on the portal the last ascent was
+/// taken through. The player is drawn into the portal exactly as a descent draws them in, so nothing
 /// about the move reads as a teleport.
 ///
 /// Shaped like the descent but not the same: with no preview to line up against, the zoom is free to
@@ -462,7 +477,7 @@ pub fn triggerAscend(coord: Coordinate, bx: u4, by: u4) void {
 /// recorded `AscentStep`, so any portal serves as the way down.
 /// No-op unless the player is actually above their deepest depth.
 pub fn triggerReturn(coord: Coordinate, bx: u4, by: u4) void {
-    if (isActive() or !world.isSpectating()) return;
+    if (isActive() or !world.canRetrace()) return;
     beginTransition(.returning, coord, bx, by);
 }
 
@@ -565,8 +580,6 @@ fn ensureReady() void {
     } else {
         // player rises thru inverted portal as well
         ascend_origin = world.blockStandPos(bx, by);
-        ascend_from_coord = memory.game.getPlayerCoord();
-        ascend_from_pos = memory.game.player_pos;
         transition = world.computeParentLayer(portalCoord(), ascend_origin);
         anchor = chunkRelative(ascend_origin);
     }
@@ -1173,6 +1186,8 @@ fn commitReturn() void {
 
     world.commitRetrace(transition);
     world.SimBuffer.refreshAdopting(memory.game.getPlayerCoord(), PreviewSource{});
+    // A return lands on the portal block, which the player may have built over since.
+    if (dw.player.escapeSolid()) dw.player.startSoftlockFade();
 
     // The rubble was sampled from the depth just left; none of it belongs to where we landed.
     clearDebris();
@@ -1223,13 +1238,12 @@ fn finish() void {
 
     if (ascended) {
         // Records the retrace step and rolls the deeper depth's edits up into markers, then commits.
-        // Returning back to a greater depth value puts the player back where they were STANDING when they used it,
-        // not inside the block they rose through.
-        world.applyAscent(transition, ascend_from_coord, ascend_from_pos);
+        // A later return lands ON the portal that was used, not where the player happened to stand.
+        world.applyAscent(transition, portalCoord(), ascend_origin);
     } else {
-        // Always a fresh descent: going back down from a spectating layer is the return fade
+        // Always a fresh descent: going back down from above the frontier is the return fade
         // (triggerReturn()), never this zoom, so the ascent stack is untouched here.
-        std.debug.assert(!world.isSpectating());
+        std.debug.assert(!world.canRetrace());
         // The preview left the ancestor cache holding this depth's parents, already tiered for it.
         world.commitLayer(transition, true);
     }
@@ -1237,8 +1251,8 @@ fn finish() void {
     // Hand the generated chunks to the SimBuffer so we don't instantly regenerate 256 chunks.
     world.SimBuffer.refreshAdopting(g.getPlayerCoord(), PreviewSource{});
 
-    // An ascent's preview was generated before applyAscent(), so re-apply them onto the adopted chunks.
-    if (ascended) world.applyDescendantMarkersToSim();
+    // The SimBuffer holds the new depth now, so a landing inside rock can be resolved.
+    if (dw.player.escapeSolid()) dw.player.startSoftlockFade();
 
     g.portal_phase = @intFromEnum(Phase.idle);
     g.portal_frame = 0;

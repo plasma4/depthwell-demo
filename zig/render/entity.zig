@@ -98,17 +98,20 @@ pub fn updateEntities(time_diff: f64) void {
 
     var buf: [128]u8 = undefined;
     const store = &dw.world.mod_store;
+    const frozen = &dw.world.legacy_store;
 
     const msg = if (dw.dev_menu)
         std.fmt.bufPrint(
             &buf,
-            "{d} block{s} mined | mods: {d} chunk{s} / {d:.2}KB",
+            "{d} block{s} mined | mods: {d} chunk{s} / {d:.2}KB | frozen: {d} / {d:.2}KB",
             .{
                 blocks_mined,
                 if (blocks_mined == 1) "" else "s",
                 store.index.count(),
                 if (store.index.count() == 1) "" else "s",
                 @as(f64, @floatFromInt(store.cellBytes())) / 1000.0,
+                frozen.index.count(),
+                @as(f64, @floatFromInt(frozen.cellBytes())) / 1000.0,
             },
         ) catch unreachable
     else

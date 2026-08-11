@@ -56,11 +56,12 @@ pub inline fn dispatchMouseType() void {
 ///
 /// A portal descent adds a second layer on top: the D+1 preview, faded in over D (see `state/portal.zig`)!
 pub fn prepareVisibleData(dt: f64, time_diff: f64, canvas_w: f64, canvas_h: f64) void {
-    dw.chunks.updateVisibleChunks(dt, canvas_w, canvas_h);
-
-    const world_opacity = dw.portal.worldOpacity();
-    drawBackground(world_opacity);
-    handleVisibleChunks(world_opacity, WIREFRAME_BRIGHTNESS);
+    if (dw.chunks.updateVisibleChunks(dt, canvas_w, canvas_h)) {
+        const world_opacity = dw.portal.worldOpacity();
+        const chunk_opacity = world_opacity * @as(f64, dw.player.softlockFadeOpacity());
+        drawBackground(world_opacity);
+        handleVisibleChunks(chunk_opacity, WIREFRAME_BRIGHTNESS);
+    }
 
     if (dw.portal.isActive()) {
         const opacity = dw.portal.overlayOpacity();
@@ -72,16 +73,5 @@ pub fn prepareVisibleData(dt: f64, time_diff: f64, canvas_w: f64, canvas_h: f64)
     }
 
     entity.updateEntities(time_diff);
-
-    // no longer using SegmentedList
-    // const count = entity.entities.count();
-
-    // const out_ptr: [*]memory.WGSLEntity = @ptrCast(@alignCast(memory.scratchAlloc(count * @sizeOf(memory.WGSLEntity))));
-    // const out_slice = out_ptr[0..count];
-    // entity.entities.writeToSlice(out_slice, 0);
-
     handleVisibleEntities();
-
-    // from old SegmentedList code:
-    // entity.entities.clearRetainingCapacity(); // clear previous sprites
 }

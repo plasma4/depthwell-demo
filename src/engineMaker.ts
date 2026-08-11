@@ -101,6 +101,12 @@ export async function create(
     }
 
     // Fetch WASM
+    const textElems: HTMLSpanElement[] = [
+        document.getElementById("text1") as any,
+        document.getElementById("text2"),
+        document.getElementById("text3"),
+        document.getElementById("text4"),
+    ];
     const mem = new WebAssembly.Memory({
         initial: 128, // start with 8 MiB in WASM memory
     }) as WebAssembly.Memory;
@@ -145,10 +151,9 @@ export async function create(
                         Number(len),
                     );
                     const str = new TextDecoder().decode(bytes);
-
-                    const el = document.getElementById(
-                        `text${id + 1}`,
-                    ) as HTMLSpanElement;
+                    const el = textElems[id];
+                    if (bytes.length == 0) el.style.display = "none"; // hide elem entirely
+                    el.removeAttribute("style"); // unhide if needed
                     el.textContent = str;
                 },
                 jsGetTime: () => performance.now(),

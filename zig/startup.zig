@@ -74,6 +74,7 @@ fn resetAfterStart() void {
     dw.chunks.shake_seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, .screen_shake));
     // Frees the descent's preview buffer; `memory.game` above already cleared its saved fields.
     dw.portal.reset();
+    dw.player.resetSoftlockFade();
 
     // dropped item ring buffer lives in the world arena reset above; detach instead of freeing
     dw.inventory.dropped_items = .{};
@@ -102,10 +103,7 @@ pub fn init(new_game: bool) void {
     }
 
     const seed = memory.game.seed;
-    var temp_seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .seed2_init));
-    inline for (&memory.game.seed2) |*s| {
-        s.* = temp_seed.next();
-    }
+    memory.deriveHashSeeds();
 
     // Start off by determining where the player starts off exactly with layer pushing
     dw.sound.seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(seed, .sound));
@@ -127,7 +125,6 @@ pub fn init(new_game: bool) void {
         });
 
         world.pushLayer(
-            .none,
             memory.game.getPlayerCoord(),
             memory.game.getBlockXInChunk(), // convert a subpixel (0-4095) in a chunk to a block in a chunk (0-15)
             memory.game.getBlockYInChunk(),
@@ -138,76 +135,60 @@ pub fn init(new_game: bool) void {
 
     if (SET_PLAYER_SPAWN_RANDOMLY) {
         findSafeSpawn();
-        // world.SimBuffer.sync(memory.game.getPlayerCoord(), .{ 16, 16 });
+        // findSafeSpawn() fills the live buffer before it selects this position!
+        _ = dw.player.escapeSolid();
     }
 }
 
-const SPAWN_CHECK_SIZE = 32;
+/// Maximum chunk distance from the spawn center that the loaded window can contain.
+const SPAWN_SEARCH_RADIUS_CHUNKS: i64 = @intCast(world.SIM_BUFFER_WIDTH / 2);
 
-/// Searches for a safe grounded spawn point by spiraling through CHUNKS
-/// and scanning all blocks within those chunks.
+/// Finds a safe grounded spawn in the loaded simulation window.
+///
+/// This fills and scans at most one `SimBuffer` window.
+/// It must not generate an unbounded spiral of chunks during a new game or debug teleport.
+/// The later `escapeSolid()` check handles the rare case where this window has no grounded cell.
 pub fn findSafeSpawn() void {
     const game = &memory.game;
     const start_coord = game.getPlayerCoord();
 
-    var chunk: memory.Chunk = undefined; // temp buffer for performance
+    // The fixed window is the complete spawn-search budget. Reads below are resident only.
+    // At a normal centered window, the radius-8 positive edge is one chunk past its half-open side.
+    // `SimBuffer.get()` returns null there without generation. At a clamped world edge, that coordinate can be resident.
+    world.SimBuffer.sync(start_coord);
 
-    // Spiral parameters (on increments of chunks)
-    var side_len: i64 = 1;
-    var dx: i64 = 1;
-    var dy: i64 = 0;
-    var segment_passed: i64 = 0;
-    var cx: i64 = 0;
-    var cy: i64 = 0;
+    var radius: i64 = 0;
+    while (radius <= SPAWN_SEARCH_RADIUS_CHUNKS) : (radius += 1) {
+        var cy: i64 = -radius;
+        while (cy <= radius) : (cy += 1) {
+            var cx: i64 = -radius;
+            while (cx <= radius) : (cx += 1) {
+                if (@max(@abs(cx), @abs(cy)) != radius) continue;
+                const coord = start_coord.move(.{ cx, cy }) orelse continue;
+                const chunk = world.SimBuffer.get(coord) orelse continue;
 
-    // check a diamond area, in case there's some weird issues
-    var i: u32 = 0;
-    while (@abs(cx) + @abs(cy) < (SPAWN_CHECK_SIZE * 2)) {
-        if (start_coord.move(.{ cx, cy })) |nc| {
-            world.writeChunk(&chunk, nc);
+                var y: usize = 0;
+                while (y < CHUNK_SIZE - 1) : (y += 1) {
+                    const row = y * CHUNK_SIZE;
+                    const below_row = (y + 1) * CHUNK_SIZE;
 
-            // Scan the chunk for a "safe" spot!
-            var y: usize = 0;
-            while (y < CHUNK_SIZE - 1) : (y += 1) {
-                const row = y * CHUNK_SIZE;
-                const column = (y + 1) * CHUNK_SIZE;
+                    for (0..CHUNK_SIZE) |x| {
+                        if (!chunk.blocks[row + x].isEmpty() or !chunk.blocks[below_row + x].isSolid()) continue;
 
-                for (0..CHUNK_SIZE) |x| {
-                    const block = chunk.blocks[row + x];
-                    const block_below = chunk.blocks[column + x];
-
-                    if (block.isEmpty() and block_below.isSolid()) {
-                        // Found a valid floor!
-                        game.player_quadrant = nc.quadrant;
-                        game.player_chunk = nc.suffix;
-
+                        game.player_quadrant = coord.quadrant;
+                        game.player_chunk = coord.suffix;
                         game.setPlayerPosDumb(.{
                             @as(i64, @intCast(x)) * CHUNK_SIZE_SQ + (CHUNK_SIZE_SQ / 2),
-                            @as(i64, @intCast(y)) * CHUNK_SIZE_SQ + (CHUNK_SIZE_SQ / 2) - 1, // -1 or you have to jump to move
+                            @as(i64, @intCast(y)) * CHUNK_SIZE_SQ + (CHUNK_SIZE_SQ / 2) - 1,
                         });
-
                         game.setCameraPosDumb(game.player_pos);
                         return;
                     }
                 }
             }
-
-            i += 1; // increment i for next loop iter
-        }
-
-        // Update spiral to next CHUNK
-        cx += dx;
-        cy += dy;
-        segment_passed += 1;
-        if (segment_passed >= side_len) {
-            segment_passed = 0;
-            const temp = dx;
-            dx = -dy;
-            dy = temp;
-            if (dy == 0) side_len += 1;
         }
     }
 
-    // Fallback: If no ground found in nearby chunks, center in current chunk
+    // The correction probe will move an improbable blocked fallback position.
     game.setPlayerPosDumb(.{ 2048, 2048 });
 }
