@@ -62,7 +62,7 @@ pub fn generate(
     _ = cx;
     _ = cy;
     _ = struct_seed;
-    const is_molten = state.getChance(0.4);
+    const is_red = state.getChance(0.42);
     const furnace_x = 1 + state.getLimit(u32, size_x - 2);
 
     const struct_x = @as(i32, @bitCast(wx)) - bounds.x_start;
@@ -73,7 +73,7 @@ pub fn generate(
         return .{ .id = .black_plate };
     }
     if (struct_y == size_y - 2) {
-        return .{ .id = if (is_molten) .molten_stone else .lava_stone };
+        return .{ .id = if (is_red) .red_dirt else .dirt };
     }
     if (struct_y == size_y - 3 and struct_x == furnace_x) {
         return .{ .id = .lava_furnace };

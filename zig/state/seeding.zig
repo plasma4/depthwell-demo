@@ -50,7 +50,7 @@ pub const Seed = extern struct { value: [8]u64 align(16) = @splat(0) };
 /// Contains 4 512-bit seed states, which are different for each chunk.
 ///
 /// - `value[0]` is meant for any large-scale data.
-///   - Note that for base chunks, `hash2d()` from `seed2` is used instead.
+///   - Note that for base chunks, `hash2d()` from `hash_seeds` is used instead.
 /// - `value[1]` is meant for ancestor logic.
 /// - `value[2]` is meant for base chunk decorations.
 /// - `value[3]` is meant for unimportant seeding data (such as entity effects or `seed` property of `Block`, which is only useful for WGSL).
@@ -79,7 +79,7 @@ test "basic usage example" {
 // }
 
 pub const SeedStream = enum(u64) {
-    seed2_init = 1,
+    hash_seeds_init = 1,
     sound,
     particles,
     startup_layers,

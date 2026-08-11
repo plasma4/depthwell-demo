@@ -216,7 +216,7 @@ pub fn resolve(wx: u32, wy: u32, seed: Vec2u) ?Sprite {
 pub fn stampChunk(chunk: *Chunk, cx: u64, cy: u64, column_seeds: *const [columns.len][CHUNK_SIZE]ColumnState) void {
     stampColumns(chunk, cx, cy, column_seeds);
 
-    const seed = dw.memory.game.getHashSeed(.vine1);
+    const seed = dw.memory.getHashSeed(.vine1);
     for (0..CHUNK_SIZE) |block_y| {
         for (0..CHUNK_SIZE) |block_x| {
             const block = &chunk.blocks[block_x + block_y * CHUNK_SIZE];
@@ -297,13 +297,13 @@ pub const ColumnState = struct {
 
 /// True if the surface at world (`wx`, `wy`) anchors feature `f` in the cell directly past it.
 inline fn columnAnchorHit(comptime f: ColumnFeature, wx: u64, wy: u64) bool {
-    const hash = dw.seeding.FastHash.hash2d(dw.memory.game.getHashSeed(f.anchor_seed), wx, wy);
+    const hash = dw.seeding.FastHash.hash2d(dw.memory.getHashSeed(f.anchor_seed), wx, wy);
     return hash <= dw.seeding.oddsNum(f.anchor_odds);
 }
 
 /// True if feature `f` extends into the empty cell at world (`wx`, `wy`).
 inline fn columnGrowHit(comptime f: ColumnFeature, wx: u64, wy: u64) bool {
-    const hash = dw.seeding.FastHash.hash2d(dw.memory.game.getHashSeed(f.grow_seed), wx, wy);
+    const hash = dw.seeding.FastHash.hash2d(dw.memory.getHashSeed(f.grow_seed), wx, wy);
     return hash <= dw.seeding.oddsNum(f.grow_odds);
 }
 
@@ -344,9 +344,8 @@ const testing = std.testing;
 test "a multi-block decoration owns its whole footprint" {
     const memory = dw.memory;
     memory.game.seed = .{};
-    var rng = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(memory.game.seed, .seed2_init));
-    for (&memory.game.seed2) |*v| v.* = rng.next();
-    const seed = memory.game.getHashSeed(.vine1);
+    memory.deriveHashSeeds();
+    const seed = memory.getHashSeed(.vine1);
 
     var checked: usize = 0;
     inline for (points, 0..) |D, kind| {
