@@ -2555,49 +2555,88 @@ inline fn rightNeighborCell(coord: Coordinate, bx: u4) ?RightCell {
     return .{ .coord = coord.move(.{ 1, 0 }) orelse return null, .bx = 0 };
 }
 
-/// Applies a block modification, changing the `Sprite` type and resetting `hp`. Mutates `mod_store` and caches in-place.
-/// Returns whether `update_local_edge_flags` instantly removed the current block due to being in an invalid position.
+const BlockTypeCell = struct {
+    coord: Coordinate,
+    bx: u4,
+    sprite: Sprite,
+    prev: Block,
+};
+
+/// Exact cells a `modifyBlockType()` action will write before support validation.
+const BlockTypePlan = struct {
+    first: BlockTypeCell,
+    second: ?BlockTypeCell = null,
+};
+
+/// Result of a `modifyBlockType()` request.
+pub const ModifyBlockTypeResult = enum {
+    /// The requested primary block stayed in the world.
+    placed,
+    /// Support validation removed the requested primary block after it was written.
+    collapsed,
+    /// Normal-play safety rejected a placement before any world state changed.
+    rejected_softlock,
+};
+
+/// Works out the exact primary and paired cells that a block placement will write.
+fn planBlockTypeChange(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, prev_block: Block) BlockTypePlan {
+    var plan: BlockTypePlan = .{
+        .first = .{ .coord = coord, .bx = bx, .sprite = new_sprite, .prev = prev_block },
+    };
+
+    const partner = new_sprite.pairedRight();
+    if (partner == .none) return plan;
+
+    const right = rightNeighborCell(coord, bx) orelse return plan;
+    const right_block = getBlockAt(right.coord, right.bx, by, memory.game.depth);
+    if (!dw.inventory.isInCreative() and !right_block.isEmpty()) return plan;
+
+    // Only place the right half if the block underneath it is solid.
+    const ny = @as(i32, by) + 1;
+    const under_coord = if (ny >= CHUNK_SIZE) right.coord.moveY(1) else right.coord;
+    const uc = under_coord orelse return plan;
+    const under_by: u4 = @intCast(@mod(ny, CHUNK_SIZE));
+    const under_block = getBlockAt(uc, right.bx, under_by, memory.game.depth);
+    if (!under_block.isSolid()) return plan;
+
+    plan.second = .{ .coord = right.coord, .bx = right.bx, .sprite = partner, .prev = .empty };
+    return plan;
+}
+
+/// Applies a block modification, changing the `Sprite` type and resetting `hp`.
 ///
-/// `prev_block` is the block that occupied this cell BEFORE this action began.
-/// The caller must pass the original block (for example, mining reads it before deleting).
-pub fn modifyBlockType(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, prev_block: Block) bool {
-    // a block that spans two cells includes its right half
-    var cell: struct { Coordinate, u4 } = .{ coord, bx };
-    var sprite = new_sprite;
-    var prev = prev_block;
-    var second_cell: ?struct { Coordinate, u4 } = null;
+/// Normal-play callers must use this function for every placement.
+/// It gives `player.permitsPlacement()` the exact cells that will persist before it writes `mod_store`.
+/// `prev_block` is the block that occupied the primary cell before this action began.
+/// The caller must pass the original block when mining replaces a cell.
+pub fn modifyBlockType(
+    coord: Coordinate,
+    bx: u4,
+    by: u4,
+    new_sprite: Sprite,
+    prev_block: Block,
+) ModifyBlockTypeResult {
+    const plan = planBlockTypeChange(coord, bx, by, new_sprite, prev_block);
 
-    while (true) {
-        const partner = sprite.pairedRight();
-        writeBlockType(cell[0], cell[1], by, sprite, prev);
-        if (partner == .none) break;
-
-        const right = rightNeighborCell(cell[0], cell[1]) orelse break;
-
-        // stop placement if the right cell is not empty in non-creative
-        const right_block = getBlockAt(right.coord, right.bx, by, memory.game.depth);
-        if (!dw.inventory.isInCreative() and !right_block.isEmpty()) break;
-
-        // only place the right half if the block underneath it is solid
-        const ny = @as(i32, by) + 1;
-        const under_coord = if (ny >= CHUNK_SIZE) right.coord.moveY(1) else right.coord;
-        if (under_coord) |uc| {
-            const under_by: u4 = @intCast(@mod(ny, CHUNK_SIZE));
-            const under_block = getBlockAt(uc, right.bx, under_by, memory.game.depth);
-            if (!under_block.isSolid()) break;
-        } else break;
-
-        cell = .{ right.coord, right.bx };
-        second_cell = cell;
-        sprite = partner;
-        prev = .empty;
+    if (!dw.inventory.isInCreative()) {
+        var pending: [2]player.PendingPlacement = .{
+            .{ .coord = plan.first.coord, .bx = plan.first.bx, .by = by, .sprite = plan.first.sprite },
+            undefined,
+        };
+        var pending_len: usize = 1;
+        if (plan.second) |second| {
+            pending[pending_len] = .{ .coord = second.coord, .bx = second.bx, .by = by, .sprite = second.sprite };
+            pending_len += 1;
+        }
+        if (!player.permitsPlacement(pending[0..pending_len])) return .rejected_softlock;
     }
 
-    // Update edge flags for both cells when a two-cell block is placed.
-    if (second_cell) |c2| {
-        _ = updateLocalEdgeFlags(c2[0], c2[1], by);
+    writeBlockType(plan.first.coord, plan.first.bx, by, plan.first.sprite, plan.first.prev);
+    if (plan.second) |second| {
+        writeBlockType(second.coord, second.bx, by, second.sprite, second.prev);
+        _ = updateLocalEdgeFlags(second.coord, second.bx, by);
     }
-    return updateLocalEdgeFlags(coord, bx, by);
+    return if (updateLocalEdgeFlags(coord, bx, by)) .collapsed else .placed;
 }
 
 /// The write half of `modifyBlockType()`: updates `mod_store` and every live cache, WITHOUT validating
@@ -3523,8 +3562,6 @@ pub fn popLayer() void {
     // reads it. Matches `retraceInstant()`; without it the world is momentarily absent, and an absent
     // chunk reads as solid to collision (see `getBlockPtr()`).
     SimBuffer.sync(g.getPlayerCoord());
-    // An ascent scales the player down into a wall more often than not, and every depth collides now.
-    dw.player.escapeSolid();
 }
 
 /// Commits an already-computed ascent transition: rolls the deeper depth's modifications up into markers,
@@ -3593,7 +3630,6 @@ pub fn retraceInstant() void {
     commitLayer(computeRetraceLayer(retraceStep().?), false);
     popAscentStep();
     SimBuffer.sync(memory.game.getPlayerCoord());
-    dw.player.escapeSolid();
 }
 
 /// Commits an already-computed return transition, popping the ascent stack.
@@ -4607,13 +4643,19 @@ test "coordinate consistency: a block is the same whatever route reached it" {
     }
 }
 
-test "a 2x1 pair is placed and validated as one unit" {
+test "placement guard blocks self-encasement and keeps pairs coherent" {
     const saved_game = memory.game;
     const saved_suffix = max_possible_suffix;
+    const saved_pickaxe = dw.mining.pickaxe_type;
+    const saved_structure_tool = dw.mining.has_structure_tool;
+    const saved_creative = dw.inventory.IN_CREATIVE;
     defer {
         memory.game = saved_game;
         memory.deriveHashSeeds();
         max_possible_suffix = saved_suffix;
+        dw.mining.pickaxe_type = saved_pickaxe;
+        dw.mining.has_structure_tool = saved_structure_tool;
+        dw.inventory.IN_CREATIVE = saved_creative;
         clearCaches(true);
     }
 
@@ -4645,8 +4687,8 @@ test "a 2x1 pair is placed and validated as one unit" {
         key = coord.asDepthCoordinate(memory.game.depth);
         materializeChunk(&chunk, key);
 
-        for (0..CHUNK_SIZE - 1) |by| {
-            for (0..CHUNK_SIZE - 1) |bx| {
+        for (1..CHUNK_SIZE - 1) |by| {
+            for (1..CHUNK_SIZE - 1) |bx| {
                 const here = chunk.blocks[by * CHUNK_SIZE + bx];
                 const right = chunk.blocks[by * CHUNK_SIZE + bx + 1];
                 const under = chunk.blocks[(by + 1) * CHUNK_SIZE + bx];
@@ -4660,10 +4702,94 @@ test "a 2x1 pair is placed and validated as one unit" {
         }
     }
     const at = spot orelse return error.TestUnexpectedResult; // 20 chunks with no ledge at all is a bug
+    std.debug.assert(at.bx > 0 and at.bx < CHUNK_SIZE - 1 and at.by > 0 and at.by < CHUNK_SIZE - 1);
+
+    // The full hitbox fits in the empty cell. A solid replacement must be refused before it writes the store.
+    memory.game.player_quadrant = coord.quadrant;
+    memory.game.player_chunk = coord.suffix;
+    memory.game.player_pos = .{
+        @as(i64, at.bx) * CHUNK_SIZE_SQ + CHUNK_SIZE_SQ / 2,
+        @as(i64, at.by) * CHUNK_SIZE_SQ + 100,
+    };
+    try testing.expectEqual(
+        ModifyBlockTypeResult.rejected_softlock,
+        modifyBlockType(coord, at.bx, at.by, .stone, .empty),
+    );
+    try testing.expect(mod_store.get(key) == null);
+
+    // Three unbreakable gems leave a one-cell cardinal exit. The fourth must not close it.
+    dw.mining.pickaxe_type = .stone;
+    dw.mining.has_structure_tool = false;
+    dw.inventory.IN_CREATIVE = false;
+    const lower_by: u4 = @intCast(@as(u5, at.by) + 1);
+    const ring = [_]struct { bx: u4, by: u4 }{
+        .{ .bx = at.bx - 1, .by = at.by },
+        .{ .bx = at.bx + 1, .by = at.by },
+        .{ .bx = at.bx, .by = at.by - 1 },
+    };
+    for (ring) |cell| {
+        mod_store.beginWrite(key).setCell(@intCast(@as(usize, cell.by) * CHUNK_SIZE + cell.bx), .{
+            .id = .amethyst,
+            .base_id = .stone,
+            .hp = 0,
+        });
+    }
+    const lower_idx: u8 = @intCast(@as(usize, lower_by) * CHUNK_SIZE + at.bx);
+    mod_store.beginWrite(key).setCell(lower_idx, .{ .id = .none, .base_id = .none, .hp = 0 });
+    clearCaches(true);
+
+    try testing.expectEqual(
+        ModifyBlockTypeResult.rejected_softlock,
+        modifyBlockType(coord, at.bx, lower_by, .amethyst, .empty),
+    );
+    try testing.expectEqual(Sprite.none, mod_store.getCell(key, lower_idx).?.id);
+
+    // A portal correction moves a player out of the equivalent completed four-gem cage.
+    const trapped_pos = memory.game.player_pos;
+    mod_store.beginWrite(key).setCell(lower_idx, .{ .id = .amethyst, .base_id = .stone, .hp = 0 });
+    clearCaches(true);
+    try testing.expect(player.escapeSolid());
+    try testing.expect(@reduce(.Or, memory.game.player_pos != trapped_pos));
+    memory.game.player_quadrant = coord.quadrant;
+    memory.game.player_chunk = coord.suffix;
+    memory.game.player_pos = trapped_pos;
+    memory.game.last_player_pos = trapped_pos;
+    memory.game.camera_pos = trapped_pos;
+    memory.game.last_camera_pos = trapped_pos;
+
+    // A portal is non-solid, but it makes this last breakable exit support unbreakable.
+    mod_store.beginWrite(key).setCell(lower_idx, .{ .id = .stone, .base_id = .none, .hp = 0 });
+    clearCaches(true);
+    const center_idx: u8 = @intCast(@as(usize, at.by) * CHUNK_SIZE + at.bx);
+    try testing.expectEqual(Sprite.amethyst, getBlockAt(coord, at.bx - 1, at.by, memory.game.depth).id);
+    try testing.expectEqual(Sprite.amethyst, getBlockAt(coord, at.bx + 1, at.by, memory.game.depth).id);
+    try testing.expectEqual(Sprite.amethyst, getBlockAt(coord, at.bx, at.by - 1, memory.game.depth).id);
+    try testing.expectEqual(Sprite.stone, getBlockAt(coord, at.bx, lower_by, memory.game.depth).id);
+    try testing.expect(player.isColliding(memory.game.player_pos[0] - CHUNK_SIZE_SQ, memory.game.player_pos[1]));
+    try testing.expect(player.isColliding(memory.game.player_pos[0] + CHUNK_SIZE_SQ, memory.game.player_pos[1]));
+    try testing.expect(player.isColliding(memory.game.player_pos[0], memory.game.player_pos[1] - CHUNK_SIZE_SQ));
+    try testing.expect(player.isColliding(memory.game.player_pos[0], memory.game.player_pos[1] + CHUNK_SIZE_SQ));
+    const portal_pending = [_]player.PendingPlacement{
+        .{ .coord = coord, .bx = at.bx, .by = at.by, .sprite = .portal },
+    };
+    try testing.expect(!player.permitsPlacement(&portal_pending));
+    try testing.expectEqual(
+        ModifyBlockTypeResult.rejected_softlock,
+        modifyBlockType(coord, at.bx, at.by, .portal, .empty),
+    );
+    try testing.expect(mod_store.getCell(key, center_idx) == null);
+
+    // The pair case below needs its original procedural ledge, not the synthetic test cage.
+    mod_store.clear();
+    legacy_store.clear();
+    clearCaches(true);
 
     // Placing the left half alone must leave BOTH halves standing: each demands the other,
     // so a pass that validated the first before writing the second would clear the pair right back out.
-    try testing.expect(!modifyBlockType(coord, at.bx, at.by, .moss_shrub1, .empty));
+    try testing.expectEqual(
+        ModifyBlockTypeResult.placed,
+        modifyBlockType(coord, at.bx, at.by, .moss_shrub1, .empty),
+    );
 
     const idx: u8 = @intCast(@as(usize, at.by) * CHUNK_SIZE + at.bx);
     const entry = mod_store.get(key) orelse return error.TestUnexpectedResult;
