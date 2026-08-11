@@ -16,7 +16,7 @@ const Vec4f32 = dw.utils.Vec4f32;
 /// Random seed used for particle spawning. Seeded in `startup.init()`.
 pub var seed: dw.seeding.ChaCha12 = undefined;
 
-/// Circular buffer capacity. Must be a power of two so the write index wraps with a mask.
+/// Circular buffer capacity.
 pub const MAX_PARTICLES = 8192;
 /// Maximum opacity of any particle (lerped based on lifetime).
 const MAX_OPACITY = 0.8;
@@ -45,7 +45,7 @@ pub const Particle = struct {
     rotation: f32 = 0.0,
     /// Rotation applied each render frame (radians).
     spin: f32 = 0.0,
-    /// Square edge length in viewport pixels.
+    /// Square size in viewport pixels.
     size: f32 = 2.0,
     /// Point this particle accelerates toward, in viewport pixels. Only read when `pull` is non-zero.
     attractor: Vec2f32 = .{ 0.0, 0.0 },
@@ -67,21 +67,26 @@ var pool: [MAX_PARTICLES]Particle = @splat(.{});
 /// Next slot to write; wraps around, overwriting the oldest particle when full.
 var next_slot: usize = 0;
 
-/// Tunable knobs for `spawnBurst()`. Every range is sampled uniformly per particle.
+/// Tunable knobs for `spawnBurst()`.
+/// Every range is sampled uniformly per particle.
 pub const BurstConfig = struct {
     /// How many particles to spawn.
     count: usize = 10,
-    /// Speed range in viewport pixels per render frame.
+    /// Lowest speed in viewport pixels per render frame.
     speed_min: f32 = 0.6,
+    /// Highest speed in viewport pixels per render frame.
     speed_max: f32 = 2.0,
-    /// Square edge length range in viewport pixels.
+    /// Minimum particle size in viewport pixels.
     size_min: f32 = 0.8,
+    /// Maximum particle size in viewport pixels.
     size_max: f32 = 3.0,
-    /// Spin magnitude range (radians per render frame); direction is randomized.
-    spin_min: f32 = 0.02,
+    /// Spin magnitude minimum (radians per render frame); direction sign is randomized.
+    spin_min: f32 = 0.03,
+    /// Spin magnitude maximum (radians per render frame); direction sign is randomized.
     spin_max: f32 = 0.12,
-    /// Lifetime range of each spawned particle, in render frames.
+    /// Lowest possible lifetime of each spawned particle in render frames.
     lifetime_min: u16 = 12,
+    /// Highest possible lifetime of each spawned particle in render frames.
     lifetime_max: u16 = 28,
 };
 
@@ -99,7 +104,7 @@ fn randRange(min: f32, max: f32) f32 {
 /// Pushes one particle into the circular buffer, overwriting the oldest slot when full.
 pub fn addParticle(particle: Particle) void {
     pool[next_slot] = particle;
-    next_slot = (next_slot + 1) & (MAX_PARTICLES - 1);
+    next_slot = (next_slot + 1) % MAX_PARTICLES;
 }
 
 /// Spawns `config.count` particles radiating from `origin` (viewport pixels) in random directions.
@@ -131,39 +136,35 @@ pub fn spawnBurst(origin: Vec2f32, colors: []const Vec4f32, config: BurstConfig)
     }
 }
 
-/// Tunable knobs for `spawnOrbitRing()`.
+/// Configuration for `spawnOrbitRing()`.
 pub const OrbitConfig = struct {
-    /// How many particles to spawn.
+    /// Number of particles to spawn.
     count: usize = 6,
-    /// Ring radius particles are laid out against, in viewport pixels.
+    /// Minimum spawn radius in viewport pixels.
     radius_min: f32 = 24.0,
+    /// Maximum spawn radius in viewport pixels.
     radius_max: f32 = 44.0,
-    /// Square edge length range in viewport pixels.
+    /// Minimum particle size in viewport pixels.
     size_min: f32 = 0.8,
+    /// Maximum particle size in viewport pixels.
     size_max: f32 = 2.4,
-    /// Spin magnitude range (radians per render frame); direction is randomized.
+    /// Minimum spin rate in radians per frame (direction randomized).
     spin_min: f32 = 0.02,
+    /// Maximum spin rate in radians per frame (direction randomized).
     spin_max: f32 = 0.10,
-    /// Frames a particle lives for, and the span its radial speed is set from.
-    /// Only the opening approach takes that long: the attraction keeps building on the way in,
-    /// so an inward particle reaches the mouth early and spends its remaining frames whipping around it.
+    /// Minimum particle lifetime and travel duration in frames.
     travel_min: u16 = 14,
+    /// Maximum particle lifetime and travel duration in frames.
     travel_max: u16 = 26,
-    /// Tangential speed as a multiple of the radial speed.
-    /// 0 falls straight in; around 1 the particle circles about as fast as it falls,
-    /// which is what turns the fall into a visible spiral.
+    /// Tangential speed relative to radial speed (controls spiral curvature).
     swirl: f32 = 1.0,
-    /// Fraction of the ring thrown back out from near the mouth instead of drawn in,
-    /// so the portal doesn't just look like a boring ol' drain. 0 is all inward, 1 all outward.
+    /// Ratio of outward to inward particles (0.0 = all inward, 1.0 = all outward).
     outward_ratio: f32 = 0.0,
-    /// Number of streams the spawn angles are gathered into, or 0 to scatter them evenly.
-    /// A handful of arms is what separates a flowing intake from a uniform ring of noise;
-    /// the eye follows a stream, but averages a full circle out into a static band.
+    /// Number of distinct stream arms, or 0 for even angular distribution.
     arms: u32 = 0,
-    /// Rotation of the arm pattern in radians. Advancing it a little per call is what makes the arms sweep,
-    /// so successive spawns lay down a continuous spiral rather than a set of fixed spokes.
+    /// Angular rotation offset of the arm pattern in radians.
     arm_phase: f32 = 0.0,
-    /// Half-width of an "arm" in radians.
+    /// Angular half-width of each arm stream in radians.
     arm_spread: f32 = 0.22,
 };
 
