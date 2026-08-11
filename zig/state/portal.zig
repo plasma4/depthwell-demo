@@ -287,7 +287,6 @@ var effect_center: [2]f64 = .{ 0.0, 0.0 };
 /// Only meaningful while an ascent runs.
 var ascend_origin: dw.utils.Vec2i = .{ 0, 0 };
 
-
 /// The descent's shards. Held in a fixed-sized array rather than a dynamic allocation.
 var debris: [SHARD_COUNT]Shard = undefined;
 /// How many shards are currently active in the array.
@@ -1210,7 +1209,7 @@ fn commitReturn() void {
     world.commitRetrace(transition);
     world.SimBuffer.refreshAdopting(memory.game.getPlayerCoord(), PreviewSource{});
     // A return lands on the portal block, which the player may have built over since.
-    dw.player.escapeSolid();
+    if (dw.player.escapeSolid()) dw.player.startSoftlockFade();
 
     // The rubble was sampled from the depth just left; none of it belongs to where we landed.
     clearDebris();
@@ -1275,7 +1274,7 @@ fn finish() void {
     world.SimBuffer.refreshAdopting(g.getPlayerCoord(), PreviewSource{});
 
     // The SimBuffer holds the new depth now, so a landing inside rock can be resolved.
-    dw.player.escapeSolid();
+    if (dw.player.escapeSolid()) dw.player.startSoftlockFade();
 
     g.portal_phase = @intFromEnum(Phase.idle);
     g.portal_frame = 0;

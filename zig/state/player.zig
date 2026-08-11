@@ -230,6 +230,55 @@ pub fn currentSprite() Sprite {
 /// rather than as a collision bug.
 const GHOST_ALPHA: f32 = 0.8;
 
+/// Frames that the correction fades the world out.
+const SOFTLOCK_FADE_OUT_FRAMES: u8 = 8;
+/// Frames that the correction fades the world back in.
+const SOFTLOCK_FADE_IN_FRAMES: u8 = 16;
+const SOFTLOCK_FADE_TOTAL_FRAMES = SOFTLOCK_FADE_OUT_FRAMES + SOFTLOCK_FADE_IN_FRAMES;
+
+comptime {
+    if (SOFTLOCK_FADE_OUT_FRAMES == 0 or SOFTLOCK_FADE_IN_FRAMES == 0)
+        @compileError("The softlock fade needs an out and an in phase.");
+}
+
+// This is render-only state. It is intentionally not saved.
+var softlock_fade_frame: u8 = 0;
+
+/// Starts the visible correction pulse after a portal escape correction.
+pub fn startSoftlockFade() void {
+    softlock_fade_frame = 1;
+}
+
+/// Advances the visible correction pulse by one logical frame.
+pub fn tickSoftlockFade() void {
+    if (softlock_fade_frame == 0) return;
+    if (softlock_fade_frame >= SOFTLOCK_FADE_TOTAL_FRAMES) {
+        softlock_fade_frame = 0;
+        return;
+    }
+    softlock_fade_frame += 1;
+}
+
+/// Stops a correction pulse when a game is reset or loaded.
+pub fn resetSoftlockFade() void {
+    softlock_fade_frame = 0;
+}
+
+/// Opacity for chunks and the player during a softlock correction pulse.
+pub fn softlockFadeOpacity() f32 {
+    if (softlock_fade_frame == 0) return 1.0;
+
+    const frame: f32 = @floatFromInt(softlock_fade_frame);
+    if (softlock_fade_frame <= SOFTLOCK_FADE_OUT_FRAMES) {
+        const t = frame / @as(f32, @floatFromInt(SOFTLOCK_FADE_OUT_FRAMES));
+        return 1.0 - t * t * (3.0 - 2.0 * t);
+    }
+
+    const t = (frame - @as(f32, @floatFromInt(SOFTLOCK_FADE_OUT_FRAMES))) /
+        @as(f32, @floatFromInt(SOFTLOCK_FADE_IN_FRAMES));
+    return t * t * (3.0 - 2.0 * t);
+}
+
 pub fn drawPlayerEntity() void {
     // Turns ghostly the moment the ascent starts rather than when it commits, so the fade belongs to
     // the animation instead of popping at the end of it.
@@ -240,7 +289,7 @@ pub fn drawPlayerEntity() void {
         // A portal descent squeezes this down and back up again (see `portal.playerScale()`); the
         // player stays fully opaque throughout, so nothing blinks out and returns.
         .size = if (facing_right) dw.chunks.player_screen_size else -dw.chunks.player_screen_size,
-        .lcha = .{ 1.0, 0.0, 0.0, if (ghost) GHOST_ALPHA else 1.0 },
+        .lcha = .{ 1.0, 0.0, 0.0, (if (ghost) GHOST_ALPHA else 1.0) * softlockFadeOpacity() },
     });
 }
 
@@ -412,7 +461,7 @@ fn handleLocalWrap(comptime axis: u1) bool {
     return false;
 }
 
-/// How far `escapeSolid()` looks for a mineable route to open space, in blocks.
+/// How far `escapeSolid()` proves a route to the outside, in blocks.
 const MAX_ESCAPE_BLOCKS: i64 = 100;
 const ESCAPE_DIAMETER: usize = @intCast(2 * MAX_ESCAPE_BLOCKS + 1);
 const MAX_ESCAPE_CELLS = ESCAPE_DIAMETER * ESCAPE_DIAMETER;
@@ -425,58 +474,92 @@ const ESCAPE_STEPS = [_]EscapeOffset{
     .{ .x = 0, .y = 1 },
 };
 
+/// One block type that a pending player placement would replace.
+///
+/// `world.modifyBlockType()` constructs this from every cell that will persist.
+/// The escape probe uses it before the modification writes to the live world.
+pub const PendingPlacement = struct {
+    coord: world.Coordinate,
+    bx: u4,
+    by: u4,
+    sprite: Sprite,
+};
+
+const EscapeOverlay = struct {
+    cells: [2]?PendingPlacement = .{ null, null },
+
+    fn init(cells: []const PendingPlacement) EscapeOverlay {
+        std.debug.assert(cells.len > 0 and cells.len <= 2);
+
+        var overlay = EscapeOverlay{};
+        for (cells, 0..) |cell, i| overlay.cells[i] = cell;
+        return overlay;
+    }
+
+    fn replacementAt(self: *const EscapeOverlay, coord: world.Coordinate, bx: u4, by: u4) ?Sprite {
+        for (self.cells) |pending| {
+            const cell = pending orelse continue;
+            if (cell.bx == bx and cell.by == by and cell.coord.eql(coord)) return cell.sprite;
+        }
+        return null;
+    }
+};
+
 comptime {
+    if (MAX_ESCAPE_BLOCKS <= 0)
+        @compileError("`MAX_ESCAPE_BLOCKS` must be positive.");
     if (MAX_ESCAPE_BLOCKS > std.math.maxInt(i16))
         @compileError("`MAX_ESCAPE_BLOCKS` must fit `EscapeOffset`.");
 }
 
-// Escape runs only during a spawn or a depth transition. Static scratch avoids a large WASM stack frame.
+// Escape runs only during a spawn, a portal correction, or a solid placement.
+// Static scratch avoids a large WASM stack frame.
 var escape_queue: [MAX_ESCAPE_CELLS]EscapeOffset = undefined;
 var escape_seen: [MAX_ESCAPE_CELLS]bool = undefined;
 
-/// Moves the player to the nearest open cell through a mineable cardinal path.
+/// Checks whether a pending placement leaves the player connected to the outside.
 ///
-/// A block at D is a quarter of a block at D-1, so an ascent can land inside rock.
-/// A route may pass through blocks only when the active tool can remove every colliding block.
-/// Diagonal cells do not connect because the player cannot pass through their shared corner.
-/// Call after the `SimBuffer` holds the new depth: an absent chunk reads as solid.
-///
-/// The landing cell is the conflict being resolved. Only a cell the route enters must be mineable.
-/// Does nothing when the player is already free or has no route in range.
-pub fn escapeSolid() void {
+/// `cells` must list every cell the placement will leave solid.
+/// `world.modifyBlockType()` calls this before it changes `mod_store` or a live cache.
+/// A non-solid placement cannot close a collision path.
+pub fn permitsPlacement(cells: []const PendingPlacement) bool {
+    std.debug.assert(cells.len > 0 and cells.len <= 2);
+
+    var has_solid = false;
+    for (cells) |cell| has_solid = has_solid or cell.sprite.isSolid();
+    if (!has_solid) return true;
+
+    const overlay = EscapeOverlay.init(cells);
     const game = &memory.game;
-    if (!isColliding(game.player_pos[0], game.player_pos[1])) return;
+    if (!positionIsClear(game.player_pos[0], game.player_pos[1], &overlay)) return false;
 
-    @memset(&escape_seen, false);
-    escape_queue[0] = .{ .x = 0, .y = 0 };
-    escape_seen[escapeIndex(0, 0)] = true;
+    _ = floodOutside(&overlay, canExcavateOffset);
+    return escape_seen[escapeIndex(0, 0)];
+}
 
-    var read: usize = 0;
-    var write: usize = 1;
-    while (read < write) : (read += 1) {
-        const current = escape_queue[read];
-        for (ESCAPE_STEPS) |step| {
-            const next_x = @as(i64, current.x) + step.x;
-            const next_y = @as(i64, current.y) + step.y;
-            if (@abs(next_x) > MAX_ESCAPE_BLOCKS or @abs(next_y) > MAX_ESCAPE_BLOCKS) continue;
+/// Corrects a bounded softlock with a reverse orthogonal flood.
+///
+/// Each node is the player hitbox moved one block from the landing point.
+/// A node is passable when every solid corner block can be broken by the active tool.
+/// The flood starts on the `MAX_ESCAPE_BLOCKS` ring and proves that a node reaches outside.
+/// A diagonal does not connect, because the player cannot pass through a shared corner.
+///
+/// This is deliberately a bounded epsilon check, not a proof about the full procedural world.
+/// It catches every immutable enclosure contained in the square, including player-made ones.
+/// A larger enclosure can still evade it, but the light-limited placement game cannot make one in normal play.
+/// Call only after the `SimBuffer` holds the current depth.
+///
+/// Returns `true` only when it moved the player to a proven external position.
+pub fn escapeSolid() bool {
+    if (isGhost()) return false;
 
-            const index = escapeIndex(next_x, next_y);
-            if (escape_seen[index]) continue;
-            escape_seen[index] = true;
+    const overlay = EscapeOverlay{};
+    const count = floodOutside(&overlay, canExcavateOffset);
+    if (landingHasEscape()) return false;
 
-            const px = game.player_pos[0] + next_x * dw.CHUNK_SIZE_SQ;
-            const py = game.player_pos[1] + next_y * dw.CHUNK_SIZE_SQ;
-            if (!canExcavatePosition(px, py)) continue;
-            if (!isColliding(px, py)) {
-                moveOutOfSolid(.{ px, py });
-                return;
-            }
-
-            std.debug.assert(write < escape_queue.len);
-            escape_queue[write] = .{ .x = @intCast(next_x), .y = @intCast(next_y) };
-            write += 1;
-        }
-    }
+    const target = nearestExternalPosition(&overlay, count) orelse return false;
+    moveToEscapablePosition(target);
+    return true;
 }
 
 /// Maps an offset in the escape square to scratch storage. Call only inside its fixed range.
@@ -486,32 +569,140 @@ inline fn escapeIndex(dx: i64, dy: i64) usize {
         @as(usize, @intCast(dx + MAX_ESCAPE_BLOCKS));
 }
 
-/// Returns whether every solid cell the player overlaps can be removed with the active tool.
-fn canExcavatePosition(px: i64, py: i64) bool {
-    const game = &memory.game;
-    const corners = playerCorners(px, py);
-    var last_coord: ?world.Coordinate = null;
-    var chunk: *const memory.Chunk = undefined;
+/// Floods the component that reaches the edge of the bounded escape square.
+///
+/// `can_enter()` must reject positions whose hitbox crosses an unbreakable block.
+/// It is intentionally generic so the graph rule has a direct unit test.
+fn floodOutside(context: anytype, comptime can_enter: anytype) usize {
+    @memset(&escape_seen, false);
+    var write: usize = 0;
 
-    for (corners) |corner| {
-        const cx_shift = @divFloor(corner[0], SUBPIXELS_IN_CHUNK);
-        const cy_shift = @divFloor(corner[1], SUBPIXELS_IN_CHUNK);
-        const coord = game.getPlayerCoord().move(.{ cx_shift, cy_shift }) orelse return false;
-        if (last_coord == null or !coord.eql(last_coord.?)) {
-            chunk = world.getChunkPtr(coord);
-            last_coord = coord;
+    var edge: i64 = -MAX_ESCAPE_BLOCKS;
+    while (edge <= MAX_ESCAPE_BLOCKS) : (edge += 1) {
+        enqueueEscapeNode(context, can_enter, -MAX_ESCAPE_BLOCKS, edge, &write);
+        enqueueEscapeNode(context, can_enter, MAX_ESCAPE_BLOCKS, edge, &write);
+        enqueueEscapeNode(context, can_enter, edge, -MAX_ESCAPE_BLOCKS, &write);
+        enqueueEscapeNode(context, can_enter, edge, MAX_ESCAPE_BLOCKS, &write);
+    }
+
+    var read: usize = 0;
+    while (read < write) : (read += 1) {
+        const current = escape_queue[read];
+        for (ESCAPE_STEPS) |step| {
+            const next_x = @as(i64, current.x) + step.x;
+            const next_y = @as(i64, current.y) + step.y;
+            if (@abs(next_x) > MAX_ESCAPE_BLOCKS or @abs(next_y) > MAX_ESCAPE_BLOCKS) continue;
+            enqueueEscapeNode(context, can_enter, next_x, next_y, &write);
+        }
+    }
+    return write;
+}
+
+/// Adds one passable node to the external flood, once.
+fn enqueueEscapeNode(context: anytype, comptime can_enter: anytype, dx: i64, dy: i64, write: *usize) void {
+    const index = escapeIndex(dx, dy);
+    if (escape_seen[index] or !can_enter(context, dx, dy)) return;
+
+    escape_seen[index] = true;
+    std.debug.assert(write.* < escape_queue.len);
+    escape_queue[write.*] = .{ .x = @intCast(dx), .y = @intCast(dy) };
+    write.* += 1;
+}
+
+/// Returns whether the landing itself, or an immediate cardinal move from it, reaches outside.
+fn landingHasEscape() bool {
+    if (escape_seen[escapeIndex(0, 0)]) return true;
+    for (ESCAPE_STEPS) |step| {
+        if (escape_seen[escapeIndex(step.x, step.y)]) return true;
+    }
+    return false;
+}
+
+/// Returns a closest node in the external component, preferring an already-clear landing.
+fn nearestExternalPosition(overlay: *const EscapeOverlay, count: usize) ?Vec2i {
+    const game = &memory.game;
+    var clear: ?EscapeOffset = null;
+    var clear_distance: u64 = std.math.maxInt(u64);
+    var excavatable: ?EscapeOffset = null;
+    var excavatable_distance: u64 = std.math.maxInt(u64);
+
+    for (escape_queue[0..count]) |offset| {
+        const dx: i64 = offset.x;
+        const dy: i64 = offset.y;
+        const distance = @abs(dx) + @abs(dy);
+        if (distance >= excavatable_distance and distance >= clear_distance) continue;
+
+        if (distance < excavatable_distance) {
+            excavatable = offset;
+            excavatable_distance = distance;
         }
 
-        const bx: u4 = @intCast(@as(u64, @bitCast(@divFloor(@mod(corner[0], SUBPIXELS_IN_CHUNK), dw.CHUNK_SIZE_SQ))));
-        const by: u4 = @intCast(@as(u64, @bitCast(@divFloor(@mod(corner[1], SUBPIXELS_IN_CHUNK), dw.CHUNK_SIZE_SQ))));
-        const block = chunk.blocks[@as(usize, by) * CHUNK_SIZE + @as(usize, bx)];
-        if (block.isSolid() and !mining.canMineForEscape(coord, bx, by, block)) return false;
+        const px = game.player_pos[0] + dx * dw.CHUNK_SIZE_SQ;
+        const py = game.player_pos[1] + dy * dw.CHUNK_SIZE_SQ;
+        if (distance < clear_distance and positionIsClear(px, py, overlay)) {
+            clear = offset;
+            clear_distance = distance;
+        }
+    }
+
+    const offset = clear orelse excavatable orelse return null;
+    return .{
+        game.player_pos[0] + @as(i64, offset.x) * dw.CHUNK_SIZE_SQ,
+        game.player_pos[1] + @as(i64, offset.y) * dw.CHUNK_SIZE_SQ,
+    };
+}
+
+/// Returns whether the player can enter the offset after breaking every solid corner block.
+fn canExcavateOffset(overlay: *const EscapeOverlay, dx: i64, dy: i64) bool {
+    const game = &memory.game;
+    return positionCanBeExcavated(
+        game.player_pos[0] + dx * dw.CHUNK_SIZE_SQ,
+        game.player_pos[1] + dy * dw.CHUNK_SIZE_SQ,
+        overlay,
+    );
+}
+
+/// Returns whether every solid cell the player overlaps can be removed with the active tool.
+fn positionCanBeExcavated(px: i64, py: i64, overlay: *const EscapeOverlay) bool {
+    for (playerCorners(px, py)) |corner| {
+        const cell = blockAtPlayerCorner(corner, overlay) orelse return false;
+        if (cell.block.isSolid() and !mining.canBreak(cell.coord, cell.bx, cell.by, cell.block)) return false;
     }
     return true;
 }
 
-/// Places the player at a proven open position and clears motion state.
-fn moveOutOfSolid(pos: Vec2i) void {
+/// Returns whether no solid cell overlaps the player at this position.
+fn positionIsClear(px: i64, py: i64, overlay: *const EscapeOverlay) bool {
+    for (playerCorners(px, py)) |corner| {
+        const cell = blockAtPlayerCorner(corner, overlay) orelse return false;
+        if (cell.block.isSolid()) return false;
+    }
+    return true;
+}
+
+const PlayerCornerBlock = struct {
+    coord: world.Coordinate,
+    bx: u4,
+    by: u4,
+    block: memory.Block,
+};
+
+/// Reads one player hitbox corner, including an uncommitted placement overlay.
+fn blockAtPlayerCorner(corner: [2]i64, overlay: *const EscapeOverlay) ?PlayerCornerBlock {
+    const game = &memory.game;
+    const cx_shift = @divFloor(corner[0], SUBPIXELS_IN_CHUNK);
+    const cy_shift = @divFloor(corner[1], SUBPIXELS_IN_CHUNK);
+    const coord = game.getPlayerCoord().move(.{ cx_shift, cy_shift }) orelse return null;
+
+    const bx: u4 = @intCast(@as(u64, @bitCast(@divFloor(@mod(corner[0], SUBPIXELS_IN_CHUNK), dw.CHUNK_SIZE_SQ))));
+    const by: u4 = @intCast(@as(u64, @bitCast(@divFloor(@mod(corner[1], SUBPIXELS_IN_CHUNK), dw.CHUNK_SIZE_SQ))));
+    var block = world.getChunkPtr(coord).blocks[@as(usize, by) * CHUNK_SIZE + @as(usize, bx)];
+    if (overlay.replacementAt(coord, bx, by)) |replacement| block.id = replacement;
+    return .{ .coord = coord, .bx = bx, .by = by, .block = block };
+}
+
+/// Places the player at a proven external position and clears motion state.
+fn moveToEscapablePosition(pos: Vec2i) void {
     const game = &memory.game;
     game.player_pos = pos;
     // The offset can cross a chunk edge, and the world edge can refuse it.
@@ -593,4 +784,28 @@ fn updateCamera(logic_speed: f64) void {
     const smooth_speed = 1.0 - std.math.pow(f64, 1.0 - CAMERA_SMOOTHING, logic_speed);
     game.camera_pos[0] += @intFromFloat(@as(f64, @floatFromInt(shift_x)) * smooth_speed);
     game.camera_pos[1] += @intFromFloat(@as(f64, @floatFromInt(shift_y)) * smooth_speed);
+}
+
+test "bounded escape flood requires a cardinal route to the outside" {
+    const Open = struct {
+        fn canEnter(_: *const @This(), _: i64, _: i64) bool {
+            return true;
+        }
+    };
+    const Sealed = struct {
+        fn canEnter(_: *const @This(), dx: i64, dy: i64) bool {
+            return !((@abs(dx) == 1 and dy == 0) or (@abs(dy) == 1 and dx == 0));
+        }
+    };
+
+    const open = Open{};
+    _ = floodOutside(&open, Open.canEnter);
+    try std.testing.expect(escape_seen[escapeIndex(0, 0)]);
+
+    const sealed = Sealed{};
+    _ = floodOutside(&sealed, Sealed.canEnter);
+    try std.testing.expect(!escape_seen[escapeIndex(0, 0)]);
+    for (ESCAPE_STEPS) |step| {
+        try std.testing.expect(!escape_seen[escapeIndex(step.x, step.y)]);
+    }
 }

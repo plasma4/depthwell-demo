@@ -128,13 +128,14 @@ pub fn canMine(tool_type: Tools, target_sprite: Sprite) bool {
     return pickaxe.capabilities.satisfies(block_props.required_capabilities);
 }
 
-/// Returns whether the player can remove this block while escaping a solid landing.
+/// Returns whether the active tools can remove this block.
 ///
 /// `coord`, `bx`, and `by` identify `block` in the live world.
-/// This uses the active tool and installation protection rules, but not cursor range or light.
-/// A valid escape route is mined one adjacent block at a time, so the player light moves with it.
-pub fn canMineForEscape(coord: world.Coordinate, bx: u4, by: u4, block: memory.Block) bool {
-    if (!block.isSolid() or inventory.isInCreative()) return true;
+/// This applies pickaxe capability and installation protection rules.
+/// It does not apply cursor range or light, because callers can supply their own reach rule.
+/// The bounded escape search mines one cardinal block at a time, so its light follows the player.
+pub fn canBreak(coord: world.Coordinate, bx: u4, by: u4, block: memory.Block) bool {
+    if (inventory.isInCreative()) return true;
     if (!canMine(pickaxe_type, block.id)) return false;
     if (!has_structure_tool and restsOnProtectedInstallation(coord, bx, by)) return false;
 
@@ -219,7 +220,12 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
             else
                 @as(u64, @intFromFloat(@as(f64, @floatFromInt(mining_speed)) * logic_speed));
 
-            const can_mine_block = in_creative or (canMine(pickaxe_type, block.id) and !is_protected);
+            const can_mine_block = in_creative or canBreak(
+                mouse.mouse_chunk_coord.?,
+                mouse.mouse_block_x,
+                mouse.mouse_block_y,
+                block,
+            );
             const near_enough = in_creative or isLitForMining();
 
             var strength = getSpriteStrength(block.id) orelse std.math.maxInt(u64);
@@ -335,16 +341,23 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                         // Only auto-replace if the block being mined is different from the held item.
                         if (sprite_type.isInWorld()) {
                             if (inventory.removeFromInventory(sprite_type)) { // make sure it's possible to use
-                                if (world.modifyBlockType(
+                                switch (world.modifyBlockType(
                                     mouse.mouse_chunk_coord.?, // mouse block successful already
                                     mouse.mouse_block_x,
                                     mouse.mouse_block_y,
                                     sprite_type,
                                     block, // pre-mined block seeds the ore's underlay/base
                                 )) {
-                                    // If TRUE, then the block was NOT successfully modified, so revert the selection.
-                                    // This fixes funny issues involving de-selection due to invalid placement.
-                                    inventory.selected_sprite = sprite_type;
+                                    .placed => {},
+                                    .collapsed => {
+                                        // The anchor cascade returned the item as a drop.
+                                        inventory.selected_sprite = sprite_type;
+                                    },
+                                    .rejected_softlock => {
+                                        // No world write happened, so return the consumed placement item directly.
+                                        inventory.addToInventory(sprite_type, 1);
+                                        inventory.selected_sprite = sprite_type;
+                                    },
                                 }
 
                                 mining_progress = 0;
@@ -365,24 +378,28 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
         } else if (block.isEmpty() and (in_creative or isLitForMining())) {
             // placing into empty air!
             if (inventory.removeFromInventory(sprite_type)) {
-                if (world.modifyBlockType(
+                switch (world.modifyBlockType(
                     mouse.mouse_chunk_coord.?,
                     mouse.mouse_block_x,
                     mouse.mouse_block_y,
                     sprite_type,
                     block, // empty here (placing into air), so ores fall back to a plain-stone underlay
                 )) {
-                    // If TRUE, then the block was NOT successfully modified. Revert selection if so.
-                    // This fixes funny issues involving instant deselection with invalid placement
-                    // (for example: placing your last ceiling flower in an invalid spot would deselect without this)
-                    inventory.selected_sprite = sprite_type;
-                } else {
-                    dw.sound.playSound(
+                    .placed => dw.sound.playSound(
                         9,
                         if (sprite_type.isFoundation()) 0.75 else 0.2,
                         0.1,
                         0.2,
-                    );
+                    ),
+                    .collapsed => {
+                        // The anchor cascade returned the item as a drop.
+                        inventory.selected_sprite = sprite_type;
+                    },
+                    .rejected_softlock => {
+                        // No world write happened, so return the consumed placement item directly.
+                        inventory.addToInventory(sprite_type, 1);
+                        inventory.selected_sprite = sprite_type;
+                    },
                 }
                 selected_hp = 0;
                 mining_progress = 0;
