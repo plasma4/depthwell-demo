@@ -40,6 +40,45 @@ const SHAKE_MAX_SCALE: f32 = 0.03; // plus or minus 3%
 /// Pure white noise strobes at high frame rates, so each frame only closes part of the gap.
 const SHAKE_RESPONSE: f32 = 0.45;
 
+/// Tiles the shader's light filter reads PAST the tile it shades.
+///
+/// `sample_light()` in src/shader.wgsl blends the four tiles nearest a pixel, so a pixel in the
+/// outermost visible tile reads one tile further out. `tile_light()` clamps past the grid, which
+/// would repeat the border row and hold a thin band of light still while the camera moves.
+/// The rasterizer must therefore hand the GPU at least this much tile beyond the visible edge.
+const LIGHT_FILTER_REACH_TILES: f64 = 1.0;
+
+/// Tiles per side the warp can pull into view beyond the unwarped screen edge,
+/// at the most zoomed-out camera scale.
+///
+/// `apply_warp()` runs in the shader, AFTER `rasterizeLayer()` has already chosen the window,
+/// so every term here is world the CPU did not know it had to cover:
+/// - a scale BELOW 1 shows `1 / (1 - scale)` times as much,
+/// - a rotation reaches the corners out by about `half_height * sin(angle)`, bounded here by the angle,
+/// - the offset slides the whole image.
+/// The three are added rather than combined properly, which only overstates the reach.
+const WARP_REACH_TILES: f64 = blk: {
+    const half_w: f64 = dw.SCREEN_WIDTH_HALF;
+    const half_h: f64 = dw.SCREEN_HEIGHT_HALF;
+
+    const from_scale = half_w * (1.0 / (1.0 - SHAKE_MAX_SCALE) - 1.0);
+    const from_rotation = half_h * SHAKE_MAX_ROTATION;
+    const reach_screen_px = from_scale + from_rotation + SHAKE_MAX_OFFSET;
+
+    // Screen pixels become world tiles at the zoom that shows the most world per pixel.
+    break :blk reach_screen_px / (dw.player.CAMERA_MIN_ZOOM * CHUNK_SIZE_FLOAT);
+};
+
+comptime {
+    // `rasterizeLayer()` pads the visible chunk rectangle by `CHUNK_MARGIN` chunks a side, and the
+    // rectangle is chunk-aligned OUTWARD, so this is the padding it guarantees in tiles.
+    const margin_tiles: f64 = @floatFromInt(dw.lighting.CHUNK_MARGIN * CHUNK_SIZE);
+    if (margin_tiles < LIGHT_FILTER_REACH_TILES + WARP_REACH_TILES) @compileError(
+        "The lighting margin no longer covers what the shader's light filter reads: " ++
+            "raise lighting.CHUNK_MARGIN, or lower CAMERA_MIN_ZOOM's shake.",
+    );
+}
+
 /// The per-frame warp handed to both tile layers.
 /// Regenerated once per render frame by `updateShake()` and reused for every pass,
 /// so the layers of a portal descent shake as one image.
@@ -230,6 +269,8 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
 
     // find the chunk indices that end up covering the screen, padded on every side by the lighting
     // margin so off-screen light sources that can bleed onscreen are present during the flood.
+    // The same padding is what keeps the shader's light filter inside the grid; the comptime block
+    // beside WARP_REACH_TILES above proves it covers the filter reach and the shake warp together.
     const margin: i32 = @intCast(dw.lighting.CHUNK_MARGIN);
     const min_cx = @as(i32, @intFromFloat(@floor(edge_left / subpixels_per_chunk))) - margin;
     const min_cy = @as(i32, @intFromFloat(@floor(edge_top / subpixels_per_chunk))) - margin;

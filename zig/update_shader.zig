@@ -12,10 +12,52 @@ pub const dw = @import("root.zig");
 
 const Sprite = dw.Sprite;
 const sprite = dw.sprite;
+const Block = dw.memory.Block;
 
 const SHADER_PATH = "src/shader.wgsl";
 const START_MARKER = "// #CONSTANT REGION START, DO NOT MODIFY CONTENTS MANUALLY#";
 const END_MARKER = "// #CONSTANT REGION END#";
+
+/// One `memory.Block` field that `unpack_tile()` or `tile_light()` pulls out of the tile buffer.
+///
+/// The shader reads a field with one `extractBits()` on one 32-bit word,
+/// so a field listed here must sit entirely inside `word`.
+const BlockField = struct {
+    /// WGSL constant name; `_OFF` and `_LEN` are appended to it.
+    name: []const u8,
+    /// Field name in `memory.Block`.
+    field: []const u8,
+    /// Word of `Block` the shader reads this field out of. See the `Block` doc comment.
+    word: usize,
+};
+
+/// Every `Block` field the shader unpacks. `Block.seed` is absent on purpose:
+/// the shader reads the whole of word1 as the seed, and `hp` folds into it.
+const BLOCK_FIELDS = [_]BlockField{
+    .{ .name = "BLOCK_ID", .field = "id", .word = 0 },
+    .{ .name = "BLOCK_EDGE_FLAGS", .field = "edge_flags", .word = 0 },
+    .{ .name = "BLOCK_LIGHT_L", .field = "light_l", .word = 0 },
+    .{ .name = "BLOCK_HP", .field = "hp", .word = 1 },
+    .{ .name = "BLOCK_BASE_ID", .field = "base_id", .word = 2 },
+    .{ .name = "BLOCK_ID_EDGE_FLAGS", .field = "id_edge_flags", .word = 2 },
+    .{ .name = "BLOCK_LIGHT_C", .field = "light_c", .word = 2 },
+    .{ .name = "BLOCK_WATER", .field = "water", .word = 3 },
+    .{ .name = "BLOCK_LIGHT_H", .field = "light_h", .word = 3 },
+};
+
+/// Bit offset of `f` inside its own word, and the width of the field.
+fn blockFieldBits(comptime f: BlockField) struct { off: usize, len: usize } {
+    const off = @bitOffsetOf(Block, f.field);
+    const len = @bitSizeOf(@FieldType(Block, f.field));
+    comptime {
+        if (off / 32 != f.word or (off + len - 1) / 32 != f.word) @compileError(
+            "Block." ++ f.field ++ " no longer fits inside word" ++
+                std.fmt.comptimePrint("{d}", .{f.word}) ++
+                "; the shader cannot read it with one extractBits().",
+        );
+    }
+    return .{ .off = off % 32, .len = len };
+}
 
 pub fn main(init: std.process.Init) !void {
     var buffer: [512 * 1024]u8 = undefined;
@@ -52,6 +94,11 @@ pub fn main(init: std.process.Init) !void {
         \\const LIGHT_CHROMA_MAX: f32 = {d};
         \\// Steps a full hue turn is divided into. Hue WRAPS, so the last step is one step before the first.
         \\const LIGHT_HUE_STEPS: f32 = {d}.0;
+        \\// Largest value of a packed light channel.
+        \\const LIGHT_CHANNEL_MAX: f32 = {d}.0;
+        \\
+        \\// Bit layout of memory.Block, taken from the struct itself.
+        \\// Each offset is relative to the 32-bit word the field lives in, which the generator checks.
         \\
     , .{
         dw.getTilesPerRow(),
@@ -63,7 +110,18 @@ pub fn main(init: std.process.Init) !void {
         @intFromEnum(Sprite.water),
         dw.lighting.LIGHT_CHROMA_MAX,
         dw.lighting.HUE_STEPS,
+        dw.memory.LIGHT_MAX,
     });
+
+    inline for (BLOCK_FIELDS) |f| {
+        const bits = comptime blockFieldBits(f);
+        try writer.print("const {s}_OFF: u32 = {d}u;\nconst {s}_LEN: u32 = {d}u;\n", .{
+            f.name,
+            bits.off,
+            f.name,
+            bits.len,
+        });
+    }
     try writer.writeAll(src[end..]);
 
     // Only touch the file when the content actually changes, so the dev file-watcher does not churn.

@@ -21,6 +21,29 @@ const WATER_START: u32 = 319u;
 const LIGHT_CHROMA_MAX: f32 = 0.16;
 // Steps a full hue turn is divided into. Hue WRAPS, so the last step is one step before the first.
 const LIGHT_HUE_STEPS: f32 = 64.0;
+// Largest value of a packed light channel.
+const LIGHT_CHANNEL_MAX: f32 = 63.0;
+
+// Bit layout of memory.Block, taken from the struct itself.
+// Each offset is relative to the 32-bit word the field lives in, which the generator checks.
+const BLOCK_ID_OFF: u32 = 0u;
+const BLOCK_ID_LEN: u32 = 16u;
+const BLOCK_EDGE_FLAGS_OFF: u32 = 16u;
+const BLOCK_EDGE_FLAGS_LEN: u32 = 8u;
+const BLOCK_LIGHT_L_OFF: u32 = 24u;
+const BLOCK_LIGHT_L_LEN: u32 = 6u;
+const BLOCK_HP_OFF: u32 = 0u;
+const BLOCK_HP_LEN: u32 = 4u;
+const BLOCK_BASE_ID_OFF: u32 = 0u;
+const BLOCK_BASE_ID_LEN: u32 = 16u;
+const BLOCK_ID_EDGE_FLAGS_OFF: u32 = 16u;
+const BLOCK_ID_EDGE_FLAGS_LEN: u32 = 8u;
+const BLOCK_LIGHT_C_OFF: u32 = 24u;
+const BLOCK_LIGHT_C_LEN: u32 = 6u;
+const BLOCK_WATER_OFF: u32 = 0u;
+const BLOCK_WATER_LEN: u32 = 11u;
+const BLOCK_LIGHT_H_OFF: u32 = 26u;
+const BLOCK_LIGHT_H_LEN: u32 = 6u;
 // #CONSTANT REGION END#
 
 const PI = radians(180.0);
@@ -49,8 +72,6 @@ const TINT_LUMA_GAIN: f32 = 0.13;
 // Share of its OWN chroma a block keeps where no light reaches it.
 // Zero drains every dim block to grey, and a grey band beside a colored one also reads as a dark ring.
 const MATERIAL_CHROMA_FLOOR: f32 = 0.35;
-// Largest value of a packed light channel; the three of them are 6 bits each.
-const LIGHT_CHANNEL_MAX: f32 = 63.0;
 // How much of the light's tint water takes, against a solid sprite's full share.
 // Water already carries strong chroma, so a full share would flatten a pool into the lamp's color.
 const WATER_TINT_STRENGTH: f32 = 0.55;
@@ -142,43 +163,45 @@ struct UnpackedTile {
 fn unpack_tile(data: TileData) -> UnpackedTile {
     var out: UnpackedTile;
 
-    out.sprite_id = extractBits(data.word0, 0u, 16u);
-    out.edge_flags = extractBits(data.word0, 16u, 8u);
+    out.sprite_id = extractBits(data.word0, BLOCK_ID_OFF, BLOCK_ID_LEN);
+    out.edge_flags = extractBits(data.word0, BLOCK_EDGE_FLAGS_OFF, BLOCK_EDGE_FLAGS_LEN);
     // out.edge_flags = 0u; // override test example
 
     // The HP is automatically folded into the 28-bit seed by accessing just this word!
-    out.hp = extractBits(data.word1, 0u, 4u);
+    out.hp = extractBits(data.word1, BLOCK_HP_OFF, BLOCK_HP_LEN);
     let s0 = data.word1;
     let s1 = murmurmix32(s0);
     let s2 = murmurmix32(s1);
     let s3 = murmurmix32(s2);
     out.seeds = vec4u(s0, s1, s2, s3);
 
-    out.base_id = extractBits(data.word2, 0u, 16u);
-    out.id_edge_flags = extractBits(data.word2, 16u, 8u);
+    out.base_id = extractBits(data.word2, BLOCK_BASE_ID_OFF, BLOCK_BASE_ID_LEN);
+    out.id_edge_flags = extractBits(data.word2, BLOCK_ID_EDGE_FLAGS_OFF, BLOCK_ID_EDGE_FLAGS_LEN);
     // The three light channels stay packed here!
     // bilinear blending and mixing stuff happens in tile_light()
 
-    // Bits 11-21 of word3 are Block.tag, which is Zig-side only, and 28-31 are unused.
-    out.water = extractBits(data.word3, 0u, 11u);
+    // Block.tag sits between water and light_h in word3. It is Zig-side only, so nothing reads it here.
+    out.water = extractBits(data.word3, BLOCK_WATER_OFF, BLOCK_WATER_LEN);
     return out;
 }
 
 // The light of ONE tile of the grid: lightness in .x, and the OKLAB (a, b) of its tint in .yz.
 // The tint travels as a vector, not as a (chroma, hue) pair.
-// Coordinates outside the grid clamp to its border rather than wrapping to the far side.
 fn tile_light(coords: vec2i) -> vec3f {
     let size = vec2i(scene.map_size);
+    // The clamp is a safety net that only fires outside the tile grid.
+    // Since Zig pads the grid by lighting.CHUNK_MARGIN chunks on every side, it should be optional!
     let c = clamp(coords, vec2i(0), size - vec2i(1));
     let data = tiles[u32(c.y) * scene.map_size.x + u32(c.x)];
 
-    let lightness = f32(extractBits(data.word0, 24u, 6u)) / LIGHT_CHANNEL_MAX;
-    let chroma = f32(extractBits(data.word2, 24u, 6u)) / LIGHT_CHANNEL_MAX * LIGHT_CHROMA_MAX;
-    let hue = f32(extractBits(data.word3, 22u, 6u)) / LIGHT_HUE_STEPS * TAU;
+    let lightness = f32(extractBits(data.word0, BLOCK_LIGHT_L_OFF, BLOCK_LIGHT_L_LEN)) / LIGHT_CHANNEL_MAX;
+    let chroma = f32(extractBits(data.word2, BLOCK_LIGHT_C_OFF, BLOCK_LIGHT_C_LEN)) / LIGHT_CHANNEL_MAX * LIGHT_CHROMA_MAX;
+    let hue = f32(extractBits(data.word3, BLOCK_LIGHT_H_OFF, BLOCK_LIGHT_H_LEN)) / LIGHT_HUE_STEPS * TAU;
     return vec3f(lightness, chroma * cos(hue), chroma * sin(hue));
 }
 
-// The light at one PIXEL, blended across the four tiles nearest it!
+// The light at one PIXEL, blended across the four tiles nearest it.
+// The half-tile shift is what makes the reach exactly one tile in each direction.
 fn sample_light(tile_coords: vec2u, local_uv: vec2f) -> vec3f {
     let p = vec2f(tile_coords) + local_uv - 0.5;
     let base = floor(p);

@@ -228,7 +228,14 @@ pub fn build(b: *std.Build) void {
         // Bake sprite-layout and light constants into src/shader.wgsl.
         // Every file the generator reads a value out of belongs in this list,
         // or the shader keeps a stale constant while Zig packs against the new one.
-        generateShaderConstants(b, &[_][]const u8{ "zig/types/sprite.zig", "zig/render/lighting.zig" });
+        // memory.zig, refine.zig and water.zig decide the Block bit layout the shader unpacks.
+        generateShaderConstants(b, &[_][]const u8{
+            "zig/types/sprite.zig",
+            "zig/render/lighting.zig",
+            "zig/memory.zig",
+            "zig/state/refine.zig",
+            "zig/state/water.zig",
+        });
 
         // Bake per-tile sprite sheet colors into zig/render/particle_colors.zig;
         // hash-guarded like the shader constants.
