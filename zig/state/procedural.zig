@@ -93,7 +93,7 @@ const TerrainSampler = struct {
 
     /// Draws the three fields every terrain rule needs.
     fn init(wx: u32, wy: u32) TerrainSampler {
-        const density_seed = memory.game.getHashSeed(.density);
+        const density_seed = memory.getHashSeed(.density);
 
         var warp: Vec2f32 = .{ 0.0, 0.0 };
         const density_res = getFbmValueWarp(density_seed, wx, wy, 93.0, 28.0, &warp);
@@ -105,8 +105,8 @@ const TerrainSampler = struct {
             .warp = warp,
             .cell_hash = density_res.cell_hash,
             .density = density_res.value,
-            .cutoff = 0.75 + 0.3 * getHybridNoise(memory.game.getHashSeed(.cutoff), wx, wy, 20.5),
-            .moisture = fbm(getPerlinNoiseFixed, memory.game.getHashSeed(.moisture), wx, wy, 375.0, 3),
+            .cutoff = 0.75 + 0.3 * getHybridNoise(memory.getHashSeed(.cutoff), wx, wy, 20.5),
+            .moisture = fbm(getPerlinNoiseFixed, memory.getHashSeed(.moisture), wx, wy, 375.0, 3),
         };
     }
 
@@ -115,7 +115,7 @@ const TerrainSampler = struct {
         if (self.detail_ready) return;
         self.detail_ready = true;
 
-        self.weirdness = getBillowNoise(memory.game.getHashSeed(.weirdness), self.wx, self.wy, 140.8);
+        self.weirdness = getBillowNoise(memory.getHashSeed(.weirdness), self.wx, self.wy, 140.8);
         // reuse the density sample's domain warp instead of drawing a second one
         self.density2 = getFbmValuePrewarped(
             self.density_seed,
@@ -216,7 +216,7 @@ fn computeBaseSpriteType(wx: u32, wy: u32) TerrainData {
     return .{
         .sprite = sprite,
         .ore_density = if (sampler.deep)
-            fbm(getPerlinNoiseFixed, memory.game.getHashSeed(.ore_density), wx, wy, 122.0, 3)
+            fbm(getPerlinNoiseFixed, memory.getHashSeed(.ore_density), wx, wy, 122.0, 3)
         else
             0,
     };
@@ -452,8 +452,11 @@ pub fn invalidateTuning() void {
 
 /// Returns version key for current world seed and tuning state.
 pub inline fn terrainGeneration() u64 {
-    const seed = memory.game.getHashSeed(.moisture);
-    return (seed[0] ^ seed[1]) +% tuning_epoch;
+    const seed = memory.getHashSeed(.moisture);
+    if (dw.dev_menu) {
+        return (seed[0] ^ seed[1]) +% tuning_epoch;
+    }
+    return seed[0] ^ seed[1];
 }
 
 /// Calculates cache index for a block position using tile mapping.
@@ -502,7 +505,7 @@ pub fn getBaseSpriteType(
     return .{ .sprite = entry.sprite, .ore_density = entry.ore_density };
 }
 
-/// Returns base terrain sprite for block coordinates without copying full sample.
+/// Returns base terrain sprite for block coordinates without copying a full sample.
 pub fn getBaseSprite(chunk_x: u32, chunk_y: u32, block_x: u4, block_y: u4) Sprite {
     return baseTerrainSlot(chunk_x, chunk_y, block_x, block_y).sprite;
 }
@@ -788,8 +791,8 @@ pub const OreSeeds = struct {
     /// returns seed streams for base depth terrain
     pub inline fn atBaseDepth() OreSeeds {
         return .{
-            .field = memory.game.getHashSeed(.ores1),
-            .gem = memory.game.getHashSeed(.gems),
+            .field = memory.getHashSeed(.ores1),
+            .gem = memory.getHashSeed(.gems),
         };
     }
 
@@ -984,11 +987,13 @@ comptime {
 }
 
 /// Calculates normalized noise field value for an ore rule.
+///
 /// Deliberately NOT `inline`: `lane` and `rule` are `comptime`,
 /// so Zig already makes one specialization per rule and nothing is lost.
 /// `disperseOre()` unrolls 13 rules, and inlining a whole FBM evaluation into each copy
 /// made that one function large enough to dominate the Debug build.
-/// LLVM cost per function is quadratic in basic-block count, and `ReleaseFast` inlines this again anyway.
+///
+/// LLVM cost-per-func is quadratic in basic-block count, and `ReleaseFast` inlines this again anyway!
 fn oreField(seed: Vec2u, x: WorldCoord, y: WorldCoord, comptime lane: u3, comptime rule: OreDispersal) f32 {
     const inv_scale = 1.0 / rule.scale;
     // derive lane seed

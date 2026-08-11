@@ -40,6 +40,45 @@ const SHAKE_MAX_SCALE: f32 = 0.03; // plus or minus 3%
 /// Pure white noise strobes at high frame rates, so each frame only closes part of the gap.
 const SHAKE_RESPONSE: f32 = 0.45;
 
+/// Tiles the shader's light filter reads PAST the tile it shades.
+///
+/// `sample_light()` in src/shader.wgsl blends the four tiles nearest a pixel, so a pixel in the
+/// outermost visible tile reads one tile further out. `tile_light()` clamps past the grid, which
+/// would repeat the border row and hold a thin band of light still while the camera moves.
+/// The rasterizer must therefore hand the GPU at least this much tile beyond the visible edge.
+const LIGHT_FILTER_REACH_TILES: f64 = 1.0;
+
+/// Tiles per side the warp can pull into view beyond the unwarped screen edge,
+/// at the most zoomed-out camera scale.
+///
+/// `apply_warp()` runs in the shader, AFTER `rasterizeLayer()` has already chosen the window,
+/// so every term here is world the CPU did not know it had to cover:
+/// - a scale BELOW 1 shows `1 / (1 - scale)` times as much,
+/// - a rotation reaches the corners out by about `half_height * sin(angle)`, bounded here by the angle,
+/// - the offset slides the whole image.
+/// The three are added rather than combined properly, which only overstates the reach.
+const WARP_REACH_TILES: f64 = blk: {
+    const half_w: f64 = dw.SCREEN_WIDTH_HALF;
+    const half_h: f64 = dw.SCREEN_HEIGHT_HALF;
+
+    const from_scale = half_w * (1.0 / (1.0 - SHAKE_MAX_SCALE) - 1.0);
+    const from_rotation = half_h * SHAKE_MAX_ROTATION;
+    const reach_screen_px = from_scale + from_rotation + SHAKE_MAX_OFFSET;
+
+    // Screen pixels become world tiles at the zoom that shows the most world per pixel.
+    break :blk reach_screen_px / (dw.player.CAMERA_MIN_ZOOM * CHUNK_SIZE_FLOAT);
+};
+
+comptime {
+    // `rasterizeLayer()` pads the visible chunk rectangle by `CHUNK_MARGIN` chunks a side, and the
+    // rectangle is chunk-aligned OUTWARD, so this is the padding it guarantees in tiles.
+    const margin_tiles: f64 = @floatFromInt(dw.lighting.CHUNK_MARGIN * CHUNK_SIZE);
+    if (margin_tiles < LIGHT_FILTER_REACH_TILES + WARP_REACH_TILES) @compileError(
+        "The lighting margin no longer covers what the shader's light filter reads: " ++
+            "raise lighting.CHUNK_MARGIN, or lower CAMERA_MIN_ZOOM's shake.",
+    );
+}
+
 /// The per-frame warp handed to both tile layers.
 /// Regenerated once per render frame by `updateShake()` and reused for every pass,
 /// so the layers of a portal descent shake as one image.
@@ -180,11 +219,22 @@ fn overlayLayer() LayerPass {
 
 /// Adds visible chunk data for the live world to the scratch buffer, as well as properties.
 /// This is used in `render.prepareVisibleData()`.
-pub fn updateVisibleChunks(dt: f64, canvas_w: f64, canvas_h: f64) void {
+///
+/// Returns whether anything was rasterized. False means the layer is hidden outright
+/// (`portal.liveLayerHidden()`), and the caller must skip its draw calls: nothing was published for them
+/// to read. The player is still placed, since the entity pass draws them over both layers.
+pub fn updateVisibleChunks(dt: f64, canvas_w: f64, canvas_h: f64) bool {
     current_dt = dt;
     // rolled once per render frame, before either pass, so both layers are handed the same warp!
     updateShake(dw.portal.shakeIntensity());
-    rasterizeLayer(liveLayer(dt), canvas_w, canvas_h);
+
+    const pass = liveLayer(dt);
+    if (dw.portal.liveLayerHidden()) {
+        placePlayer(pass);
+        return false;
+    }
+    rasterizeLayer(pass, canvas_w, canvas_h);
+    return true;
 }
 
 /// Adds the portal descent's D+1 preview to the scratch buffer, ready for a second tile draw call.
@@ -219,6 +269,8 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
 
     // find the chunk indices that end up covering the screen, padded on every side by the lighting
     // margin so off-screen light sources that can bleed onscreen are present during the flood.
+    // The same padding is what keeps the shader's light filter inside the grid; the comptime block
+    // beside WARP_REACH_TILES above proves it covers the filter reach and the shake warp together.
     const margin: i32 = @intCast(dw.lighting.CHUNK_MARGIN);
     const min_cx = @as(i32, @intFromFloat(@floor(edge_left / subpixels_per_chunk))) - margin;
     const min_cy = @as(i32, @intFromFloat(@floor(edge_top / subpixels_per_chunk))) - margin;
@@ -339,6 +391,29 @@ fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
     }
 }
 
+/// Places the player sprite for the ENTITY pass (logical 480x270 px, sprite center).
+///
+/// This is the same world-to-screen mapping the tile grid uses (1 px = `CHUNK_SIZE` subpixels, scaled by
+/// zoom), so the player stays pixel-aligned with the blocks. `pass.zoom` is the logical
+/// (non-resolution-scaled) zoom, matching how every other entity is positioned.
+///
+/// Split out of `updateRenderProperties()` because the live layer is skipped once an ascent's overlay
+/// covers it, and the player is drawn over both layers either way.
+fn placePlayer(pass: LayerPass) void {
+    std.debug.assert(pass.source == .live);
+    player_screen_pos = .{
+        @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + (pass.player[0] - pass.cam[0]) * pass.zoom / CHUNK_SIZE_FLOAT),
+        @floatCast(@as(f64, dw.SCREEN_HEIGHT_HALF) + (pass.player[1] - pass.cam[1]) * pass.zoom / CHUNK_SIZE_FLOAT),
+    };
+    // A descent zooms the world in by exactly the factor that the next depth shrinks the player by,
+    // so the two cancel: holding the sprite at the committed scale keeps it from popping at either
+    // end. It shrinks further only as the portal swallows it.
+    player_screen_size = @floatCast(CHUNK_SIZE_FLOAT * if (dw.portal.hasMotionOverride())
+        memory.game.camera_scale * dw.portal.playerScale()
+    else
+        pass.zoom);
+}
+
 /// Sets scratch properties containing information to TypeScript for renderFrame.
 fn updateRenderProperties(
     pass: LayerPass,
@@ -362,26 +437,9 @@ fn updateRenderProperties(
     const player_interpolated_x = pass.player[0];
     const player_interpolated_y = pass.player[1];
 
-    // Player render position for the ENTITY pass (logical 480x270 px, sprite center).
-    // This is the same world->screen mapping the tile grid uses (1 px = CHUNK_SIZE subpixels, scaled by zoom),
-    // so the player entity stays pixel-aligned with the blocks. interpolated_zoom is the logical(non-resolution-scaled) zoom
-    // (matching how other entities are positioned),
-    //
-    // The overlay pass leaves these alone: the live pass already placed the player,
+    // The overlay pass leaves the player alone: the live pass already placed them,
     // and letting the D+1 layer restate them would move the sprite mid-descent.
-    if (pass.source == .live) {
-        player_screen_pos = .{
-            @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + (player_interpolated_x - interp_cam_x) * interpolated_zoom / CHUNK_SIZE_FLOAT),
-            @floatCast(@as(f64, dw.SCREEN_HEIGHT_HALF) + (player_interpolated_y - interp_cam_y) * interpolated_zoom / CHUNK_SIZE_FLOAT),
-        };
-        // A descent zooms the world in by exactly the factor that the next depth shrinks the player by,
-        // so the two cancel: holding the sprite at the committed scale keeps it from popping at either
-        // end. It shrinks further only as the portal swallows it.
-        player_screen_size = @floatCast(CHUNK_SIZE_FLOAT * if (dw.portal.hasMotionOverride())
-            memory.game.camera_scale * dw.portal.playerScale()
-        else
-            interpolated_zoom);
-    }
+    if (pass.source == .live) placePlayer(pass);
 
     // Position player in the middle of the screen plus their offset from the camera center
     const player_render_x = (player_interpolated_x - grid_origin_sub_x - CHUNK_SIZE_FLOAT * CHUNK_SIZE_FLOAT / 2) / CHUNK_SIZE_FLOAT;

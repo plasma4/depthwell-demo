@@ -69,6 +69,9 @@ export class GameEngine {
     /** Save manager instance that handles budgeting logic, OPFS, and tab lock. */
     public saveManager!: SaveManager;
 
+    /** One new-game setup may use WebCrypto at a time. Repeated calls join this promise. */
+    private startInFlight: Promise<void> | null = null;
+
     /** The mouse type that the canvas element is. */
     public mouseType!: number;
     /** The canvas where rendering is presented. */
@@ -207,9 +210,16 @@ export class GameEngine {
         return await EngineMaker.create(canvas, options);
     }
 
-    public async start() {
-        await this.setSeed(Seeding.makeSeed(100));
-        this.exports.init();
+    public start(): Promise<void> {
+        if (this.startInFlight) return this.startInFlight;
+
+        const start = this.setSeed(Seeding.makeSeed(100)).then(() => {
+            this.exports.init();
+        });
+        this.startInFlight = start.finally(() => {
+            this.startInFlight = null;
+        });
+        return this.startInFlight;
     }
 
     public destroy(reason = "unknown reason", error: any = null) {
