@@ -106,15 +106,9 @@ const IndicatorKind = enum {
 
     /// Whether clicking this indicator does anything, for the block it sits on this frame.
     ///
-    /// Spectating previous depths is read-only, so every mutating (menu-backed) indicator goes dead.
-    /// The two depth indicators stay live: `.invportal` keeps going further back, and ANY `.portal` acts as the way down.
-    /// The clicked portal is not entered (that would reframe the depth);
-    /// it only asks for the recorded route back, which is why every one of them serves equally.
-    ///
-    /// See `portal.triggerReturn()`.
+    /// Every depth is fully playable, so each indicator is live at each depth.
     fn clickableAt(self: IndicatorKind, ref: BlockRef) bool {
         _ = ref;
-        if (dw.world.isSpectating()) return self == .invportal or self == .portal;
         return self == .portal or self == .invportal or self.menuFlag() != null;
     }
 
@@ -129,9 +123,11 @@ const IndicatorKind = enum {
     /// Runs what clicking this indicator does, for kinds that act instead of toggling a menu.
     fn activate(self: IndicatorKind, ref: BlockRef) void {
         switch (self) {
-            // Above the deepest depth a portal walks the last ascent back instead of entering itself,
-            // landing on the spot that ascent was taken from.
-            .portal => if (dw.world.isSpectating())
+            // Above the frontier a portal walks the last ascent back instead of entering itself,
+            // landing on the portal that ascent was taken through.
+            // Entering any other portal would reframe the depth and orphan every key below it
+            // (see `world.AscentStep`), so all of them serve the recorded route equally.
+            .portal => if (dw.world.canRetrace())
                 dw.portal.triggerReturn(ref.coord, ref.bx, ref.by)
             else
                 dw.portal.trigger(ref.coord, ref.bx, ref.by),
@@ -395,11 +391,10 @@ pub fn drawIndicators() void {
 
     // A menu whose indicator drifted out of range (or vanished) autocloses.
     // A depth change closes every one of them up front instead (see `closeAllMenus()`).
-    const spectating = dw.world.isSpectating();
     inline for (@typeInfo(IndicatorKind).@"enum".fields) |field| {
         const kind: IndicatorKind = @enumFromInt(field.value);
         if (kind.menuFlag()) |flag| {
-            if (flag.* and (spectating or !drawer.seen.contains(kind))) closeMenu(kind);
+            if (flag.* and !drawer.seen.contains(kind)) closeMenu(kind);
         }
     }
 }

@@ -225,8 +225,17 @@ pub fn build(b: *std.Build) void {
             generateEnums(b, &[_][]const u8{ "zig/root.zig", "zig/types/types.zig", "zig/memory.zig" });
         }
 
-        // Bake sprite-layout constants into src/shader.wgsl.
-        generateShaderConstants(b, &[_][]const u8{"zig/types/sprite.zig"});
+        // Bake sprite-layout and light constants into src/shader.wgsl.
+        // Every file the generator reads a value out of belongs in this list,
+        // or the shader keeps a stale constant while Zig packs against the new one.
+        // memory.zig, refine.zig and water.zig decide the Block bit layout the shader unpacks.
+        generateShaderConstants(b, &[_][]const u8{
+            "zig/types/sprite.zig",
+            "zig/render/lighting.zig",
+            "zig/memory.zig",
+            "zig/state/refine.zig",
+            "zig/state/water.zig",
+        });
 
         // Bake per-tile sprite sheet colors into zig/render/particle_colors.zig;
         // hash-guarded like the shader constants.
@@ -386,9 +395,9 @@ fn generateEnums(b: *std.Build, paths: []const []const u8) void {
     b.getInstallStep().dependOn(&install_ts.step);
 }
 
-/// Regenerates the `#CONSTANT REGION, DO NOT MODIFY MANUALLY#` block in `src/shader.wgsl` from the `Sprite` enum.
+/// Regenerates the `#CONSTANT REGION START, DO NOT MODIFY CONTENTS MANUALLY#` block in `src/shader.wgsl` from the `Sprite` enum.
 /// Similar to `generateEnums()`: hashes `paths`, skips entirely when unchanged,
-/// otherwise builds and runs `zig/generate_shader.zig` (which rewrites the shader in place and updates the cache).
+/// otherwise builds and runs `zig/update_shader.zig` (which rewrites the shader in place and updates the cache).
 fn generateShaderConstants(b: *std.Build, paths: []const []const u8) void {
     const cache_root = b.cache_root.path orelse ".";
     const cache_path = b.pathJoin(&.{ cache_root, "shader_const_hashes.txt" });
@@ -425,9 +434,9 @@ fn generateShaderConstants(b: *std.Build, paths: []const []const u8) void {
     if (std.mem.eql(u8, current_hash_hex, old_hash_hex)) return;
 
     const gen_tool = b.addExecutable(.{
-        .name = "generate_shader",
+        .name = "update_shader",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("zig/generate_shader.zig"),
+            .root_source_file = b.path("zig/update_shader.zig"),
             .target = b.graph.host,
             .optimize = .Debug,
         }),

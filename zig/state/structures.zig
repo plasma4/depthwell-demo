@@ -43,7 +43,7 @@ const HashState = dw.seeding.HashState;
 const Vec2u = dw.utils.Vec2u;
 const Sprite = dw.Sprite;
 
-/// A struct list of all structures ordered by spawning priority.
+/// A struct list of all structures ordered by spawning priority (first to last).
 pub const structures = .{
     @import("structures/Tree.zig"),
     @import("structures/BasicRect.zig"),
@@ -562,14 +562,14 @@ const StructCacheEntry = struct {
 /// A cell is `spawn_area` blocks wide,
 /// so even the smallest kind's tile spans far more world than one generation pass touches.
 const STRUCT_CACHE_TILE = 32;
+const STRUCT_CACHE_SIZE = STRUCT_CACHE_TILE * STRUCT_CACHE_TILE;
+
 /// Direct-mapped bounds/blocked cache, one bank per structure kind (a power of two by construction).
-/// A structure's bounds and verdicts are identical for every footprint cell and re-derived by later structures' priority scans,
 ///
 /// so memoizing per grid cell collapses that repeated hashing (and all terrain sampling) to O(1).
-/// Pure function of (cell, seed): the per-entry seed check self-invalidates on reseed, so no explicit clear.
+/// Pure function of (cell, seed): the per-entry seed check self-invalidates on reseed, so no explicit clear is needed.
 /// The `i32` cx/cy size is okay because it's at base depth!
-const STRUCT_CACHE_SLOTS = STRUCT_CACHE_TILE * STRUCT_CACHE_TILE;
-var struct_cache: [structures.len][STRUCT_CACHE_SLOTS]StructCacheEntry = @splat(@splat(.{}));
+var struct_cache: [structures.len][STRUCT_CACHE_SIZE]StructCacheEntry = @splat(@splat(.{}));
 
 /// Returns the (populated) cache entry for structure `kind` at grid cell (`cx`, `cy`), computing bounds on miss.
 fn structCacheSlot(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) *StructCacheEntry {
@@ -1003,7 +1003,7 @@ pub fn addStructures(
 const testing = std.testing;
 
 /// Reference implementation of `addStructures()`: resolves the covering candidate from scratch for every single block.
-/// Exists only to validate prepass for testing (see below).
+/// Exists ONLY to validate prepass for testing (see below).
 fn addStructuresPerBlock(starting_sprite: Sprite, wx: u32, wy: u32, struct_seed: Vec2u) StructureResult {
     const i_wx = @as(i32, @bitCast(wx));
     const i_wy = @as(i32, @bitCast(wy));
@@ -1040,10 +1040,9 @@ fn addStructuresPerBlock(starting_sprite: Sprite, wx: u32, wy: u32, struct_seed:
 test "the per-chunk candidate prepass agrees with a per-block scan, block for block" {
     const memory = dw.memory;
     memory.game.seed = .{};
-    var rng = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(memory.game.seed, .seed2_init));
-    for (&memory.game.seed2) |*v| v.* = rng.next();
+    memory.deriveHashSeeds();
 
-    const struct_seed = memory.game.getHashSeed(.structures);
+    const struct_seed = memory.getHashSeed(.structures);
 
     // Spans many chunks in both axes, so candidates that overhang a chunk border are exercised on both sides.
     var wy: u32 = 0;
