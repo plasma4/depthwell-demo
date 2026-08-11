@@ -108,6 +108,7 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
 
     // Iterations may be > 1 if FPS is low as a correction factor.
     for (0..iterations) |_| {
+        dw.player.tickSoftlockFade();
         const descending = dw.portal.isActive(); // portal animation override stuff
         memory.game.bg_time += (logic_speed / TICK_RATE) * dw.portal.backgroundRate();
 
