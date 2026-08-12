@@ -19,9 +19,9 @@ Stuck on how to begin?
 - Left-click places blocks. Click an inventory slot to pick a block type. Click an indicator above a block to open its menu.
 - Select the pickaxe in the inventory to mine. Use WASD or the arrow keys to move.
 - Look for items with an indicator above them. A furnace smelts ore into bars. You can go to crafting station "cores" to upgrade!
-- You cannot mine everything. Either your pickaxe is too weak, or that block is not minable yet.
+- You cannot mine everything. Either your pickaxe is too weak, or that block is not mine-able yet.
 
-Press M to open or close the debug menu and the logs. Creative mode lives in that menu and makes block testing easy.
+Press M to open or close the debug menu and the logs. Creative mode lives in that menu and makes testing simpler (and allows you to move into solid blocks)!
 
 Inventory hotkeys:
 
@@ -324,23 +324,23 @@ Every cache sits in static WASM memory with a fixed budget, so nothing grows wit
 
 **The access pattern decides the shape of a cache, and nearly every pattern here is a sweep.** A sweep visits a rectangle of cells in order and then visits the same rectangle again: the generator walking a chunk, the halo walking its border, the renderer redrawing the window each frame. Total capacity is the wrong thing to measure for a sweep. What matters is whether two cells that are live at the same time can land in the same slot.
 
-That is why most banks are **direct-mapped and tiled** through `dw.utils.tileIndex()` (rather than a multi-associative cache or similar). A cell's slot is its position wrapped into a power-of-two tile, never a hash. Two cells share a slot only when they sit a whole tile apart. So as long as the tile is bigger than the sweep, the sweep has **zero** conflicts by construction. A chunk and its halo cannot evict each other.
+That is why most caches are **direct-mapped and tiled** through `dw.utils.tileIndex()` (rather than a multi-associative cache or similar). A cell's slot is its position wrapped into a power-of-two tile, never a hash. Two cells share a slot only when they sit a whole tile apart. So as long as the tile is bigger than the sweep, the sweep has **zero** conflicts by construction. A chunk and its halo cannot evict each other.
 
 Invalidation splits them into two families. Some **self-invalidate**: each entry stores the identity it was computed under, and a read that does not match recomputes. The rest get **dropped** by `world.clearCaches()`, which runs on a depth change or a reseed. The main hazard is here: any debug slider that moves terrain must set `regen = true`, or the slider moves and the cached samples do not.
 
 From shallowest to deepest:
 
-| Bank                            | Holds                                                                                                                               | Shape                                                                                                                       | Dropped by                          |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
-| `procedural.base_terrain_cache` | The raw terrain sample at one base-depth block: which stone, and how much ore the spot wants. The expensive one.                    | Tiled 256 blocks across by 128 down. 32768 entries of 16 bytes, 512 KiB.                                                    | Self, against `terrainGeneration()` |
-| `world.foundation_cache`        | The finished base-depth block: terrain, plus the ore over it, plus any structure that claimed it. No decorations, which come later. | The same tile as above, on purpose, because one sweep reads both.                                                           | Self, against `terrainGeneration()` |
-| `structures.struct_cache`       | One bank per structure kind, holding the box in each cell of that kind's spawn grid with the terrain rules applied.                 | Tiled 32 by 32 grid cells. A cell is `spawn_area` blocks wide.                                                              | Self, against seed and generation   |
-| `structures.chunk_ctx`          | Every structure that can reach into one chunk, resolved once per chunk instead of once per block.                                   | Tiled 16 chunks across by 4 down.                                                                                           | Self, against seed and generation   |
-| `QuadCache.seed_cache`          | The four seeds of one chunk, mixed from its quadrant seed, suffix, and depth. Cheap, but asked for constantly.                      | 4-way hash, 256 entries.                                                                                                    | `clearCaches()`                     |
-| `ancestor.chunk_noise`          | The two seed streams every cell of one chunk shares.                                                                                | Exactly one entry.                                                                                                          | `clearCaches()`                     |
-| `ancestor.ancestor_cache`       | Whole materialized chunks at parent depths. This is what recursive generation reads.                                                | 8-way with CLOCK eviction, indexed by _distance_ from D. The two nearest depths get 128 slots, the rest get 8. About 2 MiB. | `clearCaches(true)`                 |
-| `ancestor.parent_hood_cache`    | A parent block and its eight neighbors. 64 sets of 4.                                                                               | The other deliberate hash.                                                                                                  | `clearCaches()`                     |
-| `world.chunk_cache`             | Finished chunks at D. The only bank the renderer reads.                                                                             | Tiled to the widest window the camera can ask for. A dev build lands on 64 by 32 chunks, 2048 slots, 8 MiB.                 | Replaced in place                   |
+| Cache name                      | Holds                                                                                                                               | Shape                                                                                                                                                                   | How do I clear this cache?                  |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `procedural.base_terrain_cache` | The raw terrain sample at one base-depth block: which stone, and how much ore the spot wants.                                       | Tiled 256 blocks across by 128 down. 32768 entries of 16 bytes, 512 KiB.                                                                                                | Self-cleared, against `terrainGeneration()` |
+| `world.foundation_cache`        | The finished base-depth block: terrain, plus the ore over it, plus any structure that claimed it. No decorations, which come later. | The same tile as above, on purpose, because one sweep reads both.                                                                                                       | Self-cleared, against `terrainGeneration()` |
+| `structures.struct_cache`       | One cache per structure kind, holding the box in each cell of that kind's spawn grid with the terrain rules applied.                | Tiled 32 by 32 grid cells. A cell is `spawn_area` blocks wide.                                                                                                          | Self-cleared, against seed and generation   |
+| `structures.chunk_ctx`          | Every structure that can reach into one chunk, resolved once per chunk instead of once per block.                                   | Tiled 16 chunks across by 4 down.                                                                                                                                       | Self, against seed and generation           |
+| `QuadCache.seed_cache`          | The four seeds of one chunk, mixed from its quadrant seed, suffix, and depth. Cheap, but asked for constantly.                      | 4-way hash, 256 entries.                                                                                                                                                | `clearCaches()`                             |
+| `ancestor.chunk_noise`          | The two seed streams every cell of one chunk shares.                                                                                | Exactly one entry.                                                                                                                                                      | `clearCaches()`                             |
+| `ancestor.ancestor_cache`       | Whole materialized chunks at parent depths. This is what recursive generation reads.                                                | 8-way with CLOCK eviction, indexed by _distance_ from D. The two nearest depths get 128 slots, the rest get 8. About 2 MiB.                                             | `clearCaches(true)`                         |
+| `ancestor.parent_hood_cache`    | A parent block and its eight neighbors. 64 sets of 4.                                                                               | The other deliberate hash.                                                                                                                                              | `clearCaches()`                             |
+| `world.chunk_cache`             | Finished chunks at D. The only cache the renderer reads.                                                                            | Tiled to the widest window the camera can ask for. The dev build (which has the minimum camera zoom 10 times smaller than normal!) has 64x32 chunks, 2048 slots, 8 MiB. | Replaced in place                           |
 
 Additional notes on the caches:
 
@@ -352,40 +352,41 @@ Additional notes on the caches:
 
 `chunk_cache` is what the camera falls back to whenever it outruns the `SimBuffer`, whether the player moved fast or zoomed out. Because the tile covers the window, a still camera settles at zero misses and a panning one pays only for the row that just came into view. The one thing that outgrows the tile is a portal ascent, which stretches the live layer to about 7 times its usual window. That is left alone on purpose, and the next section says why.
 
-One rule ties them all together, and it is the one to remember when adding a bank. **Every cache above memoizes procedural output only**: what the world would be before the player touched it. Player edits stay a separate overlay that `materializeChunk()` replays on top. That is why an edit never has to reach into any of these banks, and why none of them watches the modification store. A bank that broke this rule would have to count store writes itself, which is a strong sign it belongs somewhere else.
+One rule ties them all together, and it is the one to remember when adding a cache. **Every cache above memoizes procedural output only**: what the world would be before the player touched it. Player edits stay a separate overlay that `materializeChunk()` replays on top. That is why an edit never has to reach into any of these caches, and why none of them watches the modification store. A cache that broke this rule would have to count store writes itself, which is a strong sign it belongs somewhere else.
 
 The prefix stack follows the same idea one level up. Each level of the stack stores its own 512-bit seed, so the game never re-hashes a 10,000-level BLAKE3 chain. It hashes only the newest step. That makes a depth change effectively constant time.
 
 #### What they cost, and what a small tile does
 
-Every bank is a fixed-size static array, so its worst case is its only case:
+Every cache is a fixed-size static array, so its worst case is its only case!
 
-| Bank                 | Bytes   |
-| -------------------- | ------- |
-| `chunk_pool`         | 9 MiB   |
-| `ancestor_cache`     | 2 MiB   |
-| `base_terrain_cache` | 512 KiB |
-| `foundation_cache`   | 512 KiB |
-| `struct_cache`       | 512 KiB |
-| `chunk_ctx`          | 111 KiB |
-| `quad_cache`         | 115 KiB |
-| `chunk_cache` keys   | 96 KiB  |
-| `parent_hood_cache`  | 48 KiB  |
-| `chunk_noise`        | 32 B    |
+| cache                | Bytes                                         |
+| -------------------- | --------------------------------------------- |
+| `ancestor_cache`     | 2 MiB                                         |
+| `chunk_pool`         | 1 MiB (9 MiB with huge dev menu camera cap)   |
+| `base_terrain_cache` | 512 KiB                                       |
+| `foundation_cache`   | 512 KiB                                       |
+| `struct_cache`       | 512 KiB                                       |
+| `parent_hood_cache`  | 192 KiB (wide margin due to collision chance) |
+| `chunk_ctx`          | 111 KiB                                       |
+| `quad_cache`         | 115 KiB                                       |
+| `chunk_cache` keys   | 96 KiB                                        |
+| `chunk_noise`        | 32 B                                          |
 
 `chunk_pool` is the `SimBuffer`'s 256 chunks and the chunk cache's 2048 chunks sharing one array, at 4 KiB each. The total is a little under 13 MiB. It shrinks with `dev_menu` off, because `CAMERA_MIN_ZOOM` then stops at 0.5 and the chunk cache tile falls to 16 by 16.
 
 Some dynamic allocations sit near these and **do** scale with the camera. The visible block buffer is 16 bytes a block, or 5 MiB at the widest dev window. Lighting adds a cost grid and three lanes over the same area. A portal descent's preview buffer is sized for the overlay's widest footprint, which is tens of MiB at full dev zoom-out. None of them is a cache.
 
-Now the interesting failure. **A tile that is too small never returns the wrong block.** Every bank compares the full key it stored, and the tile index is total, so every coordinate has exactly one slot and there is no "outside the cache" to fall off. A collision produces a miss and a recompute. A wrong tile is a performance bug, never a correctness one.
+Note that a tile that is too small never returns the wrong block, so caches are **always safe**. Every cache compares the full key it stored, and the tile index is total, so every coordinate has exactly one slot and there is no "outside the cache" to fall off. A collision produces a miss and a recompute. A wrong tile is merely a performance bug, never a correctness one!
 
 What it costs depends on the intrusion:
 
 - **A stray far read**, such as a debug jump or a probe outside the camera, costs exactly one eviction. Whatever it displaced comes back on its next miss. A direct-mapped slot has nothing to spill into, so there is no cascade.
+    - (Keep in mind all per-frame logic, such as water, should naturally remain in the confines of the `SimBuffer`!)
 - **A sweep wider than its tile** wraps onto itself. A sweep touches each cell once, so this costs nothing within a pass. It only means the next pass cannot reuse what the last one left. That is what a portal ascent does, and why `chunk_cache` does not size for it.
-- **Alternating between two cells a whole tile apart** is the one genuinely bad pattern, and it misses every time. No loop in the engine does this. Keeping it that way means keeping each tile at least as large as the sweep it serves, and each bank has a `comptime` check that states its sweep.
+- **Alternating between two cells a whole tile apart** is the one genuinely bad pattern, and it misses every time. No loop in the engine does this. Keeping it that way means keeping each tile at least as large as the sweep it serves, and each cache has a `comptime` check that states its sweep.
 
-One ordering rule falls out of direct mapping and is easy to miss. **Claim a cache entry after you fill it, never before.** The slot is fixed by position, so a nested fill of anything a tile away lands on the same slot. A key written up front would still be sitting there, naming a chunk whose blocks the outer fill has since overwritten. Every bank writes its key and its value in one assignment at the end, `ChunkCache.fill()` included.
+One ordering rule falls out of direct mapping and is easy to miss. **Claim a cache entry after you fill it, never before.** The slot is fixed by position, so a nested fill of anything a tile away lands on the same slot. A key written up front would still be sitting there, naming a chunk whose blocks the outer fill has since overwritten. Every cache writes its key and its value in one assignment at the end, `ChunkCache.fill()` included.
 
 ### Light system
 
