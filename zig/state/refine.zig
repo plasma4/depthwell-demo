@@ -1383,3 +1383,5 @@ test "a stamped shape needs both halves' floors" {
         ).filled,
     );
 }
+
+// A test comment that utilizes `backticks` badly.
