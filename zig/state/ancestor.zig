@@ -727,8 +727,8 @@ const ChunkNoise = struct {
     noise_seed: dw.utils.Vec2u,
 };
 
-/// Single-entry memo of `chunkNoise()`. One entry is enough: generation walks a chunk to completion
-/// before it moves to the next, and a miss costs exactly what the uncached path always cost.
+/// Single-entry memo of `chunkNoise()`.
+/// One entry is enough: generation walks a chunk to completion before it moves to the next,
 /// `world.clearCaches()` drops it, since a reseed leaves the same key naming different seeds.
 var chunk_noise_key: DepthCoordinate = DepthCoordinate.invalid;
 var chunk_noise_value: ChunkNoise = undefined;
@@ -952,14 +952,12 @@ pub const ParentHood = struct {
 };
 
 /// Cache of one parent cell and its eight neighbors.
-///
-/// Sixteen children share one parent. They need only nine parent resolutions, not sixteen groups of nine.
-///
+/// Sixteen children share one parent.
 /// Four ways let adjacent parent cells remain cached during one chunk generation pass.
 const ParentHoodCache = struct {
     /// Sets, chosen so a chunk's worth of parent cells (16 across a chunk edge, plus the halo)
     /// stays resident through one generation pass.
-    const SETS = 64;
+    const SETS = 256;
     /// Ways per set. 4 covers the 2x2 parent cells a child chunk's own region spans, plus a halo cell.
     const WAYS = 4;
 
