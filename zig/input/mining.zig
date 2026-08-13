@@ -386,7 +386,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
 
                         // Only auto-replace if the block being mined is different from the held item.
                         if (sprite_type.isInWorld()) {
-                            if (inventory.removeFromInventory(sprite_type)) { // make sure it's possible to use
+                            if (inventory.removeFromInventory(sprite_type, inventory.placementUnits(sprite_type))) { // make sure it's possible to use
                                 switch (world.modifyBlockType(
                                     mouse.mouse_chunk_coord.?, // mouse block successful already
                                     mouse.mouse_block_x,
@@ -401,7 +401,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                                     },
                                     .rejected_softlock => {
                                         // No world write happened, so return the consumed placement item directly.
-                                        inventory.addToInventory(sprite_type, 1);
+                                        inventory.addToInventory(sprite_type, inventory.placementUnits(sprite_type));
                                         inventory.selected_sprite = sprite_type;
                                     },
                                 }
@@ -423,7 +423,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
             mining_progress = 0;
         } else if (block.isEmpty() and (in_creative or isLitForMining())) {
             // placing into empty air!
-            if (inventory.removeFromInventory(sprite_type)) {
+            if (inventory.removeFromInventory(sprite_type, inventory.placementUnits(sprite_type))) {
                 switch (world.modifyBlockType(
                     mouse.mouse_chunk_coord.?,
                     mouse.mouse_block_x,
@@ -443,7 +443,32 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                     },
                     .rejected_softlock => {
                         // No world write happened, so return the consumed placement item directly.
-                        inventory.addToInventory(sprite_type, 1);
+                        inventory.addToInventory(sprite_type, inventory.placementUnits(sprite_type));
+                        inventory.selected_sprite = sprite_type;
+                    },
+                }
+                selected_hp = 0;
+                mining_progress = 0;
+            }
+        } else if (sprite_type == .water and block.isLiquid() and block.hp < memory.Block.MAX_HP and
+            (in_creative or isLitForMining()))
+        {
+            // Pouring into a cell that already holds water tops it up to full.
+            // Only the units that fit are charged, so the pour neither creates nor destroys water.
+            // Without this the click falls through to collection and a partly full cell can never be filled.
+            const needed: u64 = memory.Block.MAX_HP - block.hp;
+            if (inventory.removeFromInventory(.water, needed)) {
+                switch (world.modifyBlockType(
+                    mouse.mouse_chunk_coord.?,
+                    mouse.mouse_block_x,
+                    mouse.mouse_block_y,
+                    sprite_type,
+                    block,
+                )) {
+                    .placed => dw.sound.playSound(9, 0.2, 0.1, 0.2),
+                    .collapsed => inventory.selected_sprite = sprite_type,
+                    .rejected_softlock => {
+                        inventory.addToInventory(.water, needed);
                         inventory.selected_sprite = sprite_type;
                     },
                 }
