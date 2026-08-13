@@ -165,12 +165,21 @@ pub const WaterState = packed union {
     /// Nothing around this block holds water. The state every block generates in.
     pub const dry: WaterState = .{ .bits = 0 };
 
-    /// A liquid only has to know whether more liquid sits directly above it,
+    /// A liquid has to know whether more liquid sits directly above it,
     /// which is what decides whether it draws a surface or a full body.
+    ///
+    /// Bit 1 is `falling` here and `below` in the `Solid` view.
+    /// Only bit 0 has to agree across the views, and the block `id` picks the view.
     pub const Liquid = packed struct(WaterBits) {
         /// Liquid of any depth directly above.
         above: bool = false,
-        _unused: u10 = 0,
+        /// The cell below can still take liquid, so this cell is mid-fall, not a resting surface.
+        ///
+        /// A falling cell draws at FULL height whatever its volume is.
+        /// Surface height comes from volume, so a thin stream of low-volume cells
+        /// would otherwise draw as a dashed column of slivers instead of one stream.
+        falling: bool = false,
+        _unused: u9 = 0,
     };
 
     /// Everything the shader needs to draw the water AROUND a block that is not itself liquid.
@@ -432,6 +441,13 @@ fn applyCellWaterFlags(
         water_state = getWaterFlags(top_nb, bottom_nb, left_nb, right_nb, above_left_nb, above_right_nb);
 
         const src_is_liquid = ptr.isLiquid();
+        // A liquid reads bit 1 as falling, so overwrite what the solid view put there.
+        // A missing chunk below counts as support, like everywhere else in this file.
+        if (src_is_liquid) {
+            const below_takes = if (bottom_nb) |b| (b.isFlowable() and getVolume(b) < MAX_HP) else false;
+            water_state.liquid.falling = below_takes;
+        }
+
         inline for (.{ -1, 0, 1 }) |dy| {
             inline for (.{ -1, 0, 1 }) |dx| {
                 if (dx == 0 and dy == 0) continue;
@@ -1173,4 +1189,28 @@ test "water: queued flags resolve even when no chunk is active" {
 
     try testing.expect(cell.edge_flags != STALE);
     try testing.expect(pending_flag_chunks.count() == 0);
+}
+
+test "water: a falling cell is flagged, a resting surface is not" {
+    TestWorld.begin();
+    defer TestWorld.end();
+
+    const chunk = testInstallChunk(4, 4);
+    for (0..CHUNK_SIZE) |bx| testSetSolid(chunk, bx, CHUNK_SIZE - 1);
+
+    // A cell resting directly on the floor, and a cell with air under it.
+    testSetWater(chunk, 3, CHUNK_SIZE - 2, 4);
+    testSetWater(chunk, 8, 2, 4);
+    tickWater();
+
+    const resting = chunk.blocks[((CHUNK_SIZE - 2) << CHUNK_SIZE_LOG2) | 3];
+    try testing.expect(!resting.water.liquid.falling);
+
+    // The airborne cell moved down one row during the tick it was flagged in.
+    var found_falling = false;
+    for (0..CHUNK_SIZE - 1) |by| {
+        const b = chunk.blocks[(by << CHUNK_SIZE_LOG2) | 8];
+        if (getVolume(b) > 0 and b.water.liquid.falling) found_falling = true;
+    }
+    try testing.expect(found_falling);
 }
