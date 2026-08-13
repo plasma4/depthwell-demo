@@ -32,7 +32,7 @@ There are three regimes. Mixing up their integer types is the most common way to
 - **Foundation vs solid** — `isSolid()` includes `edge_stone` (the world border); `isFoundation()` excludes it. Reading the border as air makes terrain erode toward it, so the carve uses `isSolid()` and material inheritance uses `isFoundation()`.
 - **Overlay / underlay** — an ore or gem is an overlay drawn over a `base_id` stone underlay.
 - **Refine** (`refine.zig`) — what a non-terrain parent block does at the next depth. A bush states a PLAN for its 4x4 child region instead of filling it, so one bush does not become sixteen.
-- **Carve** — `ancestor.carvesSlope()` deleting a child cell to make a parent silhouette sloped instead of blocky. The parent **core** (the center 2x2) is never carved, so a descent always has floor to land on.
+- **Carve** — `ancestor.carvesSlope()` deleting a child cell to make a parent silhouette sloped instead of blocky. The parent **core** (the center 2x2) is not carved, so a descent has floor to land on. A solid parent surrounded by water is the exception: water can consume its core instead of making a 2x2 island.
 - **Dispersal** — `procedural.disperseOre()` applying the comptime ore palette. It runs at base depth and at every recursive depth.
 
 ### Worldgen caches

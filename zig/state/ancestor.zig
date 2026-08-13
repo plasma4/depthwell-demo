@@ -330,7 +330,7 @@ inline fn worldBlock(quadrant_bit: u1, chunk: u64, block: u4) WorldCoord {
     return chunk_index * dw.CHUNK_SIZE + block;
 }
 
-/// Bounds (inclusive) of the core that a solid parent ALWAYS keeps at the next depth:
+/// Bounds (inclusive) of the core that a solid parent keeps at the next depth unless water surrounds it:
 /// the center `BLOCKS_PER_PARENT / 2` square of its child region, so a 2x2 out of the standard 4x4.
 ///
 /// (See diagram below: `o` is optional, `R` is required; this is meant for standard dupe-able solids.)
@@ -348,13 +348,17 @@ inline fn isParentCore(lx: u4, ly: u4) bool {
     return lx >= CORE_MIN and lx <= CORE_MAX and ly >= CORE_MIN and ly <= CORE_MAX;
 }
 
-/// Whether a child cell can't be carved; true if the block is the 2x2 core,
-/// OR if we want horizonta/vertical arms.
+/// Whether a child cell cannot be carved.
+/// Water can consume an isolated solid parent instead of preserving its square core.
+/// Other parents keep the 2x2 core and horizontal or vertical arms.
 inline fn isProtectedCell(n: [8]Block, lx: u4, ly: u4) bool {
     const core_x = lx >= CORE_MIN and lx <= CORE_MAX;
     const core_y = ly >= CORE_MIN and ly <= CORE_MAX;
 
-    if (core_x and core_y) return true;
+    if (core_x and core_y) {
+        for (n) |block| if (!block.isLiquid()) return true;
+        return false;
+    }
     // Neighbor 1 is above, 3 left, 4 right, 6 below (due to edge flags)
     if (core_x) return if (ly < CORE_MIN) n[1].isSolid() else n[6].isSolid();
     if (core_y) return if (lx < CORE_MIN) n[3].isSolid() else n[4].isSolid();
@@ -1280,7 +1284,7 @@ test "slope carve: a fully enclosed block is never touched" {
     }
 }
 
-test "slope carve: a parent always keeps its core, and only its core is unconditional" {
+test "slope carve: a parent in air keeps its core, and only its core is unconditional" {
     // The worst case there is: a lone block with nothing solid around it,
     // so every corner of its region reads one solid neighbor and the density field wants the whole thing gone.
     const parent: Block = .makeBasicBlock(.stone, 11);
@@ -1300,6 +1304,18 @@ test "slope carve: a parent always keeps its core, and only its core is uncondit
     // ...and the guard has to be a floor, not a blanket: the rest of the region must still erode,
     // or every block in the world squares off into its full 4x4 and the slopes disappear.
     try testing.expect(carved_outside);
+}
+
+test "slope carve: water can consume an isolated solid parent" {
+    const parent: Block = .makeBasicBlock(.stone, 12);
+    const water: Block = .makeBasicBlock(.water, 13);
+    const submerged: [8]Block = @splat(water);
+
+    for (0..dw.BLOCKS_PER_PARENT) |ly| {
+        for (0..dw.BLOCKS_PER_PARENT) |lx| {
+            try testing.expect(carvesAnywhere(parent, submerged, @intCast(lx), @intCast(ly)));
+        }
+    }
 }
 
 test "slope carve: solid neighbors stay joined across the border they share" {
