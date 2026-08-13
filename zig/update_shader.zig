@@ -122,6 +122,7 @@ pub fn main(init: std.process.Init) !void {
             bits.len,
         });
     }
+    try writeHueTable(writer);
     try writer.writeAll(src[end..]);
 
     // Only touch the file when the content actually changes, so the dev file-watcher does not churn.
@@ -138,4 +139,27 @@ pub fn main(init: std.process.Init) !void {
     const current_hash_hex = args[3];
     cwd.createDirPath(init.io, cache_root) catch {};
     cwd.writeFile(init.io, .{ .sub_path = cache_path, .data = current_hash_hex }) catch {};
+}
+
+/// Writes the `LIGHT_HUE_DIR` table: the unit vector of every hue step, as `(cos, sin)`.
+///
+/// `light_h` is a `LightChannel`, so a hue has exactly `lighting.HUE_STEPS` values.
+/// A table of that size is exact, which lets `tile_light()` drop a `cos()` and a `sin()`.
+/// `sample_light()` calls `tile_light()` four times per PIXEL,
+/// so this removes eight transcendental operations per pixel at native resolution.
+fn writeHueTable(writer: anytype) !void {
+    const steps = dw.lighting.HUE_STEPS;
+    try writer.print(
+        \\
+        \\// Unit vector of each hue step, as (cos, sin). Indexed by the raw light_h bits.
+        \\// Exact: a hue has only {d} values, so this replaces cos()/sin() with no loss.
+        \\const LIGHT_HUE_DIR = array<vec2f, {d}>(
+        \\
+    , .{ steps, steps });
+
+    for (0..steps) |i| {
+        const angle = 2.0 * std.math.pi * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps));
+        try writer.print("    vec2f({d:.9}, {d:.9}),\n", .{ @cos(angle), @sin(angle) });
+    }
+    try writer.writeAll(");\n");
 }

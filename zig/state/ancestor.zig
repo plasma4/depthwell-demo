@@ -330,8 +330,9 @@ inline fn worldBlock(quadrant_bit: u1, chunk: u64, block: u4) WorldCoord {
     return chunk_index * dw.CHUNK_SIZE + block;
 }
 
-/// Bounds (inclusive) of the core that a solid parent ALWAYS keeps at the next depth:
-/// the center `BLOCKS_PER_PARENT / 2` square of its child region, so a 2x2 out of the standard 4x4.
+/// Bounds (inclusive) of the core that a supported solid parent keeps at the next depth.
+/// The center is a `BLOCKS_PER_PARENT / 2` square of its child region.
+/// This is a 2x2 area in the standard 4x4 region.
 ///
 /// (See diagram below: `o` is optional, `R` is required; this is meant for standard dupe-able solids.)
 /// ```
@@ -343,13 +344,13 @@ inline fn worldBlock(quadrant_bit: u1, chunk: u64, block: u4) WorldCoord {
 const CORE_MIN: u4 = dw.BLOCKS_PER_PARENT / 2 - 1;
 const CORE_MAX: u4 = dw.BLOCKS_PER_PARENT / 2;
 
-/// Whether a child cell sits in the core its parent may never lose (see `CORE_MIN`).
+/// Whether a child cell sits in its parent's protected core (see `CORE_MIN`).
 inline fn isParentCore(lx: u4, ly: u4) bool {
     return lx >= CORE_MIN and lx <= CORE_MAX and ly >= CORE_MIN and ly <= CORE_MAX;
 }
 
-/// Whether a child cell can't be carved; true if the block is the 2x2 core,
-/// OR if we want horizonta/vertical arms.
+/// Whether a child cell cannot be carved.
+/// Supported parents keep the 2x2 core and horizontal or vertical arms.
 inline fn isProtectedCell(n: [8]Block, lx: u4, ly: u4) bool {
     const core_x = lx >= CORE_MIN and lx <= CORE_MAX;
     const core_y = ly >= CORE_MIN and ly <= CORE_MAX;
@@ -586,11 +587,20 @@ fn carvesSlope(
     lx: u4,
     ly: u4,
 ) bool {
+    var buried = true;
+    var supported = false;
+    for (n) |block| {
+        const solid = block.isSolid();
+        buried = buried and solid;
+        supported = supported or solid;
+    }
+
+    // An isolated parent has no terrain connection to preserve at the finer depth.
+    if (!supported) return true;
+
     // The core and its bridges outrank every density and erosion term below; see `CORE_MIN`.
     if (isProtectedCell(n, lx, ly)) return false;
 
-    var buried = true;
-    for (n) |b| buried = buried and b.isSolid();
     if (buried) return false;
 
     const corners = cornerDensities(parent_block, n);
@@ -727,8 +737,8 @@ const ChunkNoise = struct {
     noise_seed: dw.utils.Vec2u,
 };
 
-/// Single-entry memo of `chunkNoise()`. One entry is enough: generation walks a chunk to completion
-/// before it moves to the next, and a miss costs exactly what the uncached path always cost.
+/// Single-entry memo of `chunkNoise()`.
+/// One entry is enough: generation walks a chunk to completion before it moves to the next,
 /// `world.clearCaches()` drops it, since a reseed leaves the same key naming different seeds.
 var chunk_noise_key: DepthCoordinate = DepthCoordinate.invalid;
 var chunk_noise_value: ChunkNoise = undefined;
@@ -952,14 +962,12 @@ pub const ParentHood = struct {
 };
 
 /// Cache of one parent cell and its eight neighbors.
-///
-/// Sixteen children share one parent. They need only nine parent resolutions, not sixteen groups of nine.
-///
+/// Sixteen children share one parent.
 /// Four ways let adjacent parent cells remain cached during one chunk generation pass.
 const ParentHoodCache = struct {
     /// Sets, chosen so a chunk's worth of parent cells (16 across a chunk edge, plus the halo)
     /// stays resident through one generation pass.
-    const SETS = 64;
+    const SETS = 256;
     /// Ways per set. 4 covers the 2x2 parent cells a child chunk's own region spans, plus a halo cell.
     const WAYS = 4;
 
@@ -1282,16 +1290,15 @@ test "slope carve: a fully enclosed block is never touched" {
     }
 }
 
-test "slope carve: a parent always keeps its core, and only its core is unconditional" {
-    // The worst case there is: a lone block with nothing solid around it,
-    // so every corner of its region reads one solid neighbor and the density field wants the whole thing gone.
+test "slope carve: a supported parent keeps its core, and only its core is unconditional" {
     const parent: Block = .makeBasicBlock(.stone, 11);
-    const alone: [8]Block = @splat(.empty);
+    var supported: [8]Block = @splat(.empty);
+    supported[6] = parent;
 
     var carved_outside = false;
     for (0..dw.BLOCKS_PER_PARENT) |ly| {
         for (0..dw.BLOCKS_PER_PARENT) |lx| {
-            const carves = carvesAnywhere(parent, alone, @intCast(lx), @intCast(ly));
+            const carves = carvesAnywhere(parent, supported, @intCast(lx), @intCast(ly));
             if (isParentCore(@intCast(lx), @intCast(ly))) {
                 // A descent onto this block has to have something to land on.
                 try testing.expect(!carves);
@@ -1302,6 +1309,20 @@ test "slope carve: a parent always keeps its core, and only its core is uncondit
     // ...and the guard has to be a floor, not a blanket: the rest of the region must still erode,
     // or every block in the world squares off into its full 4x4 and the slopes disappear.
     try testing.expect(carved_outside);
+}
+
+test "slope carve: an unsupported solid parent disappears" {
+    const parent: Block = .makeBasicBlock(.stone, 12);
+    const surroundings: [2]Block = .{ .empty, .makeBasicBlock(.water, 13) };
+
+    for (surroundings) |surrounding| {
+        const unsupported: [8]Block = @splat(surrounding);
+        for (0..dw.BLOCKS_PER_PARENT) |ly| {
+            for (0..dw.BLOCKS_PER_PARENT) |lx| {
+                try testing.expect(carvesAnywhere(parent, unsupported, @intCast(lx), @intCast(ly)));
+            }
+        }
+    }
 }
 
 test "slope carve: solid neighbors stay joined across the border they share" {
