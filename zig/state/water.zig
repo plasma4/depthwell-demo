@@ -93,7 +93,7 @@ pub fn queueWaterFlags(cx: SimIndexType, cy: SimIndexType) void {
 }
 
 /// Volume a settled cell of OPEN water comes to rest at.
-pub const RESTING_VOLUME: u4 = MAX_HP - 1;
+pub const RESTING_VOLUME: u4 = MAX_HP;
 
 /// Helper to get the volume of a block (0 to 15 for water/waterlogged blocks, 0 otherwise).
 /// (Integer casting automatically enforces HP being within `u4` range.)
