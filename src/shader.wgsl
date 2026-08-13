@@ -396,7 +396,11 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
     if id == WATER_START || id == WATER_START + 1u {
         let has_liquid_above = (in.water & 1u) != 0u;
         let has_solid_above = ((in.edge_flags & EDGE_TOP) != 0u) && !has_liquid_above;
-        let has_top = has_liquid_above || (has_solid_above && (in.hp == 15u));
+        // Bit 1 of a LIQUID water state is `falling`; see WaterState.Liquid in zig/state/water.zig.
+        // A falling cell is not a surface, so it draws full height and a thin stream
+        // reads as one connected column instead of a dashed line of slivers.
+        let is_falling = (in.water & 2u) != 0u;
+        let has_top = has_liquid_above || is_falling || (has_solid_above && (in.hp == 15u));
 
         if !has_top {
             // This is the top surface of the water body!
