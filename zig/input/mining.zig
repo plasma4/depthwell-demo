@@ -472,11 +472,7 @@ inline fn isToolBreakable(s: Sprite) bool {
     return sprite.getSpriteProps(s).strength == sprite.UNMINEABLE_STRENGTH;
 }
 
-/// Whether the cell at (bx, by) supports a protected installation and so cannot be dug out without the structure tool:
-/// an unmineable floor-anchored block resting on it from above,
-/// or an unmineable ceiling-anchored one hanging from it below.
-/// Either way, breaking the support would cascade the installation out
-/// (see `Sprite.supports()`), which the structure tool exists to gate.
+/// Whether the cell at (bx, by) supports a protected installation and so cannot be dug out without the structure tool.
 fn restsOnProtectedInstallation(coord: world.Coordinate, bx: u4, by: u4) bool {
     return restsOnProtectedInstallationWithLookup({}, liveBlockAt, coord, bx, by) orelse true;
 }
