@@ -61,6 +61,15 @@ var pending_flag_chunks: std.StaticBitSet(SIM_BUFFER_SIZE) = std.StaticBitSet(SI
 /// it touched instead of writing back a whole chunk. Set only by `setVolumeAt()`.
 var cells_changed: std.StaticBitSet(SIM_GRID_SIZE_SQ) = undefined;
 
+/// Direction the row sweep of phase 2 runs this tick.
+/// It flips every tick.
+///
+/// A cell that already received sideways water is barred from spreading again
+/// (`lateral_received`), so whichever end of a row moves first wins the tie.
+/// A fixed left-to-right sweep therefore drifts every pool one way over many ticks.
+/// The flip cancels the drift instead of accumulating it.
+var sweep_rightward: bool = false;
+
 /// Resets all water simulation states, clearing pending flag updates and tracking bitsets.
 pub fn reset() void {
     pending_flag_chunks = .initEmpty();
@@ -69,6 +78,7 @@ pub fn reset() void {
     lateral_received = .initEmpty();
     chunks_to_update_flags = .initEmpty();
     cells_changed = .initEmpty();
+    sweep_rightward = false;
 }
 
 /// Queues a manually-placed water block's chunk plus its 4 orthogonal neighbors for a batched flag recompute.
@@ -83,7 +93,7 @@ pub fn queueWaterFlags(cx: SimIndexType, cy: SimIndexType) void {
 }
 
 /// Volume a settled cell of OPEN water comes to rest at.
-pub const RESTING_VOLUME: u4 = MAX_HP - 1;
+pub const RESTING_VOLUME: u4 = MAX_HP;
 
 /// Helper to get the volume of a block (0 to 15 for water/waterlogged blocks, 0 otherwise).
 /// (Integer casting automatically enforces HP being within `u4` range.)
@@ -278,7 +288,17 @@ pub fn getWaterloggedStateSprites(
 }
 
 /// Computes the water volume for a cell dynamically.
-/// Supports cross-chunk reads via horizontal offsets (`bx` of -1 or 16).
+///
+/// `bx` may reach one full chunk to either side, so the valid range is `-CHUNK_SIZE` to
+/// `2 * CHUNK_SIZE - 1`. `cascadeSide()` reads at `rbx - 2` and `rbx + 2`, so the range is
+/// wider than one cell on purpose.
+/// `by` must stay inside the chunk: this helper has no vertical neighbors to fall back on.
+///
+/// A missing left or right chunk reads as `MAX_HP`, NOT as 0.
+/// The file treats an absent neighbor as present.
+/// So a cell at the `SimBuffer` border never sees open space outside the buffer,
+/// and cannot drain into it.
+/// This matches the null that `getLocalBlockPtr()` returns, which every caller reads as unflowable.
 inline fn getVolumeLocal(
     curr: *Chunk,
     left: ?*Chunk,
@@ -286,13 +306,15 @@ inline fn getVolumeLocal(
     bx: i32,
     by: i32,
 ) u32 {
+    std.debug.assert(by >= 0 and by < CHUNK_SIZE);
+    std.debug.assert(bx >= -@as(i32, CHUNK_SIZE) and bx < 2 * CHUNK_SIZE);
     if (bx >= 0 and bx < CHUNK_SIZE) {
         return getVolume(curr.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | bx))]);
     } else if (bx < 0) {
-        const l = left orelse return 0;
+        const l = left orelse return MAX_HP;
         return getVolume(l.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | (bx + CHUNK_SIZE)))]);
     } else {
-        const r = right orelse return 0;
+        const r = right orelse return MAX_HP;
         return getVolume(r.blocks[@as(usize, @intCast((by << CHUNK_SIZE_LOG2) | (bx - CHUNK_SIZE)))]);
     }
 }
@@ -834,14 +856,21 @@ pub fn tickWater() void {
         if (cy == SIM_BUFFER_WIDTH - 1) break;
     }
 
-    if (active_chunks.count() == 0) return;
-    water_updated = .initEmpty();
-    lateral_received = .initEmpty();
     chunks_to_update_flags = .initEmpty();
-    cells_changed = .initEmpty();
-
     chunks_to_update_flags.setUnion(pending_flag_chunks);
     pending_flag_chunks = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
+
+    // Placement queues flags through queueWaterFlags(), which promises they resolve this tick.
+    // That has to hold even when no chunk is active, so phase 4 runs before this returns.
+    if (active_chunks.count() == 0) {
+        recomputeFlagsFor(&chunks_to_update_flags);
+        return;
+    }
+
+    sweep_rightward = !sweep_rightward;
+    water_updated = .initEmpty();
+    lateral_received = .initEmpty();
+    cells_changed = .initEmpty();
 
     const water_before: u64 = if (VERIFY_WATER_MASS) totalSimWater() else 0;
 
@@ -851,8 +880,10 @@ pub fn tickWater() void {
     // (the water_updated bitset guards cells that already took their turn)
     var chunk_y: i32 = SIM_BUFFER_WIDTH - 1;
     while (chunk_y >= 0) : (chunk_y -= 1) {
-        var chunk_x: i32 = 0;
-        while (chunk_x < SIM_BUFFER_WIDTH) : (chunk_x += 1) {
+        // The chunk order flips with the row order, or the bias just moves to the chunk seams.
+        var step: i32 = 0;
+        while (step < SIM_BUFFER_WIDTH) : (step += 1) {
+            const chunk_x: i32 = if (sweep_rightward) step else SIM_BUFFER_WIDTH - 1 - step;
             const chunk_idx = (@as(usize, @intCast(chunk_y)) << world.SIM_WIDTH_LOG2) | @as(usize, @intCast(chunk_x));
 
             if (!active_chunks.isSet(chunk_idx)) continue;
@@ -876,9 +907,17 @@ pub fn tickWater() void {
 
             var by: i32 = CHUNK_SIZE - 1;
             while (by >= 0) : (by -= 1) {
-                var bx: i32 = 0;
-                while (bx < CHUNK_SIZE) : (bx += 1) {
-                    simulateCell(&hood, bx, by, &dirty_chunks);
+                // Sweep the row from the end that did not go first last tick; see sweep_rightward.
+                if (sweep_rightward) {
+                    var bx: i32 = 0;
+                    while (bx < CHUNK_SIZE) : (bx += 1) {
+                        simulateCell(&hood, bx, by, &dirty_chunks);
+                    }
+                } else {
+                    var bx: i32 = CHUNK_SIZE - 1;
+                    while (bx >= 0) : (bx -= 1) {
+                        simulateCell(&hood, bx, by, &dirty_chunks);
+                    }
                 }
             }
         }
@@ -973,4 +1012,165 @@ fn recomputeFlagsFor(chunks: *const std.StaticBitSet(SIM_BUFFER_SIZE)) void {
 pub fn flushPendingFlags() void {
     recomputeFlagsFor(&pending_flag_chunks);
     pending_flag_chunks = std.StaticBitSet(SIM_BUFFER_SIZE).initEmpty();
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+//
+// The sim is global state, so every test here restores what it touched.
+// SimBuffer.reset() puts the ring offsets back to zero, which makes
+// SimBuffer.getIndex(cx, cy) equal (cy << 4) | cx. Do not rely on that
+// outside a test: at a non-zero ring offset the two index spaces differ.
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+/// Installs an empty chunk at `SimBuffer` cell (`cx`, `cy`) and returns it.
+/// The chunk counts as holding water and as unsettled, so `tickWater()` picks it up.
+fn testInstallChunk(cx: SimIndexType, cy: SimIndexType) *Chunk {
+    const idx = SimBuffer.getIndex(cx, cy);
+    SimBuffer.keys[idx] = .{ .suffix = .{ 100 + @as(u64, cx), 100 + @as(u64, cy) }, .quadrant = 0 };
+    const chunk = &SimBuffer.sim_buffer_ptr[idx];
+    for (&chunk.blocks) |*b| b.* = Block.empty;
+    SimBuffer.has_water.set(idx);
+    SimBuffer.water_settled.unset(idx);
+    return chunk;
+}
+
+/// Writes one solid, unflowable block.
+fn testSetSolid(chunk: *Chunk, bx: usize, by: usize) void {
+    chunk.blocks[(by << CHUNK_SIZE_LOG2) | bx] = Block.makeBasicBlock(.stone, 0);
+}
+
+/// Writes one water cell of the given volume.
+fn testSetWater(chunk: *Chunk, bx: usize, by: usize, vol: u32) void {
+    setVolume(&chunk.blocks[(by << CHUNK_SIZE_LOG2) | bx], vol);
+}
+
+fn testVolAt(chunk: *const Chunk, bx: usize, by: usize) u32 {
+    return getVolume(chunk.blocks[(by << CHUNK_SIZE_LOG2) | bx]);
+}
+
+/// Total water in one chunk.
+fn testChunkWater(chunk: *const Chunk) u32 {
+    var total: u32 = 0;
+    for (&chunk.blocks) |b| total += getVolume(b);
+    return total;
+}
+
+/// Shared setup and teardown for the sim tests.
+const TestWorld = struct {
+    fn begin() void {
+        SimBuffer.reset();
+        reset();
+        world.mod_store.init(testing.allocator);
+    }
+    fn end() void {
+        world.mod_store.deinit();
+        SimBuffer.reset();
+        reset();
+    }
+};
+
+test "water: a tick conserves total volume" {
+    TestWorld.begin();
+    defer TestWorld.end();
+
+    const chunk = testInstallChunk(4, 4);
+    // A floor with a column of water resting on it.
+    for (0..CHUNK_SIZE) |bx| testSetSolid(chunk, bx, CHUNK_SIZE - 1);
+    testSetWater(chunk, 8, 2, MAX_HP);
+    testSetWater(chunk, 8, 3, MAX_HP);
+    testSetWater(chunk, 8, 4, 7);
+
+    const before = testChunkWater(chunk);
+    try testing.expect(before > 0);
+
+    for (0..24) |_| tickWater();
+
+    try testing.expectEqual(before, testChunkWater(chunk));
+}
+
+test "water: the row sweep does not favor one side" {
+    TestWorld.begin();
+    defer TestWorld.end();
+
+    const chunk = testInstallChunk(4, 4);
+    // A symmetric basin: solid floor, solid walls well clear of the water.
+    for (0..CHUNK_SIZE) |bx| testSetSolid(chunk, bx, CHUNK_SIZE - 1);
+    testSetSolid(chunk, 0, CHUNK_SIZE - 2);
+    testSetSolid(chunk, CHUNK_SIZE - 1, CHUNK_SIZE - 2);
+
+    // One tall column dead center of the 16-wide chunk, so cells 7 and 8 are the mirror pair.
+    testSetWater(chunk, 7, CHUNK_SIZE - 2, MAX_HP);
+    testSetWater(chunk, 8, CHUNK_SIZE - 2, MAX_HP);
+
+    // An even number of ticks, so the alternating sweep cancels rather than accumulates.
+    for (0..32) |_| tickWater();
+
+    const row = CHUNK_SIZE - 2;
+    var offset: usize = 0;
+    while (offset < 7) : (offset += 1) {
+        const left = testVolAt(chunk, 7 - offset, row);
+        const right = testVolAt(chunk, 8 + offset, row);
+        try testing.expectEqual(left, right);
+    }
+}
+
+test "water: a cell at the SimBuffer border does not drain into the missing chunk" {
+    TestWorld.begin();
+    defer TestWorld.end();
+
+    // Column 0 with NO left neighbor installed, so the left chunk is absent.
+    const chunk = testInstallChunk(0, 4);
+    for (0..CHUNK_SIZE) |bx| testSetSolid(chunk, bx, CHUNK_SIZE - 1);
+    testSetWater(chunk, 0, CHUNK_SIZE - 2, MAX_HP);
+    testSetWater(chunk, 1, CHUNK_SIZE - 2, MAX_HP);
+
+    const before = testChunkWater(chunk);
+    for (0..24) |_| tickWater();
+
+    // Nothing may vanish through the open border.
+    try testing.expectEqual(before, testChunkWater(chunk));
+}
+
+test "water: a flat pool settles and stays settled" {
+    TestWorld.begin();
+    defer TestWorld.end();
+
+    const chunk = testInstallChunk(4, 4);
+    for (0..CHUNK_SIZE) |bx| testSetSolid(chunk, bx, CHUNK_SIZE - 1);
+    for (0..CHUNK_SIZE) |bx| testSetWater(chunk, bx, CHUNK_SIZE - 2, RESTING_VOLUME);
+
+    for (0..32) |_| tickWater();
+
+    const idx = SimBuffer.getIndex(4, 4);
+    try testing.expect(SimBuffer.water_settled.isSet(idx));
+
+    // Once settled, a further tick must not disturb it.
+    const snapshot = testChunkWater(chunk);
+    tickWater();
+    try testing.expectEqual(snapshot, testChunkWater(chunk));
+}
+
+test "water: queued flags resolve even when no chunk is active" {
+    TestWorld.begin();
+    defer TestWorld.end();
+
+    // A chunk that holds water but is already settled, so phase 1 finds nothing active.
+    const chunk = testInstallChunk(4, 4);
+    for (0..CHUNK_SIZE) |bx| testSetSolid(chunk, bx, CHUNK_SIZE - 1);
+    testSetWater(chunk, 5, CHUNK_SIZE - 2, RESTING_VOLUME);
+    SimBuffer.water_settled.set(SimBuffer.getIndex(4, 4));
+
+    // A sentinel no recompute can produce. Draining the queue without recomputing leaves it.
+    const cell = &chunk.blocks[((CHUNK_SIZE - 2) << CHUNK_SIZE_LOG2) | 5];
+    const STALE: u8 = 0x5A;
+    cell.edge_flags = STALE;
+
+    queueWaterFlags(4, 4);
+    tickWater();
+
+    try testing.expect(cell.edge_flags != STALE);
+    try testing.expect(pending_flag_chunks.count() == 0);
 }
