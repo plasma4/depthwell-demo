@@ -331,7 +331,8 @@ inline fn worldBlock(quadrant_bit: u1, chunk: u64, block: u4) WorldCoord {
 }
 
 /// Bounds (inclusive) of the core that a solid parent ALWAYS keeps at the next depth:
-/// the center `BLOCKS_PER_PARENT / 2` square of its child region, so a 2x2 out of the standard 4x4.
+/// The center is a `BLOCKS_PER_PARENT / 2` square of its child region.
+/// This is a 2x2 area in the standard 4x4 region.
 ///
 /// (See diagram below: `o` is optional, `R` is required; this is meant for standard dupe-able solids.)
 /// ```
@@ -406,7 +407,9 @@ fn macroInfillSource(
     n: [8]Block,
     lx: u4,
     ly: u4,
+    water: u4,
 ) ?Block {
+    if (water > 0) return null;
     if (lx != 0 and lx != dw.BLOCKS_PER_PARENT - 1) return null;
     if (ly != 0 and ly != dw.BLOCKS_PER_PARENT - 1) return null;
 
@@ -727,8 +730,8 @@ const ChunkNoise = struct {
     noise_seed: dw.utils.Vec2u,
 };
 
-/// Single-entry memo of `chunkNoise()`. One entry is enough: generation walks a chunk to completion
-/// before it moves to the next, and a miss costs exactly what the uncached path always cost.
+/// Single-entry memo of `chunkNoise()`.
+/// One entry is enough: generation walks a chunk to completion before it moves to the next,
 /// `world.clearCaches()` drops it, since a reseed leaves the same key naming different seeds.
 var chunk_noise_key: DepthCoordinate = DepthCoordinate.invalid;
 var chunk_noise_value: ChunkNoise = undefined;
@@ -820,7 +823,7 @@ pub fn applyAncestorLogic(
         const refined = dw.refine.refineChild(rule, cell);
         if (refined.id != .none) return refined;
 
-        const source = macroInfillSource(rule.surface, parent_neighbors, lx, ly) orelse return refined;
+        const source = macroInfillSource(rule.surface, parent_neighbors, lx, ly, inherited_water) orelse return refined;
         if (!infillsCorner(noise_seed, wx, wy)) return refined;
         return infillSpec(source, noise_hash_2);
     }
@@ -952,14 +955,12 @@ pub const ParentHood = struct {
 };
 
 /// Cache of one parent cell and its eight neighbors.
-///
-/// Sixteen children share one parent. They need only nine parent resolutions, not sixteen groups of nine.
-///
+/// Sixteen children share one parent.
 /// Four ways let adjacent parent cells remain cached during one chunk generation pass.
 const ParentHoodCache = struct {
     /// Sets, chosen so a chunk's worth of parent cells (16 across a chunk edge, plus the halo)
     /// stays resident through one generation pass.
-    const SETS = 64;
+    const SETS = 256;
     /// Ways per set. 4 covers the 2x2 parent cells a child chunk's own region spans, plus a halo cell.
     const WAYS = 4;
 
@@ -1186,15 +1187,23 @@ test "infill: floor and ceiling macros use their support terrain" {
     var neighbors: [8]Block = @splat(.empty);
 
     neighbors[6] = stone;
-    try testing.expectEqual(stone.id, macroInfillSource(.floor, neighbors, 0, 0).?.id);
-    try testing.expect(macroInfillSource(.ceiling, neighbors, 0, 0) == null);
+    try testing.expectEqual(stone.id, macroInfillSource(.floor, neighbors, 0, 0, 0).?.id);
+    try testing.expect(macroInfillSource(.ceiling, neighbors, 0, 0, 0) == null);
 
     neighbors[1] = stone;
-    try testing.expectEqual(stone.id, macroInfillSource(.ceiling, neighbors, 3, 0).?.id);
-    try testing.expect(macroInfillSource(.suspended, neighbors, 3, 0) == null);
+    try testing.expectEqual(stone.id, macroInfillSource(.ceiling, neighbors, 3, 0, 0).?.id);
+    try testing.expect(macroInfillSource(.suspended, neighbors, 3, 0, 0) == null);
 
     neighbors[6] = .makeBasicBlock(.portal, 2);
-    try testing.expect(macroInfillSource(.floor, neighbors, 0, 3) == null);
+    try testing.expect(macroInfillSource(.floor, neighbors, 0, 3, 0) == null);
+}
+
+test "infill: a submerged macro does not borrow terrain into its corners" {
+    const stone: Block = .makeBasicBlock(.stone, 1);
+    var neighbors: [8]Block = @splat(.empty);
+    neighbors[6] = stone;
+
+    try testing.expect(macroInfillSource(.floor, neighbors, 0, 0, 1) == null);
 }
 
 /// Builds a parent block and its 8 row-major neighbors out of a 3x3 solidity map,
