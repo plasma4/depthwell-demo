@@ -328,18 +328,33 @@ pub fn tickDroppedItems() void {
 
 /// Decrements the amount of an item in the inventory by 1.
 /// Returns whether the removal was successful (as in, if there was at least one item, and the decrement worked).
-pub fn removeFromInventory(id: Sprite) bool {
+/// Inventory units one WHOLE placement of `id` costs.
+///
+/// Water is counted in `Block.MAX_HP` units per block, and every other item in one unit per block.
+/// The inventory readout divides the water count by that same number.
+pub fn placementUnits(id: Sprite) u64 {
+    return if (id == .water) memory.Block.MAX_HP else 1;
+}
+
+/// Takes exactly `units` of `id` out of the inventory.
+/// Returns false and takes nothing when the player does not have that many.
+///
+/// `units` is in INVENTORY units, not blocks, so a caller that places a whole block
+/// passes `placementUnits()`.
+/// A partial water top-up passes only the units that fit in the target cell:
+/// charging a full block for a partial pour would delete water the player still owns.
+pub fn removeFromInventory(id: Sprite, units: u64) bool {
     if (id.isEmpty() or id == .unselected) return false;
+    if (units == 0) return false;
 
     const idx = @intFromEnum(id);
     if (!isInCreative()) {
-        const to_remove = if (id == .water) memory.Block.MAX_HP else 1;
-        if (idx >= inventory_counts.len or inventory_counts[idx] < to_remove) return false;
-        inventory_counts[idx] -= to_remove;
+        if (idx >= inventory_counts.len or inventory_counts[idx] < units) return false;
+        inventory_counts[idx] -= units;
 
-        // if we used the last one, remove it immediately!
+        // if we can no longer afford a whole placement, drop the selection immediately!
         // the amount of water that the player has is rendered by dividing by 15, so this checks out
-        if (inventory_counts[idx] < to_remove and selected_sprite == id) {
+        if (inventory_counts[idx] < placementUnits(id) and selected_sprite == id) {
             selected_sprite = .unselected;
         }
     }
