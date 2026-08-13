@@ -44,6 +44,75 @@ const BLOCK_WATER_OFF: u32 = 0u;
 const BLOCK_WATER_LEN: u32 = 11u;
 const BLOCK_LIGHT_H_OFF: u32 = 26u;
 const BLOCK_LIGHT_H_LEN: u32 = 6u;
+
+// Unit vector of each hue step, as (cos, sin). Indexed by the raw light_h bits.
+// Exact: a hue has only 64 values, so this replaces cos()/sin() with no loss.
+const LIGHT_HUE_DIR = array<vec2f, 64>(
+    vec2f(1.000000000, 0.000000000),
+    vec2f(0.995184727, 0.098017140),
+    vec2f(0.980785280, 0.195090322),
+    vec2f(0.956940336, 0.290284677),
+    vec2f(0.923879533, 0.382683432),
+    vec2f(0.881921264, 0.471396737),
+    vec2f(0.831469612, 0.555570233),
+    vec2f(0.773010453, 0.634393284),
+    vec2f(0.707106781, 0.707106781),
+    vec2f(0.634393284, 0.773010453),
+    vec2f(0.555570233, 0.831469612),
+    vec2f(0.471396737, 0.881921264),
+    vec2f(0.382683432, 0.923879533),
+    vec2f(0.290284677, 0.956940336),
+    vec2f(0.195090322, 0.980785280),
+    vec2f(0.098017140, 0.995184727),
+    vec2f(0.000000000, 1.000000000),
+    vec2f(-0.098017140, 0.995184727),
+    vec2f(-0.195090322, 0.980785280),
+    vec2f(-0.290284677, 0.956940336),
+    vec2f(-0.382683432, 0.923879533),
+    vec2f(-0.471396737, 0.881921264),
+    vec2f(-0.555570233, 0.831469612),
+    vec2f(-0.634393284, 0.773010453),
+    vec2f(-0.707106781, 0.707106781),
+    vec2f(-0.773010453, 0.634393284),
+    vec2f(-0.831469612, 0.555570233),
+    vec2f(-0.881921264, 0.471396737),
+    vec2f(-0.923879533, 0.382683432),
+    vec2f(-0.956940336, 0.290284677),
+    vec2f(-0.980785280, 0.195090322),
+    vec2f(-0.995184727, 0.098017140),
+    vec2f(-1.000000000, 0.000000000),
+    vec2f(-0.995184727, -0.098017140),
+    vec2f(-0.980785280, -0.195090322),
+    vec2f(-0.956940336, -0.290284677),
+    vec2f(-0.923879533, -0.382683432),
+    vec2f(-0.881921264, -0.471396737),
+    vec2f(-0.831469612, -0.555570233),
+    vec2f(-0.773010453, -0.634393284),
+    vec2f(-0.707106781, -0.707106781),
+    vec2f(-0.634393284, -0.773010453),
+    vec2f(-0.555570233, -0.831469612),
+    vec2f(-0.471396737, -0.881921264),
+    vec2f(-0.382683432, -0.923879533),
+    vec2f(-0.290284677, -0.956940336),
+    vec2f(-0.195090322, -0.980785280),
+    vec2f(-0.098017140, -0.995184727),
+    vec2f(-0.000000000, -1.000000000),
+    vec2f(0.098017140, -0.995184727),
+    vec2f(0.195090322, -0.980785280),
+    vec2f(0.290284677, -0.956940336),
+    vec2f(0.382683432, -0.923879533),
+    vec2f(0.471396737, -0.881921264),
+    vec2f(0.555570233, -0.831469612),
+    vec2f(0.634393284, -0.773010453),
+    vec2f(0.707106781, -0.707106781),
+    vec2f(0.773010453, -0.634393284),
+    vec2f(0.831469612, -0.555570233),
+    vec2f(0.881921264, -0.471396737),
+    vec2f(0.923879533, -0.382683432),
+    vec2f(0.956940336, -0.290284677),
+    vec2f(0.980785280, -0.195090322),
+    vec2f(0.995184727, -0.098017140),
+);
 // #CONSTANT REGION END#
 
 const PI = radians(180.0);
@@ -196,8 +265,10 @@ fn tile_light(coords: vec2i) -> vec3f {
 
     let lightness = f32(extractBits(data.word0, BLOCK_LIGHT_L_OFF, BLOCK_LIGHT_L_LEN)) / LIGHT_CHANNEL_MAX;
     let chroma = f32(extractBits(data.word2, BLOCK_LIGHT_C_OFF, BLOCK_LIGHT_C_LEN)) / LIGHT_CHANNEL_MAX * LIGHT_CHROMA_MAX;
-    let hue = f32(extractBits(data.word3, BLOCK_LIGHT_H_OFF, BLOCK_LIGHT_H_LEN)) / LIGHT_HUE_STEPS * TAU;
-    return vec3f(lightness, chroma * cos(hue), chroma * sin(hue));
+    // Hue is quantized to LIGHT_HUE_STEPS values, so a table lookup is exact and skips cos()/sin().
+    // This runs four times per pixel through sample_light(), so it is the hot path here.
+    let hue_step = extractBits(data.word3, BLOCK_LIGHT_H_OFF, BLOCK_LIGHT_H_LEN);
+    return vec3f(lightness, chroma * LIGHT_HUE_DIR[hue_step]);
 }
 
 // The light at one PIXEL, blended across the four tiles nearest it.
