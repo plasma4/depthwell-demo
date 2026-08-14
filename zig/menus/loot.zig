@@ -1,9 +1,10 @@
 //! Chest loot menu: a 5x2 grid previewing the contents of the opened chest.
 //!
-//! Opening is routed through a chest's in-world indicator (see `render/indicators.zig`),
-//! which calls `open()` with the chest's block position so the menu knows WHICH chest backs it.
+//! Opening is routed through a chest's in-world indicator; see `render/indicators.zig`.
+//! It calls `open()` with the chest's block position, so the menu knows WHICH chest backs it.
 //!
-//! Contents are seeded based on block position and clicking any filled slot loots EVERYTHING at once!
+//! Contents are seeded from the block position.
+//! A click on any filled slot loots EVERYTHING at once.
 const std = @import("std");
 const dw = @import("../root.zig");
 const util = @import("util.zig");
@@ -25,7 +26,8 @@ const MIN_LOOT = 3;
 /// One rollable chest drop: an inclusive count range and a relative pick weight.
 const LootEntry = struct { item: Sprite, min: u32, max: u32, weight: u32 };
 
-/// The chest drop pool. Weights are relative; add a row to add a drop.
+/// The chest drop pool.
+/// Weights are relative, and a new row adds a drop.
 const loot_table = [_]LootEntry{
     .{ .item = .wood, .min = 4, .max = 12, .weight = 20 },
     .{ .item = .leaves, .min = 3, .max = 8, .weight = 3 },
@@ -63,18 +65,21 @@ const grid = util.Grid(.{ .len = MAX_LOOT, .cols = 5 });
 const MENU_SIZE: Vec2f32 = grid.SIZE_UV;
 const MENU_POS: Vec2f32 = .{ 0.5 - MENU_SIZE[0] / 2.0, 0.96 - MENU_SIZE[1] };
 
-/// Whether the cursor is over the loot panel. Always false while the menu is closed.
+/// Whether the cursor is over the loot panel.
+/// Always false while the menu is closed.
 pub fn isHoveringOnMenu() bool {
     return util.isHovering(dw.indicators.menus.loot and open_chest != null, MENU_POS, MENU_SIZE);
 }
 
-/// Rolls and shows the contents of the chest at `ref`. Called when its indicator toggles the menu open.
+/// Rolls and shows the contents of the chest at `ref`.
+/// Called when its indicator toggles the menu open.
 pub fn open(ref: dw.indicators.BlockRef) void {
     open_chest = ref;
     rollLoot(ref);
 }
 
-/// Forgets the open chest. Called when the menu toggles closed or during reset.
+/// Forgets the open chest.
+/// Called when the menu toggles closed, and during a reset.
 pub fn close() void {
     open_chest = null;
 }
@@ -155,7 +160,7 @@ pub fn draw() void {
     // The menu is only visible/interactive while opened via a chest indicator.
     if (!dw.indicators.menus.loot) return;
     const ref = open_chest orelse {
-        // an open flag without a backing chest (such as right after a load) has nothing to show
+        // An open flag without a backing chest, such as right after a load, has nothing to show.
         dw.indicators.menus.loot = false;
         return;
     };
@@ -167,7 +172,7 @@ pub fn draw() void {
         .sprite = .rectangle,
         .position = MENU_POS,
         .size = MENU_SIZE,
-        // warm chest brown
+        // Warm chest brown.
         .lcha = .{ 0.45, 0.12, 1.2, 1.0 },
     });
 

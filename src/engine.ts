@@ -286,7 +286,7 @@ export class GameEngine {
     /** Function called from Zig (using the `js_handle_visible_chunks` function in `env`) that actually draws the chunks. */
     public handleVisibleChunks(opacity: number, wireframeBrightness: number) {
         this.wireframeBrightness = wireframeBrightness;
-        // Ensure we have an active encoder from renderFrame to satisfy TS
+        // Make sure we have an active encoder from renderFrame, to satisfy TS
         if (
             !this.currentEncoder ||
             !this.currentTextureView ||
@@ -374,7 +374,7 @@ export class GameEngine {
 
     /** Function called from Zig (using the `js_handle_visible_entities` function in `env`) that renders entities. */
     public handleVisibleEntities() {
-        // setting color space flags not needed, piggybacking off of previous calls for color space
+        // Setting the color space flags is not needed; this rides on the previous calls
         this.renderCallId = 0;
         const scratchPtr = this.getScratchPtr();
         const entityBytes = this.getScratchProperty(0) * 48; // can't trust length as it's a multiple of 64
@@ -587,7 +587,7 @@ export class GameEngine {
                 );
 
                 if (!response.ok) {
-                    // standard error handling
+                    // Standard error handling
                     throw new Error(`HTTP error! status: ${response.status}`);
                 }
 
@@ -785,7 +785,7 @@ export class GameEngine {
      * ```ts
         let str1 = "hello", str2 = "hi"
         // In practice, you would either do the reading or writing from Zig.
-        // You would pass the string pointers and lengths to Zig through arguments if you're reading from Zig,
+        // You would pass the string pointers and lengths to Zig through arguments when reading from Zig,
         // and return pointers/lengths with getScratchProperty or some agreed-upon format.
 
         let ptr1 = engine.writeStr(str1); // Write a string, setting the scratch buffer's length to 5.
@@ -893,7 +893,7 @@ export class GameEngine {
             w = Math.round(cssW * devicePixelRatio);
             h = Math.round(cssH * devicePixelRatio);
         } else {
-            // final fallback
+            // Final fallback
             const cssW = entry.contentRect.width;
             const cssH = entry.contentRect.height;
 

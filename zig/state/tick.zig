@@ -66,7 +66,7 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
         }
     }
 
-    // The (inverted) portal indicators are the real way to change depth (see `state/portal.zig`);
+    // The (inverted) portal indicators are the real way to change depth (see state/portal.zig);
     // these hotkeys stay as a way to skip straight there, and are ignored mid-animation so they
     // cannot push a second transition during one.
     const can_hotkey_depth = dw.dev_menu and !dw.portal.isActive();
@@ -91,7 +91,7 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
     }
 
     // X: decrease depth (ascend), instantly. The depth left behind becomes frozen for its
-    // descendants, but stays fully playable (see `world.isAboveFrontier()`).
+    // descendants, but stays fully playable (see world.isAboveFrontier()).
     const just_decreased_depth = can_hotkey_depth and
         !just_increased_depth and
         dw.world.canAscend() and

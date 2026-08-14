@@ -37,7 +37,7 @@ comptime {
     //   (costs ~5% of computeBaseSpriteType(), so it stays off until it is actually needed)
     // both routes agree to f32 rounding wherever both are valid, so crossing 7 changes the world's SIZE and not the world
 
-    // what binds now is integer width, not mantissa width: `structures.MAX_WORLD_BLOCK` is an i32
+    // what binds now is integer width, not mantissa width: structures.MAX_WORLD_BLOCK is an i32
     // (deliberately, it is what traps out-of-world structure probes), so a 4 ** (2 + 14) world overflows it.
     // 13 is verified to build and pass the suite; going past it means widening the structure pass to i64.
     if (STARTING_ZOOM_TIMES > 13) {
@@ -69,10 +69,10 @@ fn resetAfterStart() void {
     dw.particles.reset();
     world.SimBuffer.reset();
     dw.water.reset();
-    // Seeded here (as well as from the loaded seed in `save.finalizeLoad()`) so it is never left undefined:
+    // Seeded here, as well as from the loaded seed in save.finalizeLoad(), so it is never undefined:
     // this path runs for both a new world and an import, including one that fails.
     dw.chunks.shake_seed = seeding.ChaCha12.init(&seeding.mixBaseSeed(memory.game.seed, .screen_shake));
-    // Frees the descent's preview buffer; `memory.game` above already cleared its saved fields.
+    // Frees the descent's preview buffer; memory.game above already cleared its saved fields.
     dw.portal.reset();
     dw.player.resetSoftlockFade();
 
@@ -154,7 +154,7 @@ pub fn findSafeSpawn() void {
 
     // The fixed window is the complete spawn-search budget. Reads below are resident only.
     // At a normal centered window, the radius-8 positive edge is one chunk past its half-open side.
-    // `SimBuffer.get()` returns null there without generation. At a clamped world edge, that coordinate can be resident.
+    // SimBuffer.get() returns null there without generation. At a clamped world edge, that coordinate can be resident.
     world.SimBuffer.sync(start_coord);
 
     var radius: i64 = 0;

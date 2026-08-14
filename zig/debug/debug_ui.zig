@@ -184,7 +184,8 @@ pub const buttons = [_]ButtonDef{
     },
 };
 
-/// Teleports to the top left quadrant. Then, tries to find a valid spawn point.
+/// Teleports to the top left quadrant.
+/// Then it tries to find a valid spawn point.
 fn teleportToEdge() void {
     memory.game.teleport(
         .{ .quadrant = 0, .suffix = .{ 0, 0 } },
@@ -200,8 +201,8 @@ fn clearCaches() void {
 /// Internal random number for teleport PRNG.
 /// This is for debugging only and should NOT be used for gameplay.
 var teleport_rand: u64 = std.math.maxInt(u64);
-/// Teleports to a random valid coordinate (chunk) within the same quadrant. Then, tries to find a valid spawn point.
-/// This is for debugging only and should NOT be used for gameplay.
+/// Teleports to a random valid chunk coordinate in the same quadrant, then searches for valid spawn.
+/// For debugging only and should NOT be used for gameplay!
 fn teleportRandomly() void {
     const game = &memory.game;
 
@@ -232,7 +233,7 @@ fn teleportRandomly() void {
 
 /// Handles a slider change to a new specified value.
 pub fn changeSlider(id: u32, val: f64) void {
-    // `id` is unsigned, so only the upper bound can fail; the old `and id < 0` made this unreachable.
+    // id is unsigned, so only the upper bound can fail; the old "and id < 0" made this unreachable.
     if (id >= sliders.len) @panic("Slider ID invalid!");
     if (sliders.len == 0) return;
     const s = sliders[id];

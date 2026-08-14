@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "build:depthwell": "zig build"
+    "build:depthwell": "zig build",
+    "lint:comments": "node tools/lint-comments.mjs",
+    "lint:comments:all": "node tools/lint-comments.mjs --all"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

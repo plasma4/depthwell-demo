@@ -14,10 +14,10 @@ const addEntity = dw.entity.addEntity;
 const drawNumber = dw.entity.drawNumber;
 
 /// Debug option, allowing for unlimited block placement.
-/// Use the `isInCreative()` function in order to check for creative mode.
+/// Use the `isInCreative()` function to check for creative mode.
 pub var IN_CREATIVE = false;
 /// Debug option, changing whether to show all inventory item slots and items or not.
-/// Use the `shouldShowAllItems()` function in order to check for this value correctly.
+/// Use the `shouldShowAllItems()` function to check this value correctly.
 pub const SHOW_ALL_INVENTORY_ITEMS = false;
 /// Determines how wide each row of the inventory is (how many slots per row).
 pub const INVENTORY_WIDTH = 10;
@@ -73,22 +73,26 @@ pub var selected_sprite: Sprite = .none;
 /// Dense storage: index is `@intFromEnum(Sprite)`, value is the number of that item in the inventory.
 pub var inventory_counts: [sprite.max_sprite_value + 1]u64 = @splat(0);
 
-/// Animation progress for each potential slot. Always between 0 (idle) and 1 (fully triggered).
+/// Animation progress for each potential slot.
+/// Always between 0, idle, and 1, fully triggered.
 pub var inventory_anim_progress: [sprite.max_sprite_value + 1]f32 = @splat(0.0);
 
-/// Animation progress for the wobble effect of text. Always between -1 and 1; 0 if idle.
+/// Animation progress for the wobble effect of text.
+/// Always between -1 and 1, and 0 when idle.
 pub var inventory_wobble_progress: [sprite.max_sprite_value + 1]f32 = @splat(0.0);
 
 /// Selected sprite as of the previous frame, used to retrigger the name banner's ripple on change.
-/// A value of `.none` represents the pickaxe. Set to `.unselected` to force refresh.
+/// A value of `.none` represents the pickaxe.
+/// Set it to `.unselected` to force a refresh.
 pub var last_named_sprite: Sprite = .unselected;
-/// Ripple strength of the selected-item name banner. 1 on selection change, decaying to 0 (idle).
+/// Ripple strength of the selected-item name banner.
+/// 1 on a selection change, decaying to 0 at idle.
 pub var name_wave: f32 = 0.0;
 /// Free-running phase (radians) driving the name banner's traveling wave.
 var name_phase: f32 = 0.0;
 
 /// Resets the selected-item name banner's ripple animation to its idle, page-load state.
-/// Called on load so a restored game doesn't inherit the previous session's banner phase.
+/// Called on load, so a restored game does not inherit the previous session's banner phase.
 pub fn resetNameBanner() void {
     last_named_sprite = .unselected;
     name_wave = 0.0;
@@ -205,7 +209,7 @@ pub fn addDroppedItemsAsEntities(time_diff: f64) void {
         fn render_item(_: void, item: *DroppedItem) void {
             const player_coord = memory.game.getPlayerCoord();
 
-            // Resolve relative chunk positions safely using the move-validation helper
+            // Resolve relative chunk positions safely using the move-validation helper.
             const prev_offset = getRelativeOffset(player_coord, item.last_position) orelse return;
             const curr_offset = getRelativeOffset(player_coord, item.position) orelse return;
 
@@ -242,7 +246,7 @@ pub fn addDroppedItemsAsEntities(time_diff: f64) void {
 
             const half_lifespan = getMaxItemDropLifespan() / 2;
             const life_fraction = @min(@as(f32, @floatFromInt(item.frames_left)) / half_lifespan, 1.0);
-            // Shrink as it approaches player
+            // Shrink as it approaches the player.
             const item_size = if (life_fraction == 1.0) 16.0 else 4.0 + 12.0 * life_fraction;
             const rotation_mult: f32 = if (item.is_clockwise) 1 else -1;
             // Rotate as it flies (so peak)
@@ -328,18 +332,33 @@ pub fn tickDroppedItems() void {
 
 /// Decrements the amount of an item in the inventory by 1.
 /// Returns whether the removal was successful (as in, if there was at least one item, and the decrement worked).
-pub fn removeFromInventory(id: Sprite) bool {
+/// Inventory units one WHOLE placement of `id` costs.
+///
+/// Water is counted in `Block.MAX_HP` units per block, and every other item in one unit per block.
+/// The inventory readout divides the water count by that same number.
+pub fn placementUnits(id: Sprite) u64 {
+    return if (id == .water) memory.Block.MAX_HP else 1;
+}
+
+/// Takes exactly `units` of `id` out of the inventory.
+/// Returns false and takes nothing when the player does not have that many.
+///
+/// `units` is in INVENTORY units, not blocks,
+/// so a caller that places a whole block passes `placementUnits()`.
+/// A partial water top-up passes only the units that fit in the target cell.
+/// A full charge for a partial pour would delete water the player still owns.
+pub fn removeFromInventory(id: Sprite, units: u64) bool {
     if (id.isEmpty() or id == .unselected) return false;
+    if (units == 0) return false;
 
     const idx = @intFromEnum(id);
     if (!isInCreative()) {
-        const to_remove = if (id == .water) memory.Block.MAX_HP else 1;
-        if (idx >= inventory_counts.len or inventory_counts[idx] < to_remove) return false;
-        inventory_counts[idx] -= to_remove;
+        if (idx >= inventory_counts.len or inventory_counts[idx] < units) return false;
+        inventory_counts[idx] -= units;
 
-        // if we used the last one, remove it immediately!
+        // if we can no longer afford a whole placement, drop the selection immediately!
         // the amount of water that the player has is rendered by dividing by 15, so this checks out
-        if (inventory_counts[idx] < to_remove and selected_sprite == id) {
+        if (inventory_counts[idx] < placementUnits(id) and selected_sprite == id) {
             selected_sprite = .unselected;
         }
     }
@@ -348,12 +367,13 @@ pub fn removeFromInventory(id: Sprite) bool {
     return true;
 }
 
-/// Whether `s` occupies a slot right now: the single predicate every slot walk shares, so the palette,
-/// the selection index, and the hover test can never disagree about which slot is which.
+/// Whether `s` occupies a slot right now.
+/// Every slot walk shares this one predicate.
+/// So the palette, the selection index, and the hover test always agree on which slot is which.
 inline fn hasSlot(s: Sprite) bool {
     if (s.isEmpty()) return false;
     // The right half of a 2x1 pair is placed BY its left half, never chosen;
-    // showing it would offer a block that deletes itself the moment it lands (see `world.modifyBlockType()`).
+    // showing it would offer a block that deletes itself the moment it lands (see world.modifyBlockType()).
     if (s.isPairedRight()) return false;
 
     // if we're showing all items, is this item actually placeable?
@@ -364,7 +384,8 @@ inline fn hasSlot(s: Sprite) bool {
     return owned > 0 and (s != .water or owned >= memory.Block.MAX_HP);
 }
 
-/// Helper to get the list of sprites currently in the inventory. Creates a temporary buffer in the stack.
+/// Helper to get the list of sprites currently in the inventory.
+/// Creates a temporary buffer on the stack.
 /// Always starts with .none, followed by owned foundation sprites sorted by ID.
 /// Requires a buffer to prevent dangling pointer (from local array) issues.
 pub fn getSpritesInInventory(buffer: *SlotBuffer) []Sprite {
@@ -393,7 +414,7 @@ pub fn getSelectedIndex() u16 {
         }
     }
 
-    // This shouldn't be possible, unless something bad happened or `SHOW_ALL_INVENTORY_ITEMS` got toggled!
+    // this should not be possible, unless something bad happened or SHOW_ALL_INVENTORY_ITEMS got toggled
     selected_sprite = .none;
     selected_row = 0;
     return 0;
@@ -456,7 +477,7 @@ pub fn drawInventory(time_diff: f64) void {
 
     var hovered_inventory_sprite: ?Sprite = null;
     for (active_slots, 0..) |active_sprite, i| {
-        // For each slot, find the sprite ID, handle animations, and draw sprite and its shadow
+        // for each slot, find the sprite ID, handle animations, and draw the sprite and its shadow
         const acts_as_pickaxe = active_sprite.isEmpty();
         const id = @intFromEnum(active_sprite);
         const is_selected = active_sprite == selected_sprite;
@@ -480,7 +501,7 @@ pub fn drawInventory(time_diff: f64) void {
 
         const inventory_pos: Vec2f32 = .{ 32 + col * spacing, 32 + row * spacing };
 
-        // Background sizing (using is_selected directly for instant feedback on bg)
+        // background sizing, using is_selected directly for instant feedback
         const bg_size: f32 = if (is_selected) base_size * 1.125 else if (acts_as_pickaxe) base_size * 0.9 else base_size;
         const bg_pos = inventory_pos - Vec2f32{ bg_size / 4.0, bg_size / 4.0 };
 
@@ -539,7 +560,7 @@ pub fn drawInventory(time_diff: f64) void {
         }
     }
 
-    // Only the furnace uses ore dragging, so the drag cursor is furnace-only (crafting has no drag).
+    // only the furnace uses ore dragging, so the drag cursor is furnace-only (crafting has no drag)
     if (mouse.click_focus == .inventory and menus.furnace) {
         mouse.requestCursorType(.grabbing);
     }
@@ -556,7 +577,7 @@ pub fn drawInventory(time_diff: f64) void {
         }
     }
 
-    // Second pass for numbers to ensure they are at the top of inventory rendering
+    // second pass for the numbers, so they land on top of the inventory rendering
     for (active_slots, 0..) |active_sprite, i| {
         if (active_sprite.isEmpty()) continue;
 
@@ -646,7 +667,7 @@ fn drawSelectedName(time_diff: f64) void {
 
     if (sprite_to_name == .unselected) return;
 
-    // Display name: the enum tag with underscores shown as spaces; the empty slot is the pickaxe.
+    // Display name: the enum tag with underscores shown as spaces; the empty slot is the pickaxe
     const name = if (sprite_to_name.isEmpty()) blk: {
         var buf: [128]u8 = undefined;
         var stats_buf: [64]u8 = undefined;
@@ -656,8 +677,8 @@ fn drawSelectedName(time_diff: f64) void {
             .{ dw.mining.mining_speed, dw.mining.mining_strength },
         ) catch "";
 
-        // from 1.0 to 0.9: stats "progress" for pickaxe goes from 0.0 to 1.0
-        // from 0.1 to 0.0: goes from 1.0 to 0.0
+        // From 1.0 to 0.9, the pickaxe stats "progress" goes from 0.0 to 1.0
+        // From 0.1 to 0.0, it goes from 1.0 back to 0.0
         const progress: f32 = if (name_wave > 0.9)
             (1.0 - name_wave) / 0.1
         else if (name_wave < 0.1)
@@ -673,7 +694,7 @@ fn drawSelectedName(time_diff: f64) void {
         ) catch "pickaxe";
     } else sprite_to_name.getName();
 
-    // Tint from the sprite's signature color; the empty slot borrows the equipped pickaxe tile.
+    // Tint from the sprite's signature color; the empty slot borrows the equipped pickaxe tile
     const rendered: Sprite = if (sprite_to_name.isEmpty())
         @enumFromInt(@intFromEnum(Sprite.pickaxe) + @intFromEnum(dw.mining.pickaxe_type))
     else

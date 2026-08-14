@@ -285,7 +285,7 @@ pub const Bitmap = struct {
                 const b: u64 = px.channels.b;
                 const a: u64 = px.channels.a;
 
-                // Ensure u64 math throughout to prevent overflow
+                // Keep the math in u64 throughout to prevent overflow
                 sum_r += r * r * a;
                 sum_g += g * g * a;
                 sum_b += b * b * a;
