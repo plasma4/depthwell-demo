@@ -59,7 +59,7 @@ export async function create(
                 "No canvas element or ID string provided, and no canvas was not found in the HTML.",
             );
         }
-        // Using the first HTML canvas element to create the GameEngine here.
+        // Using the first HTML canvas element to create the GameEngine here
     } else if (typeof canvas === "string") {
         const elem = document.getElementById(canvas);
         if (!(elem instanceof HTMLCanvasElement)) {
@@ -115,7 +115,7 @@ export async function create(
         {
             env: {
                 memory: mem,
-                // See how logging works in logger.zig. Logging is guaranteed to return valid arguments.
+                // See how logging works in logger.zig; logging always returns valid arguments
                 jsMessage: (
                     ptr: Zig.Pointer,
                     len: Zig.LengthLike,
@@ -266,8 +266,9 @@ export async function create(
             targets: [
                 {
                     format: format,
-                    // fs_background returns premultiplied color (rgb * opacity, opacity),
-                    // so the background cross-dissolves during a portal descent, where the D+1 background is drawn over D's.
+                    // fs_background returns premultiplied color (rgb * opacity, opacity), so the
+                    // background cross-dissolves during a portal descent, where the D+1 background
+                    // is drawn over D's
                     blend: {
                         color: {
                             srcFactor: "one",
@@ -419,7 +420,7 @@ export async function create(
     //     new Uint32Array([tileMap.width, tileMap.height]),
     // );
 
-    // do some media monitoring
+    // Do some media monitoring
     engine.isP3 = supportsP3 && format === "rgba16float";
     engine.is8Bit = format === "bgra8unorm";
 

@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
     try writer.print(
         \\// This is a dynamically generated file from generate_types.zig for use in engine.ts and should not be manually modified. See types.zig for where type definitions come from.
         \\
-        // getting rid of these because of Memory64 hacks: an error SHOULD be expected if these are referenced
+        // Dropped because of the Memory64 hacks: a reference to one of these SHOULD be an error
         \\/**
         \\ * A pointer in the WASM memory. Equals 0/0n to represent a null value.
         \\ */

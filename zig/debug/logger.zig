@@ -1,4 +1,7 @@
-//! Contains dedicated code for logging. Use quickWarn to quickly create warnings when testing (using ZLS or native zig test command), and quick to quickly log values to JS. Use the write()/clear() function to write to the 4 corners of the screen with the canvas for JS.
+//! Logging.
+//! - `quick()` logs a value to JS.
+//! - `quickWarn()` makes a warning while testing, works from both ZLS or from a native `zig test`.
+//! - `write()` and `clear()` put text in the four corners of the screen, on the JS canvas.
 const std = @import("std");
 const dw = @import("../root.zig");
 const memory = dw.memory;
@@ -28,7 +31,8 @@ const text_4 = text_buffer[3072..4096];
 /// Represents the lengths of the current strings in each text buffer (rendered to HTML elements).
 var text_lengths: [4]usize = .{ 0, 0, 0, 0 };
 
-/// Gets a time in milliseconds. Time is not guaranteed to start from 0 or standard UNIX timestamp when program execution begins.
+/// Gets a time in milliseconds.
+/// The clock does not have to start at 0, or at the UNIX epoch.
 pub inline fn getTime() f64 {
     if (dw.is_wasm) {
         return dw.jsGetTime();
@@ -336,8 +340,9 @@ fn formatArgs(writer: anytype, args: anytype) !void {
     }
 }
 
-/// Writes formatted text to one of the four UI text buffers. No-op without `dw.dev_menu`.
-/// Argument can be a simple literal, complex nested struct, and most other things.
+/// Writes formatted text to one of the four UI text buffers.
+/// Does nothing without `dw.dev_menu`.
+/// The argument can be a literal, a nested struct, or most other things.
 pub inline fn write(buffer_id: u2, args: anytype) void {
     if (!dw.dev_menu) return;
 
@@ -390,7 +395,7 @@ fn writerTruncate(writer: *std.Io.Writer, args: anytype) bool {
     return true;
 }
 
-/// Clears the text from a specific UI buffer (id 0-3). No-op without `dw.dev_menu`.
+/// Clears the text from one UI buffer, id 0-3. Does nothing without `dw.dev_menu`.
 pub fn clear(id: u2) void {
     if (!dw.dev_menu) return;
     text_lengths[id] = 0;

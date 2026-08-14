@@ -1,7 +1,8 @@
 //! Draws visual indicators above certain block types and routes indicator clicks to their menus.
 //!
-//! A single block window scan (see `scanIndicators()`) feeds both the per-frame drawing pass hover testing,
-//! so the drawn icon and its clickable hitbox can't ever drift apart.
+//! One block window scan feeds both the per-frame drawing pass and the hover test;
+//! see `scanIndicators()`.
+//! So the drawn icon and its clickable hitbox can never drift apart.
 const std = @import("std");
 const dw = @import("../root.zig");
 
@@ -20,7 +21,7 @@ const MenusList = struct {
     pub fn isAnyEnabled(self: @This()) bool {
         // inline for loops are unrolled at compile-time
         inline for (@typeInfo(@This()).@"struct".fields) |field_info| {
-            // Ensure we are only checking boolean fields
+            // Check boolean fields only
             if (field_info.type == bool) {
                 if (@field(self, field_info.name)) {
                     return true;
@@ -36,7 +37,8 @@ const MenusList = struct {
 /// List of menus that could be opened.
 pub var menus: MenusList = .{};
 
-/// Which core tiers sit within indicator range of the player this frame; refreshed by drawIndicators().
+/// Which core tiers sit within indicator range of the player this frame.
+/// `drawIndicators()` refreshes it.
 /// Consumed by future corecraft crafting logic to know which cores (if any) back the menu.
 pub const NearbyCores = packed struct {
     off: bool = false,
@@ -51,17 +53,20 @@ pub const NearbyCores = packed struct {
     }
 };
 
-/// Core tiers near the player, valid for the current frame only. See NearbyCores.
+/// Core tiers near the player, valid for the current frame only.
+/// See `NearbyCores`.
 pub var nearby_cores: NearbyCores = .{};
 
 /// Hue shifts, in radians, for the two depth-changing indicators.
 ///
-/// The slot sprite is white, so hue is ADDED onto it rather than replacing anything
-/// (see `DEFAULT_ENTITY_LCHA`). These are tuning knobs!
+/// The slot sprite is white, so hue is ADDED onto it and replaces nothing.
+/// See `DEFAULT_ENTITY_LCHA`.
+/// These are tuning knobs.
 const PORTAL_SLOT_HUE: f32 = -1.9;
 const INVPORTAL_SLOT_HUE: f32 = 1.1;
 
-/// Which menu (if any) an in-world block's indicator opens. Extend by adding a variant plus its rows below.
+/// Which menu an in-world block's indicator opens, if any.
+/// To extend it, add a variant and its rows below.
 const IndicatorKind = enum {
     furnace,
     corecraft,
@@ -126,7 +131,7 @@ const IndicatorKind = enum {
             // Above the frontier a portal walks the last ascent back instead of entering itself,
             // landing on the portal that ascent was taken through.
             // Entering any other portal would reframe the depth and orphan every key below it
-            // (see `world.AscentStep`), so all of them serve the recorded route equally.
+            // (see world.AscentStep), so all of them serve the recorded route equally.
             .portal => if (dw.world.canRetrace())
                 dw.portal.triggerReturn(ref.coord, ref.bx, ref.by)
             else
@@ -145,7 +150,8 @@ fn closeMenu(comptime kind: IndicatorKind) void {
     if (kind == .loot) @import("../menus/loot.zig").close();
 }
 
-/// Shuts every menu at once. Needed when a depth transition begins (see `portal.beginTransition()`).
+/// Shuts every menu at once.
+/// Needed when a depth transition begins; see `portal.beginTransition()`.
 pub fn closeAllMenus() void {
     inline for (@typeInfo(IndicatorKind).@"enum".fields) |field| {
         closeMenu(@enumFromInt(field.value));
@@ -309,13 +315,13 @@ const DrawVisitor = struct {
 
         const flag = kind.menuFlag();
         const is_open = if (flag) |f| f.* else false;
-        // undo camera scale mult (slot_size is scale-relative)
+        // Undo the camera scale multiply, because slot_size is scale-relative
         const rel_size: f32 = @floatCast(geom.slot_size / @as(f32, @floatCast(memory.game.camera_scale)));
 
-        // Only clickable indicators react; display-only ones (tree) just draw.
+        // Only clickable indicators react; a display-only one, such as a tree, just draws
         if (kind.clickableAt(ref) and geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
-            // Down-capture for .indicator is claimed centrally in mouse.processDownCaptures()
-            // (via isHoveringIndicator), so this frame's click_focus is already settled.
+            // Down-capture for .indicator is claimed centrally in mouse.processDownCaptures(),
+            // through isHoveringIndicator, so this frame's click_focus is already settled
 
             // Only change mouse appearance if current focus permits UI actions
             if (mouse.click_focus.permits(.indicator)) mouse.requestCursorType(.pointer);
@@ -325,7 +331,7 @@ const DrawVisitor = struct {
                 self.click_used = true;
                 if (flag) |f| {
                     f.* = !f.*;
-                    // The loot menu is per-chest: tell it which block backs it (or that it lost one).
+                    // The loot menu is per-chest, so tell it which block backs it, or that it lost one
                     if (kind == .loot) {
                         const loot = @import("../menus/loot.zig");
                         if (f.*) loot.open(ref) else loot.close();
@@ -336,13 +342,13 @@ const DrawVisitor = struct {
 
         // Background inventory slot (color shifts while its menu is open)
         dw.entity.addEntity(.{
-            // this creates an interesting style, just go with it
+            // This creates an interesting style, just go with it
             .sprite = if (kind == .furnace or kind == .portal or kind == .invportal) .wood_frame else .wood,
             .position = .{ geom.screen_x, geom.screen_y },
             .size = geom.slot_size,
             .lcha = if (kind == .portal or kind == .invportal)
-                // Brightens as the player closes in, to read as "this takes you somewhere";
-                // the hue is what separates going down from going up.
+                // Brightens as the player closes in, to read as "this takes you somewhere".
+                // The hue is what separates going down from going up
                 .{
                     0.85 + 0.15 * geom.opacity,
                     0.06 + rel_size * 0.006,
@@ -350,7 +356,7 @@ const DrawVisitor = struct {
                     geom.opacity,
                 }
             else if (kind == .furnace)
-                // wood style if furnace
+                // Wood style if furnace
                 if (is_open)
                     .{ 1.0, rel_size * 0.007, 0.3, geom.opacity }
                 else
@@ -390,7 +396,7 @@ pub fn drawIndicators() void {
     scanIndicators(view, &drawer);
 
     // A menu whose indicator drifted out of range (or vanished) autocloses.
-    // A depth change closes every one of them up front instead (see `closeAllMenus()`).
+    // A depth change closes every one of them up front instead (see closeAllMenus()).
     inline for (@typeInfo(IndicatorKind).@"enum".fields) |field| {
         const kind: IndicatorKind = @enumFromInt(field.value);
         if (kind.menuFlag()) |flag| {
