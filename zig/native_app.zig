@@ -1,5 +1,6 @@
-//! Code that starts up Mach Engine logic for native bulids
-//! Does not work. Mach Engine work has been paused until Zig SPIR-V support completes.
+//! Starts up Mach Engine for native builds.
+//! Does not work yet.
+//! Mach Engine work is paused until Zig SPIR-V support is complete.
 const std = @import("std");
 const mach = @import("mach");
 const gpu = mach.gpu;

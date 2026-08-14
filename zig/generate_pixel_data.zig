@@ -1,11 +1,13 @@
 //! Regenerates `zig/render/sprite_colors.zig` from the exported sprite atlas at build time.
 //!
-//! For every 16x16 atlas tile, collects the UNIQUE fully-opaque texel colors from main.png,
-//! converts each to OKLCH, and emits them as raw Zig arrays indexed CSR-style per tile.
-//! Translucent-only tiles (such as leaves, which top out below full alpha) have no fully-opaque texel,
-//! so those fall back to sampling the tile's most-opaque texels forced to full alpha.
+//! For every 16x16 atlas tile, it collects the UNIQUE fully-opaque texel colors
+//! from main.png, converts each to OKLCH, and writes them as raw Zig arrays.
+//! The arrays are indexed CSR-style per tile.
 //!
-//! Guarded by a content hash of the PNG so this host tool is not rebuilt/rerun on unrelated changes.
+//! A translucent-only tile, such as leaves, has no fully-opaque texel.
+//! Those tiles fall back to their most-opaque texels, forced to full alpha.
+//!
+//! A content hash of the PNG guards this, so an unrelated change does not rerun the tool.
 const std = @import("std");
 
 const Bitmap = @import("png/png_to_binary.zig").Bitmap;
@@ -81,8 +83,9 @@ pub fn main(init: std.process.Init) !void {
             }
         }
 
-        // Pick the primary (most common) and secondary (second most common) colors BEFORE sorting,
-        // while `counts` still aligns with `unique`. Fully-blank tiles have no color at all, so fall back to opaque white.
+        // Pick the primary (most common) and secondary (second most common) colors BEFORE
+        // sorting, while counts still aligns with unique. A fully-blank tile has no color
+        // at all, so it falls back to opaque white.
         const pair = if (unique_len == 0)
             [2]ColorRgba{ ColorRgba.white, ColorRgba.white }
         else if (unique_len == 1)
@@ -193,8 +196,8 @@ pub fn main(init: std.process.Init) !void {
 
     try writer.writeAll(
         \\
-        \\/// Second most common opaque color of each tile as OKLCH+alpha (see file docs); opaque white for blank/single-color tiles.
-        \\/// Indexed by tile (entity id), and falls back to the primary (only) color if a secondary color doesn't exist.
+        \\/// Second most common opaque color of each tile as OKLCH+alpha (see file docs); white for blank/single-color tiles.
+        \\/// Indexed by tile (entity id) and falls back to the primary (only) color if a secondary color doesn't exist!
         \\pub const secondary = [TILE_COUNT]Vec4f32{
         \\
     );
@@ -256,8 +259,9 @@ fn loadPng(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Bitmap {
     return Bitmap.fromPngData(allocator, data);
 }
 
-/// Appends `color` to the tile's dedup scratch list, tallying occurrences in the parallel `counts` list
-/// (a fresh color starts at 1; a repeat increments the existing entry).
+/// Appends `color` to the tile's dedup scratch list.
+/// It counts occurrences in the parallel `counts` list:
+/// a fresh color starts at 1, and a repeat increments the existing entry.
 fn appendUnique(unique: []ColorRgba, counts: []u32, unique_len: *usize, color: ColorRgba) void {
     for (unique[0..unique_len.*], counts[0..unique_len.*]) |seen, *count| {
         if (seen.eql(color)) {

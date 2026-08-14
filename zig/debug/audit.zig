@@ -8,9 +8,12 @@
 //! - decorations: anchors standing, and how many survived an overlapping anchor
 //! - blocks: the sprite mix, which is the `ore odds` question
 //!
-//! Everything is sampled straight from world coordinates, so it never touches the chunk pipeline or the caches the game is using.
-//! Column features (vines) are the one thing MISSING from the block mix:
-//! a chain is walked down a column rather than resolved per block, so a single block cannot be asked about in isolation.
+//! Everything is sampled straight from world coordinates.
+//! So it never touches the chunk pipeline, or the caches the game is using.
+//!
+//! Column features, such as vines, are the one thing MISSING from the block mix.
+//! A chain is walked down a column, not resolved per block,
+//! so a single block cannot be asked about on its own.
 const std = @import("std");
 const dw = @import("../root.zig");
 
@@ -30,7 +33,7 @@ const MAX_TRACKED_SPRITES = 64;
 /// Runs the audit on a region centered on the player's base-depth position, and logs the result.
 /// Depth is ignored: everything here is a property of the base layer the whole fractal descends from.
 ///
-/// Do note that this code WILL run faster in release!
+/// This code WILL run faster in release.
 pub fn sampleWorldAroundPlayer() void {
     if (!dw.dev_menu) return;
 
@@ -70,9 +73,10 @@ pub fn run(x0: i32, y0: i32, span: i32) void {
 /// `offset` is the mean anchor position within the cell against the uniform expectation.
 /// A number that drifts says placements favor one corner of their cell, which would show up as a visible lattice.
 fn auditStructures(x0: i32, y0: i32, span: i32, seed: dw.utils.Vec2u, per_million: f64) void {
-    // Funnel: of every cell, how many survived each stage. The gaps between columns are the "attrition",
-    // and the widest gap is the knob to reach for (a huge rolled->seated drop means the terrain gate makes the structure rare).
-    // Note that won is post-collision, the rest pre-collision.
+    // Funnel: of every cell, how many survived each stage. The gaps between columns are the
+    // "attrition", and the widest gap is the knob to reach for. A huge rolled->seated drop
+    // means the terrain gate is what makes the structure rare.
+    // Won is post-collision, and the rest are pre-collision.
     logger.log(@src(), " {s:<10} {s:>6} {s:>8} {s:>8} {s:>8} {s:>8} {s:>6} {s:>10} {s:>14}", .{
         "structure",
         "chance",
@@ -120,7 +124,7 @@ fn auditStructures(x0: i32, y0: i32, span: i32, seed: dw.utils.Vec2u, per_millio
                     },
                 }
 
-                // won also survives the priority/collision scan, which the funnel above does not model.
+                // Won also survives the priority and collision scan, which the funnel above does not model.
                 const bounds = structures.acceptedBoundsForAudit(kind, cx, cy, seed) orelse continue;
                 won += 1;
                 sum_ox += @floatFromInt(bounds.x_start - cx * area);
@@ -177,8 +181,8 @@ fn auditDecorations(x0: i32, y0: i32, span: i32, per_million: f64) void {
     }
 }
 
-/// The sprite mix of the region, most common first. The `block odds` readout:
-/// what fraction of the world is stone, air, each ore, each gem.
+/// The sprite mix of the region, most common first.
+/// This is the "block odds" readout: what fraction of the world is stone, air, each ore, each gem.
 fn auditBlocks(x0: i32, y0: i32, span: i32) void {
     var ids: [MAX_TRACKED_SPRITES]Sprite = @splat(.none);
     var counts: [MAX_TRACKED_SPRITES]u64 = @splat(0);

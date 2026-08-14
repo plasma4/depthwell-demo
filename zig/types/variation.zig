@@ -1,10 +1,11 @@
 //! Data-driven sprite variation and animation resolver through a giant rule table.
 //!
-//! `resolveVariant()` is called once per visible tile per render frame in `render/chunk.zig`,
-//! producing the FINAL atlas sprite ID; the shader samples it directly with no further shifting.
+//! `render/chunk.zig` calls `resolveVariant()` once per visible tile per render frame.
+//! It gives the FINAL atlas sprite ID, which the shader samples with no further shifting.
 //!
-//! To add a variant: append one row to `rules`. Variant frames must be CONTIGUOUS atlas IDs
-//! starting at the base sprite (base+0 .. base+count-1); the comptime check below enforces range.
+//! To add a variant, append one row to `rules`.
+//! Variant frames must be CONTIGUOUS atlas IDs, from base+0 to base+count-1.
+//! The comptime check below holds that range.
 //!
 //! TODO: migrate this to be calculated on-GPU once SPIR-V support drops.
 const std = @import("std");
@@ -59,14 +60,15 @@ pub const VariantRule = struct {
     edge_rules: []const EdgeRule = &.{},
 };
 
-/// The full variation database. Order does not matter; each sprite maps to at most one rule.
+/// The full variation database.
+/// Order does not matter, and each sprite maps to at most one rule.
 const rules = [_]struct { Sprite, VariantRule }{
-    // "Plain" stone: 2x2 grid so it reads like a 32x32 texture instead of obviously tiling.
+    // "plain" stone: a 2x2 grid, so it reads like a 32x32 texture instead of an obvious tiling
     .{ .stone, .{ .kind = .grid_2x2, .count = 4 } },
     .{ .diorite, .{ .kind = .x_parity, .count = 2 } },
-    // Edge stone alternates in a checkerboard.
+    // edge stone alternates in a checkerboard
     .{ .edge_stone, .{ .kind = .checkerboard, .count = 2 } },
-    // seed variations! (non-uniform; read VariantKind definition!)
+    // seed variations: non-uniform, see the VariantKind definition
     .{ .bush, .{ .kind = .random, .count = 2 } },
     .{ .rock, .{ .kind = .random, .count = 2 } },
     .{ .aqua_stone, .{ .kind = .random, .count = 2 } },
@@ -135,8 +137,8 @@ const rules = [_]struct { Sprite, VariantRule }{
         },
     },
 
-    // Campfire animation has 4 contiguous frames, advancing every 6 render frames.
-    // There's a HARDCODED custom resolveVariant() check to use the underwater variant if waterlogged!
+    // campfire animation: 4 contiguous frames, one step every 6 render frames
+    // resolveVariant() has a HARDCODED check that swaps in the underwater variant when waterlogged
     .{ .campfire, .{ .kind = .animate, .count = 4, .period_frames = 6 } },
     // needed for custom variant
     .{ .campfire_water, .{ .kind = .animate, .count = 4, .period_frames = 7 } },
@@ -200,7 +202,8 @@ fn parsePattern(pattern_str: []const u8) struct { mask: u8, value: u8 } {
     return .{ .mask = mask, .value = value };
 }
 
-/// Sparse-to-dense lookup: sprite ID -> its compiled rule, or null. One indexed load at runtime.
+/// Sparse-to-dense lookup: sprite ID to its compiled rule, or null.
+/// One indexed load at runtime.
 const variant_table: [dw.sprite.MAX_SPRITE_ID]?CompiledRule = blk: {
     @setEvalBranchQuota(20000);
     var table: [dw.sprite.MAX_SPRITE_ID]?CompiledRule = @splat(null);

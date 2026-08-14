@@ -181,12 +181,12 @@ export class SaveManager {
 
         const startTime = performance.now();
         const TARGET_SAVE_TIME_MS = 11500; // target save duration within the 12-second limit
-        // ~1MB of memcpy + incremental BLAKE3 per batch: <5ms per frame on mid-end devices
+        // ~1MB of memcpy plus incremental BLAKE3 per batch: under 5ms per frame on a mid-end device.
         const SAFE_LOWER_BOUND = 256;
 
         let remaining = total;
         while (remaining > 0) {
-            // If escalated mid-save, process all remaining chunks immediately without yielding
+            // If escalated mid-save, process every remaining chunk at once without yielding.
             if (this.forceSyncCompletion) {
                 remaining = Number(
                     this.engine.exports.saveWriteBatch(BigInt(remaining)),
@@ -200,7 +200,7 @@ export class SaveManager {
             const elapsed = performance.now() - startTime;
             const remainingTime = Math.max(10, TARGET_SAVE_TIME_MS - elapsed);
 
-            // estimate remaining frames assuming a pessimistic 30fps under load (ms -> frames)
+            // Estimate the remaining frames at a pessimistic 30fps under load (ms to frames).
             const estimatedRemainingFrames = remainingTime * (30 / 1000);
             const requiredChunksPerFrame = Math.ceil(
                 remaining / estimatedRemainingFrames,
@@ -255,7 +255,8 @@ export class SaveManager {
         ----
     */
 
-    // TODO: should we even gzip here or is compression good enough? we need to do practical gameplay+perf tests and evaluations
+    // TODO: should we gzip here at all, or is the compression good enough?
+    // This needs practical gameplay and performance tests.
     private async gzip(bytes: Uint8Array): Promise<Uint8Array> {
         const stream = new Blob([bytes as any]) // typescript funny
             .stream()
@@ -334,8 +335,8 @@ export class SaveManager {
      * (such as on page unload, where there are no future frames to spread across).
      */
     public async save(compress = true, budgeted = true): Promise<void> {
-        // A save is already in flight: an urgent (non-budgeted) request escalates it to finish immediately instead of waiting on rAF yields,
-        // which never fire in a hidden tab.
+        // A save is already in flight. An urgent, non-budgeted request escalates it to finish
+        // at once, instead of waiting on rAF yields, which never fire in a hidden tab.
         if (this.activeSavePromise) {
             if (!budgeted) {
                 this.forceSyncCompletion = true;
@@ -460,7 +461,7 @@ export class SaveManager {
             return false;
         }
 
-        // Finalize state derivation synchronously
+        // Finalize state derivation synchronously.
         this.engine.exports.saveFinalizeLoad();
         return true;
     }
@@ -472,7 +473,7 @@ export class SaveManager {
     private reportImportFailure(): void {
         const code = this.engine.exports.saveLastImportError();
         if (code != 0) {
-            // code 0 is garbage
+            // Code 0 is garbage.
             const label = IMPORT_ERROR_LABELS[code] ?? "an unknown error";
             console.warn(`Save import failed because ${label}`);
             alert(
@@ -493,12 +494,12 @@ export class SaveManager {
         let attempted = false;
         const tryApply = (bytes: Uint8Array, name: string): boolean => {
             attempted = true;
-            // commit the bytes synchronously in a single frame execution slice
+            // Commit the bytes synchronously in one frame execution slice.
             return this.applyBytesSync(bytes, name);
         };
 
-        // The emergency slot is only non-empty when it is newer than MAIN (commits clear it)
-        // Torn slots fail validation and fall through to MAIN
+        // The emergency slot is only non-empty when it is newer than MAIN, because a commit
+        // clears it. A torn slot fails validation and falls through to MAIN.
         const emergency = await this.readEmergency();
         if (emergency && emergency.length > 0) {
             if (tryApply(emergency, "emergency slot")) return true;
@@ -572,7 +573,7 @@ export class SaveManager {
             try {
                 await dir.removeEntry(name);
             } catch {
-                // already gone
+                // Already gone.
             }
         }
         // The emergency slot is lock-held by the worker; it's cleared there instead of removeEntry().

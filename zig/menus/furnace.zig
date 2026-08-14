@@ -31,7 +31,8 @@ const TOTAL_PROGRESS = SMELTING_STEPS * FRAMES_PER_STEP;
 const MENU_POS: Vec2f32 = .{ 0.02, 0.75 };
 const MENU_SIZE: Vec2f32 = toSize(0.3) * Vec2f32{ 1.0, 0.5 };
 
-/// Whether the cursor is over the furnace panel. Always false while the menu is closed.
+/// Whether the cursor is over the furnace panel.
+/// Always false while the menu is closed.
 pub fn isHoveringOnMenu() bool {
     return util.isHovering(dw.indicators.menus.furnace, MENU_POS, MENU_SIZE);
 }
@@ -91,8 +92,10 @@ pub fn setSaveState(s: SaveState) void {
     smelting_progress = s.smelting_progress;
 }
 
-/// Advances smelting. Only called while the menu is open (see `state/tick.zig`),
-/// so closing the menu pauses smelting. Holds at 0 whenever nothing is loaded.
+/// Advances smelting.
+/// Only called while the menu is open, so closing the menu pauses smelting;
+/// see `state/tick.zig`.
+/// Holds at 0 whenever nothing is loaded.
 pub fn updateSmelting() void {
     if (loaded_ore == .none or loaded_count == 0) {
         smelting_progress = 0;
@@ -206,7 +209,7 @@ fn drawDragIcon(mouse_px: Vec2f) void {
     const offsets = [3]Vec2f{ .{ -3.0, -2.0 }, .{ 3.0, -2.0 }, .{ 0.0, 0.0 } };
     const start = 3 - copies;
 
-    // equal to (i = start; i <= 3; i++) in other conventional langs
+    // Equal to (i = start; i <= 3; i++) in a more conventional language.
     for (start..3) |i| {
         const is_front = (i == 2);
         const off = offsets[i];
@@ -280,7 +283,7 @@ pub fn draw() void {
         });
     }
 
-    // Loaded ore+count goes in the input slot
+    // Loaded ore and count go in the input slot.
     if (loaded_ore != .none) {
         addEntity(.{
             .sprite = loaded_ore,
@@ -291,7 +294,7 @@ pub fn draw() void {
         util.drawCount(loaded_count, .{ input_px[0] + 3.0, input_px[1] + 5.0 }, .{ 0.85, 0.30, 1.2, 1.0 }, 1.0);
     }
 
-    // Finished bars+count goes in the output slot
+    // Finished bars and count go in the output slot.
     if (output_bar != .none) {
         addEntity(.{
             .sprite = output_bar,

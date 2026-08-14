@@ -42,7 +42,8 @@ const CHARACTER_WIDTH_FRACTION: f32 = 12.0 / 16.0;
 /// Current number of entities (reset every frame).
 pub var entity_count: u64 = 0;
 
-/// Updates all entities by adding them to the scratch buffer. Does not actually inform JS by calling `handleVisibleEntities()`.
+/// Updates all entities by adding them to the scratch buffer.
+/// Does not tell JS; the caller does that with `handleVisibleEntities()`.
 /// Every entity needs a position, size, rotation, LCHA, and sprite associated with it.
 /// Some properties are optional with defaults (size, rotation, LCHA).
 pub fn updateEntities(time_diff: f64) void {
@@ -52,10 +53,10 @@ pub fn updateEntities(time_diff: f64) void {
 
     inventory.addDroppedItemsAsEntities(time_diff); // pass in delta time in ms
 
-    // The player is a world-space entity (see render/chunk.zig for its grid-aligned position).
+    // draw the player, a world-space entity (render/chunk.zig holds its grid-aligned position)
     dw.player.drawPlayerEntity();
 
-    // A portal descent's swallowed terrain sits above the player but below the particles feeding into it.
+    // draw a portal descent's swallowed terrain, above the player but below its particles
     dw.portal.drawEffects();
 
     // advance and draw particles (under all UI overlays)
@@ -494,7 +495,8 @@ pub fn drawStringWave(
     }
 }
 
-/// Draws a multi-line string. Each newline character offsets downwards by `line_height_factor * font_size`.
+/// Draws a multi-line string.
+/// Each newline character offsets downwards by `line_height_factor * font_size`.
 /// Supports rotation by rotating the vertical line offset vector.
 pub fn drawMultiline(
     string: []const u8,

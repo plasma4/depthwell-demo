@@ -1,3 +1,4 @@
+//! An unbounded FIFO queue on a growable ring buffer.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
@@ -28,7 +29,8 @@ pub fn UnboundedFifo(comptime T: type) type {
             self.count += 1;
         }
 
-        /// Pops an item from the front of the FIFO. Returns null if empty.
+        /// Pops an item from the front of the FIFO.
+        /// Returns null if empty.
         pub fn pop(self: *Self) ?T {
             if (self.count == 0) return null;
             std.debug.assert(self.buf.len > 0 and (self.buf.len & (self.buf.len - 1)) == 0);
@@ -51,7 +53,7 @@ pub fn UnboundedFifo(comptime T: type) type {
             const old_capacity = self.buf.len;
             const new_capacity = if (old_capacity == 0) 8 else old_capacity * 2;
 
-            // try to resize the existing buffer in-place
+            // Try to resize the existing buffer in place
             if (old_capacity > 0 and allocator.resize(self.buf, new_capacity)) {
                 self.buf = self.buf.ptr[0..new_capacity];
 
@@ -60,11 +62,11 @@ pub fn UnboundedFifo(comptime T: type) type {
                     const second_part_len = self.head;
 
                     if (second_part_len < first_part_len) {
-                        // copy the smaller second part to the new space to unwrap the ring
+                        // Copy the smaller second part to the new space to unwrap the ring
                         @memcpy(self.buf[old_capacity .. old_capacity + second_part_len], self.buf[0..second_part_len]);
                         self.tail = old_capacity + second_part_len;
                     } else {
-                        // copy the smaller first part to the end of the new space
+                        // Copy the smaller first part to the end of the new space
                         const dst_idx = new_capacity - first_part_len;
                         @memcpy(self.buf[dst_idx..new_capacity], self.buf[self.head..old_capacity]);
                         self.head = dst_idx;

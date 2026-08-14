@@ -44,6 +44,75 @@ const BLOCK_WATER_OFF: u32 = 0u;
 const BLOCK_WATER_LEN: u32 = 11u;
 const BLOCK_LIGHT_H_OFF: u32 = 26u;
 const BLOCK_LIGHT_H_LEN: u32 = 6u;
+
+// Unit vector of each hue step, as (cos, sin). Indexed by the raw light_h bits.
+// Exact: a hue has only 64 values, so this replaces cos()/sin() with no loss.
+const LIGHT_HUE_DIR = array<vec2f, 64>(
+    vec2f(1, 0),
+    vec2f(0.9951847266721969, 0.0980171403295606),
+    vec2f(0.9807852804032304, 0.19509032201612825),
+    vec2f(0.9569403357322088, 0.29028467725446233),
+    vec2f(0.9238795325112867, 0.3826834323650898),
+    vec2f(0.881921264348355, 0.47139673682599764),
+    vec2f(0.8314696123025452, 0.5555702330196022),
+    vec2f(0.773010453362737, 0.6343932841636455),
+    vec2f(0.7071067811865476, 0.7071067811865475),
+    vec2f(0.6343932841636455, 0.7730104533627369),
+    vec2f(0.5555702330196023, 0.8314696123025452),
+    vec2f(0.4713967368259978, 0.8819212643483549),
+    vec2f(0.38268343236508984, 0.9238795325112867),
+    vec2f(0.29028467725446233, 0.9569403357322089),
+    vec2f(0.19509032201612833, 0.9807852804032304),
+    vec2f(0.09801714032956077, 0.9951847266721968),
+    vec2f(0.00000000000000006123233995736766, 1),
+    vec2f(-0.09801714032956065, 0.9951847266721969),
+    vec2f(-0.1950903220161282, 0.9807852804032304),
+    vec2f(-0.29028467725446216, 0.9569403357322089),
+    vec2f(-0.3826834323650897, 0.9238795325112867),
+    vec2f(-0.4713967368259977, 0.881921264348355),
+    vec2f(-0.555570233019602, 0.8314696123025453),
+    vec2f(-0.6343932841636454, 0.7730104533627371),
+    vec2f(-0.7071067811865475, 0.7071067811865476),
+    vec2f(-0.773010453362737, 0.6343932841636455),
+    vec2f(-0.8314696123025453, 0.5555702330196022),
+    vec2f(-0.8819212643483549, 0.47139673682599786),
+    vec2f(-0.9238795325112867, 0.3826834323650899),
+    vec2f(-0.9569403357322088, 0.2902846772544624),
+    vec2f(-0.9807852804032304, 0.1950903220161286),
+    vec2f(-0.9951847266721968, 0.09801714032956083),
+    vec2f(-1, 0.00000000000000012246467991473532),
+    vec2f(-0.9951847266721969, -0.09801714032956059),
+    vec2f(-0.9807852804032304, -0.19509032201612836),
+    vec2f(-0.9569403357322089, -0.2902846772544621),
+    vec2f(-0.9238795325112868, -0.38268343236508967),
+    vec2f(-0.881921264348355, -0.47139673682599764),
+    vec2f(-0.8314696123025455, -0.555570233019602),
+    vec2f(-0.7730104533627371, -0.6343932841636453),
+    vec2f(-0.7071067811865477, -0.7071067811865475),
+    vec2f(-0.6343932841636459, -0.7730104533627367),
+    vec2f(-0.5555702330196022, -0.8314696123025452),
+    vec2f(-0.4713967368259979, -0.8819212643483549),
+    vec2f(-0.38268343236509034, -0.9238795325112865),
+    vec2f(-0.29028467725446244, -0.9569403357322088),
+    vec2f(-0.19509032201612866, -0.9807852804032303),
+    vec2f(-0.09801714032956045, -0.9951847266721969),
+    vec2f(-0.00000000000000018369701987210297, -1),
+    vec2f(0.09801714032956009, -0.9951847266721969),
+    vec2f(0.1950903220161283, -0.9807852804032304),
+    vec2f(0.29028467725446205, -0.9569403357322089),
+    vec2f(0.38268343236509, -0.9238795325112866),
+    vec2f(0.4713967368259976, -0.881921264348355),
+    vec2f(0.5555702330196018, -0.8314696123025455),
+    vec2f(0.6343932841636456, -0.7730104533627369),
+    vec2f(0.7071067811865474, -0.7071067811865477),
+    vec2f(0.7730104533627365, -0.6343932841636459),
+    vec2f(0.8314696123025452, -0.5555702330196022),
+    vec2f(0.8819212643483548, -0.4713967368259979),
+    vec2f(0.9238795325112865, -0.3826834323650904),
+    vec2f(0.9569403357322088, -0.2902846772544625),
+    vec2f(0.9807852804032303, -0.19509032201612872),
+    vec2f(0.9951847266721969, -0.0980171403295605),
+);
 // #CONSTANT REGION END#
 
 const PI = radians(180.0);
@@ -66,8 +135,8 @@ const TEXTURE_BLEEDING_EPSILON = 0.5 / TILE_SIZE;
 const LIGHT_CHROMA_FLOOR: f32 = 0.25;
 // Lightness given back per unit of WARM tint added, to hold the rendered luminance steady.
 // OKLAB lightness is not brightness: at a fixed L a warm color renders darker than a grey one,
-// so without this the band where a lamp's color takes over from white light reads as a dark ring.
-// Measured against relative luminance; the cool half of the hue circle loses nothing, so it gets nothing.
+// So without this, the band where a lamp's color takes over from white light reads as a dark ring.
+// Measured against relative luminance. The cool half of the hue circle loses nothing, so it gets nothing.
 const TINT_LUMA_GAIN: f32 = 0.13;
 // Share of its OWN chroma a block keeps where no light reaches it.
 // Zero drains every dim block to grey, and a grey band beside a colored one also reads as a dark ring.
@@ -127,7 +196,7 @@ struct TileOutput {
     // @interpolate(flat) tells the GPU NOT to blend these values between the 4 corners of the quad.
     @location(1) @interpolate(flat) tile_coords: vec2u, // X and Y of the tile
     @location(2) @interpolate(flat) sprite_uv_origin: vec2f, // base UV of the sprite
-    @location(3) @interpolate(flat) sprite_id: u32, // do note that an extra u16 id is injected to the top half of bits with gems
+    @location(3) @interpolate(flat) sprite_id: u32, // an extra u16 id is injected into the top half of the bits for gems
     @location(4) @interpolate(flat) edge_flags: u32,
     @location(6) @interpolate(flat) hp: u32,
     // seed0: raw seed data and HP mixed
@@ -196,8 +265,10 @@ fn tile_light(coords: vec2i) -> vec3f {
 
     let lightness = f32(extractBits(data.word0, BLOCK_LIGHT_L_OFF, BLOCK_LIGHT_L_LEN)) / LIGHT_CHANNEL_MAX;
     let chroma = f32(extractBits(data.word2, BLOCK_LIGHT_C_OFF, BLOCK_LIGHT_C_LEN)) / LIGHT_CHANNEL_MAX * LIGHT_CHROMA_MAX;
-    let hue = f32(extractBits(data.word3, BLOCK_LIGHT_H_OFF, BLOCK_LIGHT_H_LEN)) / LIGHT_HUE_STEPS * TAU;
-    return vec3f(lightness, chroma * cos(hue), chroma * sin(hue));
+    // Hue is quantized to LIGHT_HUE_STEPS values, so a table lookup is exact and skips cos()/sin().
+    // This runs four times per pixel through sample_light(), so it is the hot path here.
+    let hue_step = extractBits(data.word3, BLOCK_LIGHT_H_OFF, BLOCK_LIGHT_H_LEN);
+    return vec3f(lightness, chroma * LIGHT_HUE_DIR[hue_step]);
 }
 
 // The light at one PIXEL, blended across the four tiles nearest it.
@@ -263,7 +334,7 @@ fn vs_tile(
     let adjusted_screen_pos = screen_pos - vec2f(0.0, vertical_offset);
     let ndc = (adjusted_screen_pos / scene.viewport_size) * vec2f(2.0, -2.0) + vec2f(-1.0, 1.0);
 
-    // Calculate which sprite in the atlas to sample
+    // calculate which sprite in the atlas to sample
     let origin = vec2f(f32(id % TILES_PER_ROW_U), f32(id / TILES_PER_ROW_U)) * vec2f(SPRITE_W, SPRITE_H);
 
     out.position = vec4f(ndc, 0.0, 1.0);
@@ -291,9 +362,9 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
     let id = in.sprite_id /* & 65535 */;
     let is_decor = id >= DECOR_START;
 
-    // instead of doing alpha blending the wireframe brightness has been lazily chucked here, since we rarely use it
+    // Instead of alpha blending, the wireframe brightness is chucked in here, since we rarely use it
     if scene.wireframe_opacity != 0.0 {
-        // render wireframe due to being at the edge of a block?
+        // Render the wireframe because this is the edge of a block?
         let inv_tile_scale = 0.5001 / (TILE_SIZE * scene.zoom);
         let is_block_edge = any(in.local_uv < vec2f(inv_tile_scale)) || any(in.local_uv > vec2f(1.0 - inv_tile_scale));
 
@@ -319,7 +390,7 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
         }
     }
 
-    // The light reaching this PIXEL, not this tile; see sample_light().
+    // The light reaching this PIXEL, not this tile; see sample_light()
     let lit = sample_light(in.tile_coords, in.local_uv);
 
     if id == WATER_START || id == WATER_START + 1u {
@@ -332,10 +403,10 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
             let t = scene.time;
             let world_pos = wrap_water_coords((vec2f(in.tile_coords) + scene.grid_origin.xy) * TILE_SIZE + in.local_uv * TILE_SIZE);
 
-            // Smooth the surface across neighbors (adjacent volumes in bits 3-6 / 7-10).
-            // Each tile edge sits at the midpoint between this cell and its neighbor,
-            // so adjacent tiles agree on the shared edge height and the surface reads as continuous instead of stepped.
-            // A dry side keeps the block's own level so the surface doesn't dip at the water's edge.
+            // Smooth the surface across neighbors, with the adjacent volumes in bits 3-6 and 7-10.
+            // Each tile edge sits at the midpoint between this cell and its neighbor, so adjacent
+            // tiles agree on the shared edge height and the surface reads as continuous, not stepped.
+            // A dry side keeps the block's own level, so the surface does not dip at the water's edge
             let left_vol = extractBits(in.water, 3u, 4u);
             let right_vol = extractBits(in.water, 7u, 4u);
             let self_h = f32(in.hp);
@@ -395,7 +466,7 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
                 let is_water_top = (in.water & 1u) != 0u;
                 let is_water_bottom = (in.water & 2u) != 0u;
                 let apply_ripple = (in.water & 4u) != 0u;
-                // Left/right presence is implied by a nonzero adjacent volume (bits 3-6 / 7-10).
+                // Left and right presence is implied by a nonzero adjacent volume (bits 3-6 and 7-10)
                 let left_vol = extractBits(in.water, 3u, 4u);
                 let right_vol = extractBits(in.water, 7u, 4u);
                 let is_water_left = left_vol > 0u;
@@ -403,8 +474,8 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
 
                 var is_water_pixel = false;
                 if is_water_top {
-                    // Water of any depth above fully submerges the block: fill it entirely,
-                    // with no exposed surface to carve.
+                    // Water of any depth above fully submerges the block, so fill it entirely,
+                    // With no exposed surface to carve
                     is_water_pixel = true;
                 } else {
                     if is_water_bottom && in.local_uv.y >= 0.5 {
@@ -424,8 +495,8 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
                         // Surface height follows the adjacent water's actual volume rather than a
                         // fixed full block, smoothly interpolated across the tile from the left
                         // neighbor's level to the right neighbor's level. A side with no water
-                        // borrows the other side's level so the surface stays flat instead of
-                        // sloping down to zero.
+                        // borrows the other side's level, so the surface stays flat instead of
+                        // sloping down to zero
                         let hl = select(f32(right_vol), f32(left_vol), is_water_left);
                         let hr = select(f32(left_vol), f32(right_vol), is_water_right);
                         let vol_at_x = mix(hl, hr, in.local_uv.x);
@@ -476,7 +547,7 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
     let base_id = extractBits(in.base_data, 0u, 16u);
     let id_edge_flags = extractBits(in.base_data, 16u, 8u);
 
-    // gem sampling pixel logic
+    // Gem sampling pixel logic
     if is_gem {
         // 8 masks, OLD: first 4 for gems, second 4 for ore, NEW: all 8 for gems only
         // let mask_variation = extractBits(seed, 15u, 2u) + select(4u, 0u, is_gem);
@@ -507,11 +578,12 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
         let abs_dist = abs(in.local_uv - 0.5); // higher value means closer to EDGES
         let u_dist = 0.5 - max(abs_dist.x, abs_dist.y); // higher value means closer to CENTER
 
-        // with linear RGB: r component of mask determines brightness, vary ore brightness, multiply stone brightness based on dist
+        // With linear RGB the r component of the mask sets brightness: vary the ore brightness,
+        // And multiply the stone brightness by the distance
         let final_rgb_ore = mix(
-             // stone pixels near center become darker based on HP
+             // Stone pixels near the center become darker with HP
             srgb_to_linear(tex_stone.rgb) * vec3f(1.2 - 0.22 * f32(in.hp + 1) * u_dist), 
-            // gem pixels near center become brighter
+            // Gem pixels near the center become brighter
             tex_color.rgb * vec3f(tex_mask.r + 0.3 * u_dist),
             tex_mask.a + u_dist
         );
@@ -566,7 +638,7 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
     let nudges = vec3f(lab_nudge_bits) / 7.0;
 
     // Drain a block's own chroma as the light fades, so a dark cell cannot leak a strong color.
-    // Never all the way: MATERIAL_CHROMA_FLOOR keeps a dim block the same material as a lit one.
+    // Never all the way. MATERIAL_CHROMA_FLOOR keeps a dim block the same material as a lit one
     let chroma_light_scale = mix(MATERIAL_CHROMA_FLOOR, 1.0, clamp(lit.x, 0.0, 1.0));
 
     // Apply light and nudges (Chroma y is scaled by the light level)
@@ -591,13 +663,13 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
     lab = oklch_to_oklab(lch);
 
     // Tint by the color of the light reaching this cell (resolved in zig/render/lighting.zig).
-    // ADDED rather than multiplied, so a block keeps its own material under a colored lamp:
-    // stone under a violet lamp is still recognizably stone.
-    // Scaled by lightness so a dark corner never picks up a strong tint.
+    // ADDED rather than multiplied, so a block keeps its own material under a colored lamp.
+    // Stone under a violet lamp still reads as stone.
+    // Scaled by lightness, so a dark corner never picks up a strong tint
     let tint = lit.yz * smoothstep(0.0, LIGHT_CHROMA_FLOOR, lit.x);
     lab.y += tint.x;
     lab.z += tint.y;
-    // Hold the luminance steady across the tint; see TINT_LUMA_GAIN.
+    // Hold the luminance steady across the tint; see TINT_LUMA_GAIN
     lab.x += TINT_LUMA_GAIN * max(0.0, tint.x);
     final_rgb = oklab_to_linear_srgb(lab);
 
@@ -908,8 +980,8 @@ fn water_base_lch(t: f32) -> vec3f {
 }
 
 // The caustic field. Returns:
-//   .x the additive caustic brightness
-//   .y: a broad swell in [0, 1] the body uses for its lightness gradient, no extra trig
+// - .x: the additive caustic brightness
+// - .y: a broad swell in [0, 1] the body uses for its lightness gradient, with no extra trig
 fn water_effect(coord: vec2f, t: f32) -> vec2f {
     // A product of two low, near-incommensurate waves: neither's own period reads as the beat's.
     let swell = water_wave(coord, vec2f(37.0, 23.0), 0.011, t) *
@@ -972,7 +1044,7 @@ fn water_effect(coord: vec2f, t: f32) -> vec2f {
 fn water_body_linear(in: TileOutput, lit: vec3f) -> vec4f {
     let light_val = max(0.0, lit.x);
 
-    // Performance shortcut: skip expensive caustic/wave calculations if the pixel is dark
+    // Performance shortcut: skip the costly caustic and wave math if the pixel is dark.
     if light_val <= 0.005 {
         return vec4f(vec3f(0.0), 0.5);
     }
@@ -985,9 +1057,10 @@ fn water_body_linear(in: TileOutput, lit: vec3f) -> vec4f {
     let effect = water_effect(world, t);
     let caustic = effect.x;
 
-    // Broad open/deep gradient. This rides the caustic field's own swell rather than absolute world y:
-    // a raw world.y ramp only means anything within the first screens of the wrap window and steps at its boundary,
-    // whereas the swell is periodic over the same window as everything else here.
+    // Broad open and deep gradient. This rides the caustic field's own swell, not absolute
+    // world y. A raw world.y ramp only means anything within the first screens of the wrap
+    // window, and it steps at the boundary. The swell is periodic over the same window as
+    // everything else here.
     lch.x = mix(0.34, 0.52, effect.y); // lighter in the open water between the streak patches
     lch.y = mix(0.14, 0.10, effect.y); // slightly more saturated in the darker stretches
 
@@ -998,7 +1071,7 @@ fn water_body_linear(in: TileOutput, lit: vec3f) -> vec4f {
     lch.x = clamp(lch.x + caustic, 0.26, 0.90);
     lch.y = clamp(lch.y + caustic * 0.10, 0.04, 0.28);
 
-    // Apply light multiplier to both lightness and chroma to prevent light leakage in the dark
+    // Apply the light multiplier to both lightness and chroma, to stop light leaking in the dark.
     lch.x *= light_val;
     lch.y *= light_val;
 
@@ -1082,7 +1155,7 @@ fn vs_background(@builtin(vertex_index) vertex_index: u32) -> BackgroundOutput {
 
 @fragment
 fn fs_background(in: BackgroundOutput) -> @location(0) vec4f {
-    const base_scale = 0.015625; // Exactly 1.0 / 64.0; see `BG_WRAP_CHUNKS` (chunk.zig) for the seamless-wrap contract
+    const base_scale = 0.015625; // Exactly 1.0 / 64.0; BG_WRAP_CHUNKS in chunk.zig holds the wrap contract
     let absolute_camera = scene.grid_origin.zw;
     let t = scene.time;
 
@@ -1154,7 +1227,7 @@ fn fs_background(in: BackgroundOutput) -> @location(0) vec4f {
     let layer3_intensity = max(f3 * f3 * f3 * 2.5 - 0.2, 0.0);
     let layer3_rgb = layer3_intensity * color3;
 
-    // Additive screen blend of both seamless layers
+    // Additive screen blend of both wrapped layers
     let final_rgb = layer1_rgb + layer2_rgb + layer3_rgb;
 
     let opacity = scene.chunk_opacity;
@@ -1256,14 +1329,14 @@ struct EntityOutput {
     @location(3) @interpolate(flat) sprite_uv_origin: vec2f,
 };
 
-// Main vertex shader for generic entities (uses the mask).
+// Main vertex shader for generic entities (uses the mask)
 @vertex
 fn vs_entity(
     @builtin(vertex_index) vertex_index: u32,
     @builtin(instance_index) instance_index: u32
 ) -> EntityOutput {
     let entity = entities[instance_index];
-    // presume ID 0 is unreasonable
+    // Presume ID 0 is unreasonable
     // var out: EntityOutput;
     // if entity.id == 0u {
     //     out.position = vec4f(2.0, 2.0, 2.0, 1.0); // ideal outcode
@@ -1309,13 +1382,13 @@ fn fs_entity(in: EntityOutput) -> @location(0) vec4f {
 
     // Both the original sprite and the mask are sampled. The mask is pre-made: for many sprites it is white.
     // For gems, there's a special gem mask, and ores have a rounded rectangular mask with darkening.
-    // This is multiplied with RGBA instead of OKLCH for simplicity.
+    // This is multiplied with RGBA instead of OKLCH for simplicity
 
-    // in the future we can also make the sample of either change over time for some neat effects
+    // In the future we can also make either sample change over time for some neat effects
     let raw_tex = textureSampleLevel(sprite_atlas, pixel_sampler, final_uv, 0.0);
     let raw_mask = textureSampleLevel(sprite_atlas_mask, pixel_sampler, final_uv, 0.0);
 
-    // make raw mask stronger
+    // Make the raw mask stronger
     let tex_rgb = srgb_to_linear(raw_tex.rgb);
     let tex_a = raw_tex.a * raw_mask.a;
     // Early discard if the pixel is fully transparent (maybe)
@@ -1332,10 +1405,10 @@ fn fs_entity(in: EntityOutput) -> @location(0) vec4f {
 
     lab = oklch_to_oklab(lch);
 
-    // darken using the mask, after OKLCH transformations (non-linear)
+    // Darken using the mask, after the OKLCH transformations (non-linear)
     let final_rgb = oklab_to_linear_srgb(lab) * raw_mask.rrr;
 
-    // apply alpha after being back to RGB!
+    // Apply alpha now that we are back in RGB
     let final_a = tex_a * in.lcha.w;
     return vec4f(apply_color_management(final_rgb), final_a);
 }

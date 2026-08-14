@@ -2,9 +2,11 @@
 //! We define a "descent" as INCREASING the depth and "ascent" as DECREASING.
 //! These terms are accurate *visually*, not algorithmically!
 //!
-//! A descent runs entirely on a frame counter (`memory.game.portal_frame`) advanced by `handleTick()`,
-//! never on wall time, so it plays back identically at any frame rate and can be resumed from a save.
-//! The committed world stays at D for every frame but the last;
+//! A descent runs on a frame counter, `memory.game.portal_frame`, advanced by `handleTick()`.
+//! It never runs on wall time, so it plays back the same at any frame rate,
+//! and a save can resume it.
+//!
+//! The committed world stays at D for every frame but the last.
 //! D+1 is only ever a preview, generated into a scratch buffer and drawn over D as it fades in.
 const std = @import("std");
 const dw = @import("../root.zig");
@@ -32,9 +34,9 @@ pub const CHUNKS_PER_FRAME: u32 = 4;
 /// Frames the zoom must stay at or below `OVERLAY_ZOOM` for, giving the preview time to fill.
 /// Asserted against the actual curve at the start of every descent rather than assumed.
 ///
-/// This is only a floor on how thinly the work can be spread, not a correctness requirement:
-/// `chunksPerFrame()` divides the buffer by the real deadline, so a shorter descent simply generates
-/// more chunks per frame rather than showing an unfinished overlay.
+/// This is only a floor on how thinly the work can be spread, not a correctness rule.
+/// `chunksPerFrame()` divides the buffer by the real deadline.
+/// So a shorter descent generates more chunks per frame instead of showing an unfinished overlay.
 pub const MIN_FILL_FRAMES: u32 = 30;
 
 /// Half-width of the block window sampled for debris sprites, in blocks (so an 8x8 window).
@@ -42,12 +44,14 @@ pub const DEBRIS_RADIUS: i32 = 4;
 /// Distinct block types collected from that window to draw from.
 const MAX_PALETTE: usize = @intCast(4 * DEBRIS_RADIUS * DEBRIS_RADIUS);
 
-/// How many shards a descent spawns. Each is one block sprite falling in from a ring around the portal.
-/// They are drawn from the sampled palette, so a type shows up as many times as it happens to be picked.
+/// How many shards a descent spawns.
+/// Each is one block sprite falling in from a ring around the portal.
+/// They are drawn from the sampled palette, so a type shows up as often as it is picked.
 const SHARD_COUNT: usize = 2048;
 
-/// Fraction of the descent over which shards keep starting. Runs almost to the end so terrain is still
-/// being drawn in as the zoom closes on `ZOOM_FACTOR`, rather than stopping partway.
+/// Fraction of the descent over which shards keep starting.
+/// It runs almost to the end, so terrain is still drawn in as the zoom closes on `ZOOM_FACTOR`,
+/// instead of stopping partway.
 const SHARD_SPAWN_SPAN: f64 = 0.9;
 
 /// Frames one shard takes to reach the portal once it starts moving.
@@ -55,9 +59,9 @@ const SHARD_TRAVEL_MIN: u32 = 14;
 const SHARD_TRAVEL_MAX: u32 = 28;
 
 /// Screen-space ring, in viewport pixels, that shards drift in from.
-/// Kept in screen space on purpose: it makes them immune to the zoom,
-/// so they can keep being "swallowed" the whole way to `ZOOM_FACTOR`,
-/// without anything having to be rescaled per frame.
+/// Kept in screen space on purpose, which makes the shards immune to the zoom.
+/// So they keep being "swallowed" the whole way to `ZOOM_FACTOR`,
+/// and nothing is rescaled per frame.
 const SHARD_RADIUS_MIN: f32 = 3.0;
 const SHARD_RADIUS_MAX: f32 = 80.0;
 
@@ -65,9 +69,11 @@ const SHARD_RADIUS_MAX: f32 = 80.0;
 /// About half a block, so the debris reads as rubble rather than as loose terrain.
 const SHARD_SIZE: f32 = @as(f32, dw.CHUNK_SIZE) / 2.0;
 
-/// Radians a shard sweeps around the portal over its travel, and how much that sweep tightens (see `drawDebris()`).
-/// The tightening is bounded by construction:
-/// the divisor bottoms out at `1 - SHARD_SWIRL_TIGHTEN`, so the total sweep cannot run away.
+/// Radians a shard sweeps around the portal over its travel, and how much that sweep tightens.
+/// See `drawDebris()`.
+///
+/// The tightening is bounded by construction.
+/// The divisor bottoms out at `1 - SHARD_SWIRL_TIGHTEN`, so the total sweep cannot run away.
 const SHARD_SWIRL: f32 = 0.35;
 const SHARD_SWIRL_TIGHTEN: f32 = 0.75;
 
@@ -77,8 +83,11 @@ comptime {
         @compileError("SHARD_SWIRL_TIGHTEN must stay below 1 to keep the sweep finite.");
 }
 
-/// How far a shard is pushed toward the portal's own light as it is swallowed (see `drawDebris()`).
-/// `L` multiplies and `C`/`H` shift, so this brightens the sprite and rotates whatever hue it had toward the mouth's,
+/// How far a shard is pushed toward the portal's own light as it is swallowed.
+/// See `drawDebris()`.
+///
+/// `L` multiplies, and `C` and `H` shift.
+/// So this brightens the sprite and turns its hue toward the mouth's,
 /// without flattening every material to one color.
 const SHARD_GLOW_LIGHT: f32 = 0.55;
 const SHARD_GLOW_CHROMA: f32 = 0.16;
@@ -89,8 +98,9 @@ const DESCENT_OUTWARD_RATIO: f32 = 0.58;
 const ASCENT_OUTWARD_RATIO: f32 = 1.0 - 0.58;
 
 /// Streams the intake is gathered into, and how far the pattern turns per frame.
-/// Chosen together: over a whole descent the arms sweep a bit under two full turns,
-/// slow enough to be followed and fast enough never to sit still.
+/// The two are chosen together.
+/// Over a whole descent the arms sweep a bit under two full turns:
+/// slow enough to follow, and fast enough never to sit still.
 const INTAKE_ARMS: u32 = 5;
 const INTAKE_ARM_SPIN: f32 = 0.09;
 const INTAKE_ARM_SPREAD: f32 = 0.2;
@@ -101,9 +111,10 @@ comptime {
         @compileError("Intake arms must stay narrower than the gap between them.");
 }
 
-/// Radians per frame of the wave the intake's spawn rate is beaten against, and the share of the
-/// rate that survives a trough. The rate works out to a gust roughly every 15 frames,
-/// which is slow enough to be felt as a pulse and quick enough to land several before the commit.
+/// Radians per frame of the wave the intake's spawn rate is beaten against,
+/// and the share of the rate that survives a trough.
+/// The rate works out to a gust about every 15 frames.
+/// That is slow enough to feel as a pulse, and quick enough to land several before the commit.
 const INTAKE_PULSE_RATE: f64 = 0.42;
 const INTAKE_PULSE_FLOOR: f64 = 0.35;
 
@@ -113,19 +124,20 @@ comptime {
         @compileError("INTAKE_PULSE_FLOOR is the share of the rate a trough keeps.");
 }
 
-/// Ring extent in world scale (viewport pixels at 1x zoom), multiplied by the live zoom at spawn.
-/// The inner edge sits INSIDE the portal's mouth (a block is `CHUNK_SIZE` px at 1x),
-/// so the swirl crosses the spot the player is drawn into rather than ringing politely around it.
+/// Ring extent in world scale, viewport pixels at 1x zoom, multiplied by the live zoom at spawn.
+/// The inner edge sits INSIDE the portal's mouth, where a block is `CHUNK_SIZE` px at 1x.
+/// So the swirl crosses the spot the player is drawn into, instead of ringing around it.
 const INTAKE_RADIUS_MIN: f32 = 2.5;
 const INTAKE_RADIUS_MAX: f32 = 30.0;
 
-/// Particle size in world scale.Scaled by the square root of the zoom rather than the zoom itself.
+/// Particle size in world scale.
+/// Scaled by the square root of the zoom, not by the zoom itself.
 const INTAKE_SIZE_MIN: f32 = 0.7;
 const INTAKE_SIZE_MAX: f32 = 2.3;
 
-/// LCHA colors for a descent's intake particles (violet, magenta, and gold here)!
-/// Ordered dimmest first, as `spawnOrbitRing()` requires: it picks by spawn radius,
-/// so the last entry is what the mouth itself is lit with and the first is what the rim fades into.
+/// LCHA colors for a descent's intake particles: violet, magenta, and gold here.
+/// Ordered dimmest first, as `spawnOrbitRing()` needs, because it picks by spawn radius.
+/// So the last entry lights the mouth itself, and the first is what the rim fades into.
 const PORTAL_COLORS = [_]Vec4f32{
     .{ 0.62, 0.21, 5.67, 1.0 },
     .{ 0.72, 0.17, 5.55, 1.0 },
@@ -155,20 +167,23 @@ comptime {
     if (OVERLAY_ZOOM >= @sqrt(@as(f64, dw.ZOOM_FACTOR))) @compileError("OVERLAY_ZOOM must stay below sqrt(ZOOM_FACTOR), or the reveal outruns the cover.");
 }
 
-/// Which transition is running. Stored in `GameState` as its integer tag.
+/// Which transition is running.
+/// Stored in `GameState` as its integer tag.
 pub const Phase = enum(u8) {
     idle,
     /// A D -> D+1 descent through a portal, shaped by `portal_frame`.
     descending,
     /// A D -> D-1 ascent through an inverted portal, the same animation run in reverse.
     ascending,
-    /// A D -> D+1 return: dives back through a portal to walk an ascent back one step,
-    /// running the zoom past `ZOOM_FACTOR` into a fadeout rather than meeting a preview (see `triggerReturn()`).
+    /// A D -> D+1 return: it dives back through a portal to walk an ascent back one step.
+    /// The zoom runs past `ZOOM_FACTOR` into a fadeout instead of meeting a preview.
+    /// See `triggerReturn()`.
     returning,
 };
 
-/// Frames the outgoing dive of a return takes. The world commits on the frame this ends,
-/// under a screen that has already faded out, so the depth change itself is never seen.
+/// Frames the outgoing dive of a return takes.
+/// The world commits on the frame this ends, under a screen that has already faded out,
+/// so the depth change itself is never seen.
 pub const RETURN_DIVE_FRAMES: u32 = 34;
 /// Frames the arrival takes, fading the depth landed on back in.
 pub const RETURN_ARRIVE_FRAMES: u32 = 18;
@@ -176,11 +191,11 @@ pub const RETURN_ARRIVE_FRAMES: u32 = 18;
 pub const RETURN_FRAMES: u32 = RETURN_DIVE_FRAMES + RETURN_ARRIVE_FRAMES;
 
 /// How far the dive keeps zooming, as a multiple of the committed scale.
-/// Helps on some level with visual clarity that "we're in preview stage".
+/// It helps read as "this is the preview stage".
 pub const RETURN_ZOOM: f64 = 12.0;
 
 /// Fraction of the dive that passes before the fade to black starts,
-/// so the zoom actually looks like a dive visually!
+/// so the zoom reads as a dive.
 const RETURN_FADE_START: f64 = 0.45;
 
 comptime {
@@ -189,12 +204,14 @@ comptime {
     if (RETURN_FADE_START <= 0.0 or RETURN_FADE_START >= 1.0) @compileError("RETURN_FADE_START is a fraction of the dive.");
 }
 
-/// Whether the running transition is a descent (rather than an ascent). Only meaningful while zooming.
+/// Whether the running transition is a descent rather than an ascent.
+/// Only meaningful while zooming.
 inline fn isDescending() bool {
     return memory.game.portal_phase == @intFromEnum(Phase.descending);
 }
 
-/// Whether an ascent is currently playing. Unlike `isDescending()`, this is safe to ask at any time.
+/// Whether an ascent is currently playing.
+/// Unlike `isDescending()`, this is safe to ask at any time.
 pub inline fn isAscending() bool {
     return memory.game.portal_phase == @intFromEnum(Phase.ascending);
 }
@@ -206,15 +223,17 @@ pub inline fn isReturning() bool {
 
 /// Whether the running transition is one of the two that DISPLAY a preview overlay (descent or ascent).
 ///
-/// A return builds a preview too, but never shows it: it commits under the fade and adopts the result,
-/// so the overlay layer (`overlayOpacity()`, `updateOverlayChunks()`) is only wanted for these two.
-/// The motion the player sees asks `isActive()`/`hasMotionOverride()`.
+/// A return builds a preview too, but never shows it.
+/// It commits under the fade and adopts the result.
+/// So the overlay layer, `overlayOpacity()` and `updateOverlayChunks()`, is only for these two.
+/// The motion the player sees asks `isActive()` and `hasMotionOverride()`.
 pub inline fn isZooming() bool {
     return isDescending() or isAscending();
 }
 
-/// Whether the transition moves DEEPER (into D+1): a descent or a return. Its preview reads D parents,
-/// which are resident in the `SimBuffer`, so both warm the ancestor cache from it (an ascent cannot).
+/// Whether the transition moves DEEPER, into D+1: a descent or a return.
+/// Its preview reads D parents, which are resident in the `SimBuffer`.
+/// So both warm the ancestor cache from it, which an ascent cannot do.
 inline fn goesDeeper() bool {
     return isDescending() or isReturning();
 }
@@ -243,20 +262,22 @@ const Shard = struct {
     travel: u32,
 };
 
-/// The D+1 transition, worked out once when the descent starts and reinstalled every frame the preview is generated under.
+/// The D+1 transition.
+/// Worked out once when the descent starts, and reinstalled every frame the preview generates under.
 /// Valid only while `ready` is set.
 var transition: world.LayerTransition = undefined;
 
 /// D+1 chunks covering everything the overlay can show, taken from `main_allocator`.
 var preview: []Chunk = &.{};
 /// The coordinate each `preview` slot holds, so a lookup can confirm it found the right chunk.
-/// Needed because a window may straddle a quadrant boundary past the horizon,
-/// where suffixes wrap and the quadrant flips; comparing suffix offsets alone would mismatch there.
+/// Needed because a window can straddle a quadrant boundary past the horizon,
+/// where suffixes wrap and the quadrant flips.
+/// A comparison of suffix offsets alone would mismatch there.
 var preview_keys: []Coordinate = &.{};
 
 /// Chunk the grid is measured out from: where the player lands at D+1.
-/// The grid is anchored here rather than on its own top-left corner,
-/// since that corner can fall off the world (near an edge) and have no coordinate at all to anchor to.
+/// The grid is anchored here, not on its own top-left corner.
+/// Near a world edge that corner falls outside the world and has no coordinate to anchor to.
 var preview_center: Coordinate = undefined;
 /// Chunk offset of the grid's top-left cell from `preview_center`.
 var preview_min: [2]i32 = .{ 0, 0 };
@@ -265,32 +286,36 @@ var preview_h: u32 = 0;
 
 /// How many slots of `preview` hold generated chunks; the rest are still blank.
 var filled: u32 = 0;
-/// Frame by which the preview must be complete, derived from where the zoom curve crosses `OVERLAY_ZOOM`.
+/// Frame by which the preview must be complete.
+/// Derived from where the zoom curve crosses `OVERLAY_ZOOM`.
 var fill_deadline: u32 = MIN_FILL_FRAMES;
 
-/// The point everything converges on, in subpixels relative to the player's chunk:
-/// the spot inside the portal block that maps exactly onto where the player lands at D+1.
-/// Zooming into it and then committing therefore lands on the very same world point, with nothing to jump.
+/// The point everything converges on, in subpixels relative to the player's chunk.
+/// It is the spot inside the portal block that maps exactly onto where the player lands at D+1.
+/// A zoom into it, then a commit, lands on the very same world point, so nothing jumps.
 var anchor: [2]f64 = .{ 0.0, 0.0 };
 
-/// Where the shards and intake particles converge on (descent) or burst from (ascent),
-/// in subpixels relative to the player's chunk.
-/// Always the (inverted) portal block; coincides with `anchor` for a descent,
-/// but sits apart from it for an ascent, where the camera holds on the player instead.
+/// Where the shards and intake particles converge on, in a descent, or burst from, in an ascent.
+/// In subpixels relative to the player's chunk.
+///
+/// Always the (inverted) portal block.
+/// It is the same point as `anchor` for a descent.
+/// It sits apart from `anchor` for an ascent, where the camera holds on the player instead.
 var effect_center: [2]f64 = .{ 0.0, 0.0 };
 
-/// The spot inside the inverted portal's own chunk that an ascent carries up:
-/// what the dive is aimed at and what the landing one depth higher is derived from.
+/// The spot inside the inverted portal's own chunk that an ascent carries up.
+/// The dive aims at it, and the landing one depth higher is derived from it.
 /// Only meaningful while an ascent runs.
 var ascend_origin: dw.utils.Vec2i = .{ 0, 0 };
 
-/// The descent's shards. Held in a fixed-sized array rather than a dynamic allocation.
+/// The descent's shards.
+/// Held in a fixed-size array rather than a dynamic allocation.
 var debris: [SHARD_COUNT]Shard = undefined;
 /// How many shards are currently active in the array.
 var debris_count: usize = 0;
 
-/// Whether `transition`, `preview`, `anchor` and `debris` describe the descent `GameState` says is running.
-/// Cleared by `reset()` and by a load, which is what makes `ensureReady()` rebuild them.
+/// Whether `transition`, `preview`, `anchor`, and `debris` describe the running descent.
+/// `reset()` and a load clear it, which is what makes `ensureReady()` rebuild them.
 var ready: bool = false;
 
 /// Whether a portal transition (descent or ascent) is currently playing.
@@ -319,8 +344,8 @@ inline fn progress() f64 {
 /// Using this for an exponent makes each frame scale the view by a visually consistent ratio
 /// (similar to how actual fractal zoom videos work)!
 ///
-/// Squaring the `smoothstep()` keeps the slope at zero on both ends (so it eases in and out),
-/// while holding the early frames low enough for the preview to finish generating before the overlay appears.
+/// Squaring the `smoothstep()` holds the slope at zero on both ends, so it eases in and out.
+/// It also keeps the early frames low enough for the preview to finish before the overlay appears.
 inline fn zoomCurve(t: f64) f64 {
     const s = smoothstep(t);
     return s * s;
@@ -353,21 +378,22 @@ fn zoomFactorAt(frame: u32) f64 {
 
 /// Scale multiplier the overlay layer is drawn at, relative to `camera_scale`.
 ///
-/// The overlay is the depth being ENTERED (D+1 descending, D-1 ascending),
-/// so it sits at a factor of `ZOOM_FACTOR` from the live layer:
-/// descending it is `ZOOM_FACTOR` smaller, ascending `ZOOM_FACTOR` larger.
+/// The overlay is the depth being ENTERED: D+1 descending, D-1 ascending.
+/// So it sits a factor of `ZOOM_FACTOR` from the live layer.
+/// Descending it is `ZOOM_FACTOR` smaller, and ascending it is `ZOOM_FACTOR` larger.
 ///
-/// Either way the factor cancels `zoomFactor()` on the last frame,
-/// so the overlay arrives at exactly `camera_scale` and the hand-off to the new depth is invisible.
+/// Either way the factor cancels `zoomFactor()` on the last frame.
+/// So the overlay arrives at exactly `camera_scale`, and the hand-off is invisible.
 pub fn overlayScale() f64 {
     @setFloatMode(.optimized);
     const factor: f64 = if (isDescending()) 1.0 / @as(f64, dw.ZOOM_FACTOR) else dw.ZOOM_FACTOR;
     return zoomFactor() * factor;
 }
 
-/// Overlay scale at its most zoomed-out (widest footprint), which is what `allocatePreview()` sizes for.
-/// Descending that is the instant it appears (`OVERLAY_ZOOM / ZOOM_FACTOR`);
-/// ascending it is the committed frame (`1.0`), since the D-1 layer starts zoomed in and pulls out to rest.
+/// Overlay scale at its most zoomed-out, its widest footprint, which `allocatePreview()` sizes for.
+/// Descending, that is the instant it appears, at `OVERLAY_ZOOM / ZOOM_FACTOR`.
+/// Ascending, it is the committed frame, at `1.0`,
+/// because the D-1 layer starts zoomed in and pulls out to rest.
 fn widestOverlayScale() f64 {
     return if (isDescending()) OVERLAY_ZOOM / @as(f64, dw.ZOOM_FACTOR) else 1.0;
 }
@@ -394,8 +420,9 @@ fn coverCurve() f64 {
 
 /// Opacity the overlay layer (chunks and background alike) is drawn at.
 ///
-/// The live layer is never faded: it stays at full strength and this is the only knob moved,
-/// so the new depth arrives *over* a solid image rather than the two meeting in the middle as a dissolve.
+/// The live layer is never faded.
+/// It stays at full strength, and this is the only knob moved.
+/// So the new depth arrives *over* a solid image, instead of the two dissolving into each other.
 pub fn overlayOpacity() f64 {
     @setFloatMode(.optimized);
     if (!isZooming()) return 0.0;
@@ -411,14 +438,17 @@ pub fn overlayOpacity() f64 {
     return t * t;
 }
 
-/// Whether to skip rendering the live layer. The player must still be rendered!
+/// Whether to skip rendering the live layer.
+/// The player must still be rendered.
 pub fn liveLayerHidden() bool {
     if (!isActive()) return false;
     return worldOpacity() <= 0.0 or overlayOpacity() >= 1.0;
 }
 
 /// How far the player has been drawn into the portal, 0 to 1.
-/// Both directions pull: a descent is swallowed by the portal below, an ascent is drawn up through the inverted one above.
+/// Both directions pull.
+/// A descent is swallowed by the portal below.
+/// An ascent is drawn up through the inverted one above.
 inline fn pullProgress() f64 {
     if (!hasMotionOverride()) return 0.0;
     const frame: f64 = @floatFromInt(@min(memory.game.portal_frame, PULL_FRAMES));
@@ -426,11 +456,12 @@ inline fn pullProgress() f64 {
 }
 
 /// How hard the world is shaking this frame, 0 (still) to 1 (full tremor).
-/// Increases as the zoom progresses, with a minor fade-out at the end (see `render/chunk.zig`'s updateShake()).
+/// It grows as the zoom progresses, with a small fade-out at the end.
+/// See `updateShake()` in `render/chunk.zig`.
 pub fn shakeIntensity() f32 {
     @setFloatMode(.optimized);
     if (!isActive()) return 0.0;
-    // if returning then there's no need to shake
+    // If returning, there is no need to shake.
     if (isReturning() and memory.game.portal_frame >= RETURN_DIVE_FRAMES) return 0.0;
 
     const p = curveProgress();
@@ -451,15 +482,16 @@ pub fn backgroundRate() f64 {
     return 1.0 - smoothstep(pullProgress());
 }
 
-/// Starts a descent through the portal at `coord`'s block (`bx`, `by`). Ignored if one is already running.
+/// Starts a descent through the portal at `coord`'s block (`bx`, `by`).
+/// Ignored if one is already running.
 pub fn trigger(coord: Coordinate, bx: u4, by: u4) void {
     beginTransition(.descending, coord, bx, by);
 }
 
 /// Starts an ascent through the inverted portal at `coord`'s block (`bx`, `by`).
-/// The block is recorded only so the effects can emanate from it;
-/// the transition itself derives entirely from the player's position (see `world.computeParentLayer()`).
-/// Ignored if one is running (already).
+/// The block is recorded only so the effects can come out of it.
+/// The transition itself derives from the player's position; see `world.computeParentLayer()`.
+/// Ignored if one is already running.
 pub fn triggerAscend(coord: Coordinate, bx: u4, by: u4) void {
     // The base layer has no parent to rise into; the indicator is already hidden there,
     // so this is only the backstop for any other caller.
@@ -467,31 +499,36 @@ pub fn triggerAscend(coord: Coordinate, bx: u4, by: u4) void {
     beginTransition(.ascending, coord, bx, by);
 }
 
-/// Starts a return: dives back through the portal at `coord`, landing on the portal the last ascent was
-/// taken through. The player is drawn into the portal exactly as a descent draws them in, so nothing
-/// about the move reads as a teleport.
+/// Starts a return.
+/// It dives back through the portal at `coord`, and lands on the portal the last ascent used.
+/// The player is drawn in exactly as a descent draws them in, so the move never reads as a teleport.
 ///
-/// Shaped like the descent but not the same: with no preview to line up against, the zoom is free to
-/// overshoot `ZOOM_FACTOR` and run away into a fadeout, which is what keeps a return looking identical
-/// at any depth. Which portal was clicked only decides where the dive is aimed; the route back is the
-/// recorded `AscentStep`, so any portal serves as the way down.
-/// No-op unless the player is actually above their deepest depth.
+/// Shaped like the descent, but not the same.
+/// With no preview to line up against, the zoom can overshoot `ZOOM_FACTOR`
+/// and run away into a fadeout.
+/// That is what keeps a return looking identical at any depth.
+///
+/// The portal that was clicked only decides where the dive is aimed.
+/// The route back is the recorded `AscentStep`, so any portal serves as the way down.
+///
+/// Does nothing unless the player is above their deepest depth.
 pub fn triggerReturn(coord: Coordinate, bx: u4, by: u4) void {
     if (isActive() or !world.canRetrace()) return;
     beginTransition(.returning, coord, bx, by);
 }
 
 /// How far through the DIVE a return is, 0 to 1, holding at 1 for the arrival.
-/// Everything visible about a return is over by the time it commits, so this is what the visual
-/// curves run on rather than the whole length.
+/// Everything visible about a return is over by the time it commits.
+/// So the visual curves run on this, not on the whole length.
 inline fn returnDiveProgress() f64 {
     const f: f64 = @floatFromInt(@min(memory.game.portal_frame, RETURN_DIVE_FRAMES));
     return f / @as(f64, @floatFromInt(RETURN_DIVE_FRAMES));
 }
 
 /// Whether the transition is currently driving the camera and player itself.
-/// False through a return's arrival: the world has already committed by then and the player is at
-/// their landing spot, so the ordinary interpolation takes back over.
+/// False through a return's arrival.
+/// The world has already committed by then, and the player is at their landing spot,
+/// so the ordinary interpolation takes over again.
 pub inline fn hasMotionOverride() bool {
     if (!isActive()) return false;
     return !isReturning() or memory.game.portal_frame < RETURN_DIVE_FRAMES;
@@ -523,9 +560,10 @@ pub fn worldOpacity() f64 {
 fn beginTransition(phase: Phase, coord: Coordinate, bx: u4, by: u4) void {
     if (isActive()) return;
 
-    // Every menu is bound to a block at the depth being left, and the world is frozen from here until
-    // the commit, so none of them may act. `mod_store.beginWrite()` asserts the same thing from the
-    // other side, since the menus are the only writers that outlive the tick gate in `handleTick()`.
+    // Every menu is bound to a block at the depth being left, and the world is frozen from here
+    // until the commit, so none of them may act. mod_store.beginWrite() asserts the same thing
+    // from the other side, since the menus are the only writers that outlive the tick gate in
+    // handleTick().
     dw.indicators.closeAllMenus();
 
     const g = &memory.game;
@@ -558,12 +596,13 @@ fn ensureReady() void {
 
     if (isReturning()) {
         if (memory.game.portal_frame >= RETURN_DIVE_FRAMES) {
-            // done!
+            // done
             ready = true;
             return;
         }
-        // A return dives back to a depth already visited, at a spot already recorded,
-        // so its D+1 transition is read straight back rather than recomputed (see world.computeRetraceLayer()).
+        // A return dives back to a depth already visited, at a spot already recorded, so its
+        // D+1 transition is read straight back instead of recomputed. See
+        // world.computeRetraceLayer().
         transition = world.computeRetraceLayer(world.retraceStep().?);
         computeEffectcenter(bx, by);
         anchor = effect_center;
@@ -592,12 +631,12 @@ fn ensureReady() void {
     ready = true;
 }
 
-/// Re-expresses a position inside the portal's chunk as subpixels relative to the PLAYER's chunk,
-/// which is the space the camera, the player and `worldToScreen()` all work in.
+/// Re-expresses a position inside the portal's chunk as subpixels relative to the PLAYER's chunk.
+/// That is the space the camera, the player, and `worldToScreen()` all work in.
 fn chunkRelative(pos: dw.utils.Vec2i) [2]f64 {
     const player_coord = memory.game.getPlayerCoord();
     const portal = portalCoord();
-    // Wrapping subtraction gives the signed chunk delta, matching how `moveAtDepth()` steps.
+    // Wrapping subtraction gives the signed chunk delta, matching how moveAtDepth() steps.
     const chunk_dx: i64 = @bitCast(portal.suffix[0] -% player_coord.suffix[0]);
     const chunk_dy: i64 = @bitCast(portal.suffix[1] -% player_coord.suffix[1]);
     return .{
@@ -618,15 +657,15 @@ fn computeEffectcenter(bx: u4, by: u4) void {
 
 /// Locates the D-space point matching where the player lands at D+1.
 ///
-/// The landing sits at some offset inside the portal block's child region; dividing that offset by
-/// `ZOOM_FACTOR` gives the same spot expressed in the parent block,
-/// which is what the camera has to arrive at for the commit to be seamless.
+/// The landing sits at some offset inside the portal block's child region.
+/// That offset divided by `ZOOM_FACTOR` is the same spot in the parent block.
+/// The camera has to arrive there for the commit to show no jump.
 fn computeAnchor(bx: u4, by: u4) void {
     const g = &memory.game;
     const player_coord = g.getPlayerCoord();
     const portal = portalCoord();
 
-    // Wrapping subtraction gives the signed chunk delta, matching how `moveAtDepth()` steps.
+    // Wrapping subtraction gives the signed chunk delta, matching how moveAtDepth() steps.
     const chunk_dx: i64 = @bitCast(portal.suffix[0] -% player_coord.suffix[0]);
     const chunk_dy: i64 = @bitCast(portal.suffix[1] -% player_coord.suffix[1]);
 
@@ -644,9 +683,11 @@ fn computeAnchor(bx: u4, by: u4) void {
     };
 }
 
-/// Finds the last frame the zoom is still at or below `OVERLAY_ZOOM`,
-/// which is the deadline the preview has to be complete by. Derived from the curve rather than hard-coded,
-/// so retuning the timing cannot silently let the overlay appear over half-generated chunks.
+/// Finds the last frame the zoom is still at or below `OVERLAY_ZOOM`.
+/// That is the deadline the preview has to be complete by.
+///
+/// It is derived from the curve, not hard-coded.
+/// So a retune of the timing cannot quietly let the overlay appear over half-generated chunks.
 fn planFill() void {
     fill_deadline = TOTAL_FRAMES;
     var frame: u32 = 0;
@@ -663,8 +704,9 @@ fn planFill() void {
 
 /// Sizes and clears the D+1 preview to cover the widest view the overlay can ever show.
 ///
-/// That widest view is the instant the overlay appears, at `OVERLAY_ZOOM`: the D+1 layer is drawn at
-/// `zoomFactor() / ZOOM_FACTOR`, which only grows from there, so the footprint only ever shrinks.
+/// That widest view is the instant the overlay appears, at `OVERLAY_ZOOM`.
+/// The D+1 layer is drawn at `zoomFactor() / ZOOM_FACTOR`, which only grows from there,
+/// so the footprint only shrinks.
 fn allocatePreview() void {
     const g = &memory.game;
     // The scale the overlay layer is drawn at when its footprint is widest (its most zoomed-out state).
@@ -772,7 +814,7 @@ fn collectDebris() void {
             .sprite = palette[@intCast(rng.next() % palette_len)],
             .angle = @floatCast(rng.float(f64) * std.math.tau),
             .radius = SHARD_RADIUS_MIN + (SHARD_RADIUS_MAX - SHARD_RADIUS_MIN) * rng.float(f32),
-            // biased to be smaller!
+            // Biased to be smaller.
             .size = SHARD_SIZE * (0.35 + 0.75 * rng.float(f32) * rng.float(f32)),
             .spin = (rng.float(f32) - 0.5) * 6.0,
             .start_frame = @intFromFloat(when * span),
@@ -781,7 +823,8 @@ fn collectDebris() void {
     }
 }
 
-/// Drops every active shard. Nothing is freed: the array is fixed-size and lives with the module.
+/// Drops every active shard.
+/// Nothing is freed: the array is fixed-size and lives with the module.
 fn clearDebris() void {
     debris_count = 0;
 }
@@ -793,10 +836,13 @@ const ANCESTOR_SEED_MAX_RADIUS: i64 = 5;
 
 /// Radius in D chunks that covers every parent the preview will read.
 ///
-/// Derived from the window rather than assumed: a zoomed-out camera can make the preview far wider than the `SimBuffer` window,
-/// and a radius that fails to reach leaves exactly the cold ancestor walk this seeding exists to avoid.
-/// Each D chunk covers `ZOOM_FACTOR` child chunks,
-/// plus one for the generator's 6x6 block neighbourhood spilling into the next chunk over, plus one to round up.
+/// Derived from the window, not assumed.
+/// A zoomed-out camera can make the preview far wider than the `SimBuffer` window.
+/// A radius that falls short leaves the cold ancestor walk this seeding exists to avoid.
+///
+/// Each D chunk covers `ZOOM_FACTOR` child chunks.
+/// Add one for the generator's 6x6 block neighborhood spilling into the next chunk over,
+/// and one more to round up.
 fn ancestorSeedRadius() i64 {
     const far_x = @max(@abs(preview_min[0]), @abs(preview_min[0] + @as(i32, @intCast(preview_w)) - 1));
     const far_y = @max(@abs(preview_min[1]), @abs(preview_min[1] + @as(i32, @intCast(preview_h)) - 1));
@@ -804,15 +850,17 @@ fn ancestorSeedRadius() i64 {
     return @min(reach, ANCESTOR_SEED_MAX_RADIUS);
 }
 
-/// Copies the D chunks the preview reads as parents into the ancestor cache, keyed for the depth the preview generates at.
+/// Copies the D chunks the preview reads as parents into the ancestor cache.
+/// They are keyed for the depth the preview generates at.
 ///
-/// `AncestorCache` indexes tiers RELATIVE to `memory.game.depth` (see `relativeTier()`),
-/// so installing the transition shifts every existing entry out of reach:
-/// a parent at D lands on the tier that holds D-1, misses, and re-derives itself from D-1,
-/// which misses in turn, all the way down the chain.
+/// `AncestorCache` indexes tiers RELATIVE to `memory.game.depth`; see `relativeTier()`.
+/// So installing the transition shifts every existing entry out of reach.
+/// A parent at D lands on the tier that holds D-1, misses, and re-derives itself from D-1.
+/// That misses in turn, all the way down the chain.
 ///
-/// The `SimBuffer` already holds these chunks fully materialized, but `getCachedChunk()` only consults it when `key.depth == game.depth`,
-/// which is false here. Copying them across turns every parent lookup into a hit,
+/// The `SimBuffer` already holds these chunks fully materialized.
+/// But `getCachedChunk()` only reads it when `key.depth == game.depth`, which is false here.
+/// A copy across turns every parent lookup into a hit,
 /// so the preview never regenerates a chunk that is already in memory.
 ///
 /// Precondition: the transition must already be installed, so `game.depth` is the preview's depth.
@@ -833,8 +881,8 @@ fn seedAncestorsFromSim(center: Coordinate, parent_depth: u64) void {
 /// Preview chunks to generate per frame. `CHUNKS_PER_FRAME` in the ordinary case, raised when the
 /// window is big enough (zoomed-out camera) or the deadline near enough that the baseline would miss it.
 ///
-/// A return has far fewer frames to fill in (`RETURN_DIVE_FRAMES` vs `TOTAL_FRAMES`), so this hands it
-/// a proportionally higher rate rather than overrunning its commit with a half-built preview.
+/// A return has far fewer frames to fill in, `RETURN_DIVE_FRAMES` against `TOTAL_FRAMES`.
+/// So this hands it a higher rate, instead of overrunning its commit with a half-built preview.
 inline fn chunksPerFrame() u32 {
     const total: u32 = @intCast(preview.len);
     const deadline = previewDeadline();
@@ -843,9 +891,9 @@ inline fn chunksPerFrame() u32 {
 
 /// Generates the next `count` preview chunks.
 ///
-/// Chunk generation reads the depth, quadrant seeds and rebase origins straight out of the globals,
-/// so the D+1 transition is installed for the duration and taken back off afterwards.
-/// The live D world is untouched: `restoreLayer()` is the exact inverse of `installLayer()`.
+/// Chunk generation reads the depth, the quadrant seeds, and the rebase origins from the globals.
+/// So the D+1 transition is installed for the duration, and taken back off after.
+/// The live D world is untouched, because `restoreLayer()` is the exact inverse of `installLayer()`.
 fn fillPreview(count: u32) void {
     if (filled >= preview.len) return;
 
@@ -890,8 +938,8 @@ fn fillPreview(count: u32) void {
 pub fn previewChunk(coord: Coordinate) ?*const Chunk {
     if (!ready or preview.len == 0) return null;
 
-    // suffix subtraction wraps the same way `moveAtDepth()` does
-    // the stored key then confirms it really is the right chunk!
+    // Suffix subtraction wraps the same way moveAtDepth() does.
+    // The stored key then confirms it really is the right chunk.
     const dx = (coord.suffix[0] -% preview_center.suffix[0]) -% @as(u64, @bitCast(@as(i64, preview_min[0])));
     const dy = (coord.suffix[1] -% preview_center.suffix[1]) -% @as(u64, @bitCast(@as(i64, preview_min[1])));
     if (dx >= preview_w or dy >= preview_h) return null;
@@ -910,7 +958,7 @@ pub fn overlayTransition() world.LayerTransition {
 }
 
 /// Camera position for this frame, in subpixels relative to the player's chunk.
-/// Easing effect; doesn't rewrite `game.camera_pos`.
+/// An easing effect, which does not rewrite `game.camera_pos`.
 pub fn cameraOverride() [2]f64 {
     const g = &memory.game;
     const t = smoothstep(pullProgress());
@@ -943,8 +991,9 @@ pub fn playerScale() f32 {
     return @floatCast(1.0 - SQUEEZE * smoothstep(pullProgress()) * (1.0 - zoomCurve(curveProgress())));
 }
 
-/// Converts a world position (subpixels relative to the player's chunk) into viewport pixels,
-/// using the same mapping the tile grid uses so effects stay locked to the blocks.
+/// Converts a world position into viewport pixels.
+/// The input is in subpixels relative to the player's chunk.
+/// It uses the same mapping the tile grid uses, so effects stay locked to the blocks.
 fn worldToScreen(sub: [2]f64) Vec2f32 {
     const zoom = memory.game.camera_scale * zoomFactor();
     const cam = cameraOverride();
@@ -956,13 +1005,16 @@ fn worldToScreen(sub: [2]f64) Vec2f32 {
 
 /// Where the effects converge this frame, in viewport pixels.
 ///
-/// Not simply the portal block: for the whole pull the player is still out where they were standing,
-/// and a swirl centered on the mouth from frame zero reads as an effect playing next to them rather
-/// than one acting on them. So it starts on the player and is carried onto the mouth as they are
-/// drawn in, arriving exactly when they do.
+/// Not simply the portal block.
+/// For the whole pull the player is still out where they were standing.
+/// A swirl centered on the mouth from frame zero reads as an effect playing next to the player,
+/// not one acting on the player.
+/// So it starts on the player and is carried onto the mouth as they are drawn in,
+/// arriving exactly when they do.
 ///
-/// Both ends converge anyway (`playerOverride()` eases onto `anchor`, which is the same block
-/// `effect_center` measures), so this only shapes the pull; afterwards it is `effect_center` outright.
+/// Both ends converge anyway, because `playerOverride()` eases onto `anchor`,
+/// which is the same block `effect_center` measures.
+/// So this only shapes the pull, and after that it is `effect_center` outright.
 fn effectOrigin() Vec2f32 {
     const t = smoothstep(pullProgress());
     const player = playerOverride();
@@ -992,8 +1044,9 @@ pub fn getDescentFade() f32 {
 
 /// Draws each shard falling into the portal.
 ///
-/// Purely screen-space: the ring, the sizes and the travel are all in viewport pixels,
-/// so the zoom ramping to `ZOOM_FACTOR` underneath costs nothing here and the debris keeps arriving throughout.
+/// Purely screen-space: the ring, the sizes, and the travel are all in viewport pixels.
+/// So the zoom ramping to `ZOOM_FACTOR` underneath costs nothing here,
+/// and the debris keeps arriving throughout.
 fn drawDebris(center: Vec2f32) void {
     const frame = memory.game.portal_frame;
 
@@ -1038,14 +1091,15 @@ fn drawDebris(center: Vec2f32) void {
     }
 }
 
-/// Particles thrown by the swallow. Big enough to punctuate, since it fires exactly once.
+/// Particles thrown by the swallow.
+/// Big enough to punctuate, since it fires exactly once.
 const SWALLOW_SPARKS: usize = 120;
 
 /// The kick the mouth gives on the frame the player finishes being drawn in.
 ///
 /// Keyed to that exact frame rather than a range, so a save resumed past it cannot fire a second time.
-/// Half of it is thrown clear and half is a tight counter-swirl straight back down,
-/// so the moment still reads as the portal taking something rather than as an explosion.
+/// Half of it is thrown clear, and half is a tight counter-swirl straight back down.
+/// So the moment reads as the portal taking something, not as an explosion.
 fn spawnSwallow() void {
     @setFloatMode(.optimized);
     const zoom: f32 = @floatCast(memory.game.camera_scale * @min(zoomFactor(), @as(f64, dw.ZOOM_FACTOR)));
@@ -1076,7 +1130,8 @@ fn spawnSwallow() void {
 
 /// Emits the portal's inward-falling particles, growing more insistent as the descent builds.
 ///
-/// Deliberately outlives the intake fade: the particles are still going strong while the D+1 layer comes up underneath them,
+/// It outlives the intake fade on purpose.
+/// The particles are still going strong while the D+1 layer comes up underneath them,
 /// which is what keeps that hand-over from reading as a dissolve.
 /// They only thin out over the closing stretch, once the zoom alone carries the shot.
 fn spawnIntake() void {
@@ -1091,7 +1146,7 @@ fn spawnIntake() void {
 
     const zoom: f32 = @floatCast(memory.game.camera_scale * zoomFactor());
 
-    // create a rhythm effect to sell an interesting effect here!
+    // Create a rhythm, which sells the effect here.
     const wave = 0.5 - 0.5 * @cos(@as(f64, @floatFromInt(memory.game.portal_frame)) * INTAKE_PULSE_RATE);
     const surge = intensity * intensity * (INTAKE_PULSE_FLOOR + (1.0 - INTAKE_PULSE_FLOOR) * wave);
     const count: usize = @intFromFloat(3.0 + 46.0 * surge);
@@ -1119,7 +1174,8 @@ fn spawnIntake() void {
     }
 }
 
-/// Advances the running transition by one logical frame. Called once per tick iteration from `handleTick()`.
+/// Advances the running transition by one logical frame.
+/// Called once per tick iteration from `handleTick()`.
 pub fn tick() void {
     if (!isActive()) return;
 
@@ -1177,11 +1233,12 @@ fn tickReturn() void {
     }
 }
 
-/// Commits a return under the dark frame: finishes any preview still owed, installs D+1 and adopts the generated chunks,
-/// so the arrival fades in on a ready world rather than one being generated.
+/// Commits a return under the dark frame.
+/// It finishes any preview still owed, installs D+1, and adopts the generated chunks.
+/// So the arrival fades in on a ready world, not on one still being generated.
 fn commitReturn() void {
     // Anything the dive did not reach (a stall, a low frame rate) is finished now.
-    // Bounded by the preview size, and the screen is already black, so a small catch-up here isn't invisible.
+    // Bounded by the preview size, and the screen is already black, so a small catch-up is unseen.
     fillPreview(@intCast(preview.len));
 
     world.commitRetrace(transition);
@@ -1292,7 +1349,8 @@ pub fn restore() void {
     if (preview.len != 0) fillPreview(@intCast(preview.len));
 }
 
-/// Abandons any running descent and releases its memory. Used when a world is torn down.
+/// Abandons any running descent and releases its memory.
+/// Used when a world is torn down.
 pub fn reset() void {
     const g = &memory.game;
     g.portal_phase = @intFromEnum(Phase.idle);
