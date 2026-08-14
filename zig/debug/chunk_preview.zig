@@ -324,7 +324,7 @@ pub fn drawChunkPreview() void {
         bg.lcha = .{ 0.8, 0.2, 0.4, 1.0 };
         addEntity(bg);
 
-        // The window is much wider than this now; show the active quadrants and their immediate ring.
+        // The window is much wider than this now, so show the active quadrants and their ring!
         const first = dw.world.QuadCache.ANCESTOR_CENTER - 1;
         for (0..4) |y| {
             for (0..4) |x| {

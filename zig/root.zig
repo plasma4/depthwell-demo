@@ -1,7 +1,9 @@
-//! Root file. Imports various other codebase files for easy access and handles exporting functions to WASM.
+//! Root file.
+//! It imports the other codebase files for easy access, and exports the WASM functions.
 //!
-//! All functions here (excluding internal ones like panic) should be `pub` to expose functions to `generate_types.zig`,
-//! and `extern` for WASM (with no other exported functions within other Zig files).
+//! Every function here, apart from an internal one such as `panic()`, must be `pub`,
+//! which is what shows it to `generate_types.zig`.
+//! It must also be `extern` for WASM, and no other Zig file exports a function.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -14,12 +16,13 @@ pub const dev_menu = true;
 
 /// Set to true if the CPU architecture is set to `wasm32` or `wasm64`.
 pub const is_wasm = builtin.cpu.arch.isWasm(); // builtin.target.cpu.arch == .wasm32 or builtin.target.cpu.arch == .wasm64;
-/// Set to true if either test mode or `Debug` mode is used. The BUILD MODE, nothing else:
-/// use `dev_menu` for anything the debug UI owns, or it will vanish from a release profile build.
+/// Set to true if either test mode or `Debug` mode is used.
+/// This is the BUILD MODE and nothing else.
+/// Use `dev_menu` for anything the debug UI owns, or it vanishes from a release profile build.
 pub const is_debug = builtin.is_test or builtin.mode == .Debug;
 
 // Note: changing these constants below will probably have disastrous consequences.
-// A lot of logic is hard-coded, such as `[6][6]Sprite` use, and a lot of logic is bound to break if these constants are modified.
+// A lot of logic is hard-coded, such as the [6][6]Sprite use, and it breaks if these change.
 
 /// Represents log2(CHUNK_SIZE).
 pub const CHUNK_SIZE_LOG2: comptime_int = 4;
@@ -141,7 +144,7 @@ pub extern "env" fn jsSetMouseType(mouse_type: mouse.CursorType) void;
 pub extern "env" fn jsPlaySound(soundId: u32, volume: f64, pitch: f64) void;
 
 pub fn main() callconv(.c) void {
-    // nothing happens here for now
+    // Nothing happens here for now.
 }
 
 comptime {
@@ -178,7 +181,7 @@ pub export fn handleMouse(mouse_x: f64, mouse_y: f64, action: u32) void {
 }
 
 pub export fn tick(logic_speed: f64, iterations: u32) void {
-    // A trap inside handleTick() leaves this set, so the torn state can never be saved (see `save.in_tick`).
+    // A trap inside handleTick() leaves this set, so the torn state can never be saved (see save.in_tick).
     save.in_tick = true;
     handleTick(logic_speed, iterations);
     save.in_tick = false;
@@ -197,8 +200,8 @@ pub export fn tick(logic_speed: f64, iterations: u32) void {
 }
 
 pub export fn mixSeed(number: u64) i64 {
-    // IMPORTANT! For some reason, it appears that this returns an `i64` even with `u64` return type.
-    // Therefore, that's the type we return.
+    // IMPORTANT! For some reason this returns an i64 even with a u64 return type.
+    // So that is the type we return.
     return @intCast(seeding.mixBaseSeed(memory.game.seed, @enumFromInt(number)).value[0] >> 1);
 }
 pub export fn mixSeedF64(number: u64) f64 { // same thing as mix_seed but f64
@@ -283,7 +286,7 @@ pub export fn saveLastImportError() u32 {
     return save.lastImportError();
 }
 
-// Import the debug UI API and the developer-only exports; see `dev_menu`.
+// Import the debug UI API and the developer-only exports; see dev_menu.
 comptime {
     _ = if (dev_menu) struct {
         pub const debug_ui = @import("debug/debug_ui.zig");

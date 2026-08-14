@@ -1,6 +1,9 @@
 /build
+/tools
 compile_commands.json
 **/.DS_Store
+/.claude
+!/.claude/tmp/bench.zig
 /.zig-cache
 /.jj
 /node_modules

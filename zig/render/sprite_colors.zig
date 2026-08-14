@@ -2318,8 +2318,8 @@ pub const primary = [TILE_COUNT]Vec4f32{
     .{ 1.0000, 0.0000, 0.0000, 1.0000 }, // #ffffff
 };
 
-/// Second most common opaque color of each tile as OKLCH+alpha (see file docs); opaque white for blank/single-color tiles.
-/// Indexed by tile (entity id), and falls back to the primary (only) color if a secondary color doesn't exist.
+/// Second most common opaque color of each tile as OKLCH+alpha (see file docs); white for blank/single-color tiles.
+/// Indexed by tile (entity id) and falls back to the primary (only) color if a secondary color doesn't exist!
 pub const secondary = [TILE_COUNT]Vec4f32{
     .{ 1.0000, 0.0000, 0.0000, 1.0000 }, // #ffffff
     .{ 0.3226, 0.0592, 2.9443, 1.0000 }, // #093d2e

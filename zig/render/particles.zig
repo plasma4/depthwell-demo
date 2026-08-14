@@ -1,6 +1,7 @@
 //! Fixed-capacity particle system rendered with the square `.particle` sprite.
 //!
-//! Colors come from `particle_colors.zig`, generated at build time from the sprite atlases by `zig/generate_pixel_data.zig`,
+//! Colors come from `particle_colors.zig`.
+//! `zig/generate_pixel_data.zig` writes it from the sprite atlases at build time,
 //! so each sprite tile exposes its unique texel colors as OKLCH tints.
 //! Particles live in a simple circular buffer that overrides the oldest particle.
 //!
@@ -35,7 +36,8 @@ comptime {
         @compileError("MAX_PARTICLES must be a power of two for mask-based index wrapping!");
 }
 
-/// One live (or dead) particle. All units are internal-viewport pixels and render frames.
+/// One live (or dead) particle.
+/// All units are internal-viewport pixels and render frames.
 pub const Particle = struct {
     /// Center position in viewport pixels.
     position: Vec2f32 = .{ 0.0, 0.0 },
@@ -47,7 +49,8 @@ pub const Particle = struct {
     spin: f32 = 0.0,
     /// Square size in viewport pixels.
     size: f32 = 2.0,
-    /// Point this particle accelerates toward, in viewport pixels. Only read when `pull` is non-zero.
+    /// Point this particle accelerates toward, in viewport pixels.
+    /// Only read when `pull` is non-zero.
     attractor: Vec2f32 = .{ 0.0, 0.0 },
     /// Strength of the attraction; 0 leaves the particle travelling in a straight line.
     ///
@@ -58,7 +61,8 @@ pub const Particle = struct {
     lcha: Vec4f32 = .{ 1.0, 0.0, 0.0, 1.0 },
     /// Render frames remaining; 0 means the slot is dead/free.
     frames_left: u16 = 0,
-    /// Total lifetime in render frames, used to interpolate opacity. Must be >= `frames_left`.
+    /// Total lifetime in render frames, used to interpolate opacity.
+    /// Must be >= `frames_left`.
     lifetime: u16 = 1,
 };
 
@@ -108,8 +112,9 @@ pub fn addParticle(particle: Particle) void {
 }
 
 /// Spawns `config.count` particles radiating from `origin` (viewport pixels) in random directions.
-/// Each picks a uniformly random color from `colors` (white if empty), a random size within the configured range,
-/// and a random starting rotation that keeps spinning until it fades out.
+/// Each picks a random color from `colors`, or white if that is empty.
+/// Each also picks a random size in the configured range.
+/// A random starting rotation keeps spinning until the particle fades out.
 pub fn spawnBurst(origin: Vec2f32, colors: []const Vec4f32, config: BurstConfig) void {
     for (0..config.count) |_| {
         const angle = randRange(0.0, std.math.tau);
@@ -194,8 +199,7 @@ pub fn spawnOrbitRing(origin: Vec2f32, colors: []const Vec4f32, config: OrbitCon
             break :blk config.arm_phase + arm * (std.math.tau / @as(f32, @floatFromInt(config.arms))) +
                 randRange(-config.arm_spread, config.arm_spread);
         };
-        // Squared so the ring crowds toward its inner edge. Spread evenly, most of a disc's area
-        // (and so most of its particles) lands out at the rim, which leaves the mouth itself bare.
+        // Squared so the ring crowds toward its inner edge!
         const u = seed.float(f32);
         const radius = config.radius_min + (config.radius_max - config.radius_min) * u * u;
         const travel: u16 = @intFromFloat(randRange(

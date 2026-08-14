@@ -6,13 +6,14 @@ const procedural = dw.procedural;
 
 const Coordinate = dw.world.Coordinate;
 
-// Drop resolution lives in `state/drops.zig`.
+// Drop resolution lives in state/drops.zig.
 const DropConfig = dw.drops.DropConfig;
 const DropHandlers = dw.drops.DropHandlers;
 
 /// Sentinel `strength` marking a block as unmineable by a normal pickaxe (see `getSpriteStrength()`).
-/// Distinct from strength 0, which means "unset" basically (see `mining.has_structure_tool`).
-/// Chosen as the max so the existing "never reaches strength" mining path already treats it as unmineable.
+/// Different from strength 0, which means "unset" (see `mining.has_structure_tool`).
+/// It is the max, so the existing "never reaches strength" mining path already
+/// treats it as unmineable.
 pub const UNMINEABLE_STRENGTH: u64 = std.math.maxInt(u64);
 
 /// ID for `Sprite.wood`, which is after edge stone.
@@ -152,14 +153,15 @@ pub const Sprite = enum(u16) {
     aquashard,
     electrit,
 
-    // Internal assets (not valid for placement/foundation)
+    // internal assets (not valid for placement or as a foundation)
     gem_mask = MASK_START, // 8 masks
     hp_mask = MASK_START + 8, // 16 masks
 
-    // Decor (THIS IS COUPLED TO WGSL CODE)
+    // decor (THIS IS COUPLED TO WGSL CODE)
     small_tree = DECOR_START,
-    /// Left half of the 2x1 big tree; each half is stored as its own block ID and requires its pair beside it
-    /// (see the `requires` rules below). The pair always breaks as a unit.
+    /// Left half of the 2x1 big tree.
+    /// Each half is its own block ID and requires its pair beside it; see the `requires` rules below.
+    /// The pair always breaks as a unit.
     moss_shrub1,
     /// Right half of `moss_shrub1`; only ever valid directly right of it.
     moss_shrub1_right,
@@ -252,7 +254,8 @@ pub const Sprite = enum(u16) {
     water = PARTICLE_START + 21 + (@as(u16, @intCast(@intFromEnum(dw.mining.Tools.gold))) + 1),
     water_icon,
 
-    /// A special type used for mining/inventory logic purposes. Doesn't exist as an actual sprite.
+    /// A special type for mining and inventory logic.
+    /// It does not exist as an actual sprite.
     unselected = 65535,
     _, // non-exhaustive for debugging heatmaps
 
@@ -273,8 +276,9 @@ pub const Sprite = enum(u16) {
         return .{};
     }
 
-    /// Determines if the sprite's type is one that should interact with the edge flags and procedural generation.
-    /// This returns false for edge stone, unlike `isSolid()`. Assumes invalid block types are impossible.
+    /// Determines if the sprite takes part in edge flags and procedural generation.
+    /// This returns false for edge stone, unlike `isSolid()`.
+    /// Assumes an invalid block type is impossible.
     pub inline fn isFoundation(self: Sprite) bool {
         return self.props().foundation;
     }
@@ -332,9 +336,11 @@ pub const Sprite = enum(u16) {
         return self.props().gem;
     }
 
-    /// True for ore/gem overlay sprites since those composited over a `base_id` stone underlay.
-    /// Ores and gems form one contiguous ID range, so this is a single bounds test rather than two `props()` lookups
-    /// (`isOre() or isGem()`); a comptime check tries to keep the ranges in sync.
+    /// True for an ore or gem overlay sprite, which composites over a `base_id` stone underlay.
+    ///
+    /// Ores and gems form one contiguous ID range.
+    /// So this is one bounds test, not the two `props()` lookups of `isOre() or isGem()`.
+    /// A comptime check keeps the two ranges in sync.
     pub inline fn isOverlay(self: Sprite) bool {
         const id = @intFromEnum(self);
         return id >= ORE_START and id < GEM_START + GEM_COUNT;
@@ -345,8 +351,9 @@ pub const Sprite = enum(u16) {
         return self.props().anchor;
     }
 
-    /// Returns every neighbor cell this sprite requires to stay in the world: its `anchor` constraint
-    /// followed by any extra `SpriteProps.requires` entries, flattened into one list at compile-time.
+    /// Returns every neighbor cell this sprite needs to stay in the world.
+    /// That is its `anchor` constraint, then any extra `SpriteProps.requires` entries,
+    /// flattened into one list at compile time.
     /// The cascade in `state/world.zig` clears the block as soon as one entry fails.
     pub inline fn supports(self: Sprite) []const Support {
         const val = @intFromEnum(self);
@@ -367,8 +374,8 @@ pub const Sprite = enum(u16) {
         return .none;
     }
 
-    /// Whether this sprite is the RIGHT half of a 2x1 pair, and so is never placed on its own:
-    /// it appears only alongside its left half, and stays out of the creative palette.
+    /// Whether this sprite is the RIGHT half of a 2x1 pair, and so is never placed alone.
+    /// It appears only beside its left half, and stays out of the creative palette.
     pub inline fn isPairedRight(self: Sprite) bool {
         for (self.supports()) |s| {
             if (s.kind == .exact and s.dx == -1 and s.dy == 0) return true;
@@ -384,8 +391,9 @@ pub const Sprite = enum(u16) {
 
     /// What this sprite becomes at increased depth and how often, or null when it stays as it is.
     ///
-    /// This is the ODDS, not the outcome: resolve it with `refine.evolve()`, which rolls the cell and
-    /// applies the anchor gate. Reading `.into` directly skips both and evolves every cell always.
+    /// This is the ODDS, not the outcome.
+    /// Resolve it with `refine.evolve()`, which rolls the cell and applies the anchor gate.
+    /// A direct read of `.into` skips both and evolves every cell, always.
     pub inline fn evolution(self: Sprite) ?Evolution {
         const val = @intFromEnum(self);
         if (val < MAX_SPRITE_ID) return dense_props_table[val].evolution;
@@ -404,9 +412,9 @@ pub const Sprite = enum(u16) {
         return self.props().category == .decor;
     }
 
-    /// Returns whether a sprite lets water flow through/around it and stores directional waterlogging
-    /// (both decor and crafter installations); non-solid placeables that never block liquid.
-    /// Examples include things like furnaces/crafting cores which aren't filled block textures.
+    /// Returns whether a sprite lets water flow around it and stores directional waterlogging.
+    /// That covers decor and crafter installations: placeables that never block liquid.
+    /// A furnace or a crafting core is one, because neither is a filled block texture.
     ///
     /// Precondition: the sprite is valid.
     pub inline fn isWaterloggable(self: Sprite) bool {
@@ -532,7 +540,7 @@ const rules = [_]SpriteRule{
             .liquid = true,
         },
     },
-    // empty block
+    // Empty block
     .{
         .{ .single = .none },
         .{ .in_world = true },
@@ -637,7 +645,7 @@ const rules = [_]SpriteRule{
         .{ .strength = 130, .required_capabilities = .t3 },
     },
 
-    // hitbox sizes!
+    // Hitbox sizes!
     .{
         .{ .list = &[_]Sprite{
             .ceiling_flower,
@@ -677,13 +685,13 @@ const rules = [_]SpriteRule{
         .{ .hitbox = .thin_strip },
     },
 
-    // evolution rules on depth increase!
-    // Moss spreads through the child terrain. refine.evolve() also returns small holes to stone.
+    // Evolution rules on depth increase!
+    // Moss spreads through the child terrain; refine.evolve() also returns small holes to stone
     .{
         .{ .single = .mossy_stone },
         .{ .evolution = .{ .into = .more_mossy_stone, .chance = 0.6 } },
     },
-    // refine.evolve() starts per-column one- or two-cell sprouts below a solid ceiling.
+    // refine.evolve() starts per-column one- or two-cell sprouts below a solid ceiling
     .{
         .{ .single = .more_mossy_stone },
         .{ .evolution = .{ .into = .spiralvine } },
@@ -702,7 +710,7 @@ const rules = [_]SpriteRule{
         .{ .evolution = .{ .into = .molten_stone, .chance = 0.2, .blob = 9 } },
     },
 
-    // 2x1 big trees. Each half pins the other through requires config, and only the left half drops the small_tree.
+    // 2x1 big trees: each half pins the other through requires config, and only the left half drops the small_tree
     .{
         .{ .list = &[_]Sprite{
             .moss_shrub1,
@@ -746,12 +754,12 @@ const rules = [_]SpriteRule{
     // Plant with base connection
     .{
         .{ .single = .plant_stem },
-        // rests on solid ground OR another `plant_base` directly below it (a self-stacking shaft)
+        // Rests on solid ground OR another plant_base directly below it (a self-stacking shaft)
         .{ .requires = &.{.{ .dy = 1, .kind = .solid_or_self }} },
     },
     .{
         .{ .single = .cornflower },
-        // the flowering tip: only ever valid directly above a `plant_base`
+        // The flowering tip: only ever valid directly above a plant_base
         .{ .requires = &.{.{ .dy = 1, .kind = .exact, .sprite = .plant_stem }} },
     },
 
@@ -845,7 +853,7 @@ const rules = [_]SpriteRule{
             .category = .decor,
         },
     },
-    // Non-item decor: a tree is picked up as the `small_tree` it drops, never as its own halves.
+    // Non-item decor: a tree is picked up as the small_tree it drops, never as its own halves
     .{
         .{ .list = &[_]Sprite{
             .moss_shrub1,
@@ -904,7 +912,7 @@ pub const SupportKind = enum(u2) {
     exact,
 };
 
-/// One neighbor cell a sprite needs in order to stay in the world.
+/// One neighbor cell a sprite needs to stay in the world.
 /// - `dx`/`dy` are tile offsets from the block itself: +x is right, +y is DOWN (screen order, like `Coordinate.move()`).
 /// - `sprite` is only read for `SupportKind.exact`.
 pub const Support = struct {
@@ -939,23 +947,27 @@ pub const Category = enum(u3) {
     /// Assumed to be instantly mineable.
     decor,
     /// Fixed installation (furnace, core, chest, portal).
-    /// Unmineable by a normal pickaxe and waterloggable like decor (doesn't look like a full block).
+    /// Unmineable by a normal pickaxe, and waterloggable like decor,
+    /// because it does not look like a full block.
     interactive,
 };
 
 /// What one sprite turns into as depth increases, and how often.
 ///
-/// Declarative on purpose: this states the ODDS, and `refine.evolve()` is the only thing that resolves
-/// them, so a kind's rule lives here rather than in the generator.
-/// Everything is a pure function of the child cell's world position,
-/// which is what keeps a cell's fate identical across regeneration.
+/// Declarative on purpose.
+/// This states the ODDS, and `refine.evolve()` is the only thing that resolves them,
+/// so a kind's rule lives here and not in the generator.
+///
+/// Everything is a pure function of the child cell's world position.
+/// That keeps a cell's fate identical across regeneration.
 pub const Evolution = struct {
     /// What the sprite becomes.
     into: Sprite,
     /// Fraction of cells that take the evolution, in `(0, 1]`.
     /// The rest keep the sprite they already are, so `0.6` reads as "40% stays put".
-    /// The anchor gate can still refuse an evolution that rolled through
-    /// (see `refine.canEvolveInto()`), which is what keeps a vine off a wall it cannot hang from.
+    /// The anchor gate can still refuse an evolution that rolled through; see
+    /// `refine.canEvolveInto()`.
+    /// That is what keeps a vine off a wall it cannot hang from.
     chance: f32 = 1.0,
     /// Diameter, in child blocks, of the patches the roll gathers into.
     /// 0 rolls every cell on its own (visually uncorrelated),
@@ -990,7 +1002,8 @@ pub const SpriteProps = struct {
     /// If the block should use a digging sound effect instead of mining, this is set to `true`.
     digged: bool = false,
     /// Pseudo-decor: mined instantly like a `.decor` sprite despite being `solid`/`foundation`.
-    /// Only consulted by `mining.getSpriteStrength()`; lives outside `SpriteFlags` since it's off the hot path.
+    /// Only `mining.getSpriteStrength()` reads it.
+    /// It lives outside `SpriteFlags` because it is off the hot path.
     instant_mine: bool = false,
     /// Backs the entity renderer's hitbox shape lookup; see `HitboxKind`.
     hitbox: HitboxKind = .full,
@@ -1155,8 +1168,9 @@ const dense_props_table: [MAX_SPRITE_ID]SpriteProps = blk: {
 
 /// Rejects an `Evolution` the roll could not honor.
 ///
-/// `chance` of 0 is a rule that does nothing (drop the field instead, so the table stays readable),
-/// and a `blob` under one block is smaller than the cells it is meant to gather.
+/// A `chance` of 0 is a rule that does nothing.
+/// Drop the field instead, so the table stays readable.
+/// A `blob` under one block is smaller than the cells it is meant to gather.
 fn validateEvolution(comptime s: Sprite, comptime ev: Evolution) void {
     if (ev.chance <= 0.0 or ev.chance > 1.0)
         @compileError("Sprite `" ++ @tagName(s) ++ "`: evolution chance must be within (0, 1].");
@@ -1209,8 +1223,9 @@ const dense_supports_table: [MAX_SPRITE_ID][]const Support = blk: {
 
 /// The partner each sprite pins one cell to its RIGHT, `.none` for all but the left half of a 2x1 pair.
 ///
-/// Read back out of the `requires` table rather than listed again, so a pair is stated in exactly one
-/// place: each half demanding the other (see `moss_shrub1`) is already the whole definition.
+/// Read back out of the `requires` table instead of listed again, so a pair is stated
+/// in exactly one place.
+/// Each half demanding the other, as `moss_shrub1` does, is already the whole definition.
 const dense_pair_table: [MAX_SPRITE_ID]Sprite = blk: {
     @setEvalBranchQuota(20000);
     var table: [MAX_SPRITE_ID]Sprite = @splat(.none);
@@ -1219,8 +1234,8 @@ const dense_pair_table: [MAX_SPRITE_ID]Sprite = blk: {
             if (s.kind != .exact or s.dx != 1 or s.dy != 0) continue;
             if (table[i] != .none)
                 @compileError("A sprite demands two different partners to its right.");
-            // `world.modifyBlockType()` walks this rightward, so a sprite pointing at itself would be an
-            // endless row rather than a pair (use `SupportKind.solid_or_self` for a real chain).
+            // world.modifyBlockType() walks this rightward, so a sprite pointing at itself would be
+            // an endless row rather than a pair (use SupportKind.solid_or_self for a real chain).
             if (@intFromEnum(s.sprite) == i)
                 @compileError("A sprite cannot be its own right-hand partner.");
             table[i] = s.sprite;
@@ -1333,7 +1348,7 @@ pub const possible_item_sprites = blk: {
     break :blk result;
 };
 
-// Comptime sanity validation check
+// comptime sanity validation check
 comptime {
     @setEvalBranchQuota(1e6);
     if ((@as(Sprite, @enumFromInt(65535))).isInWorld())

@@ -1,4 +1,4 @@
-//! Updates public values describing the mouse's position for other parts of the game, such as mining.
+//! Keeps the public mouse position values that the rest of the game reads, such as mining.
 const std = @import("std");
 const dw = @import("../root.zig");
 const memory = dw.memory;
@@ -14,13 +14,14 @@ const SCREEN_WIDTH = dw.SCREEN_WIDTH;
 const SCREEN_HEIGHT = dw.SCREEN_HEIGHT;
 
 /// The system categories that can claim the mouse's click focus.
-/// These categories prevent cross-activation (such as pointerdown within the inventory and pointerup on an indicator).
-/// Lower values on the enum are prioritized (none > canvas > clickables like inventory slots).
+/// The categories stop cross-activation, such as a pointerdown in the inventory and a pointerup on an indicator.
+/// Lower enum values win: none > canvas > clickables like inventory slots.
 pub const ClickFocus = enum(u32) {
-    /// No click is active. The cursor is free to hover over elements and change type.
+    /// No click is active.
+    /// The cursor is free to hover over elements and change type.
     none,
     /// Click started on the world canvas (such as by mining a block).
-    /// This has precedence over all UI categories to prevent active dragging from interacting with menus.
+    /// This beats every UI category, so an active drag cannot touch a menu.
     canvas,
     /// Click started specifically on an inventory slot.
     inventory,
@@ -74,9 +75,11 @@ pub const CursorType = enum(u8) {
 
 /// The active category that currently owns the click action.
 pub var click_focus: ClickFocus = .none;
-/// The current visual style of the cursor. Reset to `.initial` each render frame.
+/// The current visual style of the cursor.
+/// Reset to `.initial` each render frame.
 pub var cursor_type: CursorType = .initial;
-/// The focus state right before the mouse button was released. Remains valid for the duration of the frame.
+/// The focus state right before the mouse button was released.
+/// Stays valid for the rest of the frame.
 pub var released_focus: ClickFocus = .none;
 
 /// Determines if the mouse was just set to be down; reset via `clearFrameFlags()` at the end of the frame.
@@ -99,8 +102,9 @@ pub var mouse_block_y: u4 = 0;
 /// How many chunks the mouse sits from the player's own chunk, on each axis.
 /// Assume to be invalid if `mouse_chunk_coord` is null.
 pub var mouse_chunk_offset: [2]i64 = .{ 0, 0 };
-/// Whether the mouse's block position changed. If coordinate is out of bounds, then set to true.
-/// Is reset in `handleMining()`, called from `handleTick()`.
+/// Whether the mouse's block position changed.
+/// An out-of-bounds coordinate sets this to true.
+/// Reset in `handleMining()`, called from `handleTick()`.
 pub var block_position_changed = true;
 
 /// Point coordinate of the mouse (based on the UV).
@@ -108,7 +112,7 @@ pub var block_position_changed = true;
 pub var uv_position: dw.utils.Vec2f = .{ -1.0, -1.0 };
 
 /// Requests a mouse cursor type in a way that avoids UI races or similar issues.
-/// The request is accepted only if the requested type has a higher or equal priority than the currently active cursor type.
+/// The request only lands if the new type has a priority at or above the active one.
 pub fn requestCursorType(new_type: CursorType) void {
     if (new_type.takesPrecedenceOver(cursor_type)) {
         cursor_type = new_type;
@@ -138,8 +142,9 @@ pub fn isClicked(category: ClickFocus, is_hovered: bool) bool {
 /// Handles a fresh pointerdown across every interactive UI layer BEFORE world mining runs.
 /// Must be called once per tick, ahead of `mining.handleMiningAndPlacing()` (see `state/tick.zig`).
 ///
-/// Since `handleMouse()` optimistically sets `click_focus = .canvas` on pointerdown,
-/// without this the accuracy of first-frame click is forced to the whimsy of whether render or logical tick applies first.
+/// `handleMouse()` optimistically sets `click_focus = .canvas` on pointerdown.
+/// Without this pass, a first-frame click goes to whichever of the render and the logical tick runs first.
+/// That is not a thing to leave to chance.
 ///
 /// Categories are visited in enum order (highest priority first);
 /// the first hovered layer claims the click, matching `ClickFocus` precedence.
@@ -149,11 +154,26 @@ pub fn processDownCaptures() void {
         switch (@as(ClickFocus, @enumFromInt(field.value))) {
             // not interactive layers: .none is idle, .canvas is the fallback owner set on pointerdown
             .none, .canvas => {},
-            .indicator => _ = tryCaptureDown(.indicator, dw.indicators.isHoveringIndicator()),
-            .inventory => _ = tryCaptureDown(.inventory, inventory.getHoveredInventorySprite() != null),
-            .smelting => _ = tryCaptureDown(.smelting, @import("../menus/furnace.zig").isHoveringOnMenu()),
-            .crafting => _ = tryCaptureDown(.crafting, @import("../menus/corecraft.zig").isHoveringOnMenu()),
-            .loot => _ = tryCaptureDown(.loot, @import("../menus/loot.zig").isHoveringOnMenu()),
+            .indicator => _ = tryCaptureDown(
+                .indicator,
+                dw.indicators.isHoveringIndicator(),
+            ),
+            .inventory => _ = tryCaptureDown(
+                .inventory,
+                inventory.getHoveredInventorySprite() != null,
+            ),
+            .smelting => _ = tryCaptureDown(
+                .smelting,
+                @import("../menus/furnace.zig").isHoveringOnMenu(),
+            ),
+            .crafting => _ = tryCaptureDown(
+                .crafting,
+                @import("../menus/corecraft.zig").isHoveringOnMenu(),
+            ),
+            .loot => _ = tryCaptureDown(
+                .loot,
+                @import("../menus/loot.zig").isHoveringOnMenu(),
+            ),
             // intentionally non-exhaustive to catch errors
         }
     }

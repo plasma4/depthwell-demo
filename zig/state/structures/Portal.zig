@@ -93,16 +93,16 @@ pub fn generate(
 
     const is_inv = state.getChance(0.4);
 
-    // Normal portal stands centered on a white plate, inverted portal stands on a white plate directly above!
+    // normal portal stands centered on a white plate, inverted portal stands on a white plate directly above!
     if (is_inv and local_x == size_x / 2 and local_y == size_y - 3) return .{ .id = .white_plate };
     if (!is_inv and local_x == size_x / 2 and local_y == size_y - 1) return .{ .id = .white_plate };
     if (local_x == size_x / 2 and local_y == size_y - 2) return .{ .id = if (is_inv) .invportal else .portal };
 
     if (isShell(local_x, local_y)) return .{ .id = .black_plate };
-
-    // on uneven ground, seating drops to the lowest column and the higher columns embed into the footprint.
-    // rather than carve that away and expose a raw dug notch, keep the natural terrain that was already there.
-    if (structures.baseSolid(@bitCast(wx), @bitCast(wy))) return .{ .id = starting_sprite };
+    // preserve natural ground ONLY on the bottom floor level (to fill slope gaps)
+    if (local_y == size_y - 1 and structures.baseSolid(@bitCast(wx), @bitCast(wy))) {
+        return .{ .id = starting_sprite };
+    }
 
     return .{ .id = .none };
 }

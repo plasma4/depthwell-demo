@@ -266,7 +266,8 @@ const past60SlowestZigRenders = Array(60).fill(0);
 // Add custom properties into the engine object (not handled by TypeScript)
 engine.isDebug = !!engine.exports.isDebug(); // True when WASM is built with dev menu on (see zig/root.zig); unrelated to optimization level.
 engine.renderLoop = function (_t: number) {
-    // simulate to a second/tick of logical simulation, whichever is higher (in practice, a tick will be less than a second, so 1 second)
+    // Simulate one tick or one second of logical simulation, whichever is longer.
+    // In practice a tick is under a second, so this is one second.
     let tempTime = performance.now();
     let delta = lastFrameTime === Infinity ? 0 : tempTime - lastFrameTime;
     lastFrameTime = tempTime;
@@ -297,7 +298,7 @@ engine.renderLoop = function (_t: number) {
         const slowestRender = Math.max.apply(null, past60SlowestRenders);
         const slowestZigRender = Math.max.apply(null, past60SlowestZigRenders);
 
-        // mostly arbitrary color thresholds
+        // Mostly arbitrary color thresholds.
         let color = "#cccccc";
         if (slowestRender > 55) {
             color = "#e83769";
@@ -346,7 +347,7 @@ engine.logicLoop = function (ticks: number) {
 
         const slowestLogicLoop = Math.max.apply(null, past60SlowestLogicLoops);
 
-        // mostly arbitrary color thresholds
+        // Mostly arbitrary color thresholds.
         let color = "#cccccc";
         if (slowestLogicLoop > 30) {
             color = "#e83769";
@@ -395,7 +396,7 @@ const dispatch = (e: PointerEvent | null, action: number) => {
 window.addEventListener("blur", () => {
     lastFrameTime = Infinity;
     dispatch(null, 0);
-}); // basically, don't let frames when the tab is hidden cause any simulation.
+}); // Frames while the tab is hidden must not drive any simulation.
 
 document.addEventListener("pointermove", (e) => {
     dispatch(e, 0);

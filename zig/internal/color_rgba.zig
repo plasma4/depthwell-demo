@@ -1,4 +1,4 @@
-//! Handles colors, containing the ColorRgba struct and its tests.
+//! Contains the `ColorRgba` struct and its tests.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -27,16 +27,16 @@ pub const ColorRgba = extern union {
         a: u8 = 0,
     },
 
-    /// Creates a ColorRgba with the given Red, Green, Blue, and Alpha component values.
+    /// Creates a `ColorRgba` from red, green, blue, and alpha components.
     pub inline fn init(r: u8, g: u8, b: u8, a: u8) ColorRgba {
         return .{ .channels = .{ .r = r, .g = g, .b = b, .a = a } };
     }
 
-    // Fully transparent black.
+    /// Fully transparent black.
     pub const transparent = ColorRgba.init(0, 0, 0, 0);
-    // Fully opaque white.
+    /// Fully opaque white.
     pub const white = ColorRgba.init(255, 255, 255, 255);
-    // Fully opaque black.
+    /// Fully opaque black.
     pub const black = ColorRgba.init(0, 0, 0, 255);
 
     /// Returns an approximation of brightness.
@@ -52,7 +52,7 @@ pub const ColorRgba = extern union {
         const amt: u16 = @intFromFloat(@round(t * 256.0));
         const rev: u16 = 256 - amt;
 
-        // Perform math in vector space to prevent component-to-component bleed
+        // Work in vector space to prevent component-to-component bleed
         const v1: @Vector(4, u16) = self.v;
         const v2: @Vector(4, u16) = other.v;
 
@@ -128,13 +128,13 @@ pub const ColorRgba = extern union {
         return @intCast((@as(u16, max_c) + min_c) / 2);
     }
 
-    /// Perceived brightness using sRGB-approximate formula.
-    /// Faster than luminance(), uses sqrt approximation.
+    /// Perceived brightness, from an sRGB-approximate formula.
+    /// Faster than `luminance()`, and uses a square-root approximation.
     pub fn brightness(self: ColorRgba) u8 {
         // sqrt(0.299*R*R + 0.587*G*G + 0.114*B*B), integer approx
         const v_wide: @Vector(4, u32) = self.v;
         const v_sq = v_wide * v_wide;
-        // weights: 77/256 is about 0.299, 150/256 is about 0.587, 29/256 is about 0.114
+        // Weights: 77/256 is about 0.299, 150/256 is about 0.587, 29/256 is about 0.114
         const weights = @Vector(4, u32){ 77, 150, 29, 0 };
         const weighted = @reduce(.Add, v_sq * weights) >> 8;
         return @intCast(std.math.sqrt(weighted));
@@ -145,7 +145,7 @@ pub const ColorRgba = extern union {
         return self.channels.a == 255;
     }
 
-    /// Isn't fully opaque or transparent?
+    /// Is partly transparent?
     pub fn isTranslucent(self: ColorRgba) bool {
         return self.channels.a != 0 and self.channels.a != 255;
     }
@@ -200,7 +200,7 @@ pub const ColorRgba = extern union {
         return .{ .v = @as(@Vector(4, u8), @intCast(avg)) };
     }
 
-    /// Converts a comptime hex code into a ColorRgba (as #ffffff or #ffffffff)
+    /// Converts a comptime hex code into a `ColorRgba`, as #ffffff or #ffffffff.
     pub fn fromHex(comptime html_hex: []const u8) ColorRgba {
         const hex = if (html_hex[0] == '#') html_hex[1..] else html_hex;
 
@@ -208,12 +208,12 @@ pub const ColorRgba = extern union {
             @compileError("Hex string must be 6 or 8 characters (excluding #)");
         }
 
-        // parse RGB components
+        // Parse the RGB components!
         const r = std.fmt.parseInt(u8, hex[0..2], 16) catch @compileError("Red component is not valid hex.");
         const g = std.fmt.parseInt(u8, hex[2..4], 16) catch @compileError("Green component is not valid hex.");
         const b = std.fmt.parseInt(u8, hex[4..6], 16) catch @compileError("Blue component is not valid hex.");
 
-        const a = if (hex.len == 8) // parse alpha
+        const a = if (hex.len == 8) // Parse the alpha
             std.fmt.parseInt(u8, hex[6..8], 16) catch @compileError("Alpha component is not valid hex.")
         else
             255;
@@ -366,7 +366,7 @@ test "packed layout integrity" {
     const color = ColorRgba.init(0xAA, 0xBB, 0xCC, 0xDD);
     const as_u32: u32 = color.word;
 
-    // check endian-ness
+    // Check the byte order
     if (builtin.cpu.arch.endian() == .little) {
         try std.testing.expectEqual(@as(u32, 0xDDCCBBAA), as_u32);
     } else {
