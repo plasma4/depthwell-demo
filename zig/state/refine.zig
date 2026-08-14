@@ -1,22 +1,26 @@
 //! How a macro block becomes its own 4x4 child region one depth down.
 //!
-//! Terrain refines by carving and warping a density field (`ancestor.zig`), but a decoration is not
-//! terrain: duplicating a bush into all 16 cells of its region gives 16 bushes, and duplicating a
-//! chest gives 16 chests. Every sprite listed here instead states a PLAN for its region, and
-//! `refineChild()` answers one cell of it:
+//! Terrain refines by carving and warping a density field; see `ancestor.zig`.
+//! A decoration is not terrain.
+//! A bush duplicated into all 16 cells of its region gives 16 bushes, and a chest gives 16 chests.
+//!
+//! So every sprite listed here states a PLAN for its region, and `refineChild()` answers one cell:
 //!
 //! - `.single`: exactly one copy, like a portal landing (chests, furnaces, cores, lathes, portals).
 //! - `.scatter`: 1 to `max_copies` copies along the region's anchor row, averaging `density`
 //!   (bushes, rocks, flint, mushrooms, the 1x3 flower).
-//! - `.chain`: a hanging chain (vines): deduped to a couple of columns and capped in total length
-//!   (preventing edge flags/traversal freeze).
-//! - `.stamp`: a hard-coded macro shape spanning one or more parents (the 2x1 moss shrub becomes a little tree).
-//!   Should be extended for anything the three other generic options can't specify!
+//! - `.chain`: a hanging chain, such as a vine.
+//!   It is deduped to a couple of columns and capped in total length,
+//!   which stops an edge-flag or traversal freeze.
+//! - `.stamp`: a hard-coded macro shape over one or more parents.
+//!   The 2x1 moss shrub becomes a little tree.
+//!   Extend it for anything the three generic options cannot state.
 //!
 //! Three properties hold to keep things procedurally interesting:
 //! 1. AT LEAST ONE copy survives (`.scatter` will draw from 1),
 //!    so a decoration never silently disappears as the player descends.
-//! 2. Copies stand ON the surface the parent was anchored to. The plan places them against the region's floor/ceiling row,
+//! 2. Copies stand ON the surface the parent was anchored to.
+//!    The plan places them against the region's floor or ceiling row,
 //!    and `protectsSurfaceCell()` stops the terrain parent on the far side of that row from eroding it,
 //!   exactly as `anchorsPortal()` protects a portal's landing.
 //! 3. Every cell of a region agrees. All the randomness comes from ONE hash of the PARENT's world cell (`regionHash()`),
@@ -42,14 +46,16 @@ const CEILING_ROW: u4 = 0;
 
 /// What a block was refined out of, once its own sprite no longer says so.
 ///
-/// Deliberately tiny (a `Block` has room for 11 bits, see `memory.Block.tag`) and NOT saved: a tag is
-/// re-derived every time a chunk is generated, and a cell the player edits keeps the edit and loses
-/// the tag (`world.ModCell` stores only what generation cannot recover).
+/// Deliberately tiny, because a `Block` has room for 11 bits; see `memory.Block.tag`.
+/// It is NOT saved: a tag is re-derived every time a chunk is generated.
+/// A cell the player edits keeps the edit and loses the tag,
+/// because `world.ModCell` stores only what generation cannot recover.
 pub const RefinedKind = enum(u9) {
     /// No "origin" to care about; most common.
     none = 0,
-    /// A cell of a hanging chain. `data` is how many cells below its ceiling this one sits
-    /// (1 = directly below), which is what lets the next depth continue the chain and cap it.
+    /// A cell of a hanging chain.
+    /// `data` is how many cells below its ceiling this one sits, where 1 is directly below.
+    /// That is what lets the next depth continue the chain and cap it.
     chain_run,
     /// Canopy of a stamped plant. `data` counts the depths the tag still applies (see `aged()`).
     plant_leaf,
@@ -74,8 +80,9 @@ pub const RefinedTag = packed struct(u15) {
         return .{ .kind = kind, .data = @intCast(@min(data, DATA_MAX)) };
     }
 
-    /// The same tag one depth further down: a plant tag counts down and vanishes at zero,
-    /// and everything else is dropped, since only a plan that re-states a tag may carry one.
+    /// The same tag one depth further down.
+    /// A plant tag counts down and vanishes at zero.
+    /// Everything else is dropped, since only a plan that re-states a tag may carry one.
     ///
     /// A chain's run is NOT aged here; it is recomputed from the parent's run by the chain plan,
     /// because a child's distance below the ceiling is four times its parent's, not one less.
@@ -97,8 +104,9 @@ pub const RefinedTag = packed struct(u15) {
     }
 };
 
-/// The surface a decoration is fixed to, which decides which row of its child region holds the copies
-/// (and which neighbor has to be solid for any copy to exist at all).
+/// The surface a decoration is fixed to.
+/// It decides which row of the child region holds the copies,
+/// and which neighbor has to be solid for any copy to exist at all.
 pub const Surface = enum {
     /// Stands on a floor (`AnchorKind.floor`): copies grow UP from the region's bottom row.
     floor,
@@ -144,8 +152,8 @@ pub const Fixed = struct {
 
 /// How many copies a region gets.
 ///
-/// Authored as a mean and a ceiling by `count()`, but STORED as the thresholds a draw walks, since a
-/// rule is looked up at runtime and nothing about it can be a comptime value by then.
+/// `count()` authors it as a mean and a ceiling, but it is STORED as the thresholds a draw walks.
+/// A rule is looked up at runtime, so nothing about it can be a comptime value by then.
 pub const Count = struct {
     /// Hard ceiling on copies per region; never zero, so a decoration cannot vanish.
     max: u4,
@@ -158,7 +166,8 @@ pub const Count = struct {
 ///
 /// The count is `1 + Binomial(max - 1, p)` with `p = (density - 1) / (max - 1)`,
 /// which puts the mean at exactly `density` and never leaves `[1, max]`.
-/// `density` is THE tuning knob: raise it for clutter, lower it toward 1 to thin a decoration out as the player descends.
+/// `density` is THE tuning knob.
+/// Raise it for clutter, and lower it toward 1 to thin a decoration out with depth.
 pub fn count(comptime density: f32, comptime max: u4) Count {
     comptime {
         if (max == 0) @compileError("A decoration must keep at least one copy per region.");
@@ -189,8 +198,9 @@ pub const Chain = struct {
 /// A hard-coded plant shape, for anything the generic plans cannot express.
 /// The pattern is read as a picture: `'.'` empty, `'T'` trunk, `'L'` leaf.
 pub const Stamp = struct {
-    /// Rows top to bottom. Each row must be `BLOCKS_PER_PARENT * halves` characters wide, and there
-    /// must be exactly `BLOCKS_PER_PARENT` of them (the shape spans one parent vertically).
+    /// Rows top to bottom.
+    /// Each row must be `BLOCKS_PER_PARENT * halves` characters wide.
+    /// There must be exactly `BLOCKS_PER_PARENT` rows, so the shape spans one parent vertically.
     rows: []const []const u8,
     /// Horizontal slice this sprite draws: 0 is the leftmost parent of the shape.
     /// Each parent of a multi-parent shape gets its own rule with its own `half`.

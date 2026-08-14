@@ -63,8 +63,9 @@ pub const GridOptions = struct {
     bot_pad: f64 = 8.0,
 };
 
-/// Comptime slot-grid layout. The panel size derives from `opts.len`, so adding a slot resizes
-/// the panel automatically and menus never hand-tune panel rects against their contents.
+/// Comptime slot-grid layout.
+/// The panel size comes from `opts.len`, so adding a slot resizes the panel by itself.
+/// No menu hand-tunes a panel rect against its contents.
 pub fn Grid(comptime opts: GridOptions) type {
     return struct {
         pub const COLS = opts.cols;

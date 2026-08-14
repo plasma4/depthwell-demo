@@ -145,7 +145,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
 
-        // Main WASM game build
+        // Main WASM game build.
         const exe = b.addExecutable(.{ .name = "engine", .root_module = module });
 
         if (optimize == .Debug) {
@@ -168,11 +168,11 @@ pub fn build(b: *std.Build) void {
             const optimized = optimize_wasm.addOutputFileArg("main.wasm");
             optimize_wasm.addArgs(&.{
                 "-O4",
-                // we can keep fn names, makes crash info easier in release
+                // We can keep the fn names, which makes crash info easier to read in release.
                 // "--strip-debug",
                 "--debuginfo",
 
-                // required: Binaryen stops with a fatal error if it must read Zig's DWARF 5.
+                // Required: Binaryen stops with a fatal error if it must read Zig's DWARF 5.
                 "--strip-dwarf",
                 "--strip-producers",
             });
@@ -312,7 +312,8 @@ fn addAsepriteStep(
     return output;
 }
 
-/// Updates `enums.ts` automatically. Only called by `build()` if the `-Dgen-enums` flag is passed.
+/// Updates `enums.ts` automatically.
+/// `build()` only calls this when the `-Dgen-enums` flag is passed.
 fn generateEnums(b: *std.Build, paths: []const []const u8) void {
     const cache_root = b.cache_root.path orelse ".";
     const cache_path = b.pathJoin(&.{ cache_root, "content_hashes.txt" });
@@ -351,12 +352,12 @@ fn generateEnums(b: *std.Build, paths: []const []const u8) void {
     // @import("zig/logger.zig").quickWarn(.{ current_hash_hex, old_hash_hex, std.mem.eql(u8, current_hash_hex, old_hash_hex) });
     defer if (old_hash_hex.len > 0) b.allocator.free(old_hash_hex);
 
-    // compare array to slice and update content hash if necessary within generate_types.zig
+    // Compare the array to the slice, and update the content hash in generate_types.zig if needed.
     if (std.mem.eql(u8, current_hash_hex, old_hash_hex)) {
         return;
     }
 
-    // now actually update the types, since involved files were modified
+    // Now actually update the types, since the files involved were modified.
     const gen_tool = b.addExecutable(.{
         .name = "generate_types",
         .root_module = b.createModule(.{
@@ -366,7 +367,7 @@ fn generateEnums(b: *std.Build, paths: []const []const u8) void {
         }),
     });
 
-    // Create exactly ONE module for the game code
+    // Create exactly ONE module for the game code.
     // const depthwell_mod = b.createModule(.{
     //     .root_source_file = b.path("zig/root.zig"),
     // });
@@ -377,7 +378,7 @@ fn generateEnums(b: *std.Build, paths: []const []const u8) void {
     const run_enums = b.addRunArtifact(gen_tool);
     run_enums.has_side_effects = true;
 
-    // Pass the strings as arguments to the executable
+    // Pass the strings as arguments to the executable.
     run_enums.addArgs(&.{
         cache_root,
         cache_path,
@@ -391,7 +392,7 @@ fn generateEnums(b: *std.Build, paths: []const []const u8) void {
         "enums.ts",
     );
 
-    // Add to the main install step
+    // Add to the main install step.
     b.getInstallStep().dependOn(&install_ts.step);
 }
 

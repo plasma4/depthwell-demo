@@ -18,7 +18,8 @@ pub var mining_speed: u64 = 8;
 /// Mining progress accumulates by `mining_speed` every logical tick.
 pub var mining_strength: u4 = 1;
 
-/// Current selected block's HP. Should be from 0-15 normally, and 255 if block is empty.
+/// Current selected block's HP.
+/// Usually 0-15, and 255 when the block is empty.
 pub var selected_hp: u8 = 0;
 
 /// Frame for mining (for sound effects); reset when not mining for long enough with `not_mining_frame`.
@@ -386,7 +387,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
 
                         // Only auto-replace if the block being mined is different from the held item.
                         if (sprite_type.isInWorld()) {
-                            if (inventory.removeFromInventory(sprite_type)) { // make sure it's possible to use
+                            if (inventory.removeFromInventory(sprite_type, inventory.placementUnits(sprite_type))) { // make sure it's possible to use
                                 switch (world.modifyBlockType(
                                     mouse.mouse_chunk_coord.?, // mouse block successful already
                                     mouse.mouse_block_x,
@@ -401,7 +402,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                                     },
                                     .rejected_softlock => {
                                         // No world write happened, so return the consumed placement item directly.
-                                        inventory.addToInventory(sprite_type, 1);
+                                        inventory.addToInventory(sprite_type, inventory.placementUnits(sprite_type));
                                         inventory.selected_sprite = sprite_type;
                                     },
                                 }
@@ -423,7 +424,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
             mining_progress = 0;
         } else if (block.isEmpty() and (in_creative or isLitForMining())) {
             // placing into empty air!
-            if (inventory.removeFromInventory(sprite_type)) {
+            if (inventory.removeFromInventory(sprite_type, inventory.placementUnits(sprite_type))) {
                 switch (world.modifyBlockType(
                     mouse.mouse_chunk_coord.?,
                     mouse.mouse_block_x,
@@ -443,7 +444,32 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                     },
                     .rejected_softlock => {
                         // No world write happened, so return the consumed placement item directly.
-                        inventory.addToInventory(sprite_type, 1);
+                        inventory.addToInventory(sprite_type, inventory.placementUnits(sprite_type));
+                        inventory.selected_sprite = sprite_type;
+                    },
+                }
+                selected_hp = 0;
+                mining_progress = 0;
+            }
+        } else if (sprite_type == .water and block.isLiquid() and block.hp < memory.Block.MAX_HP and
+            (in_creative or isLitForMining()))
+        {
+            // Pouring into a cell that already holds water tops it up to full.
+            // Only the units that fit are charged, so the pour neither creates nor destroys water.
+            // Without this the click falls through to collection and a partly full cell can never be filled.
+            const needed: u64 = memory.Block.MAX_HP - block.hp;
+            if (inventory.removeFromInventory(.water, needed)) {
+                switch (world.modifyBlockType(
+                    mouse.mouse_chunk_coord.?,
+                    mouse.mouse_block_x,
+                    mouse.mouse_block_y,
+                    sprite_type,
+                    block,
+                )) {
+                    .placed => dw.sound.playSound(9, 0.2, 0.1, 0.2),
+                    .collapsed => inventory.selected_sprite = sprite_type,
+                    .rejected_softlock => {
+                        inventory.addToInventory(.water, needed);
                         inventory.selected_sprite = sprite_type;
                     },
                 }
@@ -466,17 +492,14 @@ fn getSpriteStrength(s: Sprite) ?u64 {
     return props.strength;
 }
 
-/// Whether a block is only removable with the structure tool: an installation flagged
-/// `UNMINEABLE_STRENGTH`, as opposed to a permanently unmineable block (edge stone, returns null above).
+/// Whether only the structure tool can remove a block.
+/// That means an installation flagged `UNMINEABLE_STRENGTH`.
+/// A permanently unmineable block, such as edge stone, returns null above instead.
 inline fn isToolBreakable(s: Sprite) bool {
     return sprite.getSpriteProps(s).strength == sprite.UNMINEABLE_STRENGTH;
 }
 
-/// Whether the cell at (bx, by) supports a protected installation and so cannot be dug out without the structure tool:
-/// an unmineable floor-anchored block resting on it from above,
-/// or an unmineable ceiling-anchored one hanging from it below.
-/// Either way, breaking the support would cascade the installation out
-/// (see `Sprite.supports()`), which the structure tool exists to gate.
+/// Whether the cell at (bx, by) supports a protected installation and so cannot be dug out without the structure tool.
 fn restsOnProtectedInstallation(coord: world.Coordinate, bx: u4, by: u4) bool {
     return restsOnProtectedInstallationWithLookup({}, liveBlockAt, coord, bx, by) orelse true;
 }

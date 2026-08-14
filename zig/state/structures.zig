@@ -22,15 +22,17 @@
 //! - `attempts`: placements to try in a cell before giving up (default 1)
 //! - `overlaps_self`: lets two placements of THIS kind overlap; see `hasSelfOverlap()`
 //!
-//! `target_chance` is a ROLL, not a density: seating and terrain rules throw most rolls away.
-//! it's also sadly not possible to guess the odds of terrain rules throwing odds...only approximate with auditing.
+//! `target_chance` is a ROLL, not a density.
+//! Seating and terrain rules throw most rolls away.
+//! There is no way to guess the odds a terrain rule throws away; only the audit approximates it.
 //!
-//! Small things that need no priority collision belong in `decorations.zig` instead, which is far cheaper:
-//! every structure here costs structure below a collision scan so it's not great to stuff too much here.
-//! A placement is anchored uniformly ANYWHERE in its `spawn_area` cell and may overhang into the neighboring cells.
+//! Small things that need no priority collision belong in `decorations.zig`, which is far cheaper.
+//! Every structure here costs a collision scan, so do not stuff too much in here.
+//! A placement is anchored uniformly ANYWHERE in its `spawn_area` cell.
+//! It may overhang into the neighboring cells.
 //!
-//! A rule that has to MOVE the box rather than merely judge it cannot be a `Constraint`,
-//! because constraints are pure predicates over a box that is already final.
+//! A rule that has to MOVE the box, rather than only judge it, cannot be a `Constraint`.
+//! Constraints are pure predicates over a box that is already final.
 //! Standing on the ground is the common case of that, which is what `Seat` exists for.
 //! `getBounds()` remains the escape hatch for anything else,
 //! and rejecting there lets an expensive scan bail before the box is even complete.
@@ -59,7 +61,8 @@ pub const structures = .{
 pub const template = @import("template.zig");
 pub const Template = template.Template;
 
-/// A simple axis-aligned bounding box, in absolute world blocks. The rect will then be in `[start, end)`.
+/// A simple axis-aligned bounding box, in absolute world blocks.
+/// The rect is `[start, end)`.
 pub const Rect = struct {
     x_start: i32,
     y_start: i32,
@@ -82,8 +85,9 @@ pub const StructureResult = struct {
     id: Sprite,
     base: Sprite = .none,
     /// Starting water volume (0-15) for a waterloggable `id` placed inside a pool.
-    /// A structure that puts a dry waterloggable block (like chests) in a row it also fills with water MUST set this to `Block.MAX_HP`,
-    /// or the sim floods the cell on the chunk's first tick (wasting modification storage, basically).
+    /// A structure that puts a dry waterloggable block, such as a chest, in a row it also fills
+    /// with water MUST set this to `Block.MAX_HP`.
+    /// Otherwise the sim floods the cell on the chunk's first tick and wastes modification storage.
     water_volume: u4 = 0,
 };
 
@@ -123,16 +127,17 @@ pub const Region = struct {
     }
 };
 
-/// Ground-flatness rule: profiles every column in `[x0, x1)` for its ground surface (see `surfaceY()`)
-/// and demands the profile be level enough to build a flat-bottomed structure on.
+/// Ground-flatness rule.
+/// It profiles every column in `[x0, x1)` for its ground surface; see `surfaceY()`.
+/// The profile must be level enough to build a flat-bottomed structure on.
 ///
 /// The window is deliberately ASYMMETRIC, because the two directions do not look alike:
 /// - ground ABOVE `row` (`max_rise`) just means the structure digs into a rise, which reads fine.
 /// - ground BELOW `row` (`max_drop`) leaves a visible gap under the structure so it floats:
 ///  keep this at 0 unless the structure has something to stand on.
 ///
-/// A column whose surface falls outside `[row - max_rise, row + max_drop]` fails outright,
-/// and the surfaces that do land inside must all fit within one `max_slope`-tall band.
+/// A column whose surface falls outside `[row - max_rise, row + max_drop]` fails outright.
+/// Every surface that does land inside must fit within one `max_slope`-tall band.
 pub const Level = struct {
     /// Leftmost column profiled, inclusive.
     x0: Edge = .{ .at = .start },
@@ -141,62 +146,72 @@ pub const Level = struct {
     /// Row the ground is expected at; typically the first row below the box (`.{ .at = .end }`).
     row: Edge = .{ .at = .end },
     /// How many rows apart the highest and lowest surviving surfaces may be.
-    /// 0 demands perfectly flat ground; raising it tolerates a gentle grade under the footprint.
+    /// 0 demands perfectly flat ground.
+    /// A higher value allows a gentle grade under the footprint.
     max_slope: i32 = 2,
     /// How far ABOVE `row` a column's surface may sit before that column fails.
-    /// Ground this high means the structure digs into a rise, which reads fine, so this can be generous.
+    /// Ground this high means the structure digs into a rise, which reads fine.
+    /// So this can be generous.
     max_rise: i32 = 3,
     /// How far BELOW `row` a column's surface may sit before that column fails.
-    /// Ground this low leaves a visible gap under the structure so it appears to float:
-    /// keep at 0 unless the structure has something to stand on.
+    /// Ground this low leaves a visible gap under the structure, so it appears to float.
+    /// Keep it at 0 unless the structure has something to stand on.
     max_drop: i32 = 0,
 };
 
-/// Stands a structure on the ground: profiles the terrain under the jittered box and slides the box DOWN,
-/// until its bottom row rests on the surface. Declared as a structure's `seat`.
+/// Stands a structure on the ground.
+/// It profiles the terrain under the jittered box, then slides the box DOWN
+/// until its bottom row rests on the surface.
+/// Declared as a structure's `seat`.
 ///
-/// This cannot be a `Constraint`, with an important distinction:
-/// a constraint is a pure PREDICATE over a box that is already final,
-/// while seating is a TRANSFORM that computes where the box belongs.
+/// This cannot be a `Constraint`, and the distinction matters.
+/// A constraint is a pure PREDICATE over a box that is already final.
+/// Seating is a TRANSFORM that computes where the box belongs.
 /// `checkConstraint()` returns a bool and has no way to move anything.
 ///
-/// Because seating only ever moves the box DOWN, the anchor can never leave its own cell.
-/// `max_drop` is added to the structure's `max_h` automatically when building `Configs`,
-/// so a structure declares only its footprint height and never has to remember to include the slide.
+/// Because seating only moves the box DOWN, the anchor can never leave its own cell.
+/// `Configs` adds `max_drop` to the structure's `max_h` automatically.
+/// So a structure declares only its footprint height, and never has to include the slide.
 pub const Seat = struct {
     /// How far DOWN the box may slide to meet the ground, in blocks.
     /// A candidate whose terrain surface is not within this reach is rejected outright.
-    /// This is the single knob that trades placement frequency against how far a structure may sink.
+    /// This one knob trades placement frequency against how far a structure may sink.
     max_drop: i32,
-    /// How many rows apart the profiled columns' surfaces may be. 0 demands perfectly flat ground.
+    /// How many rows apart the profiled columns' surfaces may be.
+    /// 0 demands perfectly flat ground.
     ///
-    /// The box seats on the LOWEST surface found, never the highest, so a tolerated slope makes terrain
-    /// intrude into the footprint (which the structure carves out, and which reads fine) rather than
-    /// leaving a gap underneath (which makes the structure appear to float).
+    /// The box seats on the LOWEST surface found, never the highest.
+    /// So a tolerated slope makes terrain intrude into the footprint,
+    /// which the structure carves out and which reads fine.
+    /// The alternative is a gap underneath, which makes the structure appear to float.
     max_slope: i32 = 0,
-    /// Leftmost column profiled, inclusive. Defaults to the footprint's left edge.
+    /// Leftmost column profiled, inclusive.
+    /// Defaults to the footprint's left edge.
     x0: Edge = .{ .at = .start },
-    /// One past the rightmost column profiled, EXCLUSIVE. Defaults to the footprint's right edge.
-    /// Narrow this when only part of the footprint needs ground, such as a structure with overhanging eaves.
+    /// One past the rightmost column profiled, EXCLUSIVE.
+    /// Defaults to the footprint's right edge.
+    /// Narrow it when only part of the footprint needs ground, such as one with overhanging eaves.
     x1: Edge = .{ .at = .end },
 };
 
 /// Requires a structure to be walled in by solid terrain, to a tunable degree, whatever its SHAPE.
 ///
-/// The problem this solves: "surrounded by rock" is easy for a rectangle and awkward for anything else.
-/// A bounding box around a circle tests the wrong blocks (its corners are far outside the disc),
-/// and hand-writing a halo per shape does not scale as structures are added.
+/// The problem this solves: "surrounded by rock" is easy for a rectangle, awkward for anything else.
+/// A bounding box around a circle tests the wrong blocks, since its corners sit outside the disc.
+/// A hand-written halo per shape does not scale as structures are added.
 ///
 /// So the structure hands over its own shape and the halo is derived from it:
 /// - walk the region (by default the footprint grown one block on every side)
 /// - a block the shape does NOT occupy but which touches one it DOES is a halo block
-/// - count the halo blocks that are open (non-solid); the OPEN FRACTION must fall in `[min_open, max_open]`
+/// - count the halo blocks that are open, meaning non-solid
+/// - the OPEN FRACTION must fall in `[min_open, max_open]`
 ///
-/// The fraction is a band, not a ceiling, which is what lets a structure be DELIBERATELY breached:
-/// a geode wants to be mostly buried yet never perfectly sealed, so a player can spot it (see `Geode.zig`).
+/// The fraction is a band, not a ceiling, which is what lets a structure be DELIBERATELY breached.
+/// A geode wants to be mostly buried, yet never perfectly sealed, so a player can spot it.
+/// See `Geode.zig`.
 ///
-/// `covers()` is the same shape predicate `generate()` already implements, so declaring it is usually just
-/// factoring out a test that exists anyway.
+/// `covers()` is the same shape predicate `generate()` already implements.
+/// Declaring it usually just factors out a test that exists anyway.
 pub const Encase = struct {
     /// Shape test in ABSOLUTE world blocks, so it can be called for halo blocks outside the footprint.
     /// Must agree with `generate()` about which blocks the structure occupies, or the halo tests the wrong ring.
@@ -204,11 +219,13 @@ pub const Encase = struct {
     /// Least fraction of the halo that must be OPEN. 0 permits a perfect seal.
     /// Above 0 it REQUIRES a breach, so the structure only spawns where it pokes out of the rock.
     min_open: f32 = 0,
-    /// Most of the halo that may be open before the structure reads as "floating in a cave" and is rejected.
+    /// Most of the halo that may be open before the structure reads as "floating in a cave".
+    /// Past that it is rejected.
     /// 1 permits any amount of exposure.
     max_open: f32 = 0,
 
-    /// Area searched for halo blocks. The default grows the footprint by one on every side,
+    /// Area searched for halo blocks.
+    /// The default grows the footprint by one on every side,
     /// which is exactly the ring a footprint-sized shape can touch.
     region: Region = .{
         .x0 = .{ .at = .start, .off = -1 },
@@ -229,7 +246,8 @@ pub const Constraint = union(enum) {
     level: Level,
     /// The structure must be walled in by solid terrain to a tunable degree; see `Encase`.
     encase: Encase,
-    /// Escape hatch for a rule the vocabulary above cannot express. Always sorted last.
+    /// Escape hatch for a rule the vocabulary above cannot express.
+    /// Always sorted last.
     custom: *const fn (Rect) bool,
 };
 
@@ -242,8 +260,9 @@ pub const MAX_WORLD_BLOCK: i32 = blk: {
 
 /// Tests the BASE terrain (pre-ore, pre-structure) for a foundation block at absolute world block (`wx`, `wy`).
 ///
-/// Probing OUTSIDE the world is routine, not exceptional: a constraint reaches a row above its box,
-/// a seating scan reaches rows below it, and `isBeaten()` resolves the candidate in (`cx - 1`, `cy - 1`).
+/// Probing OUTSIDE the world is routine, not exceptional.
+/// A constraint reaches a row above its box, and a seating scan reaches rows below it.
+/// `isBeaten()` also resolves the candidate in (`cx - 1`, `cy - 1`).
 ///
 /// Bounds being `i32` easily traps what would otherwise be an integer overflow (a bit hacky).
 pub fn baseSolid(wx: i32, wy: i32) bool {
@@ -259,9 +278,13 @@ pub fn baseSolid(wx: i32, wy: i32) bool {
     ).isFoundation();
 }
 
-/// Finds the ground surface of column `wx`: the topmost row in `[y_from, y_to]` that is solid base terrain with open space directly above it.
-/// Null when the column has no surface in that window (solid all the way through, or empty all the way through), which reads as "no floor here".
-/// Costs `y_to - y_from + 2` terrain samples, so keep the window tight.
+/// Finds the ground surface of column `wx`.
+/// That is the topmost row in `[y_from, y_to]` that is solid base terrain with open space above it.
+///
+/// Null when the column has no surface in that window, so it is solid or empty all the way through.
+/// Read that as "no floor here".
+///
+/// It costs `y_to - y_from + 2` terrain samples, so keep the window tight.
 pub fn surfaceY(wx: i32, y_from: i32, y_to: i32) ?i32 {
     return surfaceYWith(baseSolid, wx, y_from, y_to);
 }
@@ -280,8 +303,10 @@ pub fn surfaceYWith(comptime probe: anytype, wx: i32, y_from: i32, y_to: i32) ?i
 }
 
 /// Anchors a `w`-by-`h` footprint uniformly anywhere in the grid cell (`cx`, `cy`), overhang included.
-/// Every structure's `getBounds()` should route through this: an origin drawn from `[0, spawn_area - w)`
-/// instead would blank out a band along each cell edge and make the spawn lattice visible.
+///
+/// Every structure's `getBounds()` should route through this.
+/// An origin drawn from `[0, spawn_area - w)` would blank out a band along each cell edge,
+/// which makes the spawn lattice visible.
 pub fn jitter(state: *HashState, cx: i32, cy: i32, area: u32, w: i32, h: i32) Rect {
     const i_area = @as(i32, @intCast(area));
     const x_start = cx * i_area + @as(i32, @intCast(state.getLimit(u32, area)));
@@ -443,12 +468,12 @@ pub fn sortConstraints(comptime list: []const Constraint, comptime w: i32, compt
 
 /// Slides `bounds` down onto the terrain surface per `s`, or returns null when the ground cannot hold it.
 ///
-/// The reference row is the one directly BELOW the box (`y_end` is exclusive),
-/// which is what makes a structure stand ON the ground instead of sinking into it:
-/// seating so the box's own last row coincided with the surface would bury that row a block deep.
+/// The reference row is the one directly BELOW the box, because `y_end` is exclusive.
+/// That is what makes a structure stand ON the ground instead of sinking into it.
+/// Seating the box's own last row onto the surface would bury that row a block deep.
 ///
-/// Costs `(x1 - x0) * (max_drop + 2)` terrain samples in the worst-case,
-/// but a candidate over unsuitable ground normally dies on its first or second column.
+/// It costs `(x1 - x0) * (max_drop + 2)` terrain samples in the worst case.
+/// A candidate over unsuitable ground normally dies on its first or second column.
 fn seatBounds(comptime s: Seat, bounds: Rect) ?Rect {
     const line = bounds.y_end;
     const x0 = s.x0.resolve(bounds.x_start, bounds.x_end);
@@ -466,7 +491,7 @@ fn seatBounds(comptime s: Seat, bounds: Rect) ?Rect {
         if (lowest - highest > s.max_slope) return null;
     }
 
-    // Seat on the lowest surface so no column is left floating; see `Seat.max_slope`.
+    // Seat on the lowest surface so no column is left floating; see Seat.max_slope.
     const drop = lowest - line;
     return .{
         .x_start = bounds.x_start,
@@ -476,7 +501,8 @@ fn seatBounds(comptime s: Seat, bounds: Rect) ?Rect {
     };
 }
 
-/// Runs every rule in `list` against `bounds`, testing terrain through `probe`. Shared with `decorations.zig`.
+/// Runs every rule in `list` against `bounds`, testing terrain through `probe`.
+/// Shared with `decorations.zig`.
 pub inline fn satisfies(comptime probe: anytype, comptime list: []const Constraint, bounds: Rect) bool {
     inline for (list) |c| {
         if (!checkConstraint(probe, c, bounds)) return false;
@@ -512,24 +538,26 @@ pub const Configs = blk: {
         attempts: u32,
     } = undefined;
     for (structures, 0..) |S, i| {
-        // Vertical REACH, not footprint height: a seated structure may sit up to `max_drop` rows below its anchor,
-        // and every scan that asks "which candidate could cover this block?" has to see that far.
+        // Vertical REACH, not footprint height: a seated structure can sit up to max_drop rows
+        // below its anchor, and every scan that asks "which candidate could cover this block?"
+        // has to see that far.
         const seat_drop: u32 = if (@hasDecl(S, "seat")) @intCast(S.seat.max_drop) else 0;
         confs[i] = .{
             .spawn_area = S.spawn_area,
             .max_w = S.max_w,
             .max_h = S.max_h + seat_drop,
             .target_chance = S.target_chance,
-            // Placements to try before giving up on a cell. Only worth raising for a heavily gated kind,
-            // where one shot at a valid spot per cell is almost always wasted (see `Chamber`).
+            // Placements to try before giving up on a cell. Only worth raising for a heavily
+            // gated kind, where one shot at a valid spot per cell is almost always wasted
+            // (see Chamber).
             .attempts = if (@hasDecl(S, "attempts")) S.attempts else 1,
         };
     }
     break :blk confs;
 };
 
-// A candidate may overhang its cell by at most one cell, which is what bounds every neighborhood scan here
-// (and the 2x2 candidate sweep in `generateStructureForKind()`) to a fixed, tiny size.
+// A candidate may overhang its cell by at most one cell. That is what bounds every neighborhood
+// scan here, and the 2x2 candidate sweep in generateStructureForKind(), to a fixed, tiny size.
 comptime {
     for (Configs, 0..) |conf, i| {
         if (!std.math.isPowerOfTwo(conf.spawn_area))
@@ -567,8 +595,9 @@ const STRUCT_CACHE_SIZE = STRUCT_CACHE_TILE * STRUCT_CACHE_TILE;
 /// Direct-mapped bounds/blocked cache, one bank per structure kind (a power of two by construction).
 ///
 /// so memoizing per grid cell collapses that repeated hashing (and all terrain sampling) to O(1).
-/// Pure function of (cell, seed): the per-entry seed check self-invalidates on reseed, so no explicit clear is needed.
-/// The `i32` cx/cy size is okay because it's at base depth!
+/// A pure function of (cell, seed).
+/// The per-entry seed check self-invalidates on a reseed, so nothing has to clear it.
+/// The `i32` cx and cy are wide enough, because this is at base depth.
 var struct_cache: [structures.len][STRUCT_CACHE_SIZE]StructCacheEntry = @splat(@splat(.{}));
 
 /// Returns the (populated) cache entry for structure `kind` at grid cell (`cx`, `cy`), computing bounds on miss.
@@ -593,15 +622,17 @@ fn structCacheSlot(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) *
 /// The placement that stands in cell (`cx`, `cy`), or null: the roll, the box, and the terrain rules,
 /// all resolved together and memoized.
 ///
-/// Terrain is settled HERE rather than in a later pass, because a rejected placement can then simply be
-/// retried (see `attempts`). It also means every `bounds` in the cache is one that would really be built,
+/// Terrain is settled HERE, not in a later pass, so a rejected placement can be retried.
+/// See `attempts`.
+/// It also means every `bounds` in the cache is one that would really be built,
 /// which is what lets the collision scan trust it.
 pub fn getStructureBounds(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) ?Rect {
     return structCacheSlot(kind, cx, cy, struct_seed).bounds;
 }
 
-/// How far a cell's placement got, in order. The whole point of the enum is `audit.zig`'s funnel:
-/// counting how many cells die at each stage turns "why is this so rare?" into a number per stage.
+/// How far a cell's placement got, in order.
+/// The enum exists for the funnel in `audit.zig`.
+/// A count of how many cells die at each stage turns "why is this so rare?" into a number.
 /// - `rejected`: the `target_chance` roll failed; the cell never even tried.
 /// - `anchored`: a box was placed, but seating (if any) then failed on every attempt.
 /// - `seated`: a box seated, but a constraint rejected it on every attempt.
@@ -613,9 +644,10 @@ pub const Stage = enum { rejected, anchored, seated, placed };
 pub const CellResolution = struct { bounds: ?Rect, reached: Stage };
 
 /// The full ROLL -> ANCHOR -> SEAT -> GATE pipeline for one cell, uncached and side-effect-free.
-/// Backs both `computeStructureBounds()` (which keeps only `bounds`) and `audit.zig` (which keeps `reached`).
+/// It backs `computeStructureBounds()`, which keeps only `bounds`,
+/// and `audit.zig`, which keeps `reached`.
 fn resolveCell(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) CellResolution {
-    @setEvalBranchQuota(20000); // `getChance()` comptime-searches for a rational approximation of the odds
+    @setEvalBranchQuota(20000); // getChance() comptime-searches for a rational approximation of the odds
     const S = structures[kind];
     var state = makeStructureHash(
         struct_seed,
@@ -630,11 +662,11 @@ fn resolveCell(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) CellR
 
     // Each attempt draws fresh jitter from the same stream,
     // so a gated kind gets several shots at a valid spot in its cell instead of one.
-    // generate() reads an INDEPENDENT stream, so it neither knows nor cares how many draws were burned here.
+    // generate() reads an INDEPENDENT stream, so it does not care how many draws were burned here.
     //
-    // A runtime loop on purpose: the body does not use the index, and every comptime branch inside resolves
-    // the same way each pass, so `inline for` would only unroll identical code `attempts` times (30x for the
-    // portal), bloating codegen for nothing.
+    // A runtime loop on purpose: the body does not use the index, and every comptime branch
+    // inside resolves the same way each pass. An inline for would unroll identical code attempts
+    // times, 30x for the portal, and bloat codegen for nothing.
     for (0..Configs[kind].attempts) |_| {
         // ANCHOR: a structure only writes getBounds() when its box is not a plain max_w-by-max_h rect.
         const anchored: ?Rect = if (@hasDecl(S, "getBounds"))
@@ -715,14 +747,15 @@ pub fn makeBlockHash(
     };
 }
 
-/// Cell range (inclusive) of kind `kind` whose candidates could reach world span [`from`, `to`] on one axis.
-/// A candidate anchored anywhere in its cell reaches at most `max - 1` blocks past the anchor,
-/// so the scan must start one structure-length before `from`.
+/// Inclusive cell range of `kind` whose candidates can reach the world span [`from`, `to`] on one axis.
+/// A candidate anchored anywhere in its cell reaches at most `max - 1` blocks past the anchor.
+/// So the scan starts one structure length before `from`.
 inline fn cellRange(comptime area: i32, comptime max: i32, from: i32, to: i32) struct { lo: i32, hi: i32 } {
     return .{ .lo = @divFloor(from - (max - 1), area), .hi = @divFloor(to, area) };
 }
 
-/// A cell's tie-break rank against other cells of its own kind. Hash-derived, so no direction is favored.
+/// A cell's tie-break rank against other cells of its own kind.
+/// Hash-derived, so no direction is favored.
 fn cellRank(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) u64 {
     var state = makeStructureHash(
         struct_seed,
@@ -736,9 +769,12 @@ fn cellRank(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) u64 {
 
 /// Whether a kind lets two of its OWN placements overlap instead of settling them by rank.
 ///
-/// Off by default, and it must stay off for anything shaped: two overlapping trees interleave into one unreadable blob.
-/// Exists for a REGION-like kind (see `structures/Deposit.zig`), where every placement in a neighborhood draws the same material,
-/// so two overlapping blobs are indistinguishable from one larger one!
+/// Off by default, and it must stay off for anything shaped.
+/// Two overlapping trees interleave into one unreadable blob.
+///
+/// It exists for a REGION-like kind; see `structures/Deposit.zig`.
+/// There every placement in a neighborhood draws the same material,
+/// so two overlapping blobs look the same as one larger one.
 ///
 /// This only relaxes the SAME-kind rule; every other kind still outranks it exactly as before.
 inline fn hasSelfOverlap(comptime kind: usize) bool {
@@ -796,11 +832,13 @@ fn isBeaten(comptime kind: usize, cx: i32, cy: i32, bounds: Rect, struct_seed: V
     return false;
 }
 
-/// The placement in cell (`cx`, `cy`) that actually gets built: it stands on valid terrain AND nothing
-/// outranks it. Everything about it is a property of the CELL, never of the block asking, so it is memoized.
+/// The placement in cell (`cx`, `cy`) that actually gets built.
+/// It stands on valid terrain, and nothing outranks it.
+/// Everything about it is a property of the CELL, never of the block asking, so it is memoized.
 ///
-/// Never holds a cache POINTER across the scan: `isBeaten()` re-enters `structCacheSlot()`
-/// for neighboring cells of this same kind, which share this bank and can evict this very slot.
+/// It never holds a cache POINTER across the scan.
+/// `isBeaten()` re-enters `structCacheSlot()` for neighboring cells of this same kind,
+/// which share this bank and can evict this very slot.
 fn acceptedBounds(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) ?Rect {
     const slot = structCacheSlot(kind, cx, cy, struct_seed);
     const bounds = slot.bounds orelse return null;
@@ -808,7 +846,7 @@ fn acceptedBounds(comptime kind: usize, cx: i32, cy: i32, struct_seed: Vec2u) ?R
     if (slot.blocked) |blocked| return if (blocked) null else bounds;
 
     const verdict = isBeaten(kind, cx, cy, bounds, struct_seed);
-    // `slot` is stale past this point, so the verdict is written through a fresh lookup.
+    // slot is stale past this point, so the verdict is written through a fresh lookup.
     structCacheSlot(kind, cx, cy, struct_seed).blocked = verdict;
     return if (verdict) null else bounds;
 }
@@ -820,10 +858,12 @@ pub inline fn acceptedBoundsForAudit(comptime kind: usize, cx: i32, cy: i32, str
 
 /// Draws one block of an accepted placement.
 ///
-/// Keyed on the CANDIDATE's cell, never the block's own: a structure may overhang into the next cell,
-/// and keying on the block would hand its far half a different roll.
+/// Keyed on the CANDIDATE's cell, never the block's own.
+/// A structure can overhang into the next cell,
+/// and a key on the block would hand its far half a different roll.
 ///
-/// The stream is INDEPENDENT of the one `computeStructureBounds()` drew from (a separate `unique_id` namespace).
+/// The stream is INDEPENDENT of the one `computeStructureBounds()` drew from.
+/// It uses a separate `unique_id` namespace.
 /// Stops a structure's own choices from correlating with its jitter offset and `attempts` complexity creating issues.
 fn generateFrom(
     comptime kind: usize,
@@ -862,7 +902,8 @@ fn maxCellsPerAxis(comptime area: i32, comptime max: i32) usize {
     return @intCast(@divFloor(dw.CHUNK_SIZE - 2 + max, area) + 2);
 }
 
-/// Slots reserved per kind in a `ChunkCandidates`. Sized from the worst kind so the build loop can never overrun.
+/// Slots reserved per kind in a `ChunkCandidates`.
+/// Sized from the worst kind, so the build loop can never overrun.
 const MAX_CHUNK_CANDIDATES: usize = blk: {
     var m: usize = 0;
     for (Configs) |c| {
@@ -873,7 +914,7 @@ const MAX_CHUNK_CANDIDATES: usize = blk: {
 };
 
 comptime {
-    // `ChunkCandidates.counts` is a u8 per kind, so a wider bound would wrap instead of overflowing loudly.
+    // ChunkCandidates.counts is a u8 per kind, so a wider bound would wrap instead of trapping.
     if (MAX_CHUNK_CANDIDATES > std.math.maxInt(u8))
         @compileError("A kind can reach one chunk from more cells than ChunkCandidates.counts can hold.");
 }
@@ -887,8 +928,8 @@ const ChunkCandidates = struct {
     generation: u64 = 0,
     occupied: bool = false,
     counts: [structures.len]u8 = @splat(0),
-    /// Per kind, in the same (cy, cx) cell order the per-block scan used to walk, so the first candidate
-    /// containing a block is still the one that wins.
+    /// Per kind, in the same (cy, cx) cell order the per-block scan walked.
+    /// So the first candidate that contains a block is still the one that wins.
     list: [structures.len][MAX_CHUNK_CANDIDATES]Candidate = undefined,
 };
 
@@ -909,8 +950,9 @@ inline fn chunkCtxIndex(chunk_x: i32, chunk_y: i32) usize {
     return dw.utils.tileIndex(CHUNK_CTX_TILE_W, CHUNK_CTX_TILE_H, chunk_x, chunk_y);
 }
 
-/// Resolves every kind's candidates for one chunk. Safe to hold `ctx` across: nothing reachable from here
-/// re-enters this cache (terrain sampling reads BASE terrain, which is upstream of structures).
+/// Resolves every kind's candidates for one chunk.
+/// It is safe to hold `ctx` across the call, because nothing reachable from here re-enters this cache.
+/// Terrain sampling reads BASE terrain, which is upstream of structures.
 fn buildChunkCandidates(ctx: *ChunkCandidates, chunk_x: i32, chunk_y: i32, struct_seed: Vec2u) void {
     ctx.chunk_x = chunk_x;
     ctx.chunk_y = chunk_y;

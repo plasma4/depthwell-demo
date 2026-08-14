@@ -49,12 +49,13 @@ pub inline fn dispatchMouseType() void {
     }
 }
 
-/// Processes data for renderFrame() in TypeScript to upload to WebGPU.
+/// Processes data for `renderFrame()` in TypeScript to upload to WebGPU.
 ///
-/// Draw order is painter's order, and JS consumes the scratch buffer synchronously on each call back,
-/// so one scratch fill can serve both the background and the tiles of a layer before the next fill.
+/// JS reads the scratch buffer synchronously on each call back.
+/// So, one fill serves the background and the tiles of a layer before the next fill!
 ///
-/// A portal descent adds a second layer on top: the D+1 preview, faded in over D (see `state/portal.zig`)!
+/// A portal descent adds a second layer on top: the D+1 preview, faded in over D.
+/// See `state/portal.zig`.
 pub fn prepareVisibleData(dt: f64, time_diff: f64, canvas_w: f64, canvas_h: f64) void {
     if (dw.chunks.updateVisibleChunks(dt, canvas_w, canvas_h)) {
         const world_opacity = dw.portal.worldOpacity();

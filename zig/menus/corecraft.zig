@@ -24,8 +24,9 @@ const Ingredient = struct { item: Sprite, count: u32 = 1 };
 /// One craft: a list of input items+quantities producing a single output item+quantity.
 const Recipe = struct { inputs: []const Ingredient, output: Ingredient };
 
-/// The recipe database what "comes out" based on the inputs. Output count of 1 implied.
-/// The grid layout and panel size automatically resize based on the length of this.
+/// The recipe database: what "comes out" for a given set of inputs.
+/// An output count of 1 is implied.
+/// The grid layout and the panel size follow the length of this table.
 const recipes = [_]Recipe{
     .{
         .inputs = &.{
@@ -54,7 +55,8 @@ const NUM_OK: dw.utils.Vec4f32 = .{ 0.78, 0.19, 1.2, 1.0 };
 /// Number color for an unmet input requirement (red).
 const NUM_RED: dw.utils.Vec4f32 = .{ 0.62, 0.35, 0.5, 1.0 };
 
-/// Whether the cursor is over the corecraft panel. Always false while the menu is closed.
+/// Whether the cursor is over the corecraft panel.
+/// Always false while the menu is closed.
 pub fn isHoveringOnMenu() bool {
     return util.isHovering(dw.indicators.menus.corecraft, MENU_POS, MENU_SIZE);
 }
@@ -186,7 +188,7 @@ pub fn draw() void {
         .lcha = .{ 0.52, 0.22, 3.8, 1.0 },
     });
 
-    // draw a little craft/hammer icon!
+    // Draw a little craft/hammer icon.
     const title_px = grid.titleCenterPx(MENU_POS);
     addEntity(.{
         .sprite = .craft,
@@ -215,14 +217,14 @@ pub fn draw() void {
             .sprite = .wood_frame,
             .position = .{ @floatCast(center[0] - 1.6), @floatCast(center[1] - 1.6) },
             .size = @as(f32, @floatCast(grid.SLOT)),
-            // looks blue!
+            // Looks blue
             .lcha = .{ 0.3, 0.06, 3.0, 1.0 },
         });
         addEntity(.{
             .sprite = .wood_frame,
             .position = .{ @floatCast(center[0]), @floatCast(center[1]) },
             .size = @as(f32, @floatCast(grid.SLOT)),
-            // looks blue!
+            // Looks blue
             .lcha = .{ 0.9, 0.15, 3.0, 1.0 },
         });
 
@@ -230,7 +232,7 @@ pub fn draw() void {
 
         var item = recipe.output.item;
         if (item == .pickaxe) {
-            // draw the better pickaxe type they are crafting
+            // Draw the better pickaxe type they are crafting.
             item = @enumFromInt(@intFromEnum(Sprite.pickaxe) + @intFromEnum(dw.mining.pickaxe_type) + 1);
         }
 

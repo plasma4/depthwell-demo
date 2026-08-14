@@ -10,23 +10,27 @@ const CHUNK_SIZE_FLOAT = dw.CHUNK_SIZE_FLOAT;
 
 /// Current interpolation fraction (updated within `updateVisibleChunks()` every render frame).
 ///
-/// This value is in the range -1..0 (NOT 0..1): -1 is the start of the current logic frame, 0 is the end.
-/// The world renders position at `camera_pos + cam_vel * current_dt`,
-/// which (since `cam_vel = camera_pos - last_camera_pos`) equals `last_camera_pos + cam_vel * (current_dt + 1)`; interpolating from last to current.
+/// This value is in the range -1..0, NOT 0..1.
+/// -1 is the start of the current logic frame, and 0 is the end.
 ///
-/// Any other renderer must follow the SAME two curves so it stays locked to the world;
-/// the split matters because position and zoom base on different reference values:
+/// The world renders position at `camera_pos + cam_vel * current_dt`.
+/// `cam_vel` is `camera_pos - last_camera_pos`, so that equals
+/// `last_camera_pos + cam_vel * (current_dt + 1)`, an interpolation from last to current.
+///
+/// Any other renderer must follow the SAME two curves to stay locked to the world.
+/// The split matters because position and zoom start from different reference values:
 /// - Position: base on the previous-frame value (`last_camera_pos`, item's last subpixel, etc.)
 ///   and use the shifted fraction `current_dt + 1.0` (range 0..1).
-///   Basing on the current value with the shifted fraction renders one full frame of velocity ahead of the world.
+///   The current value with the shifted fraction draws one full frame of velocity ahead.
 /// - Zoom: use `camera_scale * pow(camera_scale_change, current_dt)` with the RAW fraction.
 ///   `camera_scale` is already the current scale and `camera_scale_change = camera_scale / old_scale`,
 ///   so the negative exponent walks it back toward `old_scale` at -1.
 ///   Equivalently `old_scale * pow(change, current_dt + 1)`, but the raw form avoids recovering `old_scale`.
 pub var current_dt: f64 = 0.0;
 
-/// Grid-aligned player position in logical viewport pixels (480x270, center of the sprite), recomputed every render frame
-/// The player is drawn as a render entity so this is shared with the entity pass.
+/// Grid-aligned player position in logical viewport pixels, at the center of the sprite.
+/// The viewport is 480x270, and this is recomputed every render frame.
+/// The player is drawn as a render entity, so the entity pass shares this.
 pub var player_screen_pos: dw.utils.Vec2f32 = .{ 0.0, 0.0 };
 /// Player sprite size (one world tile) in logical viewport pixels, matching the current zoom.
 pub var player_screen_size: f32 = 16.0;
@@ -42,17 +46,19 @@ const SHAKE_RESPONSE: f32 = 0.45;
 
 /// Tiles the shader's light filter reads PAST the tile it shades.
 ///
-/// `sample_light()` in src/shader.wgsl blends the four tiles nearest a pixel, so a pixel in the
-/// outermost visible tile reads one tile further out. `tile_light()` clamps past the grid, which
-/// would repeat the border row and hold a thin band of light still while the camera moves.
-/// The rasterizer must therefore hand the GPU at least this much tile beyond the visible edge.
+/// `sample_light()` in `src/shader.wgsl` blends the four tiles nearest a pixel.
+/// So a pixel in the outermost visible tile reads one tile further out.
+///
+/// `tile_light()` clamps past the grid.
+/// That would repeat the border row and hold a thin band of light still while the camera moves.
+/// So the rasterizer hands the GPU at least this much tile beyond the visible edge.
 const LIGHT_FILTER_REACH_TILES: f64 = 1.0;
 
 /// Tiles per side the warp can pull into view beyond the unwarped screen edge,
 /// at the most zoomed-out camera scale.
 ///
-/// `apply_warp()` runs in the shader, AFTER `rasterizeLayer()` has already chosen the window,
-/// so every term here is world the CPU did not know it had to cover:
+/// `apply_warp()` runs in the shader, AFTER `rasterizeLayer()` has chosen the window.
+/// So every term here is world the CPU did not know it had to cover:
 /// - a scale BELOW 1 shows `1 / (1 - scale)` times as much,
 /// - a rotation reaches the corners out by about `half_height * sin(angle)`, bounded here by the angle,
 /// - the offset slides the whole image.
@@ -70,7 +76,7 @@ const WARP_REACH_TILES: f64 = blk: {
 };
 
 comptime {
-    // `rasterizeLayer()` pads the visible chunk rectangle by `CHUNK_MARGIN` chunks a side, and the
+    // rasterizeLayer() pads the visible chunk rectangle by CHUNK_MARGIN chunks a side, and the
     // rectangle is chunk-aligned OUTWARD, so this is the padding it guarantees in tiles.
     const margin_tiles: f64 = @floatFromInt(dw.lighting.CHUNK_MARGIN * CHUNK_SIZE);
     if (margin_tiles < LIGHT_FILTER_REACH_TILES + WARP_REACH_TILES) @compileError(
@@ -91,7 +97,8 @@ const Warp = struct {
 };
 var warp: Warp = .{};
 
-/// Random source for the warp. Purely cosmetic, so it is never saved and never touches generation.
+/// Random source for the warp.
+/// Purely cosmetic, so it is never saved and never touches generation.
 pub var shake_seed: dw.seeding.ChaCha12 = undefined;
 
 /// Uniform random f32 in [-1, 1).
@@ -119,10 +126,12 @@ fn updateShake(intensity: f32) void {
     warp.scale += (target.scale - warp.scale) * SHAKE_RESPONSE;
 }
 
-/// Seamless wrap period (in chunks) for the FBM background camera coordinate.
-/// Must match `src/shader.wgsl`; noise "lattice" cycles every 32 units.
-/// With base_scale = 1/64, the farthest layer moves 1/16 unit/chunk (needs factor of 512).
-/// Warp coefficients (9/20, 17/20) require a factor of 20 to clear denominators.
+/// Wrap period, in chunks, for the FBM background camera coordinate.
+/// The background must repeat with no visible join at the wrap.
+///
+/// Must match `src/shader.wgsl`, where the noise "lattice" cycles every 32 units.
+/// With `base_scale = 1/64`, the farthest layer moves 1/16 unit per chunk, so it needs a factor of 512.
+/// The warp coefficients 9/20 and 17/20 need a factor of 20 to clear their denominators.
 pub const BG_WRAP_CHUNKS = 512 * 20;
 comptime {
     // 512 covers the 1/16 unit/chunk base scale; 20 covers warp-coefficient denominators.
@@ -131,9 +140,11 @@ comptime {
 
 /// One layer of the world to rasterize into the scratch buffer for a single tile draw call.
 ///
-/// Ordinarily there is just the one (the live world at the current depth), but a portal descent draws a second:
-/// the D+1 preview, overlaid on D and faded in. Everything that differs between the two lives here,
-/// so both go through the exact same rasterizer and can never drift apart.
+/// Ordinarily there is just the one, the live world at the current depth.
+/// A portal descent draws a second: the D+1 preview, overlaid on D and faded in.
+///
+/// Everything that differs between the two lives here.
+/// So both go through the exact same rasterizer and can never drift apart.
 pub const LayerPass = struct {
     /// Where blocks come from.
     pub const Source = enum {
@@ -161,12 +172,14 @@ pub const LayerPass = struct {
 /// Builds the pass for the live world at the current depth, interpolated for this render frame.
 fn liveLayer(dt: f64) LayerPass {
     const game = &memory.game;
-    // since interpolated doesn't really influence logic, std.math.pow can be non-deterministic
-    // dt allows for super smooth frame interpolation
+    // Interpolation does not influence logic, so std.math.pow can be non-deterministic here.
+    // dt allows for very smooth frame interpolation.
     const interpolated_zoom = game.camera_scale * std.math.pow(f64, game.camera_scale_change, dt);
 
-    // NOTE: this uses the raw -1..0 `dt`, so `camera_pos + vel * dt` is correct here (it equals `last_camera_pos + vel * (dt + 1)`).
-    // Renderers that use the shifted 0..1 dt must instead base on `last_camera_pos`. See the `current_dt` doc comment above.
+    // NOTE: this uses the raw -1..0 dt, so camera_pos + vel * dt is correct here
+    // (it equals last_camera_pos + vel * (dt + 1)).
+    // A renderer on the shifted 0..1 dt must start from last_camera_pos instead.
+    // See the current_dt doc comment above.
     const cam_vel_x = game.camera_pos[0] - game.last_camera_pos[0];
     const cam_vel_y = game.camera_pos[1] - game.last_camera_pos[1];
     const player_vel_x = game.player_pos[0] - game.last_player_pos[0];
@@ -198,8 +211,9 @@ fn liveLayer(dt: f64) LayerPass {
 
 /// Builds the pass for the transition's preview layer (the depth being entered).
 ///
-/// Drawn at `portal.overlayScale()` of `camera_scale`, which cancels the live layer's zoom on the last
-/// frame so the preview lands exactly on the committed view (D+1 chunks).
+/// Drawn at `portal.overlayScale()` of `camera_scale`.
+/// That cancels the live layer's zoom on the last frame,
+/// so the preview lands exactly on the committed view of D+1 chunks.
 /// The world is frozen for the whole transition, so nothing here needs interpolating.
 fn overlayLayer() LayerPass {
     const t = dw.portal.overlayTransition();
@@ -220,9 +234,10 @@ fn overlayLayer() LayerPass {
 /// Adds visible chunk data for the live world to the scratch buffer, as well as properties.
 /// This is used in `render.prepareVisibleData()`.
 ///
-/// Returns whether anything was rasterized. False means the layer is hidden outright
-/// (`portal.liveLayerHidden()`), and the caller must skip its draw calls: nothing was published for them
-/// to read. The player is still placed, since the entity pass draws them over both layers.
+/// Returns whether anything was rasterized.
+/// False means `portal.liveLayerHidden()` hid the layer outright.
+/// The caller must then skip its draw calls, because nothing was published for them to read.
+/// The player is still placed, since the entity pass draws it over both layers.
 pub fn updateVisibleChunks(dt: f64, canvas_w: f64, canvas_h: f64) bool {
     current_dt = dt;
     // rolled once per render frame, before either pass, so both layers are handed the same warp!
@@ -324,7 +339,7 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
                     const row_start = (gy * CHUNK_SIZE + ly) * wb + gx * CHUNK_SIZE;
                     const chunk_row_start = ly * CHUNK_SIZE;
 
-                    // Iterate through each block in the row instead of doing a blind @memcpy
+                    // iterate through each block in the row instead of doing a blind @memcpy
                     for (0..CHUNK_SIZE) |lx| {
                         var block = chunk.blocks[chunk_row_start + lx];
 
@@ -362,12 +377,15 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
 /// Applies sprite variation/animation to the final visible buffer, in place, just before it is sent to the GPU.
 /// Runs AFTER lighting so the lighting pass sees base (unvaried) sprite IDs.
 ///
-/// Uses grid-relative tile coordinates (`i % wb`, `i / wb`); because the grid origin is chunk-aligned (an even tile offset),
-/// their parity matches absolute tile parity, so positional variants (2x2 stone, checkerboard edge stone)
-/// are seamless across the world exactly as the old shader was.
+/// Uses grid-relative tile coordinates, `i % wb` and `i / wb`.
+/// The grid origin is chunk-aligned, an even tile offset, so their parity matches
+/// absolute tile parity.
+/// A positional variant, such as 2x2 stone or checkerboard edge stone, then shows no
+/// join across the world, exactly as the old shader did.
 fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
-    // Walked row by row rather than by flat index: the tile coordinates are the only thing the index was ever for,
-    // and recovering them per block costs a divide and a modulo on every cell of the screen.
+    // Walked row by row rather than by flat index. The tile coordinates are the only thing
+    // the index was ever for, and recovering them per block costs a divide and a modulo on
+    // every cell of the screen.
     var row_start: usize = 0;
     var ty: usize = 0;
     while (row_start < out.len) : ({
@@ -393,12 +411,15 @@ fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
 
 /// Places the player sprite for the ENTITY pass (logical 480x270 px, sprite center).
 ///
-/// This is the same world-to-screen mapping the tile grid uses (1 px = `CHUNK_SIZE` subpixels, scaled by
-/// zoom), so the player stays pixel-aligned with the blocks. `pass.zoom` is the logical
-/// (non-resolution-scaled) zoom, matching how every other entity is positioned.
+/// This is the same world-to-screen mapping the tile grid uses: 1 px is `CHUNK_SIZE`
+/// subpixels, scaled by zoom.
+/// So the player stays pixel-aligned with the blocks.
 ///
-/// Split out of `updateRenderProperties()` because the live layer is skipped once an ascent's overlay
-/// covers it, and the player is drawn over both layers either way.
+/// `pass.zoom` is the logical zoom, before resolution scaling, the same as every other entity.
+///
+/// Split out of `updateRenderProperties()` because the live layer is skipped once an
+/// ascent's overlay covers it.
+/// The player is drawn over both layers either way.
 fn placePlayer(pass: LayerPass) void {
     std.debug.assert(pass.source == .live);
     player_screen_pos = .{
@@ -445,7 +466,7 @@ fn updateRenderProperties(
     const player_render_x = (player_interpolated_x - grid_origin_sub_x - CHUNK_SIZE_FLOAT * CHUNK_SIZE_FLOAT / 2) / CHUNK_SIZE_FLOAT;
     const player_render_y = (player_interpolated_y - grid_origin_sub_y - CHUNK_SIZE_FLOAT * CHUNK_SIZE_FLOAT / 2) / CHUNK_SIZE_FLOAT;
 
-    // Modulo every 256 chunks to seamlessly loop water coordinates
+    // Modulo every 256 chunks so the water coordinates loop with no visible join
     const player_cx_mod = @as(i64, @intCast(pass.origin.suffix[0] % 256));
     const player_cy_mod = @as(i64, @intCast(pass.origin.suffix[1] % 256));
     const abs_grid_cx = @mod(player_cx_mod + min_cx, 256);
@@ -454,8 +475,9 @@ fn updateRenderProperties(
     const abs_grid_x = @as(f64, @floatFromInt(abs_grid_cx * @as(i32, dw.CHUNK_SIZE)));
     const abs_grid_y = @as(f64, @floatFromInt(abs_grid_cy * @as(i32, dw.CHUNK_SIZE)));
 
-    // Wrap the background's absolute camera every BG_WRAP_CHUNKS chunks so the FBM background loops
-    // seamlessly when walking OR zooming across the boundary (see the constant's doc comment for the contract).
+    // Wrap the background's absolute camera every BG_WRAP_CHUNKS chunks, so the FBM background
+    // loops with no visible join when walking OR zooming across it (the constant's doc comment
+    // holds the contract).
     const player_cx_bg_mod = @as(i64, @intCast(pass.origin.suffix[0] % BG_WRAP_CHUNKS));
     const player_cy_bg_mod = @as(i64, @intCast(pass.origin.suffix[1] % BG_WRAP_CHUNKS));
     const abs_grid_bg_cx = @mod(player_cx_bg_mod + min_cx, BG_WRAP_CHUNKS);

@@ -9,7 +9,8 @@ const Vec2f = dw.utils.Vec2f;
 ///
 /// Behavior is determined by `r`:
 /// - If zero, then it produces an axis-aligned rectangle.
-/// - If `r` >= 0.5 and `w` == `h`, then a circle is produced. Functionally identical to a rounded rectangle.
+/// - If `r` >= 0.5 and `w` == `h`, then a circle is produced.
+///   A circle is the same shape as a rounded rectangle here.
 /// - Otherwise, it produces a rounded rectangle.
 pub const Shape = struct {
     /// Top-left X and Y coordinate of the shape.
@@ -93,7 +94,7 @@ pub const Shape = struct {
             self.start[1] > other.start[1] + other.h or
             other.start[1] > self.start[1] + self.h) return false;
 
-        // calculate and check absolute corner radius
+        // Calculate and check the absolute corner radius
         std.debug.assert(self.r >= 0 and self.r <= 0.5);
         std.debug.assert(other.r >= 0 and other.r <= 0.5);
         const r1 = if (self.r <= 0.0) 0.0 else self.r * @min(self.w, self.h);
@@ -102,15 +103,14 @@ pub const Shape = struct {
         // Not rounded rectangle/circle: exit early!
         if (r1 == 0.0 and r2 == 0.0) return true;
 
-        // Identify the inner rectangles (the rects formed by the centers of the corner arcs).
+        // Identify the inner rectangles, formed by the centers of the corner arcs
         const inner1_min = self.start + @as(Vec2f, @splat(r1));
         const inner1_max = self.start + Vec2f{ self.w - r1, self.h - r1 };
 
         const inner2_min = other.start + @as(Vec2f, @splat(r2));
         const inner2_max = other.start + Vec2f{ other.w - r2, other.h - r2 };
 
-        // Find the distance between these two inner rectangles.
-        // We calculate the 1D distance on each axis.
+        // Find the distance between the two inner rectangles, one axis at a time
         const dx = @max(0.0, inner1_min[0] - inner2_max[0], inner2_min[0] - inner1_max[0]);
         const dy = @max(0.0, inner1_min[1] - inner2_max[1], inner2_min[1] - inner1_max[1]);
 
