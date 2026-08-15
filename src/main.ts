@@ -259,6 +259,27 @@ function preventHeldButtonRepeat(button: HTMLButtonElement): void {
     });
 }
 
+type ButtonAction = () => void | Promise<unknown>;
+
+let buttonActionInFlight = false;
+let pendingButtonAction: ButtonAction | null = null;
+
+/** Runs button actions one at a time and keeps only the newest pending action. */
+function requestButtonAction(action: ButtonAction): void {
+    pendingButtonAction = action;
+    if (buttonActionInFlight) return;
+
+    buttonActionInFlight = true;
+    void (async () => {
+        while (pendingButtonAction) {
+            const nextAction = pendingButtonAction;
+            pendingButtonAction = null;
+            await nextAction();
+        }
+        buttonActionInFlight = false;
+    })();
+}
+
 const past60SlowestLogicLoops = Array(60).fill(0);
 const past60SlowestRenders = Array(60).fill(0);
 const past60SlowestZigRenders = Array(60).fill(0);
@@ -460,7 +481,9 @@ if (is_dev && engine.isDebug) {
         const btn = document.createElement("button");
         btn.textContent = b.name;
         btn.onclick = () =>
-            (engine.exports.clickDebugUiButton as (id: number) => void)(b.id);
+            requestButtonAction(() =>
+                (engine.exports.clickDebugUiButton as (id: number) => void)(b.id),
+            );
         preventHeldButtonRepeat(btn);
         container.appendChild(btn);
     });
@@ -501,24 +524,13 @@ if (is_dev && engine.isDebug) {
     const addSaveButton = (name: string, onClick: () => void) => {
         const btn = document.createElement("button");
         btn.textContent = name;
-        btn.onclick = onClick;
-        // TODO: better async-aware solution (probably going to queue debug button events to be resolved per-tick)
+        btn.onclick = () => requestButtonAction(onClick);
         preventHeldButtonRepeat(btn);
         container.appendChild(btn);
     };
     addSaveButton("Force save", () => engine.saveManager.save());
     addSaveButton("Force load", () => engine.saveManager.load());
-    let resetInFlight = false;
-    addSaveButton("Reset", () => {
-        if (resetInFlight) return;
-        resetInFlight = true;
-        void engine
-            .start()
-            .catch((error: unknown) => console.error("Reset failed:", error))
-            .finally(() => {
-                resetInFlight = false;
-            });
-    });
+    addSaveButton("Reset", () => engine.start());
     addSaveButton("Export file", () => downloadSaveFile());
     addSaveButton("Import file", () => uploadSaveFile());
 
