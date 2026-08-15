@@ -20,6 +20,7 @@ Stuck on how to begin?
 - Select the pickaxe in the inventory to mine. Use WASD or the arrow keys to move.
 - Look for items with an indicator above them. A furnace smelts ore into bars. You can go to crafting station "cores" to upgrade!
 - You cannot mine everything. Either your pickaxe is too weak, or that block is not mine-able yet.
+- You can test the portal logic wherever you want by pressing M, turning on creative, and placing a portal. Similarly you may decrease the depth through the backwards-looking inverted portal once you've already used the portal once!
 
 Press M to open or close the debug menu and the logs. Creative mode lives in that menu and makes testing simpler (and allows you to move into solid blocks)!
 
