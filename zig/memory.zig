@@ -417,6 +417,7 @@ pub const Block = packed struct(u128) {
     ///
     /// - A 1 bit for a solid block ordinarily indicates an edge with an adjacent solid block.
     /// - A 1 bit for a liquid block means that there is either solid or liquid adjacent.
+    ///
     /// Edge flags must be reset to 255 for decorations (non-blocks or liquids) after a final decoration pass.
     edge_flags: u8,
     /// Lightness of the light reaching this block; see `BlockLight.l`.
@@ -434,7 +435,7 @@ pub const Block = packed struct(u128) {
 
     /// The background tile behind an overlay sprite, such as the stone an ore grew inside.
     /// `.none` means "no underlay", and the shader then draws `id` alone.
-    /// That is the common case for a block that is not an ore or a gem.
+    /// The `.none` case is the default for a block that is not an ore or a gem!
     base_id: Sprite = .none,
     /// Same-sprite edge flags, in the same bit order as `edge_flags`.
     /// A bit is set when the neighbor's `id` equals this block's `id`.
