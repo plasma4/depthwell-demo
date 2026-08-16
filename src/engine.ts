@@ -368,7 +368,12 @@ export class GameEngine {
         this.renderPass.setBindGroup(0, this.bindGroups[this.renderCallId], [
             this.renderCallId * 256,
         ]);
-        this.renderPass.draw(3); // Draws the background triangle (not a quad, neat little hack!)
+
+        // One instance per background cell. The grid is world-aligned and covers the canvas with two cells of slack,
+        // so its size follows the camera zoom rather than the canvas resolution.
+        const cellsX = this.getScratchProperty(17, WasmTypeCode.Float64);
+        const cellsY = this.getScratchProperty(18, WasmTypeCode.Float64);
+        this.renderPass.draw(4, cellsX * cellsY);
         this.renderCallId++;
     }
 
@@ -484,6 +489,16 @@ export class GameEngine {
         );
         this.sceneDataF32[23] = this.getScratchProperty(
             15,
+            WasmTypeCode.Float64,
+        );
+
+        // Background cell grid: cell size in world pixels, then cells per instance row.
+        this.sceneDataF32[24] = this.getScratchProperty(
+            16,
+            WasmTypeCode.Float64,
+        );
+        this.sceneDataF32[25] = this.getScratchProperty(
+            17,
             WasmTypeCode.Float64,
         );
 

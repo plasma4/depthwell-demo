@@ -4,7 +4,7 @@ Depthwell is a procedural fractal mining incremental. How deep can you explore? 
 
 > [!WARNING]
 > This game is pre-demo, so any save can break at any time when core logic changes.
-> This README is **incomplete**. Parts of it can fall behind the code. When the two disagree, trust the code.
+> This README is also **incomplete** and parts of it could fall behind the code. When the two disagree, trust the code!
 
 ### Images
 
@@ -19,7 +19,10 @@ Stuck on how to begin?
 - Left-click places blocks. Click an inventory slot to pick a block type. Click an indicator above a block to open its menu.
 - Select the pickaxe in the inventory to mine. Use WASD or the arrow keys to move.
 - Look for items with an indicator above them. A furnace smelts ore into bars. You can go to crafting station "cores" to upgrade!
-- You cannot mine everything. Either your pickaxe is too weak, or that block is not mine-able yet.
+- You can't mine everything. Either your pickaxe is too weak, or that block is just not mine-able, or you're too far from that block.
+    - Tip on mining distance: it simulates just the player emitting its light source to determine if you're close enough. So if another light source makes some blocks visible that doesn't indicate mineability, necessarily.
+- You can test the portal logic wherever you want by pressing M, turning on creative, and placing a portal. Similarly you may decrease the depth through the backwards-looking, green inverted portal once you've already used the normal purple portal once!
+    - Each depth is treated as its own world once you've "created" it by entering it with the portal for the first time. That means that only modifications in the highest depth affect later depths, with nothing the other way around.
 
 Press M to open or close the debug menu and the logs. Creative mode lives in that menu and makes testing simpler (and allows you to move into solid blocks)!
 
@@ -171,7 +174,7 @@ Everything below the modification stage is a pure function of world position and
 
 #### Hashing
 
-`ChaCha12` is strong but slow. Calling a full ChaCha block 256 times per chunk is far too expensive. For 2D noise, Depthwell uses `FastHash`, a stateless multiply-mix hasher built on constants from Wyhash. `FastHash.hash2d()` gives enough variance for smooth terrain and costs a fraction of a normal PRNG. `ChaCha12` still fills each base-depth block's cosmetic `seed`, in block order.
+`ChaCha12` is strong but slow. Calling a full ChaCha block 256 times per chunk is far too expensive, and so is `Blake3`. For 2D noise, Depthwell uses `FastHash`, a stateless multiply-mix hasher built on constants from Wyhash and SplitMix64. `FastHash.hash2d()` gives enough variance for smooth terrain and costs a fraction of a normal PRNG. `ChaCha12` still fills each base-depth block's cosmetic `seed`, in block order.
 
 #### Terrain
 
@@ -184,7 +187,7 @@ The first pass picks the block type from up to six noise values. A larger cell s
 - **Secondary density** varies the stone type.
 - **Ore density** spreads ores and gems over the host stone.
 
-These names are mostly arbitrary. Density and moisture together choose normal, blue, or lava stone. Some fields use FBM with tuned Worley noise, some use FBM with Perlin, and some use billow noise. The mix of cell sizes and algorithms is what makes the output varied but still visually related.
+These names are mostly arbitrary. Density determines whether a block starts off stone or simply becomes air! Some fields use FBM with tuned Worley noise, some use FBM with Perlin, and some use billow noise. The mix of cell sizes and algorithms is what makes the output varied but still visually related.
 
 Each of those six values costs a full noise evaluation, and most blocks need only the first three. So the rules never run against a filled-in record. They run against a `TerrainSampler`, which draws density, cutoff, and moisture up front and everything else on first use. `classifyTerrain()` holds the rules as one ordered list. Each group of rules sits right after the sample it is the first to need, so the rule order is also the cost order.
 
@@ -556,7 +559,9 @@ Ores and gems use a multi-texture mask to save atlas space. For a gem block the 
 
 #### Background and water
 
-The background is not a static image. It is multi-octave fractal brownian motion, evaluated per pixel. The octave count is low for performance. Three layers parallax at 8x, 32x, and 64x slower than the camera: for every 64 pixels the player moves, they move 8, 2, and 1 pixels. Each layer has its own colors.
+The background is not a static image. It is multi-octave fractal brownian motion. The octave count is low for performance. Three layers parallax at 8x, 32x, and 64x slower than the camera: for every 64 pixels the player moves, they move 8, 2, and 1 pixels. Each layer has its own colors.
+
+It is evaluated once per background pixel, not once per canvas pixel. A background pixel is one world pixel, the grid a block sprite's texels sit on, drawn as one instanced quad with a flat color, so the cost follows the camera zoom instead of the resolution. `publishBackgroundGrid()` in `zig/render/chunk.zig` sizes that grid.
 
 Think of the sample position as `(chunk id + sub-chunk position) modulo 512`, with coordinate warping and a trig-based light at the end.
 

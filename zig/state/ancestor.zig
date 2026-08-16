@@ -709,22 +709,23 @@ fn warpedMaterial(parent_block: Block, n: [8]Block, warp: dw.utils.Vec2f32, lx: 
     return if (source.isFoundation()) source else parent_block;
 }
 
-/// A liquid parent's level as seen by the child at row `ly` of its region.
+/// A liquid or waterlogged parent's level as seen by the child at row `ly` of its region.
 /// For example, a block of water at HP = 11 would turn into the following HP water values at D+1:
 /// ```
-/// 0 0 0 0
-/// 3 3 3 3
-/// 4 4 4 4
-/// 4 4 4 4
+/// 0  0  0  0
+/// 11 11 11 11 (4 * 3 - 1); "considers" 3/11 HP at D
+/// 15 15 15 15 (4 * 4 - 1); "considers" 4/11 HP at D
+/// 15 15 15 15 (4 * 4 - 1); "considers" 4/11 HP at D
 /// ```
 fn inheritedLiquidVolume(parent_volume: u4, ly: u4) u4 {
     if (parent_volume >= dw.water.RESTING_VOLUME) return memory.Block.MAX_HP;
 
-    const max: u32 = memory.Block.MAX_HP;
-    // height of the surface above the region's floor, in the same units, scaled to the region
-    const level: u32 = @as(u32, parent_volume) * dw.BLOCKS_PER_PARENT;
-    const rows_below: u32 = dw.BLOCKS_PER_PARENT - 1 - ly; // full rows of this column beneath the cell
-    return @intCast(@min(max, level -| rows_below * max));
+    const max = memory.Block.MAX_HP;
+    const rows_with_water: u4 = @intCast((@as(u32, parent_volume) + dw.BLOCKS_PER_PARENT - 1) / dw.BLOCKS_PER_PARENT);
+    const first_water_row: u4 = dw.BLOCKS_PER_PARENT - rows_with_water;
+    if (ly < first_water_row) return 0;
+    if (ly == first_water_row) return parent_volume;
+    return max;
 }
 
 /// Whether this parent block is the surface a portal is anchored to:
@@ -778,12 +779,13 @@ fn chunkNoise(key: DepthCoordinate) ChunkNoise {
 ///
 /// `parent_block` is the source at the shallower depth.
 /// `bx` and `by` select one of its `BLOCKS_PER_PARENT` by `BLOCKS_PER_PARENT` children.
-/// An empty result is air.
+/// An empty result is air (unless waterlogging happens, which takes priority).
 ///
 /// Processing order:
 /// 1. An empty parent usually stays empty.
 ///    An enclosed corner can receive nearby foundation terrain.
 /// 2. Edge stone, planned blocks, liquids, and other non-foundation blocks use their own rules.
+///    For waterlogging, unclaimed cells get filled with liquid.
 /// 3. A foundation child can carve into air.
 ///    A portal or a planned child can protect its required cell.
 /// 4. A surviving foundation child selects its material, then ages its refinement tag.
@@ -817,11 +819,15 @@ pub fn applyAncestorLogic(
     if (parent_sprite == .edge_stone)
         return .{ .id = parent_sprite, .seed = noise_hash_2 };
 
-    // Waterlogged parents pass their water volume to every waterloggable child.
-    const inherited_water: u4 = if (parent_sprite.isWaterloggable()) parent_block.hp else 0;
-
     const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
     const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
+    // A waterlogged parent carries its water level into this child row.
+    // On a solid parent, hp is mining progress and must not become water.
+    const inherited_water: u4 = if (parent_block.isWaterloggable())
+        inheritedLiquidVolume(parent_block.hp, ly)
+    else
+        0;
+
     const noise_seed = chunk_noise.noise_seed;
     const wx = worldBlock(@intCast(key.quadrant % 2), key.suffix[0], bx);
     const wy = worldBlock(@intCast(key.quadrant / 2), key.suffix[1], by);
@@ -840,10 +846,20 @@ pub fn applyAncestorLogic(
     };
 
     // A planned block describes its child region instead of copying into all sixteen cells.
-    // If the plan leaves an enclosed corner empty, supporting terrain can fill only that corner.
+    // Water fills its unclaimed cells first. A dry plan can borrow support terrain into an enclosed corner.
     if (dw.refine.ruleFor(parent_sprite)) |rule| {
-        const refined = dw.refine.refineChild(rule, cell);
+        var refined = dw.refine.refineChild(rule, cell);
+        if (refined.id.isSolid()) refined.water_volume = 0;
         if (refined.id != .none) return refined;
+
+        // Water fills cells that the refinement plan leaves empty.
+        if (inherited_water > 0) {
+            return .{
+                .id = .water,
+                .seed = noise_hash_2,
+                .water_volume = inherited_water,
+            };
+        }
 
         const source = macroInfillSource(rule.surface, parent_neighbors, lx, ly, inherited_water) orelse return refined;
         if (!infillsCorner(noise_seed, wx, wy)) return refined;
@@ -871,10 +887,11 @@ pub fn applyAncestorLogic(
 
     // Other non-foundation blocks copy as one child per cell. They do not carve or warp terrain.
     if (!parent_sprite.isFoundation()) {
+        const child_sprite = dw.refine.evolve(parent_sprite, cell).id;
         return .{
-            .id = dw.refine.evolve(parent_sprite, cell).id,
+            .id = child_sprite,
             .seed = noise_hash_2,
-            .water_volume = inherited_water,
+            .water_volume = if (child_sprite.isWaterloggable()) inherited_water else 0,
         };
     }
 
@@ -1299,14 +1316,13 @@ fn carvesAnywhere(parent_block: Block, n: [8]Block, lx: u4, ly: u4) bool {
 test "liquid refinement keeps the surface level and settles downward" {
     const max: u32 = memory.Block.MAX_HP;
 
-    // A parent two thirds full puts its surface two thirds up the region, not at its ceiling.
+    // A parent volume fills the smallest number of child rows that can hold it.
     try testing.expectEqual(@as(u4, 0), inheritedLiquidVolume(11, 0));
-    try testing.expectEqual(@as(u4, 14), inheritedLiquidVolume(11, 1));
+    try testing.expectEqual(@as(u4, 11), inheritedLiquidVolume(11, 1));
     try testing.expectEqual(@as(u4, 15), inheritedLiquidVolume(11, 2));
     try testing.expectEqual(@as(u4, 15), inheritedLiquidVolume(11, 3));
 
-    // A SETTLED parent is full water even though it sits below MAX_HP, so it must refine to solid water.
-    // Otherwise the top row empties, and that empty row compounds one depth at a time.
+    // A settled parent is full water, so every child row is full.
     for (dw.water.RESTING_VOLUME..max + 1) |v| {
         for (0..dw.BLOCKS_PER_PARENT) |ly| {
             try testing.expectEqual(
@@ -1316,22 +1332,105 @@ test "liquid refinement keeps the surface level and settles downward" {
         }
     }
 
-    for (0..dw.water.RESTING_VOLUME) |v| {
+    for (1..dw.water.RESTING_VOLUME) |v| {
         const parent: u4 = @intCast(v);
-        var total: u32 = 0;
-        var previous: u4 = 0;
+        const rows_with_water: u4 = @intCast((v + dw.BLOCKS_PER_PARENT - 1) / dw.BLOCKS_PER_PARENT);
+        const first_water_row = dw.BLOCKS_PER_PARENT - rows_with_water;
         for (0..dw.BLOCKS_PER_PARENT) |ly| {
-            // ly counts DOWN the region, so volume may only grow:
-            // a column that is fuller higher up would fall the instant the sim ran.
             const volume = inheritedLiquidVolume(parent, @intCast(ly));
-            try testing.expect(volume >= previous);
-            previous = volume;
-            total += volume;
+            const expected: u4 = if (ly < first_water_row)
+                0
+            else if (ly == first_water_row)
+                parent
+            else
+                memory.Block.MAX_HP;
+            try testing.expectEqual(expected, volume);
         }
-
-        // Verify the new water amount.
-        try testing.expectEqual(@as(u32, parent) * dw.BLOCKS_PER_PARENT, total);
     }
+}
+
+test "waterlogged decorations carry water into refined children" {
+    // Verify that big mushroom waterlogging behavior is correct!
+    const saved_game = memory.game;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+        clearChunkNoise();
+    }
+
+    memory.game = .{};
+    memory.deriveHashSeeds();
+    world.quad_cache.path_hashes.value[0] = memory.game.seed;
+    memory.game.depth = STARTING_ZOOM_TIMES + 1;
+    clearChunkNoise();
+
+    var parent = Block.makeBasicBlock(.mushroom, 1);
+    try testing.expect(parent.isWaterloggable());
+
+    var neighbors: [8]Block = @splat(.empty);
+    neighbors[6] = .makeBasicBlock(.stone, 2);
+    const key = (Coordinate{ .suffix = .{ 1, 1 }, .quadrant = 0 }).asDepthCoordinate(memory.game.depth);
+
+    for ([_]u4{ 11, 15 }) |parent_hp| {
+        parent.hp = parent_hp;
+        var found_water = false;
+        var found_mushroom = false;
+        for (0..dw.BLOCKS_PER_PARENT) |ly| {
+            for (0..dw.BLOCKS_PER_PARENT) |lx| {
+                const child = applyAncestorLogic(parent, neighbors, key, @intCast(lx), @intCast(ly)).compile();
+                const expected_water = inheritedLiquidVolume(parent.hp, @intCast(ly));
+                if (child.id == .water) {
+                    found_water = true;
+                    try testing.expectEqual(expected_water, child.hp);
+                } else if (child.id == .big_mushroom) {
+                    found_mushroom = true;
+                    try testing.expect(child.isWaterloggable());
+                    try testing.expectEqual(expected_water, child.hp);
+                } else {
+                    try testing.expect(child.isEmpty());
+                    try testing.expectEqual(@as(u4, 0), expected_water);
+                }
+            }
+        }
+        try testing.expect(found_water);
+        try testing.expect(found_mushroom);
+    }
+}
+
+test "refined solid mutations discard inherited water" {
+    const saved_game = memory.game;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+        clearChunkNoise();
+    }
+
+    memory.game = .{};
+    memory.deriveHashSeeds();
+    world.quad_cache.path_hashes.value[0] = memory.game.seed;
+    memory.game.depth = STARTING_ZOOM_TIMES + 1;
+    clearChunkNoise();
+
+    var parent = Block.makeBasicBlock(.moss_shrub1, 1);
+    parent.hp = 11;
+    try testing.expect(parent.isWaterloggable());
+
+    var neighbors: [8]Block = @splat(.empty);
+    neighbors[6] = .makeBasicBlock(.stone, 2);
+    neighbors[7] = .makeBasicBlock(.stone, 3);
+    const key = (Coordinate{ .suffix = .{ 2, 2 }, .quadrant = 0 }).asDepthCoordinate(memory.game.depth);
+
+    var found_solid = false;
+    for (0..dw.BLOCKS_PER_PARENT) |ly| {
+        for (0..dw.BLOCKS_PER_PARENT) |lx| {
+            const spec = applyAncestorLogic(parent, neighbors, key, @intCast(lx), @intCast(ly));
+            if (!spec.id.isSolid()) continue;
+            found_solid = true;
+            try testing.expectEqual(@as(u4, 0), spec.water_volume);
+            try testing.expectEqual(@as(u4, 0), spec.compile().hp);
+        }
+    }
+    try testing.expect(found_solid);
 }
 
 test "slope carve: a fully enclosed block is never touched" {
@@ -1589,6 +1688,7 @@ test "overlay support runs from an isolated parent to a buried one" {
     var left_only: [8]Block = @splat(.empty);
     left_only[3] = .makeBasicBlock(.copper, 1);
     try testing.expect(
-        overlaySupport(left_only, .copper, 0, 1) > overlaySupport(left_only, .copper, 3, 1),
+        overlaySupport(left_only, .copper, 0, 1) >
+            overlaySupport(left_only, .copper, 3, 1),
     );
 }
