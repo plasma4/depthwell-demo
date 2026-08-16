@@ -299,7 +299,7 @@ pub const Sprite = enum(u16) {
     /// Determines if the sprite's type is considered solid,
     /// and should interact with the physics, player, and edge flags.
     ///
-    /// This returns true for edge stone, unlike `isSolid()`.
+    /// This returns true for edge stone, unlike `isFoundation()`.
     pub inline fn isSolid(self: Sprite) bool {
         return self.props().solid;
     }
