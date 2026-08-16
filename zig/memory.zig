@@ -501,7 +501,7 @@ pub const Block = packed struct(u128) {
     }
 
     /// Determines if the block's type is considered solid, and should interact with the physics, player, and edge flags.
-    /// This returns true for edge stone, unlike `isSolid()`.
+    /// This returns true for edge stone, unlike `isFoundation()`.
     pub inline fn isSolid(self: @This()) bool {
         return self.id.isSolid();
     }
