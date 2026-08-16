@@ -1,10 +1,10 @@
 # Depthwell
 
-Depthwell is a procedural fractal mining incremental. How deep can you explore? A minimal demo release is planned for late 2026 or early 2027.
+Depthwell is a procedural fractal mining incremental, focused around a strange, quiet world where you dig deeper and deeper into the earth. A minimal demo release is planned for late 2026 or early 2027; unimplemented features include gardening, hammerstone/pre-lathe gameplay, and a slew of other content!
 
 > [!WARNING]
-> This game is pre-demo, so any save can break at any time when core logic changes.
-> This README is also **incomplete** and parts of it could fall behind the code. When the two disagree, trust the code!
+> This game is pre-demo, so any save can and WILL break at any time when core logic changes.
+> Please also note this readme is **incomplete** and you'd probably want to consult the code for specifics.
 
 ### Images
 
@@ -16,13 +16,14 @@ Depthwell is a procedural fractal mining incremental. How deep can you explore? 
 
 Stuck on how to begin?
 
-- Left-click places blocks. Click an inventory slot to pick a block type. Click an indicator above a block to open its menu.
+- Left-click places blocks. Click an inventory slot to pick a block type and press the indicator above (interactable) blocks to open its menu.
 - Select the pickaxe in the inventory to mine. Use WASD or the arrow keys to move.
-- Look for items with an indicator above them. A furnace smelts ore into bars. You can go to crafting station "cores" to upgrade!
-- You can't mine everything. Either your pickaxe is too weak, or that block is just not mine-able, or you're too far from that block.
-    - Tip on mining distance: it simulates just the player emitting its light source to determine if you're close enough. So if another light source makes some blocks visible that doesn't indicate mineability, necessarily.
+- Look for items with an indicator above them; a furnace smelts ore into bars and there are also "cores" that allow you to upgrade your pickaxe and craft some items.
+- You can't mine everything; either your pickaxe is too weak, or that block is just not mine-able. Or you're too far from that block!
+    - Tip on mining distance: it simulates just the player emitting its light source to determine if you're close enough. So if another light source makes some blocks visible that doesn't indicate mineability, necessarily; a different sound is played if you're trying to mine a solid block too far away.
 - You can test the portal logic wherever you want by pressing M, turning on creative, and placing a portal. Similarly you may decrease the depth through the backwards-looking, green inverted portal once you've already used the normal purple portal once!
     - Each depth is treated as its own world once you've "created" it by entering it with the portal for the first time. That means that only modifications in the highest depth affect later depths, with nothing the other way around.
+    - Use the Z/X keys to skip the animation; this also ignores softlocking rules.
 
 Press M to open or close the debug menu and the logs. Creative mode lives in that menu and makes testing simpler (and allows you to move into solid blocks)!
 
@@ -45,15 +46,15 @@ Every build keeps DWARF except `-Dwasm-opt` (wasm-opt doesn't support DWARF 5 an
 
 For a production build with Vite, use `npm run build` together with `zig build -Dgen-enums -Dwasm-opt`. You can also copy what `.githooks/pre-commit` does.
 
-See `build.zig` for the other options. The Zig Language Server in VSCode or VSCodium helps a lot. Set it to "watch" mode. It then rebuilds the WASM for you and gives errors, highlighting, and "Go to Definition".
+See `build.zig` for the other options. The Zig Language Server in VSCode or VSCodium helps a lot (or suitable alternatives in other IDEs); set it to "watch" mode to automatically build when you apply changes. It then rebuilds the WASM for you and gives easy errors/highlighting."Go to Definition" help.
 
 Useful things to change: `CONFIG` in `src/main.ts`, `engine.wireframeBrightness`, `engine.baseSpeed`, and the config options in `zig/state/player.zig`.
 
 ### Version control
 
-Git works by default. `.vscode/settings.json` controls whether diffs are shown.
+VCS is something that's scary to a lot of people, but it shouldn't be! I partially blame Git for that (although Git works by default in this project). `.vscode/settings.json` controls whether diffs are shown.
 
-For Jujutsu, run `jj git init` and `jj bookmark track main --remote=origin` after you clone. To build for release, run `chmod +x ./build.sh` and then `./build.sh`. To commit to main, run `chmod +x ./push.sh` and then `./push.sh`. The Windows equivalents are a direct translation.
+The alternative VCS that I use is Jujitsu, which is just as complicated but **stores an irreversible local copy in case you screw up**. Sweet, right? Run `jj git init` and `jj bookmark track main --remote=origin` after you clone. To build for release, run `chmod +x ./build.sh` and then `./build.sh`. To commit to main, run `chmod +x ./push.sh` and then `./push.sh`. The Windows equivalents are a direct translation.
 
 To auto-build Vite before each commit with Git:
 
@@ -64,9 +65,9 @@ chmod +x .githooks/pre-commit
 
 ## Architecture
 
-Depthwell is Zig compiled to WASM plus a thin TypeScript host, and it renders with WebGPU. The web version is free and always gets updates. A native build on Mach Engine is planned (but the TypeScript system will continue in-place). The internal viewport is 480x270 and scales with the display resolution. `zig/root.zig` exports every function the host can call, and it also lists almost every Zig file, so use it as the map.
+Game is created using Zig and WebGPU, and meant to be web-first. A final product that uses Mach Engine for native building is planned, but _web will always be free and receive updates_. The internal viewport is 480x270 (but it automatically scales with the DPI/base resolution). Functions are exported from `root.zig`.
 
-The seed is 1 to 100 letters from `a-z`. `ChaCha12` and `BLAKE3` turn it into over `10^140` possible worlds. Depth and chunk counts are bound only by storage and RAM. Hot paths use `FastHash` instead, which is described below.
+By using `ChaCha12` and `Blake3` and a seed with 1-100 `a-z` characters, the game can generate over `10^140` possible maps, with depth and chunk sizes only practically bound by storage/RAM limits! Performance-sensitive areas are use `FastHash` (explained a lot more comprehensively in later procedural sections).
 
 ### Sizes and terms
 
@@ -85,7 +86,9 @@ The camera and the player use integer subpixels. Entities use floating-point pix
 - **D** is shorthand for the current depth. D-1 is the space you were in just before the last portal.
 - **H**, the event horizon, is shorthand for D-32. Once D reaches 45 or more, the game stops tracking single blocks above H. A block at H is `2^64` times wider than a block at D, so the recursion can stop there.
 
-Depth 13 is the **base depth**. It is the only depth built from noise instead of inherited from a parent, and the only one with a finite size. It is a closed square walled in by `edge_stone`.
+Depth 13 is the **base depth**. It's the only depth built from noise instead of inherited from a parent, and the only one with a finite size.
+
+(Interesting tidbit: at the base depth, there's a width-2 unmine-able edge stone area for the border of the world. You can easily see this when `STARTING_ZOOM_TIMES` is 0 or a small value, which is a case handled by the code.)
 
 ### Where a chunk is
 
@@ -106,11 +109,16 @@ $$X = 2 \times 4^5 + 3 \times 4^4 + 1 \times 4^3 + 0 \times 4^2 + 3 \times 4^1 +
 
 In binary that would be `10 11 01 00 11 10`, which fits the suffix.
 
-#### Rebasing past 32 depths
+#### What if $D>32$?
 
-Past 32 levels the suffix overflows. Each extra depth triggers a **rebase**. The player is re-centered inside the 64-bit range and the oldest 2 bits leave the suffix. They become 3-bit origin offsets (`left_cell_x` and `top_cell_y`) in the range 0 to 6, stored in the prefix stack. A `u64` holds 21 of these 3-bit steps, and the code finds one with `idx / 21` and `(idx % 21) * 3`.
+Past 32 levels the suffix overflows. Each extra depth triggers a **rebase**. The player is re-centered inside the 64-bit range and the oldest 2 bits leave the suffix. They become 3-bit origin offsets (`left_cell_x` and `top_cell_y`) in the range 0 to 6, stored in the prefix stack.
 
-The rebase picks the new center so that a player can travel as far as possible in any quadrant before the coordinate runs out. In practice that is quintillions of chunks. If the game ever asks for a chunk that no quadrant can name, it crashes on purpose rather than showing the wrong world.
+Why the odd choice of 21?
+
+- Since $\lfloor 64 / 3 \rfloor = 21$, we pack exactly **21 historical steps** into a single `u64` integer.
+- The game uses dynamic division and modulo math (`idx / 21` and `(idx % 21) * 3`) to find and extract these values on the fly.
+
+The rebase picks the new center so that a player can travel as far as possible in any quadrant before the coordinate runs out (although in practice that is quintillions of chunks and NEVER reachable in practice, unless the debug "Teleport randomly" option gets real unlucky). If the game ever asks for a chunk that no quadrant can name, it crashes on purpose rather than showing the wrong world.
 
 One quadrant covers exactly `2^64` chunks at the current depth. A lookback of exactly 32 levels therefore covers the whole addressable space, which is why H sits at D-32. Anything older than that is summarized in `ancestor_materials`, a 16x16 block window whose center 2x2 is the four live quadrants.
 
@@ -127,7 +135,7 @@ Every chunk runs the same pipeline. Every stage is a pure function of the seed a
 3. **Structures.** Chambers, pillars, geodes, trees, and sand or clay deposits get placed by a planner that resolves collisions. This decides _whether and where_ a structure exists.
 4. **Decorations.** Plants such as mushrooms, flowers, vines, and shrubs get stamped. They only read local terrain, such as whether the block below is solid.
 5. **Modifications.** Player edits and water-sim changes replay over the fresh chunk from the `ModificationStore`. This is the only stage that is not procedural, and it always wins.
-6. **Derived passes.** Edge flags and waterlogging get recomputed from the settled block ids. Lighting runs last, right before the data goes to the GPU. None of this is stored, because all of it can be rebuilt.
+6. **Later derived passes.** Edge flags and waterlogging get recomputed from the settled block ids. Lighting runs last, right before the data goes to the GPU. None of this is stored, because all of it can be rebuilt.
 
 Steps 1 to 4 run at the base depth only. Every deeper copy is inherited, not re-rolled. See "Going one depth deeper".
 
@@ -209,14 +217,14 @@ An ore or a gem is an **overlay** drawn over a `base_id` stone **underlay**. Dis
 
 Trees, geodes, pillars, portal rooms, and chambers are structures. Each kind declares a `spawn_area` that is a power of two, and the world is tiled into cells of that size. One cell gets one placement, resolved in four stages that a kind can turn on or off:
 
-- **Roll.** `target_chance` decides whether the cell tries at all. It is a roll and not a density, because the stages below throw most rolls away.
-- **Anchor.** The box jitters to anywhere in the cell, overhang included. Drawing the origin from the cell interior instead would leave a blank band along every cell edge and make the spawn grid visible.
-- **Seat.** The box slides down onto the terrain surface. Seating cannot be a rule. A rule tests a box that is already final, and seating is the step that decides where the box belongs.
-- **Gate.** The terrain rules accept or reject the finished box.
+- An initial **roll** `target_chance` decides whether the cell tries at all. It is a roll and not a density, because the stages below throw most rolls away.
+- **Anchor** attempts with the structure bounding box jitters to anywhere in the cell, overhang included. Drawing the origin from the cell interior instead would leave a blank band along every cell edge and make the spawn grid visible.
+- **Seating** the structure happens next: the box tries to slide down onto the terrain surface. Seating cannot be a rule. A rule tests a box that is already final, and seating is the step that decides where the box belongs.
+- The structure can also simply provide custom **gate** for acceptance/rejection.
 
 Anchor, seat, and gate retry together up to `attempts` times before the cell gives up.
 
-The terrain rules are a small vocabulary, not per-structure code: `solid` and `empty` over a region, `level` for flat ground under a footprint, `encase` for "walled in by rock, to this degree", and `custom` as the escape hatch. Read the `Encase` and `Region` doc comments first.
+The terrain rules are kept reasonably simple and not per-structure: `solid` and `empty` over a region, `level` for flat ground under a footprint, `encase` for "walled in by rock, to this degree", and `custom` as the escape hatch. (Read the `Encase` and `Region` doc comments first!)
 
 Structures live in `zig/state/structures/` and use PascalCase file names, because they generally act more like a class than a struct! See `structures/Example.zig` for a fully commented walkthrough.
 
@@ -307,7 +315,7 @@ Generation is actually quite expensive! Each block needs several FBM and Worley 
 2. Fill a 68-chunk ring just outside the visible screen, so a chunk is ready before the player walks into it.
 3. Put every finished chunk the renderer touches, and every chunk generated for the `SimBuffer`, into the `ChunkCache`. Reading a chunk _out_ of the `SimBuffer` does not touch the cache.
 
-This removes frame spikes. Without it, a single frame could owe the `SimBuffer` 16 chunks. It changes no logic: a player can still teleport trillions of chunks away (at a flat cost of regenerating 256 chunks), and the old chunks simply age out of the cache. Plus, water simulation can easily stay confined to just work within the SimBuffer!
+This removes frame spikes (and still provides a pretty large buffer). Without it, a single frame could owe the `SimBuffer` 16 chunks. It changes no logic: a player can still teleport trillions of chunks away (at a flat cost of regenerating 256 chunks), and the old chunks simply age out of the cache. Plus, water simulation can easily stay confined to just work within the SimBuffer!
 
 #### How fast is fast enough?
 
@@ -317,7 +325,7 @@ The budget is 4 chunks per frame, so one chunk must take about 4 ms. That gives 
 
 Single-core speed and thermal throttling both matter, so check the device, not only the math. The "mid-tier mobile" throttle in DevTools is a reasonable proxy. Mobile is not a target. Test in ReleaseSafe, or ReleaseFast (`wasm-opt` optionally; doesn't give huge gains). Depthwell currently has plenty of headroom.
 
-### The cache layers
+### Scary specifics on caches
 
 Worldgen is a pure function, so the same coordinate always gives the same block. Even the base depth holds about $2^{60}$ blocks so there's no way to store everything upfront!
 
@@ -333,50 +341,44 @@ Invalidation splits them into two families. Some **self-invalidate**: each entry
 
 From shallowest to deepest:
 
-| Cache name                      | Holds                                                                                                                               | Shape                                                                                                                                                                   | How do I clear this cache?                  |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
-| `procedural.base_terrain_cache` | The raw terrain sample at one base-depth block: which stone, and how much ore the spot wants.                                       | Tiled 256 blocks across by 128 down. 32768 entries of 16 bytes, 512 KiB.                                                                                                | Self-cleared, against `terrainGeneration()` |
-| `world.foundation_cache`        | The finished base-depth block: terrain, plus the ore over it, plus any structure that claimed it. No decorations, which come later. | The same tile as above, on purpose, because one sweep reads both.                                                                                                       | Self-cleared, against `terrainGeneration()` |
-| `structures.struct_cache`       | One cache per structure kind, holding the box in each cell of that kind's spawn grid with the terrain rules applied.                | Tiled 32 by 32 grid cells. A cell is `spawn_area` blocks wide.                                                                                                          | Self-cleared, against seed and generation   |
-| `structures.chunk_ctx`          | Every structure that can reach into one chunk, resolved once per chunk instead of once per block.                                   | Tiled 16 chunks across by 4 down.                                                                                                                                       | Self, against seed and generation           |
-| `QuadCache.seed_cache`          | The four seeds of one chunk, mixed from its quadrant seed, suffix, and depth. Cheap, but asked for constantly.                      | 4-way hash, 256 entries.                                                                                                                                                | `clearCaches()`                             |
-| `ancestor.chunk_noise`          | The two seed streams every cell of one chunk shares.                                                                                | Exactly one entry.                                                                                                                                                      | `clearCaches()`                             |
-| `ancestor.ancestor_cache`       | Whole materialized chunks at parent depths. This is what recursive generation reads.                                                | 8-way with CLOCK eviction, indexed by _distance_ from D. The two nearest depths get 128 slots, the rest get 8. About 2 MiB.                                             | `clearCaches(true)`                         |
-| `ancestor.parent_hood_cache`    | A parent block and its eight neighbors. 64 sets of 4.                                                                               | The other deliberate hash.                                                                                                                                              | `clearCaches()`                             |
-| `world.chunk_cache`             | Finished chunks at D. The only cache the renderer reads.                                                                            | Tiled to the widest window the camera can ask for. The dev build (which has the minimum camera zoom 10 times smaller than normal!) has 64x32 chunks, 2048 slots, 8 MiB. | Replaced in place                           |
+| Cache name                      | Holds                                                                                                                | Shape                                                                                                                       | How do I clear this cache?                  |
+| ------------------------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `procedural.base_terrain_cache` | The raw terrain sample at one base-depth block: which stone, and `ore_density` value.                                | Tiled 256 blocks across by 128 down. 32768 entries of 16 bytes, 512 KiB.                                                    | Self-cleared, against `terrainGeneration()` |
+| `world.foundation_cache`        | The finished base-depth block: terrain+ores+structures.                                                              | The same tile as above, on purpose, because one sweep reads both.                                                           | Self-cleared, against `terrainGeneration()` |
+| `structures.struct_cache`       | One cache per structure kind, holding the box in each cell of that kind's spawn grid with the terrain rules applied. | Tiled 32 by 32 grid cells. A cell is `spawn_area` blocks wide.                                                              | Self-cleared, against seed and generation   |
+| `structures.chunk_ctx`          | Every structure that can reach into one chunk, resolved once per chunk instead of once per block.                    | Tiled 16 chunks across by 4 down.                                                                                           | Self-cleared, against seed and generation   |
+| `QuadCache.seed_cache`          | The four seeds of one chunk, mixed from its quadrant seed, suffix, and depth. Cheap, but asked for constantly.       | 4-way hash, 256 entries.                                                                                                    | `clearCaches()`                             |
+| `ancestor.chunk_noise`          | The two seed streams every cell of one chunk shares.                                                                 | Exactly one entry.                                                                                                          | `clearCaches()`                             |
+| `ancestor.ancestor_cache`       | Whole materialized chunks at parent depths. This is what recursive generation reads.                                 | 8-way with CLOCK eviction, indexed by _distance_ from D. The two nearest depths get 128 slots, the rest get 8. About 2 MiB. | `clearCaches(true)`                         |
+| `ancestor.parent_hood_cache`    | A parent block and its eight neighbors. 64 sets of 4.                                                                | The other deliberate hash.                                                                                                  | `clearCaches()`                             |
+| `world.chunk_cache`             | Finished chunks at D. The only cache the renderer reads.                                                             | Tiled to the widest window the camera can ask for (see notes below).                                                        | Replaced in place                           |
 
 Additional notes on the caches:
 
-`foundation_cache` shares a tile with `base_terrain_cache` because the chunk generator and its edge-flag halo both come through it. That is how an ore vein stays connected across a chunk border instead of being cut in half.
-
-`struct_cache` matters because the same cell is re-derived constantly: by every block inside the footprint, and again by every later kind's collision scan. A cached box is one that would really be built, which is what lets a neighbor's scan trust it. Nothing reachable from the structure pass re-enters `chunk_ctx`, because terrain sampling reads base terrain, which is upstream. But `isBeaten()` **does** re-enter `struct_cache` for neighboring cells of its own kind, and it can evict the very slot it was called from. That is why no cache pointer is ever held across that scan.
-
-`parent_hood_cache` is a hash on purpose. All 16 child cells of a region share one parent cell, and each used to walk the same nine lookups, so this turns 144 resolutions into 9. Tiling would be actively wrong: the nine cells of a neighborhood are **adjacent**, so a tile would have them evict each other on the very next child cell. The victim is plain round-robin, because a sweep gets nothing from recency.
-
-`chunk_cache` is what the camera falls back to whenever it outruns the `SimBuffer`, whether the player moved fast or zoomed out. Because the tile covers the window, a still camera settles at zero misses and a panning one pays only for the row that just came into view. The one thing that outgrows the tile is a portal ascent, which stretches the live layer to about 7 times its usual window. That is left alone on purpose, and the next section says why.
-
-One rule ties them all together, and it is the one to remember when adding a cache. **Every cache above memoizes procedural output only**: what the world would be before the player touched it. Player edits stay a separate overlay that `materializeChunk()` replays on top. That is why an edit never has to reach into any of these caches, and why none of them watches the modification store. A cache that broke this rule would have to count store writes itself, which is a strong sign it belongs somewhere else.
-
-The prefix stack follows the same idea one level up. Each level of the stack stores its own 512-bit seed, so the game never re-hashes a 10,000-level BLAKE3 chain. It hashes only the newest step. That makes a depth change effectively constant time.
+- **Caches only memoize/cache parts of procedural output**: before `ModStore`. Player edits stay a separate overlay that `materializeChunk()` replays on top.
+- For `world.chunk_cache`, the dev build (which has the minimum camera zoom 10 times smaller than normal!) has 64x32 chunks, 2048 slots, 8 MiB.
+- `foundation_cache` shares a tile with `base_terrain_cache` because the chunk generator and its edge-flag halo both come through it. That is how an ore vein stays connected across a chunk border instead of being cut in half.
+- `struct_cache` matters because the same cell is constantly re-derived by every block inside the footprint AND collision scans.
+- `parent_hood_cache` is a hash on purpose. All 16 child cells of a region share one parent cell, and each used to walk the same nine lookups, so this turns 144 resolutions into 9. Tiling would be actively wrong: the nine cells of a neighborhood are **adjacent**, so a tile would have them evict each other on the very next child cell. The victim is plain round-robin, because a sweep gets nothing from recency.
+- `chunk_cache` is what also what the camera falls back to whenever it outruns the `SimBuffer`, whether the player moved fast or zoomed out; it's automatically sized to handle large camera values at compile-time in practice.
+- The prefix stack follows the same idea one level up. Each level of the stack stores its own 512-bit seed, so the game never re-hashes a 10,000-level BLAKE3 chain. It hashes only the newest step. That makes a depth change effectively constant time.
 
 #### What they cost, and what a small tile does
 
 Every cache is a fixed-size static array, so its worst case is its only case!
 
-| cache                | Bytes                                         |
-| -------------------- | --------------------------------------------- |
-| `ancestor_cache`     | 2 MiB                                         |
-| `chunk_pool`         | 1 MiB (9 MiB with huge dev menu camera cap)   |
-| `base_terrain_cache` | 512 KiB                                       |
-| `foundation_cache`   | 512 KiB                                       |
-| `struct_cache`       | 512 KiB                                       |
-| `parent_hood_cache`  | 192 KiB (wide margin due to collision chance) |
-| `chunk_ctx`          | 111 KiB                                       |
-| `quad_cache`         | 115 KiB                                       |
-| `chunk_cache` keys   | 96 KiB                                        |
-| `chunk_noise`        | 32 B                                          |
-
-`chunk_pool` is the `SimBuffer`'s 256 chunks and the chunk cache's 2048 chunks sharing one array, at 4 KiB each. The total is a little under 13 MiB. It shrinks with `dev_menu` off, because `CAMERA_MIN_ZOOM` then stops at 0.5 and the chunk cache tile falls to 16 by 16.
+| Cache variable name  | Bytes                                          |
+| -------------------- | ---------------------------------------------- |
+| `ancestor_cache`     | 2 MiB                                          |
+| `chunk_pool`         | 1 MiB (9 MiB with huge dev menu camera cap)    |
+| `base_terrain_cache` | 512 KiB                                        |
+| `foundation_cache`   | 512 KiB                                        |
+| `struct_cache`       | 512 KiB                                        |
+| `parent_hood_cache`  | 192 KiB (wide margin to reduce collision odds) |
+| `chunk_ctx`          | 111 KiB                                        |
+| `quad_cache`         | 115 KiB                                        |
+| `chunk_cache` keys   | 96 KiB                                         |
+| `chunk_noise`        | 32 B                                           |
 
 Some dynamic allocations sit near these and **do** scale with the camera. The visible block buffer is 16 bytes a block, or 5 MiB at the widest dev window. Lighting adds a cost grid and three lanes over the same area. A portal descent's preview buffer is sized for the overlay's widest footprint, which is tens of MiB at full dev zoom-out. None of them is a cache.
 
@@ -389,7 +391,7 @@ What it costs depends on the intrusion:
 - **A sweep wider than its tile** wraps onto itself. A sweep touches each cell once, so this costs nothing within a pass. It only means the next pass cannot reuse what the last one left. That is what a portal ascent does, and why `chunk_cache` does not size for it.
 - **Alternating between two cells a whole tile apart** is the one genuinely bad pattern, and it misses every time. No loop in the engine does this. Keeping it that way means keeping each tile at least as large as the sweep it serves, and each cache has a `comptime` check that states its sweep.
 
-One ordering rule falls out of direct mapping and is easy to miss. **Claim a cache entry after you fill it, never before.** The slot is fixed by position, so a nested fill of anything a tile away lands on the same slot. A key written up front would still be sitting there, naming a chunk whose blocks the outer fill has since overwritten. Every cache writes its key and its value in one assignment at the end, `ChunkCache.fill()` included.
+One ordering rule falls out of direct mapping and is easy to miss: **caches entries should be claimed after filling, never before.** The slot is fixed by position, so a nested fill of anything a tile away lands on the same slot. A key written up front would still be sitting there, naming a chunk whose blocks the outer fill has since overwritten. Every cache writes its key and its value in one assignment at the end, `ChunkCache.fill()` included.
 
 ### Light system
 
@@ -446,9 +448,9 @@ Two shader constants exist because OKLAB lightness is not brightness:
 
 ### Why WGSL
 
-WGSL has less browser support than WebGL 2, but it lets the engine manage GPU memory directly and it is the more modern standard. It is also far faster than `drawImage()` and can do much more.
+WGSL has less browser support than WebGL 2, but it lets the engine manage GPU memory directly and it is the more modern standard. It is also far faster than `drawImage()` and can do much more (such as the background effect).
 
-Zig holds as much state as possible. Zig generates the data, pans it, converts it to `f32` so WebGPU hits no precision problems, and writes it into the scratch buffer. The shader reads from there.
+Zig holds as much state as possible. Zig generates the data, pans it, converts it to `f32` so WebGPU hits no precision problems, and writes it into the scratch buffer. The shader simply reads from their and its job is to go fast.
 
 ### Memory transfer
 
@@ -457,7 +459,7 @@ The TypeScript host and the Zig core share a planned memory layout:
 - The **scratch buffer** is a large, growing shared heap for high-bandwidth transfers, mostly chunk drawing.
 - The **scratch properties** are an array of 20 64-bit slots for metadata, also used for chunk drawing.
 
-A WASM call returns one value, so a larger result uses the scratch buffer plus up to 4 extra property slots. `getScratchProperty` in `src/engine.ts` is the host side. Pointers are Memory64-sensitive, so prefer returning a `u64` handle.
+A WASM call returns one value, so a larger result uses the scratch buffer plus up to 4 extra property slots. `getScratchProperty()` in `src/engine.ts` is the host side. Pointers are Memory64-sensitive, so prefer returning a `u64` handle.
 
 ### Entities
 
@@ -482,7 +484,7 @@ pub const Entity = struct {
 };
 ```
 
-`WGSLEntity` in `zig/render/entity.zig` is the packed form sent to the GPU. It carries the same fields in UV space instead of viewport pixels, plus the sprite id.
+`WGSLEntity` in `zig/render/entity.zig` is the packed form sent to the GPU. It carries the same fields in UV space instead of viewport pixels, plus the sprite ID.
 
 Entities draw in order, so a shadow is just the same sprite drawn first, offset and darkened:
 
@@ -503,13 +505,13 @@ for (0..10) |i| {
 }
 ```
 
-Numbers go through `drawNumber`, which takes the same `lcha`. Because L and alpha multiply while C and H add, a white sprite works as a mask: give it a chroma and a hue and it takes that color exactly.
+(Note that `addEntity()` takes a viewport-pixel center and a pixel size. `addEntitySized()` takes UV by default, and its `system` field selects the space.)
 
-Watch the coordinate space. `addEntity` takes a viewport-pixel center and a pixel size. `addEntitySized` takes UV by default, and its `system` field selects the space.
+Number use `drawNumber()`, which takes the same `lcha`. Because L and alpha multiply while C and H add, a white sprite works as a mask: give it a chroma and a hue and it takes that color exactly! This is the sneaky trick particles/rectangles/text uses: all the pixels are pure white so it basically becomes an OKLCH selector.
 
 ### Sprite variation
 
-A `Block.id` is only the **base** tile. `resolveVariant()` in `zig/types/variation.zig` resolves the tile that is actually drawn, once per visible block per frame, on the CPU after lighting and before upload. Most sprites resolve to themselves.
+A `Block.id` is only the **base** tile. `resolveVariant()` in `zig/types/variation.zig` resolves the tile that is actually drawn, once per visible block per frame, on the CPU after lighting and before upload. (Most sprites resolve to themselves; keep in mind visual variation doesn't change the internal `Sprite` type; that's a render-only thing.)
 
 It is a data-driven table. Each sprite maps to at most one `VariantRule`, and every variant frame sits at a consecutive atlas id, which a comptime check enforces. The kinds are:
 
@@ -530,7 +532,7 @@ The shader is where the visual detail comes from. Several effects look expensive
 
 #### Seeding
 
-The shader takes the block's 28 seed bits together with its 4 `hp` bits as `seed0`. It runs `murmurmix32` three more times to get `seed1` through `seed3`, so every block on screen has four independent streams. The last two drive erosion and edge flags.
+The shader takes the block's 28 seed bits together with its 4 `hp` bits as `seed0`. It runs `murmurmix32` three more times to get `seed1` through `seed3`, so every block on screen has four independent streams. The last two drive erosion and edge flags. (This was kept faithful with old WGSL code so Mach Engine/future logic can be re-GPU-ified.)
 
 #### OKLAB
 
@@ -550,18 +552,18 @@ The fragment shader reads `edge_flags` to find pixels near an air neighbor, then
 
 #### Gems and ores
 
-Ores and gems use a multi-texture mask to save atlas space. For a gem block the shader:
+Ores and gems are rendered using a multi-texture "masking" trick to save atlas space. For a gem block:
 
-1. Samples the background stone from the block's world coordinates, which preserves the 2x2 tiling.
-2. Computes a shifted UV for the gem from 8 seed bits, so the gem lands at any of 256 subpixel offsets inside the block.
-3. Samples a gem mask and mixes stone and gem by the mask's red channel.
-4. Flips the mask horizontally or vertically at random, so two gems at the same offset still differ.
+1. The shader samples the background stone based on the block's world coordinates (preserving the 2x2 tiling).
+2. It calculates a shifted UV for the gem itself using 8 bits of the seed, allowing the gem to appear at any of 256 sub-pixel offsets within the block.
+3. It samples a gem mask and mixes the stone and gem colors based on the mask's red channel.
+4. Finally, it applies a random horizontal/vertical flip to the mask, ensuring that even gems with the same offset look distinct.
 
 #### Background and water
 
-The background is not a static image. It is multi-octave fractal brownian motion. The octave count is low for performance. Three layers parallax at 8x, 32x, and 64x slower than the camera: for every 64 pixels the player moves, they move 8, 2, and 1 pixels. Each layer has its own colors.
+The background is not simply a static image looping, but instead uses multi-octave fractal brownian motion! The octave count is low for performance; three layers parallax at 8x, 32x, and 64x slower than the camera: for every 64 pixels the player moves, they move 8, 2, and 1 pixels. Every layer has its own colors and it intentionally uses RGB mixing, not OKLAB, for simplicity. (This additive/composition effect is actually quite wanted here!)
 
-It is evaluated once per background pixel, not once per canvas pixel. A background pixel is one world pixel, the grid a block sprite's texels sit on, drawn as one instanced quad with a flat color, so the cost follows the camera zoom instead of the resolution. `publishBackgroundGrid()` in `zig/render/chunk.zig` sizes that grid.
+The background are now evaluated once per background pixel, not once per canvas pixel. A background pixel is one world pixel, the grid a block sprite's texels sit on, drawn as one instanced quad with a flat color, so the cost follows the camera zoom instead of the resolution. `publishBackgroundGrid()` in `zig/render/chunk.zig` sizes that grid.
 
 Think of the sample position as `(chunk id + sub-chunk position) modulo 512`, with coordinate warping and a trig-based light at the end.
 
@@ -569,7 +571,7 @@ Water uses the same kind of wrapping, based on the chunk and subpixel position, 
 
 ### Water simulation
 
-Water is a cellular automaton in `zig/state/water.zig`, run over the loaded `SimBuffer`. There is no separate water grid. A cell's volume, 0 to 15, lives in the block's `hp`. On a solid block `hp` is mining progress instead, so the two never coexist.
+Water is a cellular automaton in `zig/state/water.zig`, run over the loaded `SimBuffer`. There is no separate water grid. A cell's volume, 0 to 15, lives in the block's `hp`. On a solid block `hp` is mining progress instead, so the two never coexist (they're "exclusive" properties).
 
 Water exists both as full `water` blocks and as **waterlogging** inside decorations and crafters, meaning anything that answers `isWaterloggable()`. That lets a pool soak through a bush without deleting it.
 
@@ -610,4 +612,4 @@ One guard sits above all of this. `in_tick` is set while a simulation tick is mi
 
 ## Copyright
 
-Copyright (c) 2026 Leo Zhang. All rights reserved. Distribution of any portion of the code or the raw assets without explicit written permission is strictly prohibited.
+Copyright (c) 2026 Leo Zhang. All rights reserved. Distribution of any portion of the code or raw assets without explicit written permission is strictly prohibited.

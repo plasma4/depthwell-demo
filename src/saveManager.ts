@@ -38,7 +38,7 @@ export class SaveManager {
     private worker: Worker | null = null;
     /** Whether the worker has acquired the emergency-slot lock (false = fall back to async saves). */
     private workerReady = false;
-    /** In-flight emergency-slot read requests, keyed by request id. */
+    /** In-flight emergency-slot read requests, keyed by request ID. */
     private readonly pendingReads = new Map<
         number,
         (bytes: Uint8Array | null) => void
