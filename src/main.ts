@@ -251,12 +251,29 @@ if (CONFIG.verbose) {
     console.log("Exported functions and memory:", engine.exports);
 }
 
-/** Keeps a focused native button selectable without treating a held key as repeated actions. */
-function preventHeldButtonRepeat(button: HTMLButtonElement): void {
-    button.addEventListener("keydown", (event) => {
-        if (!event.repeat) return;
-        if (event.key === "Enter" || event.key === " ") event.preventDefault();
-    });
+// a bit of fancy TypeScript usage
+type ButtonAction = () => void | Promise<unknown>;
+
+let buttonActionInFlight = false;
+let pendingButtonAction: ButtonAction | null = null;
+
+/** Runs at most one queued button action for this render frame. */
+function runQueuedButtonAction(): void {
+    if (buttonActionInFlight) return;
+
+    const action = pendingButtonAction;
+    pendingButtonAction = null;
+    if (!action) return;
+
+    buttonActionInFlight = true;
+    // Keep a synchronous throw from stopping the render loop.
+    void (async () => {
+        try {
+            await action();
+        } finally {
+            buttonActionInFlight = false;
+        }
+    })();
 }
 
 const past60SlowestLogicLoops = Array(60).fill(0);
@@ -266,6 +283,8 @@ const past60SlowestZigRenders = Array(60).fill(0);
 // Add custom properties into the engine object (not handled by TypeScript)
 engine.isDebug = !!engine.exports.isDebug(); // True when WASM is built with dev menu on (see zig/root.zig); unrelated to optimization level.
 engine.renderLoop = function (_t: number) {
+    runQueuedButtonAction();
+
     // Simulate one tick or one second of logical simulation, whichever is longer.
     // In practice a tick is under a second, so this is one second.
     let tempTime = performance.now();
@@ -423,7 +442,7 @@ document.addEventListener("pointerup", (e) => {
 
 engine.canvas.style.touchAction = "none"; // prevent touch gesture interception
 
-// Prevent context menu on right-click
+// Prevent the context menu from showing on right-click!
 document.addEventListener("contextmenu", (e) => e.preventDefault());
 
 // Build the fancy debug UI in the corner!
@@ -459,9 +478,13 @@ if (is_dev && engine.isDebug) {
     meta.buttons.forEach((b: any) => {
         const btn = document.createElement("button");
         btn.textContent = b.name;
-        btn.onclick = () =>
-            (engine.exports.clickDebugUiButton as (id: number) => void)(b.id);
-        preventHeldButtonRepeat(btn);
+        // store the newest button action for the next render frame!
+        btn.onclick = () => {
+            pendingButtonAction = () =>
+                (engine.exports.clickDebugUiButton as (id: number) => void)(
+                    b.id,
+                );
+        };
         container.appendChild(btn);
     });
 
@@ -498,27 +521,15 @@ if (is_dev && engine.isDebug) {
     });
 
     // Save-system debug controls.
-    const addSaveButton = (name: string, onClick: () => void) => {
+    const addSaveButton = (name: string, onClick: ButtonAction) => {
         const btn = document.createElement("button");
         btn.textContent = name;
-        btn.onclick = onClick;
-        // TODO: better async-aware solution (probably going to queue debug button events to be resolved per-tick)
-        preventHeldButtonRepeat(btn);
+        btn.onclick = () => (pendingButtonAction = onClick);
         container.appendChild(btn);
     };
     addSaveButton("Force save", () => engine.saveManager.save());
     addSaveButton("Force load", () => engine.saveManager.load());
-    let resetInFlight = false;
-    addSaveButton("Reset", () => {
-        if (resetInFlight) return;
-        resetInFlight = true;
-        void engine
-            .start()
-            .catch((error: unknown) => console.error("Reset failed:", error))
-            .finally(() => {
-                resetInFlight = false;
-            });
-    });
+    addSaveButton("Reset", () => engine.start());
     addSaveButton("Export file", () => downloadSaveFile());
     addSaveButton("Import file", () => uploadSaveFile());
 

@@ -3,8 +3,8 @@
 // ----
 
 // These are sprite sheet constants.
-// Sprites are saved as a .png in a sprite sheet 128 pixels wide, and each asset is 16x16.
-// See zig/state/world.zig's Sprite definitions for sprite type list.
+// Sprites are saved as a .png in a sprite sheet 16 sprites wide, and each asset is 16x16 pixels.
+// See the Sprite enum in zig/types/sprite.zig for the sprite type list.
 
 // #CONSTANT REGION START, DO NOT MODIFY CONTENTS MANUALLY#
 // Auto-generated from zig/types/sprite.zig by zig/update_shader.zig (runs during `zig build`).
@@ -171,7 +171,10 @@ struct SceneUniforms {
     // Both layers of a portal descent are handed the same value
     // (so they shake as one image rather than sliding apart).
     warp: vec4f,
-    _extra_padding: array<vec4u, 10>, // pad to 256 bytes for dynamic offsets
+    // Background cell grid: .x cell size in world pixels, .y cells per instance row. .zw unused.
+    // publishBackgroundGrid() in chunk.zig owns both values and sizes the draw call from them.
+    bg: vec4f,
+    _extra_padding: array<vec4u, 9>, // pad to 256 bytes for dynamic offsets
 };
 
 @group(0) @binding(0) var<uniform> scene: SceneUniforms;
@@ -549,8 +552,7 @@ fn fs_tile(in: TileOutput) -> @location(0) vec4f {
 
     // Gem sampling pixel logic
     if is_gem {
-        // 8 masks, OLD: first 4 for gems, second 4 for ore, NEW: all 8 for gems only
-        // let mask_variation = extractBits(seed, 15u, 2u) + select(4u, 0u, is_gem);
+        // All 8 masks belong to gems. Ore used to take the second 4.
 
         // First 4 bits in seeds[0] are for HP, do NOT trust
         let mask_variation = extractBits(in.seeds[0], 4u, 3u);
@@ -1000,7 +1002,7 @@ fn water_effect(coord: vec2f, t: f32) -> vec2f {
     let a2 = water_wave(world, vec2f(1707.0, -797.0), 0.374, t);
     let band_a = a1 * a2;
 
-    // Crests of A only, sharpened thru math!
+    // Crests of A only, sharpened by the sixth power.
     let s2 = band_a * band_a;
     let sparkle = s2 * s2 * s2 * 0.4;
 
@@ -1040,7 +1042,8 @@ fn water_effect(coord: vec2f, t: f32) -> vec2f {
     return vec2f(caustic, toward_a);
 }
 
-// Procedural effect for lighting (linear sRGB)
+// Color of the water body at this pixel, in linear sRGB, with alpha 0.5.
+// lit is the light reaching the pixel, from sample_light().
 fn water_body_linear(in: TileOutput, lit: vec3f) -> vec4f {
     let light_val = max(0.0, lit.x);
 
@@ -1057,29 +1060,25 @@ fn water_body_linear(in: TileOutput, lit: vec3f) -> vec4f {
     let effect = water_effect(world, t);
     let caustic = effect.x;
 
-    // Broad open and deep gradient. This rides the caustic field's own swell, not absolute
-    // world y. A raw world.y ramp only means anything within the first screens of the wrap
-    // window, and it steps at the boundary. The swell is periodic over the same window as
-    // everything else here.
-    lch.x = mix(0.34, 0.52, effect.y); // lighter in the open water between the streak patches
-    lch.y = mix(0.14, 0.10, effect.y); // slightly more saturated in the darker stretches
+    // Base lightness/chroma gradient driven by caustics (lighter between streaks)
+    lch.x = mix(0.34, 0.52, effect.y);
+    lch.y = mix(0.14, 0.10, effect.y);
 
-    // Horizontal color band (depth striping). 2731 cycles over the period holds the ~24px spacing.
+    // Subtle horizontal depth band animation (~24px periodic spacing)
     let band_t = water_wave(world, vec2f(0.0, 2731.0), 0.064, t);
     lch.x += band_t * 0.04;
 
+    // Apply caustics and clamp within valid bounds!
     lch.x = clamp(lch.x + caustic, 0.26, 0.90);
     lch.y = clamp(lch.y + caustic * 0.10, 0.04, 0.28);
 
-    // Apply the light multiplier to both lightness and chroma, to stop light leaking in the dark.
+    // Attenuate color in shadow to prevent light leaks.
     lch.x *= light_val;
     lch.y *= light_val;
 
     var lab = oklch_to_oklab(lch);
 
-    // Tint by the color of the light reaching the water, same rule as fs_tile() uses on a sprite.
-    // Water takes the tint at reduced strength: it has strong chroma of its own, and a lamp that
-    // overpowered it would turn a pool into a flat sheet of the lamp's color.
+    // Apply ambient/lamp tint at reduced strength to preserve base water color
     let tint = lit.yz * WATER_TINT_STRENGTH * smoothstep(0.0, LIGHT_CHROMA_FLOOR, light_val);
     lab.y += tint.x;
     lab.z += tint.y;
@@ -1089,7 +1088,8 @@ fn water_body_linear(in: TileOutput, lit: vec3f) -> vec4f {
     return vec4f(rgb, 0.5);
 }
 
-// Procedural effect for all but the top water sprite (backwards compatible, returns color-managed sRGB)
+// Same as water_body_linear(), but color-managed, for water written straight to the target.
+// The decoration path takes the linear color instead, because it blends before it writes.
 fn water_body(in: TileOutput, lit: vec3f) -> vec4f {
     let water_col = water_body_linear(in, lit);
     return vec4f(apply_color_management(water_col.rgb), water_col.a);
@@ -1118,49 +1118,67 @@ const BG_ZOOM_PARALLAX: f32 = 0.35;
 
 struct BackgroundOutput {
     @builtin(position) position: vec4f,
-    @location(0) screen_offset: vec2f,
-    @location(1) time: f32,
-    @location(2) time2: f32,
+    @location(0) @interpolate(flat) rgb: vec3f,
 };
 
-// Main vertex shader for rendering the fancy background.
+// This is the main vertex shader for the fancy background!
+// Each instance represents one background pixel as a quad on the world pixel grid.
+// The shader samples noise once at the cell center and holds that color flat across the quad.
+// This replaces a full-screen triangle that ran noise for every canvas pixel.
+// As a result, performance cost scales with camera zoom instead of screen resolution!
 @vertex
-fn vs_background(@builtin(vertex_index) vertex_index: u32) -> BackgroundOutput {
-    // Full-screen triangle to draw: [(-1, -1), (3, -1), (-1, 3)]
-    let x = f32((i32(vertex_index & 1u) << 2u) - 1);
-    let y = f32((i32(vertex_index & 2u) << 1u) - 1);
+fn vs_background(
+    @builtin(vertex_index) vertex_index: u32,
+    @builtin(instance_index) instance_index: u32
+) -> BackgroundOutput {
+    // (the cell size and row length are defined by publishBackgroundGrid() in chunk.zig)
+    let cell = scene.bg.x;
+    let cells_x = u32(scene.bg.y);
+    let zoom = max(scene.zoom, 1e-8); // reasonable min zoom
+    let camera = scene.grid_origin.zw;
 
-    var out: BackgroundOutput;
-    out.position = vec4f(x, y, 0.0, 1.0);
+    // Top-left visible world pixel, floored onto the cell grid, so the grid is locked to the world,
+    // not to the screen. A cell corner is a whole multiple of the cell size and stays well inside 2^24,
+    // so two neighbors agree on their shared edge to the bit and cannot leave a seam.
+    let half_world = scene.viewport_size * 0.5 / zoom;
+    let origin_cell = floor((camera - half_world) / cell);
+    let cell_xy = origin_cell + vec2f(f32(instance_index % cells_x), f32(instance_index / cells_x));
 
-    let screen_uv = vec2f(x, -y) * 0.5 + 0.5;
+    // Strip corners, in order: (0,0), (1,0), (0,1), (1,1).
+    let corner = vec2f(f32(vertex_index & 1u), f32(vertex_index >> 1u));
+    let corner_offset = (cell_xy + corner) * cell - camera;
 
     // Center the scale pivot to the screen center (camera and player viewport center). The zoom is
     // compressed so the background scales slower than the camera (parallax depth); see BG_ZOOM_PARALLAX.
-    let bg_zoom = pow(max(scene.zoom, 1e-8), BG_ZOOM_PARALLAX); // reasonable min zoom
-    out.screen_offset = ((screen_uv - 0.5) * scene.viewport_size) / bg_zoom;
+    let bg_zoom = pow(zoom, BG_ZOOM_PARALLAX);
 
-    // Zig-zag wrapping for colors
-    var t_wrap = (scene.time * 0.3) % 2.0;
-    if t_wrap > 1.0 { t_wrap = 2.0 - t_wrap; }
-
-    var t_wrap_2 = (3.0 + scene.time * 0.072) % 2.0;
-    if t_wrap_2 > 1.0 { t_wrap_2 = 2.0 - t_wrap_2; }
-
-    out.time = t_wrap;
-    out.time2 = t_wrap_2;
-
+    var out: BackgroundOutput;
+    out.position = vec4f(corner_offset * zoom / scene.viewport_size * vec2f(2.0, -2.0), 0.0, 1.0);
+    out.rgb = backgroundColor(((cell_xy + 0.5) * cell - camera) * (zoom / bg_zoom), camera);
     return out;
 }
 
 @fragment
 fn fs_background(in: BackgroundOutput) -> @location(0) vec4f {
+    let opacity = scene.chunk_opacity;
+    return vec4f(in.rgb * opacity, opacity);
+}
+
+// Samples the three parallax noise layers at one point of the background's own space.
+// screen_offset is the offset from the camera in world pixels, scaled by the parallax zoom.
+fn backgroundColor(screen_offset: vec2f, absolute_camera: vec2f) -> vec3f {
     const base_scale = 0.015625; // Exactly 1.0 / 64.0; BG_WRAP_CHUNKS in chunk.zig holds the wrap contract
-    let absolute_camera = scene.grid_origin.zw;
     let t = scene.time;
 
+    // Zig-zag wrapping for colors
+    var t_wrap = (t * 0.3) % 2.0;
+    if t_wrap > 1.0 { t_wrap = 2.0 - t_wrap; }
+
+    var t_wrap_2 = (3.0 + t * 0.072) % 2.0;
+    if t_wrap_2 > 1.0 { t_wrap_2 = 2.0 - t_wrap_2; }
+
     // Scale down coordinates by 0.5 to make the background appear twice as large.
-    let screen_offset_scaled = in.screen_offset * 0.5;
+    let screen_offset_scaled = screen_offset * 0.5;
     let absolute_camera_scaled = absolute_camera * 0.5;
 
     // The farthest background layer (64x "slower")
@@ -1192,7 +1210,7 @@ fn fs_background(in: BackgroundOutput) -> @location(0) vec4f {
 
     let f2 = fbm_3(st2 * 0.5 + 2.0 * q2);
 
-    let mix_blue = mix(0.0, 0.4, in.time);
+    let mix_blue = mix(0.0, 0.4, t_wrap);
     let color2 = mix(
         vec3f(0.0, 0.005, mix_blue * mix_blue * 0.5),
         vec3f(0.05, 0.15, 0.25),
@@ -1217,8 +1235,8 @@ fn fs_background(in: BackgroundOutput) -> @location(0) vec4f {
 
     let f3 = fbm_4(st3 * 1.2 + 2.5 * r3);
 
-    let mix_red = mix(0.0, 0.3, in.time + in.time2);
-    let mix_green = mix(0.0, 0.6, in.time2);
+    let mix_red = mix(0.0, 0.3, t_wrap + t_wrap_2);
+    let mix_green = mix(0.0, 0.6, t_wrap_2);
     let color3 = mix(
         vec3f(0.01, 0.05, 0.1),
         vec3f(mix_red * mix_red, mix_green * mix_green, 0.5),
@@ -1227,11 +1245,8 @@ fn fs_background(in: BackgroundOutput) -> @location(0) vec4f {
     let layer3_intensity = max(f3 * f3 * f3 * 2.5 - 0.2, 0.0);
     let layer3_rgb = layer3_intensity * color3;
 
-    // Additive screen blend of both wrapped layers
-    let final_rgb = layer1_rgb + layer2_rgb + layer3_rgb;
-
-    let opacity = scene.chunk_opacity;
-    return vec4f(final_rgb * opacity, opacity);
+    // End with an dditive screen blend of both wrapped layers!
+    return layer1_rgb + layer2_rgb + layer3_rgb;
 }
 
 fn noise(st: vec2f) -> f32 {

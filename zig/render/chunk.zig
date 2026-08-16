@@ -136,6 +136,48 @@ pub const BG_WRAP_CHUNKS = 512 * 20;
 comptime {
     // 512 covers the 1/16 unit/chunk base scale; 20 covers warp-coefficient denominators.
     std.debug.assert(BG_WRAP_CHUNKS % 512 == 0 and BG_WRAP_CHUNKS % 20 == 0);
+    // The background grid is locked to the world, so the wrap must land on a whole cell.
+    // A chunk edge is CHUNK_SIZE blocks of CHUNK_SIZE pixels, so the wrap is that many world pixels.
+    const wrap_world_px = BG_WRAP_CHUNKS * dw.CHUNK_SIZE * dw.CHUNK_SIZE;
+    std.debug.assert(wrap_world_px % @as(u32, @intFromFloat(BG_CELL_PIXELS)) == 0);
+}
+
+/// World pixels along one edge of a background pixel.
+/// 1.0 puts the background on the same grid as a block sprite's texels.
+/// One block then holds 16x16 background pixels, and one chunk holds 256 per edge.
+pub const BG_CELL_PIXELS: f64 = 1.0;
+
+/// Smallest a background cell may be on screen, in canvas pixels.
+/// The background costs 4 noise evaluations per cell, one per corner of its quad.
+/// It replaces 1 per canvas pixel, so a 2x2 cell is the break-even point and the floor.
+/// A cell only reaches the floor below `effective_zoom` 2, on a small canvas or a far camera.
+const BG_MIN_CELL_CANVAS_PIXELS: f64 = 2.0;
+
+/// Publishes the background's cell grid:
+/// the cell size in world pixels, then how many cells cover the canvas.
+/// `drawBackground()` in the host reads the counts to size its instanced draw,
+/// and `vs_background()` reads the cell size to place each quad.
+fn publishBackgroundGrid(effective_zoom: f64, canvas_w: f64, canvas_h: f64) void {
+    std.debug.assert(effective_zoom >= 0 and canvas_w >= 0 and canvas_h >= 0);
+
+    // Double the cell until it covers the floor above. Doubling, rather than taking a plain minimum,
+    // keeps a cell a whole number of world pixels and keeps the grid's phase:
+    // a coarser cell is the exact 2x2 of a finer one, so the pattern does not slide sideways as the camera zooms out!
+    const wanted = BG_MIN_CELL_CANVAS_PIXELS / (BG_CELL_PIXELS * effective_zoom);
+    const cell = BG_CELL_PIXELS * @exp2(@ceil(@log2(std.math.clamp(wanted, 1.0, 4096.0))));
+
+    // A cell that lands below one canvas pixel would divide by ~0 below.
+    // Zoom is only that small before the first resize, when the canvas has no area and the counts do not matter.
+    const cell_canvas_px = @max(cell * effective_zoom, 1.0);
+
+    // Two cells of slack. The grid is world-aligned, so it starts and ends part-way through a cell,
+    // and the shader recomputes the origin in f32, which can differ by one cell from this count.
+    const cells_x = @ceil(canvas_w / cell_canvas_px) + 2;
+    const cells_y = @ceil(canvas_h / cell_canvas_px) + 2;
+
+    memory.setScratchProp(16, cell);
+    memory.setScratchProp(17, cells_x);
+    memory.setScratchProp(18, cells_y);
 }
 
 /// One layer of the world to rasterize into the scratch buffer for a single tile draw call.
@@ -261,7 +303,6 @@ pub fn updateOverlayChunks(canvas_w: f64, canvas_h: f64) void {
 
 /// Rasterizes one layer into the scratch buffer and publishes its render properties.
 fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
-    _ = canvas_h;
     const game = &memory.game;
     // calculate effective zoom
     const resolution_scale = canvas_w / @as(f64, dw.SCREEN_WIDTH);
@@ -372,6 +413,7 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
 
     applyVariation(out, wb, game.frame);
     updateRenderProperties(pass, interp_cam_x, interp_cam_y, wb, hb, min_cx, min_cy, effective_zoom, interpolated_zoom);
+    publishBackgroundGrid(effective_zoom, canvas_w, canvas_h);
 }
 
 /// Applies sprite variation/animation to the final visible buffer, in place, just before it is sent to the GPU.
