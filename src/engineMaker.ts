@@ -283,7 +283,9 @@ export async function create(
             ],
         },
         primitive: {
-            topology: "triangle-list",
+            // One strip is one background cell quad, so 4 vertices instead of the 6 a list needs
+            // The noise runs once per vertex, so this is a third of the work for the same image
+            topology: "triangle-strip",
         },
         // depthStencil: {
         //     depthWriteEnabled: false, // Background doesn't need to write to depth

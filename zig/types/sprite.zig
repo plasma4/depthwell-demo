@@ -296,10 +296,9 @@ pub const Sprite = enum(u16) {
         return self.props().item;
     }
 
-    /// Determines if the sprite's type is considered solid,
-    /// and should interact with the physics, player, and edge flags.
+    /// Determines if the sprite's type is solid for physics and terrain geometry.
     ///
-    /// This returns true for edge stone, unlike `isSolid()`.
+    /// This returns true for edge stone, unlike `isFoundation()`.
     pub inline fn isSolid(self: Sprite) bool {
         return self.props().solid;
     }
@@ -981,7 +980,7 @@ pub const SpriteProps = struct {
     in_world: bool = false,
     /// Backs `Sprite.isItem()`: whether this sprite could be in the player's inventory.
     item: bool = false,
-    /// Backs `Sprite.isSolid()`: whether this sprite interacts with physics, the player, and edge flags.
+    /// Backs `Sprite.isSolid()`: whether this sprite blocks physics and terrain geometry.
     solid: bool = false,
     /// Backs `Sprite.isLiquid()`: whether this sprite is a liquid (such as water).
     liquid: bool = false,
