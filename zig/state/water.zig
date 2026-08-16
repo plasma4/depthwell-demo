@@ -490,6 +490,11 @@ fn notifyNeighborEdgeFlags(rx: i32, ry: i32) void {
             const ny = ry + dy;
             const neighbor = world.getSimBlockPtr(nx, ny);
             if (neighbor) |nb| {
+                if (nb.id == .edge_stone) {
+                    nb.edge_flags = 0xFF;
+                    nb.id_edge_flags = 0xFF;
+                    continue;
+                }
                 if (nb.isSolid() and !nb.isLiquid()) {
                     var flags: u8 = 0;
                     var ndy: i32 = -1;
@@ -499,7 +504,7 @@ fn notifyNeighborEdgeFlags(rx: i32, ry: i32) void {
                             if (ndx == 0 and ndy == 0) continue;
                             const n_nb = world.getSimBlockPtr(nx + ndx, ny + ndy);
                             if (n_nb) |block| {
-                                if (block.isSolid() or block.isLiquid() or getVolume(block) > 0) {
+                                if (block.isSolid() or block.isLiquid() or getVolume(block.*) > 0) {
                                     flags |= types.EdgeFlags.getFlagBit(ndx, ndy);
                                 }
                             } else {
@@ -1173,4 +1178,24 @@ test "water: queued flags resolve even when no chunk is active" {
 
     try testing.expect(cell.edge_flags != STALE);
     try testing.expect(pending_flag_chunks.count() == 0);
+}
+
+test "water: edge stone keeps its non-participating edge sentinel" {
+    TestWorld.begin();
+    defer TestWorld.end();
+
+    const chunk = testInstallChunk(4, 4);
+    const bx = 8;
+    const by = 8;
+    const wall = &chunk.blocks[(by << CHUNK_SIZE_LOG2) | bx];
+    wall.* = Block.makeBasicBlock(.edge_stone, 0);
+    wall.edge_flags = 0;
+    wall.id_edge_flags = 0;
+
+    const rx: i32 = @intCast(@as(i32, 4) * CHUNK_SIZE + bx - 1);
+    const ry: i32 = @intCast(@as(i32, 4) * CHUNK_SIZE + by);
+    notifyNeighborEdgeFlags(rx, ry);
+
+    try testing.expectEqual(@as(u8, 0xFF), wall.edge_flags);
+    try testing.expectEqual(@as(u8, 0xFF), wall.id_edge_flags);
 }
