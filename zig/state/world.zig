@@ -1163,7 +1163,7 @@ pub const SimBuffer = struct {
     /// Rules enforced for edge flags (see `updateVisibleChunks()`/`recalcEdgeFlags()`):
     /// - A block that is neither a foundation nor a liquid (decoration, edge stone) must carry the reset sentinel `0xFF`.
     /// - A foundation/liquid block's flags must equal the recomputed value:
-    ///   a bit is set toward a neighbor that is a foundation (for solids) or solid-or-liquid (for liquids).
+    ///   a terrain bit is set toward a solid neighbor, and a liquid bit is set toward a solid-or-liquid neighbor.
     /// - Air is ignored.
     ///
     /// Blocks whose 8 neighbors are not all resident in the loaded window are skipped, since their
@@ -1247,7 +1247,7 @@ pub const SimBuffer = struct {
                             // center (self) is comptime-skipped; only probe while all neighbors so far are resident
                             if ((ndx != 0 or ndy != 0) and all_resident) {
                                 if (getResidentNeighbor(coord, chunk, @intCast(bx), @intCast(by), ndx, ndy)) |n| {
-                                    const set = if (block.isLiquid()) n.isSolid() or n.isLiquid() else n.isFoundation();
+                                    const set = if (block.isLiquid()) n.isSolid() or n.isLiquid() else closesTerrainEdge(n.id);
                                     if (set) expected |= types.EdgeFlags.getFlagBit(ndx, ndy);
                                 } else all_resident = false;
                             }
@@ -2272,6 +2272,22 @@ pub fn getCachedChunk(key: DepthCoordinate) ?*const Chunk {
     return dw.ancestor.ancestor_cache.get(key);
 }
 
+/// Returns a block for the current-depth edge halo.
+/// Cached chunks already carry their live edit.
+/// An uncached inherited block needs the live `mod_store` value because
+/// `legacy_store` applies only below its own depth.
+fn getLiveFractalHaloBlock(key: DepthCoordinate, bx: u4, by: u4) Block {
+    std.debug.assert(key.depth == memory.game.depth);
+    if (getCachedChunk(key)) |cached_chunk| return cached_chunk.getBlock(bx, by);
+
+    var block = dw.ancestor.getInheritedMaterial(key, bx, by);
+    if (mod_store.index.count() != 0) {
+        const block_idx: u8 = @intCast((@as(usize, by) << CHUNK_SIZE_LOG2) | bx);
+        if (mod_store.getCell(key, block_idx)) |cell| cell.applyTo(&block);
+    }
+    return block;
+}
+
 /// The `mod_store` entries of a chunk and its 8 neighbors, indexed by chunk offset (`[dx + 1][dy + 1]`,
 /// so the chunk itself sits at `[1][1]`).
 ///
@@ -2380,12 +2396,12 @@ fn addEdgeFlags(target_chunk: *Chunk, key: DepthCoordinate, mods: ?*const ModNei
 
     // Every neighbor test below asks the same two questions of a halo cell, and a cell is a neighbor of
     // up to 8 others, so the sprite rule table is read once per cell here instead of 8 times below.
-    var halo_flagworthy: [18][18]bool = undefined;
+    var halo_closes_terrain_edge: [18][18]bool = undefined;
     var halo_solid_or_liquid: [18][18]bool = undefined;
     for (0..18) |hy2| {
         for (0..18) |hx2| {
             const s = halo[hy2][hx2];
-            halo_flagworthy[hy2][hx2] = shouldHaveEdgeFlags(s);
+            halo_closes_terrain_edge[hy2][hx2] = closesTerrainEdge(s);
             halo_solid_or_liquid[hy2][hx2] = s.isSolid() or s.isLiquid();
         }
     }
@@ -2422,7 +2438,7 @@ fn addEdgeFlags(target_chunk: *Chunk, key: DepthCoordinate, mods: ?*const ModNei
                     const hy2 = @as(usize, 1 + dy) + y;
                     const hx2 = @as(usize, 1 + dx) + x;
 
-                    const connects = if (current_liquid) halo_solid_or_liquid[hy2][hx2] else halo_flagworthy[hy2][hx2];
+                    const connects = if (current_liquid) halo_solid_or_liquid[hy2][hx2] else halo_closes_terrain_edge[hy2][hx2];
                     if (connects) flags |= types.EdgeFlags.getFlagBit(dx, dy);
                     if (halo[hy2][hx2] == current_sprite) {
                         id_flags |= types.EdgeFlags.getFlagBit(dx, dy);
@@ -2455,10 +2471,14 @@ fn addEdgeFlagsFractal(target_chunk: *Chunk, key: DepthCoordinate) void {
             const lx: u4 = @intCast(@mod(rx, CHUNK_SIZE));
             const ly: u4 = @intCast(@mod(ry, CHUNK_SIZE));
             const nc = k.asCoord().moveAtDepth(.{ ndx, ndy }, k.depth) orelse return .empty;
-            if (getCachedChunk(nc.asDepthCoordinate(k.depth))) |cached_chunk| {
+            const neighbor_key = nc.asDepthCoordinate(k.depth);
+            if (neighbor_key.depth == memory.game.depth) {
+                return getLiveFractalHaloBlock(neighbor_key, lx, ly);
+            }
+            if (getCachedChunk(neighbor_key)) |cached_chunk| {
                 return cached_chunk.getBlock(lx, ly);
             }
-            return dw.ancestor.getInheritedMaterial(nc.asDepthCoordinate(k.depth), lx, ly);
+            return dw.ancestor.getInheritedMaterial(neighbor_key, lx, ly);
         }
     }.func;
 
@@ -2475,13 +2495,13 @@ fn addEdgeFlagsFractal(target_chunk: *Chunk, key: DepthCoordinate) void {
     // Read the sprite rule table once per halo cell rather than once per (cell, neighbor) pair;
     // see the matching pass in `addEdgeFlags()`.
     var halo_sprite: [18][18]Sprite = undefined;
-    var halo_flagworthy: [18][18]bool = undefined;
+    var halo_closes_terrain_edge: [18][18]bool = undefined;
     var halo_solid_or_liquid: [18][18]bool = undefined;
     for (0..18) |hy2| {
         for (0..18) |hx2| {
             const s = halo[hy2][hx2].id;
             halo_sprite[hy2][hx2] = s;
-            halo_flagworthy[hy2][hx2] = shouldHaveEdgeFlags(s);
+            halo_closes_terrain_edge[hy2][hx2] = closesTerrainEdge(s);
             halo_solid_or_liquid[hy2][hx2] = s.isSolid() or s.isLiquid();
         }
     }
@@ -2517,7 +2537,7 @@ fn addEdgeFlagsFractal(target_chunk: *Chunk, key: DepthCoordinate) void {
                     const hy2: usize = @intCast(ly + dy);
                     const hx2: usize = @intCast(lx + dx);
 
-                    const connects = if (current_liquid) halo_solid_or_liquid[hy2][hx2] else halo_flagworthy[hy2][hx2];
+                    const connects = if (current_liquid) halo_solid_or_liquid[hy2][hx2] else halo_closes_terrain_edge[hy2][hx2];
                     if (connects) flags |= types.EdgeFlags.getFlagBit(dx, dy);
                     if (halo_sprite[hy2][hx2] == current_sprite) {
                         id_flags |= types.EdgeFlags.getFlagBit(dx, dy);
@@ -2531,14 +2551,17 @@ fn addEdgeFlagsFractal(target_chunk: *Chunk, key: DepthCoordinate) void {
     }
 }
 
-/// Returns whether a sprite should have edge flag logic applied to it and be considered a "solid" by edge flag code.
-/// More specifically, this by default returns `isFoundation()` and determines if a block should:
-/// - Have solid-like edge flag calculations applied to it (default).
-/// - As an adjacent block, become considered as a "solid" and changing edge flags of adjacent blocks.
-///
-/// This may be modified for testing as necessary and is different from the final result in `dw.chunks.updateVisibleChunks()`.
+/// Returns whether a sprite derives terrain-style edge flags for itself.
+/// Liquids use their own edge rule.
+/// `closesTerrainEdge()` decides how a terrain neighbor reads this sprite.
 pub inline fn shouldHaveEdgeFlags(sprite: Sprite) bool {
     return sprite.isFoundation();
+}
+
+/// Returns whether `sprite` closes an edge on an adjacent terrain block.
+/// Solid `edge_stone` closes terrain without becoming a foundation.
+pub inline fn closesTerrainEdge(sprite: Sprite) bool {
+    return sprite.isSolid();
 }
 
 /// Returns whether both sprites are liquids and should therefore use liquid-adjacent edge flags instead.
@@ -2812,7 +2835,7 @@ fn neighborFlagBits(
     const bit = types.EdgeFlags.getFlagBit(ndx, ndy);
 
     const is_solid_or_liquid = neighbor_block.isSolid() or neighbor_block.isLiquid();
-    const takes_edge = (!src_is_liquid and shouldHaveEdgeFlags(neighbor_block.id)) or
+    const takes_edge = (!src_is_liquid and closesTerrainEdge(neighbor_block.id)) or
         (src_is_liquid and is_solid_or_liquid);
 
     return .{
@@ -4558,6 +4581,115 @@ const AuthoritativeCell = struct {
         return .{ .id = b.id, .base_id = b.base_id, .hp = b.hp, .seed = b.seed, .tag = b.tag };
     }
 };
+
+test "edge flags: edge stone closes a recursive cross-chunk terrain seam" {
+    const saved_game = memory.game;
+    const saved_suffix = max_possible_suffix;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+        max_possible_suffix = saved_suffix;
+        clearCaches(true);
+    }
+
+    memory.game = .{};
+    memory.deriveHashSeeds();
+    quad_cache.path_hashes.value[0] = memory.game.seed;
+
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
+
+    // This is the inherited inner face of the two-cell base-depth outer wall at D15.
+    const depth = STARTING_ZOOM_TIMES + 2;
+    memory.game.depth = depth;
+    memory.game.max_depth_reached = depth;
+    max_possible_suffix = getMaxSuffixAtDepth(depth);
+    clearCaches(true);
+
+    const wall_coord: Coordinate = .{ .suffix = .{ 1, 4 }, .quadrant = 0 };
+    const terrain_coord: Coordinate = .{ .suffix = .{ 2, 4 }, .quadrant = 0 };
+    var wall_chunk: Chunk = undefined;
+    var terrain_chunk: Chunk = undefined;
+    materializeChunk(&wall_chunk, wall_coord.asDepthCoordinate(depth));
+    materializeChunk(&terrain_chunk, terrain_coord.asDepthCoordinate(depth));
+
+    const wall = wall_chunk.blocks[CHUNK_SIZE - 1];
+    const terrain = terrain_chunk.blocks[0];
+    try testing.expectEqual(Sprite.edge_stone, wall.id);
+    try testing.expect(wall.isSolid());
+    try testing.expect(!wall.isFoundation());
+    try testing.expect(terrain.isFoundation());
+    try testing.expect(!shouldHaveEdgeFlags(.edge_stone));
+    try testing.expect(closesTerrainEdge(.edge_stone));
+    try testing.expect((terrain.edge_flags & types.EdgeFlags.LEFT) != 0);
+    try testing.expect((terrain.id_edge_flags & types.EdgeFlags.LEFT) == 0);
+}
+
+test "edge flags: current halo overlays a live edit before cache fill" {
+    const saved_game = memory.game;
+    const saved_suffix = max_possible_suffix;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+        max_possible_suffix = saved_suffix;
+        clearCaches(true);
+    }
+
+    memory.game = .{};
+    memory.deriveHashSeeds();
+    quad_cache.path_hashes.value[0] = memory.game.seed;
+
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
+
+    const depth = STARTING_ZOOM_TIMES + 2;
+    memory.game.depth = depth;
+    memory.game.max_depth_reached = depth + 1;
+    max_possible_suffix = getMaxSuffixAtDepth(depth);
+    clearCaches(true);
+
+    const source_coord: Coordinate = .{ .suffix = .{ 2, 4 }, .quadrant = 0 };
+    const neighbor_coord: Coordinate = .{ .suffix = .{ 3, 4 }, .quadrant = 0 };
+    const source_key = source_coord.asDepthCoordinate(depth);
+    const neighbor_key = neighbor_coord.asDepthCoordinate(depth);
+    const source_idx = CHUNK_SIZE - 1;
+    const neighbor_idx = 0;
+
+    var source_before: Chunk = undefined;
+    var neighbor_before: Chunk = undefined;
+    materializeChunk(&source_before, source_key);
+    materializeChunk(&neighbor_before, neighbor_key);
+    try testing.expect(source_before.blocks[source_idx].isFoundation());
+    try testing.expect(neighbor_before.blocks[neighbor_idx].isFoundation());
+    clearCaches(true);
+
+    // At an ascended depth, this write freezes the procedural value for descendants.
+    mod_store.beginWrite(neighbor_key).setCell(neighbor_idx, .{
+        .id = .none,
+        .base_id = .none,
+        .hp = 0,
+    });
+    try testing.expect(legacy_store.getCell(neighbor_key, neighbor_idx) != null);
+    try testing.expectEqual(Sprite.none, mod_store.getCell(neighbor_key, neighbor_idx).?.id);
+    clearCaches(true);
+
+    // The neighbor is absent from every current-depth cache here.
+    var uncached: Chunk = undefined;
+    materializeChunk(&uncached, source_key);
+    try testing.expect((uncached.blocks[source_idx].edge_flags & types.EdgeFlags.RIGHT) == 0);
+
+    // Loading that same neighbor must not change the source chunk's derived edge mask.
+    const cached_neighbor = getChunkPtr(neighbor_coord);
+    try testing.expectEqual(Sprite.none, cached_neighbor.blocks[neighbor_idx].id);
+    var cached: Chunk = undefined;
+    materializeChunk(&cached, source_key);
+    try testing.expectEqual(uncached.blocks[source_idx].edge_flags, cached.blocks[source_idx].edge_flags);
+    try testing.expect((cached.blocks[source_idx].edge_flags & types.EdgeFlags.RIGHT) == 0);
+}
 
 test "coordinate consistency: a block is the same whatever route reached it" {
     const saved_game = memory.game;
