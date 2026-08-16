@@ -1116,11 +1116,16 @@ fn oklab_water(sprite_rgb: vec3f, water_rgb: vec3f, weight: f32) -> vec3f {
 // Kept < 1 so far-out custom camera modes barely zoom the background.
 const BG_ZOOM_PARALLAX: f32 = 0.35;
 
+// Size of one background pixel, in world pixels. 16.0 is one block, so the background is pixelated
+// on the block grid and a chunk holds 16 background pixels per edge.
+const BG_CELL: f32 = 16.0;
+
 struct BackgroundOutput {
     @builtin(position) position: vec4f,
     @location(0) screen_offset: vec2f,
     @location(1) time: f32,
     @location(2) time2: f32,
+    @location(3) @interpolate(flat) snap: vec2f,
 };
 
 // Main vertex shader for rendering the fancy background.
@@ -1137,8 +1142,17 @@ fn vs_background(@builtin(vertex_index) vertex_index: u32) -> BackgroundOutput {
 
     // Center the scale pivot to the screen center (camera and player viewport center). The zoom is
     // compressed so the background scales slower than the camera (parallax depth); see BG_ZOOM_PARALLAX.
-    let bg_zoom = pow(max(scene.zoom, 1e-8), BG_ZOOM_PARALLAX); // reasonable min zoom
+    let zoom = max(scene.zoom, 1e-8); // reasonable min zoom
+    let bg_zoom = pow(zoom, BG_ZOOM_PARALLAX);
     out.screen_offset = ((screen_uv - 0.5) * scene.viewport_size) / bg_zoom;
+
+    // Snap constants for the fragment shader, uniform over the triangle.
+    // x converts a screen_offset to world pixels (divide) and back (multiply); see fs_background.
+    // y is the cell size. It doubles whenever a cell would cover less than one native pixel, which
+    // stops the noise from aliasing when the camera is far out. Doubling keeps a cell a whole number
+    // of blocks and keeps the grid phase, so a coarser cell is exactly 2x2 of the finer one.
+    let cell_growth = exp2(ceil(log2(max(1.0, 1.0 / (BG_CELL * zoom)))));
+    out.snap = vec2f(zoom / bg_zoom, BG_CELL * cell_growth);
 
     // Zig-zag wrapping for colors
     var t_wrap = (scene.time * 0.3) % 2.0;
@@ -1159,8 +1173,14 @@ fn fs_background(in: BackgroundOutput) -> @location(0) vec4f {
     let absolute_camera = scene.grid_origin.zw;
     let t = scene.time;
 
+    // Pixelate on the world block grid. The camera is in world pixels and the screen offset is in
+    // world pixels scaled by the parallax zoom, so undo that scale, snap to a cell center, then redo it.
+    // All three layers share this one snapped offset, so they sit on the same grid.
+    let world_pos = absolute_camera + in.screen_offset / in.snap.x;
+    let snapped_offset = ((floor(world_pos / in.snap.y) + 0.5) * in.snap.y - absolute_camera) * in.snap.x;
+
     // Scale down coordinates by 0.5 to make the background appear twice as large.
-    let screen_offset_scaled = in.screen_offset * 0.5;
+    let screen_offset_scaled = snapped_offset * 0.5;
     let absolute_camera_scaled = absolute_camera * 0.5;
 
     // The farthest background layer (64x "slower")
