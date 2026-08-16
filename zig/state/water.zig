@@ -391,7 +391,7 @@ fn neighborEdgeBit(
         return types.EdgeFlags.getFlagBit(dx, dy);
 
     const is_solid_or_liquid = nb.isSolid() or nb.isLiquid() or getVolume(nb.*) > 0;
-    if ((!src_is_liquid and world.shouldHaveEdgeFlags(nb.id)) or (src_is_liquid and is_solid_or_liquid)) {
+    if ((!src_is_liquid and world.closesTerrainEdge(nb.id)) or (src_is_liquid and is_solid_or_liquid)) {
         return types.EdgeFlags.getFlagBit(dx, dy);
     }
     return 0;
