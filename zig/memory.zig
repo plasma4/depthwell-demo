@@ -417,6 +417,7 @@ pub const Block = packed struct(u128) {
     ///
     /// - A 1 bit for a solid block ordinarily indicates an edge with an adjacent solid block.
     /// - A 1 bit for a liquid block means that there is either solid or liquid adjacent.
+    ///
     /// Edge flags must be reset to 255 for decorations (non-blocks or liquids) after a final decoration pass.
     edge_flags: u8,
     /// Lightness of the light reaching this block; see `BlockLight.l`.
@@ -434,7 +435,7 @@ pub const Block = packed struct(u128) {
 
     /// The background tile behind an overlay sprite, such as the stone an ore grew inside.
     /// `.none` means "no underlay", and the shader then draws `id` alone.
-    /// That is the common case for a block that is not an ore or a gem.
+    /// The `.none` case is the default for a block that is not an ore or a gem!
     base_id: Sprite = .none,
     /// Same-sprite edge flags, in the same bit order as `edge_flags`.
     /// A bit is set when the neighbor's `id` equals this block's `id`.
@@ -463,13 +464,15 @@ pub const Block = packed struct(u128) {
     /// Hue of the light reaching this block; see `BlockLight.h`.
     light_h: LightChannel = 0,
 
-    /// Makes a simple block of a certain type, with full light and no edge flags and mine level.
+    /// Makes a simple block of a certain type, with full light and no derived edge flags or mine level.
+    /// An `edge_stone` block uses the `0xFF` non-participating edge sentinel.
     /// Uses the BOTTOM 32 bits from `seed_bits` to place into `seed`.
     pub inline fn makeBasicBlock(sprite_type: Sprite, seed_bits: u64) Block {
         return .{
             .id = sprite_type,
             .hp = if (sprite_type.isLiquid()) MAX_HP else 0,
-            .edge_flags = 0,
+            .edge_flags = if (sprite_type == .edge_stone) 0xFF else 0,
+            .id_edge_flags = if (sprite_type == .edge_stone) 0xFF else 0,
             .light_l = LIGHT_MAX,
             .seed = @truncate(seed_bits),
             .water = .dry,
@@ -499,8 +502,8 @@ pub const Block = packed struct(u128) {
         return self.id.isInWorld();
     }
 
-    /// Determines if the block's type is considered solid, and should interact with the physics, player, and edge flags.
-    /// This returns true for edge stone, unlike `isSolid()`.
+    /// Determines if the block's type is solid for physics and terrain geometry.
+    /// This returns true for edge stone, unlike `isFoundation()`.
     pub inline fn isSolid(self: @This()) bool {
         return self.id.isSolid();
     }
