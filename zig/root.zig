@@ -22,7 +22,7 @@ pub const is_wasm = builtin.cpu.arch.isWasm(); // builtin.target.cpu.arch == .wa
 pub const is_debug = builtin.is_test or builtin.mode == .Debug;
 
 // Note: changing these constants below will probably have disastrous consequences.
-// A lot of logic is hard-coded, such as the [6][6]Sprite use, and it breaks if these change.
+// A lot of logic is hard-coded around CHUNK_SIZE being 16, and the game optimizes heavily around this assumption.
 
 /// Represents log2(CHUNK_SIZE).
 pub const CHUNK_SIZE_LOG2: comptime_int = 4;
