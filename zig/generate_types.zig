@@ -1,0 +1,155 @@
+//! Automatically generates enum data and WASM export signatures as TypeScript.
+const std = @import("std");
+
+/// Points to definitions from zig/root.zig.
+pub const dw = @import("root.zig");
+
+const types = dw.types; // Get types through the game root
+
+/// Maps primitive Zig types to TypeScript type names.
+fn zigTypeToTs(comptime T: type) []const u8 {
+    if (T == u64 or T == i64) return "bigint";
+    switch (@typeInfo(T)) {
+        .void => return "void",
+        .bool => return "boolean",
+        .int, .float, .comptime_int, .comptime_float => return "number",
+        .pointer => return "number /* Pointers are questionably supported from Zig due to Memory64 export issues. You may want to return/request a u64 instead. */",
+        .optional => |opt| {
+            if (@typeInfo(opt.child) == .pointer) return "number /* Pointers are questionably supported from Zig due to Memory64 export issues. You may want to return/request a u64 instead. */";
+            return zigTypeToTs(opt.child);
+        },
+
+        .error_set => return "ErrorSet",
+        .@"enum" => return "number",
+        else => return "unknown",
+    }
+}
+
+pub fn main(init: std.process.Init) !void {
+    var buffer: [64 * 1024]u8 = undefined;
+    var alloc: std.heap.FixedBufferAllocator = .init(&buffer);
+    const allocator = alloc.allocator();
+    var bw = std.Io.Writer.Allocating.init(allocator);
+    defer bw.deinit();
+    var writer = &bw.writer;
+
+    // Write static TypeScript headers and configurations
+    try writer.print(
+        \\// This is a dynamically generated file from generate_types.zig for use in engine.ts and should not be manually modified. See types.zig for where type definitions come from.
+        \\
+        // Dropped because of the Memory64 hacks: a reference to one of these SHOULD be an error
+        \\/**
+        \\ * A pointer in the WASM memory. Equals 0/0n to represent a null value.
+        \\ */
+        \\export type Pointer = number | bigint;
+        \\
+        \\/**
+        \\ * Represents a length from Zig.
+        \\ */
+        \\export type LengthLike = number | bigint;
+        \\
+        \\/**
+        \\ * A pointer in the WASM memory (converted from potential BigInt to number). Safe because memory size can't reasonably grow past 2**53 bytes.
+        \\ */
+        \\export type PointerLike = number;
+        \\
+        \\/**
+        \\ * Represents a set of errors from Zig.
+        \\ */
+        \\export type ErrorSet = number;
+        \\
+        \\/**
+        \\ * Configuration options for the `GameEngine`.
+        \\ */
+        \\export interface EngineOptions {{
+        \\    highPerformance?: boolean;
+        \\}}
+        \\
+        \\/** Generated from exported functions (should all be in `zig/root.zig`). */
+        \\export interface EngineExports extends WebAssembly.Exports {{
+        \\    readonly memory: WebAssembly.Memory;
+        \\
+    , .{});
+
+    const root_info = @typeInfo(dw);
+    inline for (root_info.@"struct".decls) |struct_declaration| {
+        const T = @TypeOf(@field(dw, struct_declaration.name));
+
+        // Extract all functions from root.zig. (ALL functions from root.zig should be marked as "pub", excluding the panic handler.)
+        if (@typeInfo(T) == .@"fn") {
+            const fn_info = @typeInfo(T).@"fn";
+            if (!(std.mem.eql(u8, struct_declaration.name, "panic") or std.mem.eql(u8, struct_declaration.name, "GenerateOffsets"))) {
+                try writer.print("\n    readonly {s}: (", .{struct_declaration.name});
+
+                inline for (fn_info.params, 0..) |param, i| {
+                    // Log argument numbers from params
+                    if (i > 0) try writer.print(", ", .{});
+                    try writer.print("arg{d}: {s}", .{ i, zigTypeToTs(param.type.?) });
+                }
+
+                try writer.print(") => {s};", .{zigTypeToTs(fn_info.return_type.?)});
+            }
+        }
+    }
+
+    try writer.print("\n}}\n\n// Generated enum and struct data from types.zig:", .{});
+
+    const type_info = @typeInfo(types);
+    inline for (type_info.@"struct".decls) |decl| {
+        const value = @field(types, decl.name);
+        const ValueType = @TypeOf(value);
+
+        if (ValueType == type) {
+            const inner_info = @typeInfo(value);
+            if (inner_info == .@"enum") {
+                try writer.print("\nexport enum {s} {{\n", .{decl.name});
+
+                inline for (inner_info.@"enum".fields) |field| {
+                    try writer.print("    {s} = {d},\n", .{ field.name, field.value });
+                }
+
+                try writer.print("}}\n", .{});
+            } else if (inner_info == .@"struct") {
+                // Handle types like KeyBits that contain constants
+                try writer.print("\nexport const {s} = {{\n", .{decl.name});
+                inline for (inner_info.@"struct".decls) |struct_decl| {
+                    const field_value = @field(value, struct_decl.name);
+                    // Only export it if it's a number (skips functions like mask())
+                    if (@TypeOf(field_value) == comptime_int or @TypeOf(field_value) == u32) {
+                        try writer.print("    {s}: {d},\n", .{ struct_decl.name, field_value });
+                    }
+                }
+                try writer.print("}} as const;\n", .{});
+            }
+        } else {
+            const inner_info = @typeInfo(ValueType);
+            if (inner_info == .@"struct") {
+                try writer.print("\nexport const {s} = {{\n", .{decl.name});
+
+                inline for (inner_info.@"struct".fields) |field| {
+                    const field_value = @field(value, field.name);
+                    try writer.print("    {s}: {d},\n", .{ field.name, field_value });
+                }
+
+                try writer.print("}} as const;\n", .{});
+            }
+        }
+    }
+
+    const stdout = std.Io.File.stdout();
+    try stdout.writeStreamingAll(init.io, bw.written());
+
+    const args = try init.minimal.args.toSlice(allocator);
+    if (args.len < 4) {
+        std.debug.panic("Missing cache arguments. Skipping cache write.", .{});
+        return;
+    }
+
+    const cache_root = args[1];
+    const cache_path = args[2];
+    const current_hash_hex = args[3];
+
+    const cwd = std.Io.Dir.cwd();
+    cwd.createDirPath(init.io, cache_root) catch {};
+    cwd.writeFile(init.io, .{ .sub_path = cache_path, .data = current_hash_hex }) catch {};
+}

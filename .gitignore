@@ -1,0 +1,17 @@
+/build
+/tools
+/compile_commands.json
+**/.DS_Store
+/docs
+/AGENTS.md
+/CLAUDE.md
+/.claude
+!/.claude/tmp/bench.zig
+/.zig-cache
+/.jj
+/node_modules
+/aseprite/*.aseprite
+!/aseprite/main.aseprite
+
+/zig-out
+/zig-pkg
