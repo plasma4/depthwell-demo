@@ -559,7 +559,9 @@ Ores and gems use a multi-texture mask to save atlas space. For a gem block the 
 
 #### Background and water
 
-The background is not a static image. It is multi-octave fractal brownian motion, evaluated per pixel. The octave count is low for performance. Three layers parallax at 8x, 32x, and 64x slower than the camera: for every 64 pixels the player moves, they move 8, 2, and 1 pixels. Each layer has its own colors.
+The background is not a static image. It is multi-octave fractal brownian motion. The octave count is low for performance. Three layers parallax at 8x, 32x, and 64x slower than the camera: for every 64 pixels the player moves, they move 8, 2, and 1 pixels. Each layer has its own colors.
+
+It is evaluated once per background pixel, not once per canvas pixel. A background pixel is a 16x16 world-pixel cell locked to the block grid, drawn as one instanced quad with a flat color, so the cost follows the camera zoom instead of the resolution. `publishBackgroundGrid()` in `zig/render/chunk.zig` sizes that grid.
 
 Think of the sample position as `(chunk id + sub-chunk position) modulo 512`, with coordinate warping and a trig-based light at the end.
 
