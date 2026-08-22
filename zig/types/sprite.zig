@@ -236,7 +236,7 @@ pub const Sprite = enum(u16) {
 
     /// Quarter portion of a center part of the progress bar that is unfilled.
     progress_small_unfilled = PARTICLE_START + 3,
-    /// Quarter portion of a center part of the progress bar that is unfilled.
+    /// Quarter portion of a center part of the progress that is unfilled.
     progress_small_filled,
     /// Leftmost part of the progress bar.
     progress_left = PARTICLE_START + 5,
@@ -437,29 +437,14 @@ pub const Sprite = enum(u16) {
     /// Converts a sprite into an entity ID, handling atlas ID remaps.
     pub fn asEntity(self: Sprite) u16 {
         const id = @intFromEnum(self);
-        return if (id >= GEM_START and id < GEM_START + GEM_COUNT)
-            id + GEM_COUNT
-        else if (self == .clay)
-            @intFromEnum(Sprite.clay_visual)
-        else if (self == .red_clay)
-            @intFromEnum(Sprite.red_clay_visual)
-        else if (self == .rock)
-            @intFromEnum(Sprite.rock_visual)
-        else if (self == .flint)
-            @intFromEnum(Sprite.flint_visual)
-        else if (self == .portal)
-            @intFromEnum(Sprite.portal_visual)
-        else if (self.isLiquid())
-            id + 1
-        else
-            // default to the original!
-            id;
+        const offset = getSpriteProps(self).entity_offset;
+        return @intCast(@as(u16, id) + @as(u16, @intCast(offset)));
     }
 };
 
 /// Centralized database describing all sprite properties.
 /// Rules are checked in order, with later rules overriding earlier ones.
-const rules = [_]SpriteRule{
+const RULE_LIST = [_]SpriteRule{
     // Weak solid blocks
     .{
         .{ .list = &[_]Sprite{
@@ -537,6 +522,7 @@ const rules = [_]SpriteRule{
             .in_world = true,
             .item = true,
             .liquid = true,
+            .entity_offset = 1,
         },
     },
     // Empty block
@@ -876,6 +862,18 @@ const rules = [_]SpriteRule{
         .{ .single = .twinklemoss },
         .{ .anchor = .suspended },
     },
+
+    // Entity ID offsets for `asEntity()`
+    .{
+        .{ .range = .{ .quartz, .electrit } },
+        .{ .entity_offset = @intCast(GEM_COUNT) },
+    },
+    .{
+        .{ .list = &[_]Sprite{
+            .clay, .red_clay, .rock, .flint, .portal,
+        } },
+        .{ .entity_offset = 1 },
+    },
 };
 
 /// Hitbox geometry variants for various block shapes.
@@ -1017,6 +1015,9 @@ pub const SpriteProps = struct {
     evolution: ?Evolution = null,
     /// Conditions that must be satisfied to mine this block.
     required_capabilities: dw.mining.MiningCapabilities = .t0,
+    /// Offset added to the sprite ID to compute its entity ID.
+    /// Default is 0. Populated by `RULE_LIST` and used by `Sprite.asEntity()`.
+    entity_offset: i16 = 0,
 };
 
 /// Tightly packed 16-bit struct for high-performance, cache-friendly lookups.
@@ -1095,6 +1096,7 @@ fn mergeProps(dest: *SpriteProps, src: SpriteProps) void {
     if (!std.meta.eql(src.required_capabilities, default_caps)) {
         dest.required_capabilities = src.required_capabilities;
     }
+    if (src.entity_offset != 0) dest.entity_offset = src.entity_offset;
 }
 
 /// Constant-time lookup of precomputed full sprite properties.
@@ -1109,7 +1111,7 @@ pub inline fn getSpriteProps(s: Sprite) SpriteProps {
 fn getPropsForSprite(comptime s: Sprite) SpriteProps {
     @setEvalBranchQuota(70000);
     var p: SpriteProps = .{};
-    for (rules) |rule| {
+    for (RULE_LIST) |rule| {
         if (matchesTarget(s, rule[0])) {
             mergeProps(&p, rule[1]);
         }

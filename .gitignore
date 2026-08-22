@@ -17,6 +17,6 @@
 /AGENTS.md
 /CLAUDE.md
 /.claude
-!/.claude/tmp/bench.zig
+/.aider.conf.yml
 /.aider.chat.history.md
 /.aider.input.history

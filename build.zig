@@ -2,7 +2,7 @@
 //! - Run zig build normally, and zig build -Doptimize=ReleaseSafe for near-production performance.
 //! - Use zig build -Dwasm-opt to use ReleaseFast AND highly aggressive wasm-opt (from Binaryen).
 //! - Use zig build -Dgen-enums as well to automatically construct src/enums.ts
-//! - Use zig test "zig/root.zig" to run all tests across the codebase.
+//! - Use zig test zig/root.zig to run all tests across the codebase.
 //! - Change -Daseprite=PATH as necessary (or enforce a default in this file).
 const std = @import("std");
 const builtin = @import("builtin");
