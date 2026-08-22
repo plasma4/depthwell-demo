@@ -40,7 +40,7 @@ Then:
 
 - `zig build` builds the Zig code. It detects `main.aseprite` changes on its own.
 - `zig build -Dgen-enums` builds and also regenerates `enums.ts` (if relavant files were changed).
-- `zig test "zig/root.zig"` runs every test.
+- `zig test zig/root.zig` runs all tests.
 
 Every build keeps DWARF except `-Dwasm-opt` (wasm-opt doesn't support DWARF 5 anyway).
 
