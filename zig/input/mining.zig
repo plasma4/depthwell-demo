@@ -12,10 +12,12 @@ const mouse = dw.mouse;
 pub var mining_progress: u64 = 0;
 
 /// How much the player increases `mining_progress` every tick.
+/// Must always be positive.
 pub var mining_speed: u64 = 8;
 
 /// How much `hp` the tool takes off the block every time `mining_progress` reaches the block's strength.
 /// Mining progress accumulates by `mining_speed` every logical tick.
+/// Must always be positive.
 pub var mining_strength: u4 = 1;
 
 /// Current selected block's HP.
@@ -94,7 +96,7 @@ pub const ToolProps = struct {
     /// How much the player increases `mining_progress` every tick.
     speed: u64,
     /// How much `hp` the tool takes off the block every time `mining_progress` reaches the block's strength.
-    /// Mining progress accumulates by `mining_speed` every logical.
+    /// Mining progress accumulates by `mining_speed` every logical tick.
     strength: u4,
     /// Qualitative special properties of this pickaxe
     capabilities: MiningCapabilities = .{},
@@ -214,6 +216,7 @@ pub var has_structure_tool: bool = false;
 const STRUCTURE_STRENGTH = 1000;
 
 /// Updates mining and placing blocks. Should be called from `handleTick()`.
+/// `logic_speed` should be 1 at a 60FPS default and is unrelated to frame drop correction.
 pub fn handleMiningAndPlacing(logic_speed: f64) void {
     mouse.updateMouseLocation(); // update to get correct mouse position data
 
@@ -323,7 +326,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                         const FRAMES_PER_SOUND = if (in_creative)
                             3
                         else
-                            std.math.clamp(240 / (mining_speed - 1) + 1, 4, 30);
+                            std.math.clamp(240 / @max((mining_speed - 1), 1) + 1, 4, 30);
                         not_mining_frame = 0;
                         // create a mining sound every so often!
                         if (in_creative or mining_frame % FRAMES_PER_SOUND == 0)

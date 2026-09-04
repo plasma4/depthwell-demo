@@ -72,7 +72,7 @@ const WARP_REACH_TILES: f64 = blk: {
     const reach_screen_px = from_scale + from_rotation + SHAKE_MAX_OFFSET;
 
     // Screen pixels become world tiles at the zoom that shows the most world per pixel.
-    break :blk reach_screen_px / (dw.player.CAMERA_MIN_ZOOM * CHUNK_SIZE_FLOAT);
+    break :blk reach_screen_px / (dw.player.CAMERA_ZOOM_MIN * CHUNK_SIZE_FLOAT);
 };
 
 comptime {

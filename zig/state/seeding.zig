@@ -354,7 +354,8 @@ pub const NoiseMix = struct {
     }
 };
 
-/// A high-performance, stateless hash.
+/// A high-performance, stateless hash. Not cryptographically secure; has acceptable flaws.
+///
 /// Significantly faster than both ChaCha12/Xoshiro512** for procedural generation.
 /// Fully deterministic and highly optimized across both WASM and 64-bit Native targets.
 pub const FastHash = struct {

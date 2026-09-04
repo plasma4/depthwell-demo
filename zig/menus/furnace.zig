@@ -19,7 +19,7 @@ const toSize = dw.entity.toSizeUv;
 const mouse = dw.mouse;
 const inventory = dw.inventory;
 
-/// Number of bars in the progress bar (must be a at least 8).
+/// Number of bars in the progress bar. `progress.drawBar()` needs more than 8.
 const SMELTING_STEPS = 10;
 /// Logic ticks spent on each progress unit.
 const FRAMES_PER_STEP = 2;
