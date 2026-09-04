@@ -247,7 +247,7 @@ The pass finishes by setting `edge_flags` on every decoration to `0xFF`, so the 
 
 The real initial blocker for this game is figuring out an algorithm that makes blocks and structures at D _visually consistent_ at D+1, scaling things by $4\times$, and doing this recursively!
 
-`zig/state/ancestor.zig` and `zig/state/refine.zig` are the files that handle this higher-depth behavior. To build a chunk at D, the generator walks up through the parents from D-1 toward H. At each level it asks the `ModificationStore` and the `AncestorCache` whether the parent block was modified. At H it stops asking about chunks and reads the `QuadCache` material grid instead.
+`zig/state/ancestor.zig` and `zig/state/refine.zig` are the files that handle this deeper-depth behavior. To build a chunk at D, the generator walks up through the parents from D-1 toward H. At each level it asks the `ModificationStore` and the `AncestorCache` whether the parent block was modified. At H it stops asking about chunks and reads the `QuadCache` material grid instead.
 
 **Materialize is not the same as generate.** `generateChunk()` is pure procedure that ignores user modifications. `materializeChunk()` is that plus every `mod_store` edit replayed plus a flag recompute. It is the only supported way to turn a store entry into a `Chunk`!
 
