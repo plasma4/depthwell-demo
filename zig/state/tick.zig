@@ -13,6 +13,7 @@ const MAX_AUTO_DEPTH = 32;
 const TICK_RATE: f64 = 60.0;
 
 /// The root of ALL actions that need to be handled every logical tick.
+/// `logic_speed` should be 1 at a 60FPS default and is unrelated to frame drop correction.
 pub fn handleTick(logic_speed: f64, iterations: u32) void {
     var buffer: inventory.SlotBuffer = undefined;
     const active_slots = inventory.getSpritesInInventory(&buffer);
@@ -71,7 +72,7 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
     // cannot push a second transition during one.
     const can_hotkey_depth = dw.dev_menu and !dw.portal.isActive();
 
-    // Z key increases depth. Above the frontier it "retraces" back to already accessed depths!
+    // Z key increases depth. Shallower than the frontier it "retraces" back to already accessed depths!
     // At the frontier it "pushes" a fresh layer and suffix updates accordingly.
     const just_increased_depth = can_hotkey_depth and
         KeyBits.isSet(KeyBits.increase_depth, memory.game.keys_pressed_mask);
@@ -91,7 +92,7 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
     }
 
     // X: decrease depth (ascend), instantly. The depth left behind becomes frozen for its
-    // descendants, but stays fully playable (see world.isAboveFrontier()).
+    // descendants, but stays fully playable (see world.isShallowerThanFrontier()).
     const just_decreased_depth = can_hotkey_depth and
         !just_increased_depth and
         dw.world.canAscend() and
@@ -119,8 +120,8 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
             if (dw.indicators.menus.furnace) @import("../menus/furnace.zig").updateSmelting();
 
             // mouse block and mining/placing logic all updated in this function!
-            // Every depth plays the same way. An edit above the frontier stays at its own depth
-            // (see world.legacy_store), so nothing below it can change
+            // Every depth plays the same way. An edit shallower than the frontier stays at its own depth
+            // (see world.legacy_store), so nothing deeper than it can change
             if (!changed_depth) dw.mining.handleMiningAndPlacing(logic_speed);
 
             dw.player.move(logic_speed); // logic that moves the player/camera based on keys
@@ -134,10 +135,11 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
     }
 
     // Generate chunks around the SimBuffer in the background.
+    // See the function doc comment for amount justification and context.
     dw.world.SimBuffer.precacheChunks(
         memory.game.getPlayerCoord(),
         memory.game.player_velocity,
-        2,
-        4,
+        1,
+        1,
     );
 }
