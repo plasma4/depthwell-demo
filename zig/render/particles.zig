@@ -312,8 +312,9 @@ pub fn tick(ticks: u32) void {
     @setFloatMode(.optimized);
     const dt: f32 = @floatFromInt(ticks);
     for (&pool) |*p| {
+        if (p.frames_left == 0) continue; // skip!
         p.frames_left = @intCast(@as(u32, p.frames_left) -| ticks);
-        // Integrated rather than stepped, so a multi-tick catch-up traces the same curve as single ticks.
+        // integrated rather than stepped, so a multi-tick catch-up traces the same curve as single ticks
         const accel = accelOf(p);
         p.position += (p.velocity + accel * @as(Vec2f32, @splat(0.5 * dt))) * @as(Vec2f32, @splat(dt));
         p.velocity += accel * @as(Vec2f32, @splat(dt));
