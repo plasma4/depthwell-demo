@@ -9,7 +9,7 @@
 //! We represent light propagation as decay; a cell with high light has low decay.
 //! The radix heap processes cells from lowest decay to highest decay.
 //!
-//! NOTE: This code lags in debug bulids!
+//! NOTE: This code lags in debug builds!
 const std = @import("std");
 const dw = @import("../root.zig");
 const memory = dw.memory;
@@ -56,7 +56,7 @@ pub const Hue = struct {
     pub const violet: f32 = 5.40;
 };
 
-/// Defnes a source color through hue and chroma.
+/// Defines a source color through hue and chroma.
 pub const LightColor = struct {
     /// The angle of the hue in radians.
     hue: f32,
@@ -216,7 +216,17 @@ const RadixHeap = struct {
         value: u32,
     };
 
+    /// Buckets are indexed by the position of the highest bit where a key differs from `t`.
+    /// So the count must cover every bit a key can set, plus the zero-difference bucket.
     const BUCKETS_COUNT = 12;
+
+    comptime {
+        // A key is a decay value, which never exceeds MAX_SOURCE_LIGHT.
+        // Raise MAX_SOURCE_LIGHT past this bound and getBucketIndex() runs off the end of the
+        // bucket array, silently in ReleaseFast.
+        if (MAX_SOURCE_LIGHT >= 1 << (BUCKETS_COUNT - 1))
+            @compileError("MAX_SOURCE_LIGHT outgrew RadixHeap.BUCKETS_COUNT; raise the bucket count.");
+    }
 
     buckets: [BUCKETS_COUNT]std.ArrayList(Entry),
     t: u16,
