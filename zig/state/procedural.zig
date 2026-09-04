@@ -151,6 +151,8 @@ inline fn getIslandSprite(cell_hash: u64, wx: u32, wy: u32, density_seed: Vec2u)
         }
     } else if (roll <= 0.36) {
         return if (isTopSurface(wx, wy, density_seed)) .none else .diorite;
+    } else if (roll <= 0.37) {
+        return if (isTopSurface(wx, wy, density_seed)) .none else .basalt;
     }
     return .none;
 }
@@ -276,6 +278,12 @@ const WORLEY_FLOAT_PLACEMENT = BASE_WORLD_BLOCK_BITS <= F32_PLACEMENT_LIMIT_BITS
 /// This limit prevents overflow during split multiplication in 64-bit integers.
 /// Octave scaling consumes headroom between this bound and WORLD_COORD_BITS.
 const LATTICE_INPUT_BITS: comptime_int = 64 - STEP_MANT_BITS + SPLIT_BIT;
+
+/// Largest domain warp `shiftWorld()` accepts, in blocks.
+///
+/// A warp reaches single-digit blocks in practice.
+/// The bound exists so the reflection near world coordinate 0 stays small and provable.
+const MAX_WARP_BLOCKS = 256;
 
 comptime {
     // verify split coordinate multiplication does not overflow 64 bits
@@ -1208,6 +1216,8 @@ test "the split lattice multiply agrees with a plain 128-bit one" {
             const axis = latticeAxis(v, scale);
             try std.testing.expectEqual(seeding.foldWorld(cell), axis.corner(0));
             try std.testing.expectEqual(seeding.foldWorld(cell +% 1), axis.corner(1));
+            // corner(-1) takes the borrow branch, which no other assertion reaches.
+            try std.testing.expectEqual(seeding.foldWorld(cell -% 1), axis.corner(-1));
             try std.testing.expectEqual(
                 @as(f32, @floatFromInt(@as(u32, @truncate(scaled)))) * INV_POW_2_32,
                 axis.t,
@@ -1277,9 +1287,21 @@ inline fn splitWarp(warp: f32) WarpSplit {
     return .{ .blocks = @intFromFloat(whole), .frac = warp - whole };
 }
 
-/// Adds signed block offset to world coordinate.
+/// Adds a signed block offset to a world coordinate, mirroring at world coordinate 0.
+///
+/// A negative offset below 0 has no field to sample.
+/// Letting it wrap the unsigned coordinate is the bug this exists to stop.
+/// `latticeAxis()` keeps only bits `SPLIT_BIT` to `SPLIT_BIT + 64`.
+/// So a wrapped sample lands in an unrelated fold band and seams the field.
+/// Mirroring folds the offset back instead.
+/// This keeps the field continuous, because the value at `0 - n` becomes the value at `n`.
+/// It touches nothing more than `MAX_WARP_BLOCKS` from the origin.
 inline fn shiftWorld(v: WorldCoord, blocks: i64) WorldCoord {
-    return v +% @as(WorldCoord, @bitCast(@as(i128, blocks)));
+    std.debug.assert(blocks > -MAX_WARP_BLOCKS and blocks < MAX_WARP_BLOCKS);
+    const delta: WorldCoord = @bitCast(@as(i128, blocks));
+    const shifted = v +% delta;
+    // The sum only exceeds v on a borrow, which is exactly the underflow case.
+    return if (blocks < 0 and shifted > v) 0 -% shifted else shifted;
 }
 
 /// Stores three candidate cells and fractional offset for one warped Worley axis.
@@ -1336,7 +1358,8 @@ inline fn hashField(h: u64, comptime index: u2) f32 {
 inline fn placeWorley(comptime float_placement: bool, v: WorldCoord, inv_cell: f32, warp: f32) WorleyAxis {
     if (comptime float_placement) {
         // convert coordinate to float when fits in f32 precision
-        const w = @as(f32, @floatFromInt(@as(u32, @intCast(v)))) + warp;
+        // Mirror to match shiftWorld; both routes must describe one field.
+        const w = @abs(@as(f32, @floatFromInt(@as(u32, @intCast(v)))) + warp);
         const cell_f = @floor(w * inv_cell);
         const cell: u64 = @bitCast(@as(i64, @intFromFloat(cell_f)));
         return .{
@@ -1721,4 +1744,47 @@ test "both Worley placement routes describe the same field" {
         ).value;
         try std.testing.expectApproxEqAbs(a, b, 1e-4);
     };
+}
+
+test "a domain warp near world coordinate zero never wraps the coordinate" {
+    const seed: Vec2u = .{ 0x243f6a8885a308d3, 0x13198a2e03707344 };
+    const limit = @as(WorldCoord, 1) << seeding.WORLD_COORD_BITS;
+
+    // The wrap only reaches a few blocks, so the whole reachable band is walked.
+    inline for (ORE_DISPERSALS) |rule| {
+        const inv_scale = 1.0 / rule.scale;
+        const lane_seed = seed ^ @as(Vec2u, ORE_LANE_SEEDS[rule.seed_lane]);
+        const warp_amt = rule.scale * rule.warp_strength;
+        var y: WorldCoord = 0;
+        while (y < 512) : (y += 1) {
+            for (0..24) |xi| {
+                const x: WorldCoord = @intCast(xi);
+                const warp = getDualValueNoiseFixed(lane_seed, x, y, inv_scale * 0.4);
+                const warp_x: i64 = @intFromFloat((warp[0] - 0.5) * warp_amt);
+                const warp_y: i64 = @intFromFloat((warp[1] - 0.5) * warp_amt);
+                try std.testing.expect(shiftWorld(x, warp_x) < limit);
+                try std.testing.expect(shiftWorld(y, warp_y) < limit);
+            }
+        }
+    }
+}
+
+test "the ore field has no seam at the world origin" {
+    const seed: Vec2u = .{ 0x452821e638d01377, 0xbe5466cf34e90c6c };
+    const rule = ORE_DISPERSALS[0];
+
+    // A seam shows up as one step far larger than the steps around it.
+    var steps: [40]f32 = @splat(0);
+    var prev: f32 = oreField(seed, 0, 4096, rule.seed_lane, rule);
+    for (1..40) |i| {
+        const v = oreField(seed, @intCast(i), 4096, rule.seed_lane, rule);
+        steps[i] = @abs(v - prev);
+        prev = v;
+    }
+
+    var near_max: f32 = 0;
+    for (steps[1..12]) |st| near_max = @max(near_max, st);
+    var far_max: f32 = 0;
+    for (steps[12..40]) |st| far_max = @max(far_max, st);
+    try std.testing.expect(near_max <= far_max * 2.0);
 }

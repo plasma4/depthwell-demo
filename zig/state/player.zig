@@ -555,19 +555,19 @@ fn placementCanChangeEscape(cells: []const PendingPlacement) bool {
 
 /// Corrects a bounded softlock with an orthogonal reachability search.
 ///
-/// Each node is the player hitbox moved one block from the landing point.
-/// A node is passable when every solid corner block can be broken by the active tool.
+/// Each node is the player hitbox moved a whole number of blocks from the current position.
+/// A node is passable when the active tool can break every solid block the hitbox touches.
 /// The search starts at the player and proves escape when it reaches the `MAX_ESCAPE_BLOCKS` ring.
 /// A diagonal does not connect, because the player cannot pass through a shared corner.
-/// When trapped, the correction picks the closest clear or mineable landing in the exterior component.
+/// When trapped, the player moves to the landing that `nearestExteriorLanding()` picks.
 ///
-/// This is deliberately a bounded epsilon check, not a proof about the full procedural world.
-/// It catches every immutable enclosure contained in the square, including player-made ones.
-/// A larger enclosure can still evade it.
-/// The light-limited placement rule bounds normal player-built cages below this distance.
+/// The square is a bounded check, not a proof about the whole world.
+/// It finds every enclosure that fits inside the square, including player-made ones.
+/// A larger enclosure escapes it.
+/// The light-limited placement rule keeps player-built cages smaller than the square.
 /// Call only after the `SimBuffer` holds the current depth.
 ///
-/// Returns `true` only when it moved the player to a proven external position.
+/// Returns `true` only when it moved the player.
 pub fn escapeSolid() bool {
     if (isGhost()) return false;
 
@@ -623,28 +623,55 @@ fn enqueueEscapeNode(context: anytype, comptime can_enter: anytype, dx: i64, dy:
     write.* += 1;
 }
 
-/// Returns the nearest clear, or otherwise mineable, landing in the exterior component.
+/// Returns the world position the correction moves the player to, in subpixels.
 ///
-/// A point merely near the player is not enough. It can be a second sealed pocket.
-/// This flood starts on the proof boundary, so every returned point is connected to the outside.
+/// A standable landing is snapped down onto its floor block, the same rest position
+/// `startup.findSafeSpawn()` uses, so the player arrives standing and not falling.
+/// The snap only shrinks the blocks the hitbox covers, so a clear landing stays clear.
 fn correctionLanding(probe: *const EscapeProbe) ?Vec2i {
-    const offset = nearestExteriorLanding(probe, EscapeProbe.canEnter, EscapeProbe.positionIsClear) orelse return null;
-    return .{
-        memory.game.player_pos[0] + @as(i64, offset.x) * dw.CHUNK_SIZE_SQ,
-        memory.game.player_pos[1] + @as(i64, offset.y) * dw.CHUNK_SIZE_SQ,
-    };
+    const offset = nearestExteriorLanding(
+        probe,
+        EscapeProbe.canEnter,
+        EscapeProbe.positionIsClear,
+        EscapeProbe.positionIsStandable,
+    ) orelse return null;
+
+    const game = &memory.game;
+    const x = game.player_pos[0] + @as(i64, offset.x) * dw.CHUNK_SIZE_SQ;
+    var y = game.player_pos[1] + @as(i64, offset.y) * dw.CHUNK_SIZE_SQ;
+
+    if (probe.positionIsStandable(offset.x, offset.y)) {
+        // Put the feet on the last subpixel row of the block they already stand in.
+        const feet = y + dw.CHUNK_SIZE_SQ / 2;
+        y = @divFloor(feet, dw.CHUNK_SIZE_SQ) * dw.CHUNK_SIZE_SQ + dw.CHUNK_SIZE_SQ / 2 - 1;
+    }
+    return .{ x, y };
 }
 
-/// Finds the closest passable player position that is connected to the proof boundary.
+/// Finds the best landing that connects to the boundary of the escape square.
+///
+/// A point merely near the player is not enough.
+/// It can be a second sealed pocket.
+/// The flood starts on the boundary ring, so every point it visits reaches the outside.
+///
+/// Landings come in three tiers.
+/// Standable is best, then clear but unsupported, then a spot the player must mine out of.
+/// The closest point in the best occupied tier wins.
+/// Standable comes first because a trapped player has no blocks to build with.
+/// From the other two tiers the player falls, with no proof of where the fall stops.
 ///
 /// `can_enter()` defines the breakable movement graph.
-/// `is_clear()` prefers an empty position over a position that needs mining.
 /// The fixed square makes this another bounded `O(MAX_ESCAPE_CELLS)` scan.
-fn nearestExteriorLanding(context: anytype, comptime can_enter: anytype, comptime is_clear: anytype) ?EscapeOffset {
+fn nearestExteriorLanding(
+    context: anytype,
+    comptime can_enter: anytype,
+    comptime is_clear: anytype,
+    comptime is_standable: anytype,
+) ?EscapeOffset {
     @memset(&escape_checked, false);
     var write: usize = 0;
 
-    // Seed the exterior component from the complete proof boundary.
+    // Seed the exterior component from the complete boundary ring.
     var edge: i64 = -MAX_ESCAPE_BLOCKS;
     while (edge <= MAX_ESCAPE_BLOCKS) : (edge += 1) {
         enqueueEscapeNode(context, can_enter, edge, -MAX_ESCAPE_BLOCKS, &write);
@@ -653,15 +680,18 @@ fn nearestExteriorLanding(context: anytype, comptime can_enter: anytype, comptim
         enqueueEscapeNode(context, can_enter, MAX_ESCAPE_BLOCKS, edge, &write);
     }
 
+    var standable: ?EscapeOffset = null;
     var clear: ?EscapeOffset = null;
     var excavatable: ?EscapeOffset = null;
     while (write != 0) {
         write -= 1;
         const current = escape_queue[write];
-        if (is_clear(context, current.x, current.y)) {
+        if (!is_clear(context, current.x, current.y)) {
+            if (isCloserLanding(current, excavatable)) excavatable = current;
+        } else {
             if (isCloserLanding(current, clear)) clear = current;
-        } else if (isCloserLanding(current, excavatable)) {
-            excavatable = current;
+            if (is_standable(context, current.x, current.y) and isCloserLanding(current, standable))
+                standable = current;
         }
 
         for (ESCAPE_STEPS) |step| {
@@ -672,7 +702,7 @@ fn nearestExteriorLanding(context: anytype, comptime can_enter: anytype, comptim
         }
     }
 
-    return clear orelse excavatable;
+    return standable orelse clear orelse excavatable;
 }
 
 /// Returns whether `candidate` is a nearer exterior landing than `previous`.
@@ -766,6 +796,20 @@ const EscapeProbe = struct {
             if (block.isSolid()) return false;
         }
         return true;
+    }
+
+    /// Returns whether the player has clear space and a floor under a foot at one block offset.
+    ///
+    /// `playerCorners()` puts the two feet last, and the cell under a foot is the floor it lands on.
+    /// A landing that is only clear leaves the player in the air, where they fall to somewhere unproven.
+    fn positionIsStandable(self: *const EscapeProbe, dx: i64, dy: i64) bool {
+        if (!self.positionIsClear(dx, dy)) return false;
+
+        for (self.corner_offsets[2..]) |foot| {
+            const floor = self.blockAtRelative(dx + foot.x, dy + foot.y + 1) orelse continue;
+            if (floor.isSolid()) return true;
+        }
+        return false;
     }
 
     /// Returns whether this cell supports a protected installation.
@@ -950,12 +994,42 @@ test "softlock correction chooses the closest exterior pocket" {
         fn isClear(_: *const @This(), _: i64, _: i64) bool {
             return true;
         }
+
+        // Open air everywhere, so the correction has to fall back to the closest clear point.
+        fn isStandable(_: *const @This(), _: i64, _: i64) bool {
+            return false;
+        }
     };
 
     const ring = Ring{};
     try std.testing.expect(!canReachOutside(&ring, Ring.canEnter));
 
-    const landing = nearestExteriorLanding(&ring, Ring.canEnter, Ring.isClear) orelse unreachable;
+    const landing = nearestExteriorLanding(&ring, Ring.canEnter, Ring.isClear, Ring.isStandable) orelse unreachable;
     const distance = @abs(@as(i64, landing.x)) + @abs(@as(i64, landing.y));
     try std.testing.expectEqual(@as(u64, 2), distance);
+}
+
+test "softlock correction prefers a farther landing that stands on a floor" {
+    // The player is sealed in a 3x3 box of unbreakable ore, with one ledge to the east.
+    const Box = struct {
+        fn canEnter(_: *const @This(), dx: i64, dy: i64) bool {
+            return @max(@abs(dx), @abs(dy)) != 1;
+        }
+
+        fn isClear(_: *const @This(), dx: i64, dy: i64) bool {
+            return @max(@abs(dx), @abs(dy)) != 1;
+        }
+
+        fn isStandable(_: *const @This(), dx: i64, dy: i64) bool {
+            return dx == 3 and dy == 0;
+        }
+    };
+
+    const box = Box{};
+    try std.testing.expect(!canReachOutside(&box, Box.canEnter));
+
+    // Four clear points sit two blocks away, but only the ledge keeps the player off a fall.
+    const landing = nearestExteriorLanding(&box, Box.canEnter, Box.isClear, Box.isStandable) orelse unreachable;
+    try std.testing.expectEqual(@as(i16, 3), landing.x);
+    try std.testing.expectEqual(@as(i16, 0), landing.y);
 }
