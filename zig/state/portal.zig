@@ -41,7 +41,9 @@ pub const MIN_FILL_FRAMES: u32 = 30;
 
 /// Half-width of the block window sampled for debris sprites, in blocks (so an 8x8 window).
 pub const DEBRIS_RADIUS: i32 = 4;
-/// Distinct block types collected from that window to draw from.
+/// Block types collected from that window to draw from, one entry per non-empty cell.
+/// Duplicates are kept on purpose, so a common material shows up in the debris as often as it does in the ground.
+/// Sized for the whole window, because every cell can contribute.
 const MAX_PALETTE: usize = @intCast(4 * DEBRIS_RADIUS * DEBRIS_RADIUS);
 
 /// How many shards a descent spawns.
@@ -511,7 +513,7 @@ pub fn triggerAscend(coord: Coordinate, bx: u4, by: u4) void {
 /// The portal that was clicked only decides where the dive is aimed.
 /// The route back is the recorded `AscentStep`, so any portal serves as the way down.
 ///
-/// Does nothing unless the player is above their deepest depth.
+/// Does nothing unless the player is shallower than their deepest depth.
 pub fn triggerReturn(coord: Coordinate, bx: u4, by: u4) void {
     if (isActive() or !world.canRetrace()) return;
     beginTransition(.returning, coord, bx, by);
@@ -762,7 +764,7 @@ fn collectDebris() void {
     @setFloatMode(.optimized);
     const g = &memory.game;
 
-    // Sample the surrounding block types. Only the set of types matters; where each one sat does not,
+    // Sample the surrounding block types. Where each one sat does not matter,
     // since the shards are scattered on a ring rather than flown in from their real positions.
     var palette: [MAX_PALETTE]Sprite = undefined;
     var palette_len: usize = 0;
@@ -1298,7 +1300,7 @@ fn finish() void {
         // A later return lands ON the portal that was used, not where the player happened to stand.
         world.applyAscent(transition, portalCoord(), ascend_origin);
     } else {
-        // Always a fresh descent: going back down from above the frontier is the return fade
+        // Always a fresh descent: descending from shallower than the frontier is the return fade
         // (triggerReturn()), never this zoom, so the ascent stack is untouched here.
         std.debug.assert(!world.canRetrace());
         // The preview left the ancestor cache holding this depth's parents, already tiered for it.
