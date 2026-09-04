@@ -94,7 +94,7 @@ pub const ToolProps = struct {
     /// How much the player increases `mining_progress` every tick.
     speed: u64,
     /// How much `hp` the tool takes off the block every time `mining_progress` reaches the block's strength.
-    /// Mining progress accumulates by `mining_speed` every logical.
+    /// Mining progress accumulates by `mining_speed` every logical tick.
     strength: u4,
     /// Qualitative special properties of this pickaxe
     capabilities: MiningCapabilities = .{},

@@ -278,11 +278,12 @@ pub fn verifySimInvariants() void {
     }
 
     // A frozen value only exists for a depth the player has already descended past.
-    // One at or below the frontier means a capture ran when it should not have (see world.captureLegacy()).
+    // One at or deeper than the frontier means a capture ran when it should not have
+    // (see world.captureLegacy()).
     var legacy_keys = dw.world.legacy_store.index.iterator();
     while (legacy_keys.next()) |kv| {
         if (kv.key_ptr.depth >= dw.world.frontier()) {
-            logger.err(@src(), "legacy entry at depth {d} is not below the frontier {d}", .{
+            logger.err(@src(), "legacy entry at depth {d} is not shallower than the frontier {d}", .{
                 kv.key_ptr.depth,
                 dw.world.frontier(),
             });

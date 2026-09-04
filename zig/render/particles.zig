@@ -312,6 +312,10 @@ pub fn tick(ticks: u32) void {
     @setFloatMode(.optimized);
     const dt: f32 = @floatFromInt(ticks);
     for (&pool) |*p| {
+        // A dead slot is never drawn and is overwritten whole by addParticle(), so moving it is waste.
+        // The pool is fixed at MAX_PARTICLES, so this is the only thing that keeps the cost with the
+        // live particles instead of with the capacity.
+        if (p.frames_left == 0) continue;
         p.frames_left = @intCast(@as(u32, p.frames_left) -| ticks);
         // Integrated rather than stepped, so a multi-tick catch-up traces the same curve as single ticks.
         const accel = accelOf(p);

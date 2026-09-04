@@ -350,7 +350,7 @@ comptime {
         //     if (depth < startup.STARTING_ZOOM_TIMES)
         //         logger.quick("Depth is too small! ):")
         //     else if (depth > memory.game.depth)
-        //         logger.quick("Depth is higher than current game depth!")
+        //         logger.quick("Depth is deeper than current game depth!")
         //     else {
         //         var key = world.DepthCoordinate{
         //             .quadrant = quadrant,
