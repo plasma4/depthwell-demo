@@ -71,7 +71,7 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
     // cannot push a second transition during one.
     const can_hotkey_depth = dw.dev_menu and !dw.portal.isActive();
 
-    // Z key increases depth. Above the frontier it "retraces" back to already accessed depths!
+    // Z key increases depth. Shallower than the frontier it "retraces" back to already accessed depths!
     // At the frontier it "pushes" a fresh layer and suffix updates accordingly.
     const just_increased_depth = can_hotkey_depth and
         KeyBits.isSet(KeyBits.increase_depth, memory.game.keys_pressed_mask);

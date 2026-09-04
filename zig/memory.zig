@@ -198,7 +198,7 @@ pub const GameState = extern struct {
     /// Never decreases for the life of a world.
     ///
     /// This is the timeline authority (see `world.isAboveFrontier()`).
-    /// An edit at a depth below this value is local to that depth:
+    /// An edit at a depth shallower than this value is local to that depth:
     /// deeper depths keep the material they inherited when they were made.
     /// Initialized in `startup.zig`, and raised by `world.commitLayer()`.
     max_depth_reached: u64 align(8) = 0,
