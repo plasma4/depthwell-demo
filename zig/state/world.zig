@@ -525,7 +525,7 @@ pub const ModificationStore = struct {
         return .{
             .entry = self.entries.at(self.reserve(key, .edit)),
             .key = key,
-            // below the frontier this depth is frozen for its descendants,
+            // shallower than the frontier this depth is frozen for its descendants,
             // so each cell must give up its inherited value before the edit lands.
             .capture_legacy = self == &mod_store and key.depth < frontier(),
         };
@@ -616,9 +616,9 @@ pub var mod_store: ModificationStore = .{};
 /// The material each cell had when its depth stopped being the frontier.
 ///
 /// A cell can need two values at once:
-/// the one the depths below it inherited, and the one its own depth shows now.
+/// the one the deeper depths inherited, and the one its own depth shows now.
 /// `mod_store` holds the second; this holds the first.
-/// A cell enters here on its FIRST edit below the frontier, and is never written again.
+/// A cell enters here on its FIRST edit shallower than the frontier, and is never written again.
 ///
 /// Only ancestor lookups read this (see `inheritedCell()`).
 /// It is invisible to the depth it belongs to, which is what makes each depth its own world.
@@ -661,24 +661,26 @@ fn captureLegacy(key: DepthCoordinate, i: u8) void {
     legacy_store.beginWriteRaw(key).setCell(i, .from(legacy_scratch.blocks[i]));
 }
 
-/// The value one cell contributes to the depths BELOW it, or null when it is still procedural.
+/// The value one cell contributes to the DEEPER depths, or null when it is still procedural.
 ///
 /// The one lookup every ancestor path must use, so the two call sites cannot drift.
-/// A frozen value wins over the live one:
-/// an edit made after the depth was left is local to that depth and must not travel down.
+/// A frozen value wins over the live one.
+/// An edit made after the depth was left is local to that depth.
+/// It must not travel deeper.
 pub inline fn inheritedCell(key: DepthCoordinate, block_idx: u8) ?ModCell {
-    // Almost every session never edits below the frontier, so this keeps the store off the hot path.
+    // Almost every session never edits shallower than the frontier, so this keeps the store off the hot path.
     if (legacy_store.index.count() != 0) {
         if (legacy_store.getCell(key, block_idx)) |cell| return cell;
     }
     return mod_store.getCell(key, block_idx);
 }
 
-/// One depth the player has ascended past, recording the block they went up through.
+/// One depth the player has ascended past, recording the block they ascended through.
 ///
-/// A descent derives its whole rebase frame from the target block's position (see `computeLayer()`),
-/// so coming back down anywhere else would renumber every suffix at that depth and orphan every `mod_store` key below it.
-/// Keeping the block means the way down is the way you came.
+/// A descent derives its whole rebase frame from the target block's position (see `computeLayer()`).
+/// Descending anywhere else would renumber every suffix at that depth.
+/// That orphans every deeper `mod_store` key.
+/// Keeping the block means the way deeper is the way you came.
 pub const AscentStep = struct {
     /// The chunk at the DEEPER depth to come back to, and where in it the player stood.
     ///
@@ -719,23 +721,23 @@ pub inline fn frontier() u64 {
     return @max(memory.game.max_depth_reached, memory.game.depth);
 }
 
-/// Whether the current depth is above the frontier, so its edits stay local to it.
+/// Whether the current depth is shallower than the frontier, so its edits stay local to it.
 ///
 /// The player has already descended past this depth,
-/// so the depths below it hold the material they inherited at that moment.
+/// so the deeper depths hold the material they inherited at that moment.
 /// See `legacy_store` for how that material is kept.
-pub inline fn isAboveFrontier() bool {
+pub inline fn isShallowerThanFrontier() bool {
     return memory.game.depth < frontier();
 }
 
 /// The deepest depth the player has reached.
-/// Retrace is the only descent above the frontier, so this also equals
+/// Retrace is the only descent from shallower than the frontier, so this also equals
 /// `game.depth + ascent_stack.items.len` during play.
 pub inline fn deepestDepth() u64 {
     return frontier();
 }
 
-/// Whether there is a depth above the current one to ascend into.
+/// Whether there is a shallower depth to ascend into.
 pub inline fn canAscend() bool {
     return memory.game.depth > STARTING_ZOOM_TIMES;
 }
@@ -1960,11 +1962,16 @@ pub const QuadCache = struct {
             return self.path_hashes.value[quadrant];
         }
 
-        // below or at HORIZON_DEPTH there's simply no coordinate rebasing
+        // at or shallower than HORIZON_DEPTH there's simply no coordinate rebasing.
         if (depth <= dw.HORIZON_DEPTH) {
             return memory.game.seed;
         }
 
+        // The ring aliases every HISTORY_LEN depths, so only a depth inside the live
+        // window names its own slot. A caller outside the window would read another
+        // depth's seeds and generate a different world for the same address.
+        std.debug.assert(depth < memory.game.depth);
+        std.debug.assert(memory.game.depth - depth <= dw.HORIZON_DEPTH);
         return self.historical_seeds[@intCast(depth % HISTORY_LEN)].value[quadrant];
     }
 
@@ -5030,7 +5037,7 @@ test "frozen ancestry: an edit below the frontier is playable at its own depth" 
     const shallow = STARTING_ZOOM_TIMES + 1;
     memory.game.depth = shallow;
     memory.game.max_depth_reached = shallow + 100;
-    try testing.expect(isAboveFrontier());
+    try testing.expect(isShallowerThanFrontier());
 
     const key: DepthCoordinate = .{ .suffix = .{ 3, 4 }, .depth = shallow, .quadrant = 0 };
     try testing.expectEqual(@as(u64, shallow + 100), frontier());
