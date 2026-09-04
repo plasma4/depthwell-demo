@@ -82,7 +82,7 @@ const IndicatorKind = enum {
             .basic_core, .core1, .core2, .core3, .core4 => .corecraft,
             .chest => .loot,
             .portal => .portal,
-            // at the base depth there is nothing above to ascend into
+            // at the base depth there is no shallower depth to ascend into
             .invportal => if (dw.world.canAscend()) .invportal else null,
             else => null,
         };
@@ -128,9 +128,9 @@ const IndicatorKind = enum {
     /// Runs what clicking this indicator does, for kinds that act instead of toggling a menu.
     fn activate(self: IndicatorKind, ref: BlockRef) void {
         switch (self) {
-            // Above the frontier a portal walks the last ascent back instead of entering itself,
+            // Shallower than the frontier, a portal walks the last ascent back instead of entering itself,
             // landing on the portal that ascent was taken through.
-            // Entering any other portal would reframe the depth and orphan every key below it
+            // Entering any other portal would reframe the depth and orphan every key deeper than it
             // (see world.AscentStep), so all of them serve the recorded route equally.
             .portal => if (dw.world.canRetrace())
                 dw.portal.triggerReturn(ref.coord, ref.bx, ref.by)
