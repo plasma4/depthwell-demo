@@ -1,7 +1,6 @@
 //! Draws visual indicators above certain block types and routes indicator clicks to their menus.
 //!
-//! One block window scan feeds both the per-frame drawing pass and the hover test;
-//! see `scanIndicators()`.
+//! One block window scan feeds both the per-frame drawing pass and the hover test; see `scanIndicators()`.
 //! So the drawn icon and its clickable hitbox can never drift apart.
 const std = @import("std");
 const dw = @import("../root.zig");
@@ -82,7 +81,7 @@ const IndicatorKind = enum {
             .basic_core, .core1, .core2, .core3, .core4 => .corecraft,
             .chest => .loot,
             .portal => .portal,
-            // at the base depth there is nothing above to ascend into
+            // at the base depth there is no shallower depth to ascend into
             .invportal => if (dw.world.canAscend()) .invportal else null,
             else => null,
         };
@@ -109,9 +108,10 @@ const IndicatorKind = enum {
         };
     }
 
-    /// Whether clicking this indicator does anything, for the block it sits on this frame.
+    /// Whether clicking this indicator does anything.
     ///
-    /// Every depth is fully playable, so each indicator is live at each depth.
+    /// Every depth is fully playable, so each indicator is live at each depth, and `ref` is not read.
+    /// It stays in the signature because a per-block rule would need it and both visitors already pass it.
     fn clickableAt(self: IndicatorKind, ref: BlockRef) bool {
         _ = ref;
         return self == .portal or self == .invportal or self.menuFlag() != null;
@@ -128,9 +128,9 @@ const IndicatorKind = enum {
     /// Runs what clicking this indicator does, for kinds that act instead of toggling a menu.
     fn activate(self: IndicatorKind, ref: BlockRef) void {
         switch (self) {
-            // Above the frontier a portal walks the last ascent back instead of entering itself,
+            // Shallower than the frontier, a portal walks the last ascent back instead of entering itself,
             // landing on the portal that ascent was taken through.
-            // Entering any other portal would reframe the depth and orphan every key below it
+            // Entering any other portal would reframe the depth and orphan every key deeper than it
             // (see world.AscentStep), so all of them serve the recorded route equally.
             .portal => if (dw.world.canRetrace())
                 dw.portal.triggerReturn(ref.coord, ref.bx, ref.by)
@@ -203,7 +203,8 @@ fn cameraView() CameraView {
 }
 
 /// Computes an indicator's on-screen geometry for a block at the given chunk-relative cell.
-/// Returns null when the block is too far away (>= 5 blocks) to display an icon.
+/// Returns null when the block sits at or past this kind's `maxBlockDistance()`,
+/// which is where its icon stops being drawn and stops being clickable.
 fn indicatorGeom(
     view: CameraView,
     kind: IndicatorKind,

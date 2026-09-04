@@ -139,7 +139,7 @@ pub const AncestorCache = struct {
     };
 
     /// Maps a cache key to its tier distance from the current depth (0 = current depth).
-    /// Callers guarantee the key sits above the horizon, so the distance is always < `NUM_TIERS`.
+    /// Callers guarantee the key is no shallower than the horizon, so the distance is always < `NUM_TIERS`.
     inline fn relativeTier(depth: u64) usize {
         const rel = memory.game.depth - depth;
         std.debug.assert(rel < NUM_TIERS);
@@ -748,7 +748,7 @@ const ChunkNoise = struct {
     noise_seed: dw.utils.Vec2u,
 };
 
-/// Single-entry memo of `chunkNoise()`.
+/// Single-entry cache for `chunkNoise()`.
 /// One entry is enough, because generation walks a chunk to completion before the next one.
 /// `world.clearCaches()` drops it, since a reseed leaves the same key naming different seeds.
 var chunk_noise_key: DepthCoordinate = DepthCoordinate.invalid;
@@ -1079,7 +1079,7 @@ fn resolveParentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {
             const chunk_off_x = @divFloor(lx, dw.CHUNK_SIZE);
             const chunk_off_y = @divFloor(ly, dw.CHUNK_SIZE);
 
-            // moveAtDepth() returns null only at the world border, where it should be edge_stone
+            // moveAtDepth() returns null only at the world border, where it should be edge_stone.
             // (see world.world_edge_block for why air here would be corrosive)
             const target_nc = coord.moveAtDepth(
                 .{ chunk_off_x, chunk_off_y },
@@ -1105,10 +1105,11 @@ fn resolveParentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {
 /// `resolveParentHood()` through the memo; see `ParentHoodCache`.
 ///
 /// A hood is memoized across player edits, and must stay that way.
-/// `parent_key.depth` is always below `memory.game.depth`, so it is always below the frontier.
-/// A depth below the frontier can no longer gain an edit that travels down.
-/// See `world.legacy_store`.
+/// `parent_key.depth` is always shallower than `memory.game.depth`, so it is always shallower than the frontier.
+/// A depth shallower than the frontier can no longer gain an edit that travels deeper.
 /// The hoods are therefore fixed while the frontier is, and `world.clearCaches()` covers the moment it moves.
+///
+/// See `world.legacy_store`.
 fn parentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {
     // The structural half of the invariant above. The other half is
     // game.depth <= max_depth_reached, which world.commitLayer() keeps.

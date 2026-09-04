@@ -98,13 +98,7 @@ const player_sliders = [_]SliderDef{
         .name = "Base player speed",
         .min = 0.1,
         .max = 10.0,
-        .val = &player.PLAYER_BASE_SPEED,
-    },
-    .{
-        .name = "Ghost speed mult",
-        .min = 1.0,
-        .max = 20.0,
-        .val = &player.GHOST_SPEED_MULT,
+        .val = &player.PLAYER_ACCEL,
     },
     .{
         .name = "Base player gravity",
@@ -118,18 +112,12 @@ const player_sliders = [_]SliderDef{
         .max = 50.0,
         .val = &player.JUMP_FORCE,
     },
-    .{
-        .name = "Friction (x-axis)",
-        .min = 0.0,
-        .max = 1.0,
-        .val = &player.FRICTION_X,
-    },
-    .{
-        .name = "Friction (y-axis)",
-        .min = 0.0,
-        .max = 1.0,
-        .val = &player.FRICTION_Y,
-    },
+    // .{
+    //     .name = "Ghost speed mult",
+    //     .min = 1.0,
+    //     .max = 20.0,
+    //     .val = &player.GHOST_SPEED_MULT,
+    // },
 };
 
 const render_sliders = [_]SliderDef{
@@ -191,7 +179,7 @@ fn teleportToEdge() void {
         .{ .quadrant = 0, .suffix = .{ 0, 0 } },
         .{ dw.CHUNK_SIZE_SQ * 5 / 2, dw.CHUNK_SIZE_SQ * 5 / 2 },
     );
-    main.findSafeSpawn();
+    main.findGroundedSpawn();
 }
 
 fn clearCaches() void {
@@ -228,7 +216,7 @@ fn teleportRandomly() void {
         } },
         .{ 2048, 2048 },
     );
-    main.findSafeSpawn();
+    main.findGroundedSpawn();
 }
 
 /// Handles a slider change to a new specified value.
