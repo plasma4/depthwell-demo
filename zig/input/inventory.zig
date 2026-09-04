@@ -305,12 +305,11 @@ pub fn tickDroppedItems() void {
 
             if (player_coord.move(.{ chunk_dx, chunk_dy })) |new_coord| {
                 item.position = new_coord;
+                const rem_x = next_sp_x - @as(f64, @floatFromInt(chunk_dx)) * 4096.0;
+                const rem_y = next_sp_y - @as(f64, @floatFromInt(chunk_dy)) * 4096.0;
+                item.subpixel_x = @intFromFloat(rem_x);
+                item.subpixel_y = @intFromFloat(rem_y);
             }
-
-            const rem_x = next_sp_x - @as(f64, @floatFromInt(chunk_dx)) * 4096.0;
-            const rem_y = next_sp_y - @as(f64, @floatFromInt(chunk_dy)) * 4096.0;
-            item.subpixel_x = @intFromFloat(rem_x);
-            item.subpixel_y = @intFromFloat(rem_y);
 
             item.frames_left -= 1;
         }

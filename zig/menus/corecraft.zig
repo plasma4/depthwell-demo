@@ -129,7 +129,7 @@ fn doCraft(recipe: Recipe) void {
     std.debug.assert(canCraft(recipe));
     if (!inventory.isInCreative()) {
         for (recipe.inputs) |in| {
-            inventory.inventory_counts[@intFromEnum(in.item)] -= in.count;
+            _ = inventory.removeFromInventory(in.item, in.count);
         }
     }
 

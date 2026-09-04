@@ -76,6 +76,10 @@ There are 16 subpixels in a pixel, on each axis. The same 16 repeats at every le
 - 1 pixel = 16 subpixels
 - 1 block = 16 pixels
 - 1 chunk = 16 blocks = 256 pixels = 4,096 subpixels
+- Increasing a depth by 1 would be called D+1; decreasing D-1.
+    - Deeper and descend mean increasing the depth, typically by 1
+    - Shallower and ascend mean decreasing the depth, also typically by 1
+    - When describing physical position within a depth, standard relative terms like "above/below" or "rise/fall/climb" are used to prevent confusion with depth-related terminology.
 
 `CHUNK_SIZE` in `zig/root.zig` is that shared 16. `CHUNK_SIZE_SQ` is 256 and `SUBPIXELS_IN_CHUNK` is 4,096. Player X and Y are subpixels and wrap inside `[0, 4095]`.
 
@@ -247,7 +251,7 @@ The pass finishes by setting `edge_flags` on every decoration to `0xFF`, so the 
 
 The real initial blocker for this game is figuring out an algorithm that makes blocks and structures at D _visually consistent_ at D+1, scaling things by $4\times$, and doing this recursively!
 
-`zig/state/ancestor.zig` and `zig/state/refine.zig` are the files that handle this higher-depth behavior. To build a chunk at D, the generator walks up through the parents from D-1 toward H. At each level it asks the `ModificationStore` and the `AncestorCache` whether the parent block was modified. At H it stops asking about chunks and reads the `QuadCache` material grid instead.
+`zig/state/ancestor.zig` and `zig/state/refine.zig` are the files that handle this deeper-depth behavior. To build a chunk at D, the generator walks up through the parents from D-1 toward H. At each level it asks the `ModificationStore` and the `AncestorCache` whether the parent block was modified. At H it stops asking about chunks and reads the `QuadCache` material grid instead.
 
 **Materialize is not the same as generate.** `generateChunk()` is pure procedure that ignores user modifications. `materializeChunk()` is that plus every `mod_store` edit replayed plus a flag recompute. It is the only supported way to turn a store entry into a `Chunk`!
 
@@ -370,7 +374,7 @@ Every cache is a fixed-size static array, so its worst case is its only case!
 | Cache variable name  | Bytes                                          |
 | -------------------- | ---------------------------------------------- |
 | `ancestor_cache`     | 2 MiB                                          |
-| `chunk_pool`         | 1 MiB (9 MiB with huge dev menu camera cap)    |
+| `chunk_pool`         | 1 MiB (9 MiB with dev menu camera cap)         |
 | `base_terrain_cache` | 512 KiB                                        |
 | `foundation_cache`   | 512 KiB                                        |
 | `struct_cache`       | 512 KiB                                        |

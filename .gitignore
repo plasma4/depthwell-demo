@@ -6,17 +6,15 @@
 /compile_commands.json
 **/.DS_Store
 
-
 /aseprite/*.aseprite
 !/aseprite/main.aseprite
 /zig-out
 /zig-pkg
 
+/.claude
+/.scratch
 /docs
 /skills
 /AGENTS.md
 /CLAUDE.md
-/.claude
-/.aider.conf.yml
-/.aider.chat.history.md
-/.aider.input.history
+/DESIGN.md
