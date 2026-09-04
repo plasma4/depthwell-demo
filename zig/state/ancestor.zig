@@ -139,7 +139,7 @@ pub const AncestorCache = struct {
     };
 
     /// Maps a cache key to its tier distance from the current depth (0 = current depth).
-    /// Callers guarantee the key sits above the horizon, so the distance is always < `NUM_TIERS`.
+    /// Callers guarantee the key is no shallower than the horizon, so the distance is always < `NUM_TIERS`.
     inline fn relativeTier(depth: u64) usize {
         const rel = memory.game.depth - depth;
         std.debug.assert(rel < NUM_TIERS);
@@ -1105,8 +1105,8 @@ fn resolveParentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {
 /// `resolveParentHood()` through the memo; see `ParentHoodCache`.
 ///
 /// A hood is memoized across player edits, and must stay that way.
-/// `parent_key.depth` is always below `memory.game.depth`, so it is always below the frontier.
-/// A depth below the frontier can no longer gain an edit that travels down.
+/// `parent_key.depth` is always shallower than `memory.game.depth`, so it is always shallower than the frontier.
+/// A depth shallower than the frontier can no longer gain an edit that travels deeper.
 /// See `world.legacy_store`.
 /// The hoods are therefore fixed while the frontier is, and `world.clearCaches()` covers the moment it moves.
 fn parentHood(parent_key: DepthCoordinate, bx: u4, by: u4) ParentHood {

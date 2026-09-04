@@ -134,7 +134,7 @@ pub fn init(new_game: bool) void {
     world.quad_cache.path_hashes.value[0] = memory.game.seed;
 
     if (SET_PLAYER_SPAWN_RANDOMLY) {
-        findSafeSpawn();
+        findGroundedSpawn();
         // findSafeSpawn() fills the live buffer before it selects this position!
         _ = dw.player.escapeSolid();
     }
@@ -143,12 +143,15 @@ pub fn init(new_game: bool) void {
 /// Maximum chunk distance from the spawn center that the loaded window can contain.
 const SPAWN_SEARCH_RADIUS_CHUNKS: i64 = @intCast(world.SIM_BUFFER_WIDTH / 2);
 
-/// Finds a safe grounded spawn in the loaded simulation window.
+/// Finds a safe grounded spawn in the loaded simulation window. A safe spawn is both:
+/// - grounded (has floor directly beneath it)
+/// - non-softlocking
+/// This function only focuses on the first requirement, with `init()` calling `escapeSolid()`.
 ///
 /// This fills and scans at most one `SimBuffer` window.
 /// It must not generate an unbounded spiral of chunks during a new game or debug teleport.
 /// The later `escapeSolid()` check handles the rare case where this window has no grounded cell.
-pub fn findSafeSpawn() void {
+pub fn findGroundedSpawn() void {
     const game = &memory.game;
     const start_coord = game.getPlayerCoord();
 
