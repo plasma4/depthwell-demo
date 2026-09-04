@@ -4,8 +4,7 @@
 //! (which survives minification as a nice bonus).
 //!
 //! `zig build` runs this automatically; see `generateShaderConstants()` in `build.zig`.
-//! A content hash of the source files guards it, so an unrelated change does not
-//! rebuild this host tool.
+//! A content hash of the source files guards it, so an unrelated change does not rebuild this host tool.
 const std = @import("std");
 
 /// Points to definitions from zig/root.zig.

@@ -287,25 +287,20 @@ pub fn getMouseBlock() ?memory.Block {
         const loc = (mouse_subpixel.? / dw.utils.Vec2u{ dw.CHUNK_SIZE, dw.CHUNK_SIZE }) %
             dw.utils.Vec2u{ dw.CHUNK_SIZE, dw.CHUNK_SIZE };
 
-        const hitbox = s.props().hitbox;
         // create smaller hitboxes for some decor sprites (with a little bit of leniency involved still)
-        if (hitbox == .square_bottom_decor and (loc[0] < 3 or loc[0] >= 13 or loc[1] <= 3)) {
-            // some sprites small tree don't take up full horizontal space
-            return null;
-        } else if (hitbox == .small_bottom_decor and loc[1] <= 9) {
+        // one chain over one value: each arm rejects the part of the block its sprite does not fill
+        switch (s.props().hitbox) {
+            // a small tree and its kin do not fill the block horizontally
+            .square_bottom_decor => if (loc[0] < 3 or loc[0] >= 13 or loc[1] <= 3) return null,
             // if your mouse is over the TOP PART of the mushroom block then that's not part of its "hitbox"
-            return null;
-        }
-        if (hitbox == .large_bottom_decor and loc[1] <= 5) {
+            .small_bottom_decor => if (loc[1] <= 9) return null,
             // similar to mushroom but greater valid area, such as for bushes
-            return null;
-        } else if (hitbox == .ceiling_decor and loc[1] >= 9) {
+            .large_bottom_decor => if (loc[1] <= 5) return null,
             // for ceiling flower, it's invalid if your mouse is over the BOTTOM PART instead
-            return null;
-        } else if (hitbox == .thin_strip and (loc[0] < 4 or loc[0] >= 12)) {
-            // plant is fully vertical
-            // allow x=0,1,2,3 or 12,13,14,15
-            return null;
+            .ceiling_decor => if (loc[1] >= 9) return null,
+            // plant is fully vertical, so allow x=4..11 only
+            .thin_strip => if (loc[0] < 4 or loc[0] >= 12) return null,
+            else => {},
         }
 
         // any other type of block returns true by default!

@@ -873,7 +873,7 @@ fn deserialize(buf: []const u8) !void {
 
     // A save from before the frontier existed carries neither the counter nor a `legacy_store`,
     // which is exactly a world that has only ever had one timeline.
-    // Retrace is the only descent above the frontier, so the ascent stack gives the right value.
+    // Retrace is the only descent from shallower than the frontier, so the ascent stack gives the right value.
     memory.game.max_depth_reached = @max(
         memory.game.max_depth_reached,
         memory.game.depth + world.ascent_stack.items.len,

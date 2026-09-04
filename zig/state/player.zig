@@ -14,48 +14,60 @@ const SUBPIXELS_IN_CHUNK = dw.SUBPIXELS_IN_CHUNK;
 const Vec2i = dw.utils.Vec2i;
 const Vec2f = dw.utils.Vec2f;
 
+// ----
+// NOTE: for consistency and simplicity's sake, this specific file puts the units or qualifiers last, sorted by descending significance, so that the variable starts with the most significant word, and ends with the least significant word.
+// This rule is inspired by TigerBeetle's style guide, so things will be named DECAY_MS_MAX instead of MAX_DECAY_MS.
+// The rules are a lot lax elsewhere because X/Y are typically scoped locally and style consistency's benefits are a lot lesser.
+// ----
+
 /// Minimum camera zoom/scale allowed. This is strategically calculated to make sure the default render distance is safe.
 /// The `SimBuffer` size automatically adjusts when setting this to a very small value.
 ///
 /// Setting this to a very small value is useful for testing cache validity or overall performance, however.
-pub const CAMERA_MIN_ZOOM = if (dw.dev_menu) 0.05 else 0.5;
+pub const CAMERA_ZOOM_MIN = if (dw.dev_menu) 0.05 else 0.5;
 /// Maximum camera zoom/scale allowed. This is strategically calculated to make sure the player always remains in the viewport.
 /// Any more and it would look weird, and camera deadzone would start to no longer work.
-pub const CAMERA_MAX_ZOOM = 1.5; // 150%
+pub const CAMERA_ZOOM_MAX = 1.5; // 150%
 /// Camera scale the game starts at.
 pub const STARTING_CAMERA_SCALE = 1.0; // 100%
 
-/// The base speed of the player.
-pub var PLAYER_BASE_SPEED: f64 = 0.60;
 /// How much faster the player moves in ghost mode. Applies to all four directions.
 pub var GHOST_SPEED_MULT: f64 = 3.0;
 
-/// Whether the player flies and goes through blocks.
-pub inline fn isGhost() bool {
-    return dw.inventory.isInCreative();
-}
+/// The base (X-axis) acceleration value of the player.
+/// Top speed is `PLAYER_ACCEL * (1 - DECAY_RATE_ACCEL_X) / DECAY_RATE_ACCEL_X`,
+/// so changing either one moves the top speed.
+pub var PLAYER_ACCEL: f64 = 2.00;
+/// Decay rate of player movement (horizontal), multiplies X speed by (1.0 - this value).
+/// When horizontal movement keys are lifted, the `DECEL` variant is used instead.
+pub var DECAY_RATE_ACCEL_X: f64 = 0.500;
+/// Decay rate of player movement (horizontal), multiplies X speed by (1.0 - this value).
+/// When horizontal movement keys are held, the `ACCEL` variant is used instead.
+pub var DECAY_RATE_DECEL_X: f64 = 0.200;
 
-/// The speed the player moves at this tick, in subpixels.
-inline fn currentSpeed() f64 {
-    return if (isGhost()) PLAYER_BASE_SPEED * GHOST_SPEED_MULT else PLAYER_BASE_SPEED;
-}
 /// How strong the gravity is.
-pub var GRAVITY: f64 = 0.25;
-/// How high the player jumps.
-pub var JUMP_FORCE: f64 = 5.00;
-/// Friction of player movement (horizontal).
-pub var FRICTION_X: f64 = 0.200;
-/// Friction of player movement (vertical).
-pub var FRICTION_Y: f64 = 0.025;
-/// How many frames the player can still jump after leaving a ledge.
-const COYOTE_TIME_FRAMES: u8 = 3;
+pub var GRAVITY: f64 = 0.24;
+/// Controls how strong the jump is.
+pub var JUMP_FORCE: f64 = 6.00;
+/// Size of the apex window, in velocity units.
+/// Inside it, with the jump key held, gravity is multiplied by 60%.
+pub var REDUCED_GRAVITY_RANGE: f64 = 0.50;
+/// Decay rate of player movement (vertical), multiplies Y speed by (1.0 - this value).
+pub var DECAY_RATE_Y: f64 = 0.03;
 
 /// The size of the player's width. The player is assumed to be centered at the bottom as a rectangle.
 pub const PLAYER_HITBOX_WIDTH = 160;
 /// The size of the player's height. The player is assumed to be centered at the bottom as a rectangle.
 pub const PLAYER_HITBOX_HEIGHT = 200;
 /// Prevent block-skipping with collisions when travelling quickly.
+/// One block per step. `moveAxis()` needs this to be no smaller than the hitbox,
+/// or a sweep could straddle a solid block without any corner landing inside it.
 const CCD_STEP_SIZE = CHUNK_SIZE_SQ;
+
+comptime {
+    if (PLAYER_HITBOX_WIDTH > CCD_STEP_SIZE or PLAYER_HITBOX_HEIGHT > CCD_STEP_SIZE)
+        @compileError("The hitbox must not be larger than one CCD_STEP_SIZE sweep step.");
+}
 
 /// The zoom in/out keys change the zoom multiplier this fast per frame.
 const CAMERA_CHANGE_SPEED = if (dw.dev_menu) 1.04 else 1.025;
@@ -73,6 +85,39 @@ pub var subpixel_accum: Vec2f = .{ 0.0, 0.0 }; // note that vectors are smartly 
 /// Determines if the player is on the ground.
 var is_grounded: bool = false;
 
+// These values are floats because logic_speed-as-a-float "taints" this component.
+// Given logic_speed is typically 1.0 this is just fine. Frames represent logical frames at 60FPS.
+// The CAPITALIZED_VARIANTS are the tuned values, while the lowercase_variants are for live state decrementing.
+
+/// A value of 1 = only one jump, 2 = player can double jump, and so on.
+const MAX_JUMPS: u8 = 1;
+/// How many frames the player can still jump after leaving a ledge.
+const COYOTE_FRAMES: u8 = 5;
+/// How many frames a jump button press is kept as soon as the ground is hit.
+const JUMP_LENIENCY_FRAMES: u8 = 10;
+
+/// Jumps left before the player must touch the ground again. Refilled by `is_grounded`.
+var jumps_left: u8 = MAX_JUMPS;
+/// Frames remaining for coyote time jump.
+var coyote_frames: f64 = 0;
+/// Leniency frames.
+var jump_leniency_frames: f64 = 0;
+
+/// The jump key state from the previous tick, for finding the press edge.
+/// `keys_pressed_mask` cannot do this: `src/engine.ts` writes it once per render frame,
+/// and `handleTick()` can run several ticks inside one frame.
+var up_was_held: bool = false;
+
+/// Whether the player flies and goes through blocks.
+pub inline fn isGhost() bool {
+    return dw.inventory.isInCreative();
+}
+
+/// The X acceleration input for this tick. Not a speed: see `PLAYER_ACCEL`.
+inline fn currentSpeed() f64 {
+    return if (isGhost()) PLAYER_ACCEL * GHOST_SPEED_MULT else PLAYER_ACCEL;
+}
+
 /// Drops the airborne/jump bookkeeping, for teleports that skip `move()` entirely.
 /// A portal descent freezes movement for its whole length,
 /// so without this the coyote window from before the descent survives it.
@@ -80,10 +125,9 @@ pub fn resetMotionState() void {
     is_grounded = false;
     coyote_frames = 0;
     subpixel_accum = .{ 0.0, 0.0 };
+    jumps_left = MAX_JUMPS;
+    jump_leniency_frames = 0;
 }
-
-/// Frames remaining for coyote time jump.
-var coyote_frames: u8 = 0;
 
 const Sprite = dw.Sprite;
 
@@ -293,66 +337,115 @@ pub fn drawPlayerEntity() void {
 }
 
 /// Moves the player, handling camera changes.
+/// `logic_speed` should be 1 at a 60FPS default and is unrelated to frame drop correction.
 pub fn move(logic_speed: f64) void {
     const game = &memory.game;
-    const dt = logic_speed;
 
     // handle camera zoom (.pow is safe here despite being inconsistent on different devices)
     const old_camera_scale = game.camera_scale;
     if (KeyBits.isSet(KeyBits.plus, game.keys_held_mask)) {
-        game.camera_scale = @min(game.camera_scale * std.math.pow(f64, CAMERA_CHANGE_SPEED, dt), CAMERA_MAX_ZOOM);
+        game.camera_scale = @min(game.camera_scale * std.math.pow(f64, CAMERA_CHANGE_SPEED, logic_speed), CAMERA_ZOOM_MAX);
     }
     if (KeyBits.isSet(KeyBits.minus, game.keys_held_mask)) {
-        game.camera_scale = @max(game.camera_scale / std.math.pow(f64, CAMERA_CHANGE_SPEED, dt), CAMERA_MIN_ZOOM);
+        game.camera_scale = @max(game.camera_scale / std.math.pow(f64, CAMERA_CHANGE_SPEED, logic_speed), CAMERA_ZOOM_MIN);
     }
     game.camera_scale_change = game.camera_scale / old_camera_scale;
 
     // Analytical velocity (basic damped linear system)
     const speed = currentSpeed();
     var move_input: f64 = 0;
-    if (KeyBits.isSet(KeyBits.left, game.keys_held_mask)) move_input -= speed;
-    if (KeyBits.isSet(KeyBits.right, game.keys_held_mask)) move_input += speed;
+    const left_key_held = KeyBits.isSet(KeyBits.left, game.keys_held_mask);
+    const right_key_held = KeyBits.isSet(KeyBits.right, game.keys_held_mask);
+    if (left_key_held) move_input -= speed;
+    if (right_key_held) move_input += speed;
 
-    const x_mult = 1.0 - FRICTION_X;
-    const y_mult = 1.0 - FRICTION_Y;
-    const pow_fx = std.math.pow(f64, x_mult, dt);
-    const pow_fy = std.math.pow(f64, y_mult, dt);
+    const decay_rate_x = if (left_key_held or right_key_held) DECAY_RATE_ACCEL_X else DECAY_RATE_DECEL_X;
+    const x_mult = 1.0 - decay_rate_x;
+    const y_mult = 1.0 - DECAY_RATE_Y;
+    const pow_fx = std.math.pow(f64, x_mult, logic_speed);
+    const pow_fy = std.math.pow(f64, y_mult, logic_speed);
 
-    // Update x-velocity
+    // Update X-velocity
     game.player_velocity[0] = game.player_velocity[0] * pow_fx;
-    if (FRICTION_X < 1e-4) {
-        // acts like a frictionless surface
-        game.player_velocity[0] +=
-            move_input * x_mult;
-    } else {
-        game.player_velocity[0] +=
-            (move_input * x_mult * (1.0 - pow_fx) / FRICTION_X);
-    }
+    game.player_velocity[0] += move_input * x_mult * (1.0 - pow_fx) / decay_rate_x;
 
-    // Update y velocity with gravity.
+    const up_key_held = KeyBits.isSet(KeyBits.up, game.keys_held_mask);
+    const up_key_pressed = up_key_held and !up_was_held; // see up_was_held definition for reasoning
+    defer up_was_held = up_key_held;
+
+    const jump_requested = up_key_pressed or jump_leniency_frames > 0;
+    const can_ground_jump = coyote_frames > 0 and jumps_left > 0;
+    const can_air_jump = jumps_left < MAX_JUMPS and jumps_left > 0;
+
+    var jumped_this_frame = false;
+
+    // Update Y velocity with gravity.
     //
-    // Ghost mode flies instead, with `isColliding()` giving way below.
+    // Ghost mode flies instead, with isColliding() giving way below.
     // Vertical flight uses the X friction constants on purpose: the Y ones model falling.
     if (isGhost()) {
+        // standard ghost "flying" movement
         var lift: f64 = 0;
         if (KeyBits.isSet(KeyBits.up, game.keys_held_mask)) lift -= speed;
         if (KeyBits.isSet(KeyBits.down, game.keys_held_mask)) lift += speed;
         game.player_velocity[1] = game.player_velocity[1] * pow_fx;
-        game.player_velocity[1] += if (FRICTION_X < 1e-4)
+        game.player_velocity[1] += if (DECAY_RATE_ACCEL_X < 1e-4)
             lift * x_mult
         else
-            (lift * x_mult * (1.0 - pow_fx) / FRICTION_X);
-    } else if (coyote_frames > 0 and KeyBits.isSet(KeyBits.up, game.keys_held_mask)) {
+            (lift * x_mult * (1.0 - pow_fx) / DECAY_RATE_ACCEL_X);
+    } else if (jump_requested and (can_ground_jump or can_air_jump)) {
+        // normal jump
         game.player_velocity[1] = -JUMP_FORCE;
-        is_grounded = false;
+        jumps_left -= 1;
+
+        jump_leniency_frames = 0;
+        jumped_this_frame = true;
+
+        // prevent the same ground/coyote window from being reused
         coyote_frames = 0;
     } else {
-        game.player_velocity[1] = game.player_velocity[1] * pow_fy;
-        game.player_velocity[1] += if (FRICTION_Y < 1e-4) GRAVITY * y_mult else ((GRAVITY * y_mult * (1.0 - pow_fy) / FRICTION_Y));
+        // No jump this tick, so gravity runs. Negative y velocity is UP, positive is DOWN.
+        //
+        // Jump height follows how long the key stays down, about 1.3 blocks for a tap
+        // and about 3.0 blocks for a full hold. Two brakes do that, and both are off while
+        // the key is held: a gravity multiplier, and a constant cut taken off upward speed.
+
+        // Decay first, then gravity. The (1 - pow_fy) / DECAY_RATE_Y factor integrates a constant
+        // acceleration under that decay, so one tick at logic_speed 2 lands where two ticks at 1 do.
+        var y_vel = game.player_velocity[1] * pow_fy;
+
+        // Gravity strength by arc phase:
+        // - near the apex, key down    0.60  hang time over the top of the jump.
+        // - near the apex, key up      1.00  no brake through the turn, so the arc has no kink.
+        // - rising, key up             1.80  ends the rise early, which is the short jump.
+        // - falling under 3.0, key up  1.20  a snappier drop back to the ground.
+        // - everything else            1.00  key still down, or already falling fast.
+        const gravity_mult: f64 = if (@abs(y_vel) < REDUCED_GRAVITY_RANGE)
+            (if (up_key_held) 0.6 else 1.0)
+        else if (up_key_held or y_vel > 3.0)
+            1.0
+        else if (y_vel >= 0)
+            1.20
+        else
+            1.8;
+        y_vel += (GRAVITY * y_mult * (1.0 - pow_fy) / DECAY_RATE_Y) * gravity_mult;
+
+        // The second brake on a released jump. The multiplier above scales with current speed,
+        // so additional linear logic helps keep a "baseline" that forces the player to fall faster.
+        const LINEAR_Y_DECAY = 0.2 * logic_speed;
+        if (y_vel <= -LINEAR_Y_DECAY and !up_key_held) {
+            y_vel += LINEAR_Y_DECAY;
+        }
+
+        // Terminal velocity, about 28 blocks per second.
+        // Decay alone would settle at ~7.76, so this cap only trims the last of that creep.
+        y_vel = @min(y_vel, 7.5);
+
+        game.player_velocity[1] = y_vel;
     }
 
     // Physics displacement using average velocity!
-    const displacement = game.player_velocity * @as(Vec2f, @splat(dt * dw.CHUNK_SIZE_FLOAT));
+    const displacement = game.player_velocity * @as(Vec2f, @splat(logic_speed * dw.CHUNK_SIZE_FLOAT));
     subpixel_accum += displacement;
 
     const total_move: Vec2i = @intFromFloat(@floor(subpixel_accum));
@@ -360,64 +453,75 @@ pub fn move(logic_speed: f64) void {
 
     game.last_player_pos = game.player_pos;
 
-    // vertical CCD
-    is_grounded = false;
-    var rem_y = @abs(total_move[1]);
-    const step_y = if (total_move[1] > 0) @as(i64, 1) else -1;
-    while (rem_y > 0) {
-        const move_now = @min(rem_y, CCD_STEP_SIZE);
-        if (!isColliding(game.player_pos[0], game.player_pos[1] + (step_y * move_now))) {
-            game.player_pos[1] += step_y * move_now;
-            if (handleLocalWrap(1)) break;
-            rem_y -= move_now;
-        } else {
-            // Perfect snap: Move 1 pixel at a time until contact
-            var sub_steps = move_now;
-            while (sub_steps > 0) : (sub_steps -= 1) {
-                if (!isColliding(game.player_pos[0], game.player_pos[1] + step_y)) {
-                    game.player_pos[1] += step_y;
-                    if (handleLocalWrap(1)) break;
-                } else break;
-            }
-            if (step_y > 0) is_grounded = true;
-            game.player_velocity[1] = 0;
-            subpixel_accum[1] = 0;
-            break;
-        }
-    }
+    // Vertical first, then horizontal, with the ground test between them.
+    // So a player who walks off a ledge is still grounded for the tick that leaves it,
+    // and coyote time starts on the tick after.
+    moveAxis(1, total_move[1]);
+
+    is_grounded = isColliding(game.player_pos[0], game.player_pos[1] + 1);
 
     if (is_grounded) {
-        coyote_frames = COYOTE_TIME_FRAMES;
+        coyote_frames = COYOTE_FRAMES;
+        jumps_left = MAX_JUMPS;
     } else if (coyote_frames > 0) {
-        coyote_frames -= 1;
+        coyote_frames -= logic_speed; // this CAN be negative!
     }
 
-    // Now do horizontal CCD
-    var rem_x = @abs(total_move[0]);
-    const step_x = if (total_move[0] > 0) @as(i64, 1) else -1;
-    while (rem_x > 0) {
-        const move_now = @min(rem_x, CCD_STEP_SIZE);
-        if (!isColliding(game.player_pos[0] + (step_x * move_now), game.player_pos[1])) {
-            game.player_pos[0] += step_x * move_now;
-            if (handleLocalWrap(0)) break;
-            rem_x -= move_now;
-        } else {
-            var sub_steps = move_now;
-            while (sub_steps > 0) : (sub_steps -= 1) {
-                if (!isColliding(game.player_pos[0] + step_x, game.player_pos[1])) {
-                    game.player_pos[0] += step_x;
-                    if (handleLocalWrap(0)) break;
-                } else break;
-            }
-            game.player_velocity[0] = 0;
-            subpixel_accum[0] = 0;
-            break;
-        }
+    std.debug.assert(jumps_left >= 0); // sanity check
+    if (up_key_pressed and !jumped_this_frame) {
+        jump_leniency_frames = JUMP_LENIENCY_FRAMES;
+    } else if (jump_leniency_frames > 0) {
+        jump_leniency_frames -= logic_speed; // this CAN be negative!
     }
+
+    moveAxis(0, total_move[0]);
 
     // Finally, tell SimBuffer and the camera to update.
     world.SimBuffer.sync(game.getPlayerCoord());
-    updateCamera(dt);
+    updateCamera(logic_speed);
+}
+
+/// Returns whether the player hitbox collides after one axis moves by `delta` subpixels.
+inline fn isCollidingOffset(comptime axis: u1, delta: i64) bool {
+    const game = &memory.game;
+    return if (axis == 0)
+        isColliding(game.player_pos[0] + delta, game.player_pos[1])
+    else
+        isColliding(game.player_pos[0], game.player_pos[1] + delta);
+}
+
+/// Sweeps the player along one axis by `amount` subpixels and stops at the first contact.
+///
+/// The sweep steps one block at a time, then one subpixel at a time to close the last gap.
+/// It cannot pass through a solid block, because `CCD_STEP_SIZE` is one block
+/// and the hitbox is never larger than one block on either axis.
+/// A contact takes this axis' velocity and its subpixel remainder,
+/// so a player held against a wall does not build speed into it.
+fn moveAxis(comptime axis: u1, amount: i64) void {
+    const game = &memory.game;
+    var remaining = @abs(amount);
+    const step: i64 = if (amount > 0) 1 else -1;
+
+    while (remaining > 0) {
+        const move_now = @min(remaining, CCD_STEP_SIZE);
+        if (!isCollidingOffset(axis, step * move_now)) {
+            game.player_pos[axis] += step * move_now;
+            if (handleLocalWrap(axis)) break;
+            remaining -= move_now;
+            continue;
+        }
+
+        // Something solid is inside this step. Walk up to it one subpixel at a time.
+        var sub_steps = move_now;
+        while (sub_steps > 0) : (sub_steps -= 1) {
+            if (isCollidingOffset(axis, step)) break;
+            game.player_pos[axis] += step;
+            if (handleLocalWrap(axis)) break;
+        }
+        game.player_velocity[axis] = 0;
+        subpixel_accum[axis] = 0;
+        break;
+    }
 }
 
 /// Carries `game.player_pos` into the neighboring chunk once it leaves `[0, SUBPIXELS_IN_CHUNK)`,
@@ -554,20 +658,24 @@ fn placementCanChangeEscape(cells: []const PendingPlacement) bool {
 }
 
 /// Corrects a bounded softlock with an orthogonal reachability search.
+/// This exists because the player can potentially access placeable but un-mineable materials,
+/// such as items from a chest.
+/// The player can place these items to create a "malicious" softlock;
+/// separate to this, there is a tiny probability an unlucky spawn softlocks the player.
 ///
-/// Each node is the player hitbox moved one block from the landing point.
-/// A node is passable when every solid corner block can be broken by the active tool.
+/// Each node is the player hitbox moved a whole number of blocks from the current position.
+/// A node is passable when the active tool can break every solid block the hitbox touches.
 /// The search starts at the player and proves escape when it reaches the `MAX_ESCAPE_BLOCKS` ring.
 /// A diagonal does not connect, because the player cannot pass through a shared corner.
-/// When trapped, the correction picks the closest clear or mineable landing in the exterior component.
+/// When trapped, the player moves to the landing that `nearestExteriorLanding()` picks.
 ///
-/// This is deliberately a bounded epsilon check, not a proof about the full procedural world.
-/// It catches every immutable enclosure contained in the square, including player-made ones.
-/// A larger enclosure can still evade it.
-/// The light-limited placement rule bounds normal player-built cages below this distance.
+/// The square is a bounded check, not a proof about the whole world.
+/// It finds every enclosure that fits inside the square, including player-made ones.
+/// A larger enclosure escapes it.
+/// The light-limited placement rule keeps player-built cages smaller than the square.
 /// Call only after the `SimBuffer` holds the current depth.
 ///
-/// Returns `true` only when it moved the player to a proven external position.
+/// Returns `true` only when it moved the player.
 pub fn escapeSolid() bool {
     if (isGhost()) return false;
 
@@ -623,28 +731,54 @@ fn enqueueEscapeNode(context: anytype, comptime can_enter: anytype, dx: i64, dy:
     write.* += 1;
 }
 
-/// Returns the nearest clear, or otherwise mineable, landing in the exterior component.
+/// Returns the world position the correction moves the player to, in subpixels.
 ///
-/// A point merely near the player is not enough. It can be a second sealed pocket.
-/// This flood starts on the proof boundary, so every returned point is connected to the outside.
+/// A standable landing is snapped down onto its floor block, the same rest position
+/// `startup.findSafeSpawn()` uses, so the player arrives standing and not falling.
+/// The snap only shrinks the blocks the hitbox covers, so a clear landing stays clear.
 fn correctionLanding(probe: *const EscapeProbe) ?Vec2i {
-    const offset = nearestExteriorLanding(probe, EscapeProbe.canEnter, EscapeProbe.positionIsClear) orelse return null;
-    return .{
-        memory.game.player_pos[0] + @as(i64, offset.x) * dw.CHUNK_SIZE_SQ,
-        memory.game.player_pos[1] + @as(i64, offset.y) * dw.CHUNK_SIZE_SQ,
-    };
+    const offset = nearestExteriorLanding(
+        probe,
+        EscapeProbe.canEnter,
+        EscapeProbe.positionIsClear,
+        EscapeProbe.positionIsGrounded,
+    ) orelse return null;
+
+    const game = &memory.game;
+    const x = game.player_pos[0] + @as(i64, offset.x) * dw.CHUNK_SIZE_SQ;
+    var y = game.player_pos[1] + @as(i64, offset.y) * dw.CHUNK_SIZE_SQ;
+
+    if (probe.positionIsGrounded(offset.x, offset.y)) {
+        // Put the feet on the last subpixel row of the block they already stand in.
+        const feet = y + dw.CHUNK_SIZE_SQ / 2;
+        y = @divFloor(feet, dw.CHUNK_SIZE_SQ) * dw.CHUNK_SIZE_SQ + dw.CHUNK_SIZE_SQ / 2 - 1;
+    }
+    return .{ x, y };
 }
 
-/// Finds the closest passable player position that is connected to the proof boundary.
+/// Finds the best landing that connects to the boundary of the escape square.
+///
+/// A point merely near the player is not enough. It can be a second sealed pocket.
+/// The flood starts on the boundary ring, so every point it visits reaches the outside.
+///
+/// Landings come in three tiers.
+/// Standable is best, then clear but unsupported, then a spot the player must mine out of.
+/// The closest point in the best occupied tier wins!
+/// Standable comes first because a trapped player has no blocks to build with.
+/// From the other two tiers the player falls, with no proof of where the fall stops.
 ///
 /// `can_enter()` defines the breakable movement graph.
-/// `is_clear()` prefers an empty position over a position that needs mining.
 /// The fixed square makes this another bounded `O(MAX_ESCAPE_CELLS)` scan.
-fn nearestExteriorLanding(context: anytype, comptime can_enter: anytype, comptime is_clear: anytype) ?EscapeOffset {
+fn nearestExteriorLanding(
+    context: anytype,
+    comptime can_enter: anytype,
+    comptime is_clear: anytype,
+    comptime is_standable: anytype,
+) ?EscapeOffset {
     @memset(&escape_checked, false);
     var write: usize = 0;
 
-    // Seed the exterior component from the complete proof boundary.
+    // Seed the exterior component from the complete boundary ring.
     var edge: i64 = -MAX_ESCAPE_BLOCKS;
     while (edge <= MAX_ESCAPE_BLOCKS) : (edge += 1) {
         enqueueEscapeNode(context, can_enter, edge, -MAX_ESCAPE_BLOCKS, &write);
@@ -653,15 +787,18 @@ fn nearestExteriorLanding(context: anytype, comptime can_enter: anytype, comptim
         enqueueEscapeNode(context, can_enter, MAX_ESCAPE_BLOCKS, edge, &write);
     }
 
+    var standable: ?EscapeOffset = null;
     var clear: ?EscapeOffset = null;
     var excavatable: ?EscapeOffset = null;
     while (write != 0) {
         write -= 1;
         const current = escape_queue[write];
-        if (is_clear(context, current.x, current.y)) {
+        if (!is_clear(context, current.x, current.y)) {
+            if (isCloserLanding(current, excavatable)) excavatable = current;
+        } else {
             if (isCloserLanding(current, clear)) clear = current;
-        } else if (isCloserLanding(current, excavatable)) {
-            excavatable = current;
+            if (is_standable(context, current.x, current.y) and isCloserLanding(current, standable))
+                standable = current;
         }
 
         for (ESCAPE_STEPS) |step| {
@@ -672,7 +809,7 @@ fn nearestExteriorLanding(context: anytype, comptime can_enter: anytype, comptim
         }
     }
 
-    return clear orelse excavatable;
+    return standable orelse clear orelse excavatable;
 }
 
 /// Returns whether `candidate` is a nearer exterior landing than `previous`.
@@ -766,6 +903,20 @@ const EscapeProbe = struct {
             if (block.isSolid()) return false;
         }
         return true;
+    }
+
+    /// Returns whether the player has clear space and a floor under a foot at one block offset.
+    ///
+    /// `playerCorners()` puts the two feet last, and the cell under a foot is the floor it lands on.
+    /// A landing that is only clear leaves the player in the air, where they fall to somewhere unproven.
+    fn positionIsGrounded(self: *const EscapeProbe, dx: i64, dy: i64) bool {
+        if (!self.positionIsClear(dx, dy)) return false;
+
+        for (self.corner_offsets[2..]) |foot| {
+            const floor = self.blockAtRelative(dx + foot.x, dy + foot.y + 1) orelse continue;
+            if (floor.isSolid()) return true;
+        }
+        return false;
     }
 
     /// Returns whether this cell supports a protected installation.
@@ -950,12 +1101,42 @@ test "softlock correction chooses the closest exterior pocket" {
         fn isClear(_: *const @This(), _: i64, _: i64) bool {
             return true;
         }
+
+        // Open air everywhere, so the correction has to fall back to the closest clear point.
+        fn isStandable(_: *const @This(), _: i64, _: i64) bool {
+            return false;
+        }
     };
 
     const ring = Ring{};
     try std.testing.expect(!canReachOutside(&ring, Ring.canEnter));
 
-    const landing = nearestExteriorLanding(&ring, Ring.canEnter, Ring.isClear) orelse unreachable;
+    const landing = nearestExteriorLanding(&ring, Ring.canEnter, Ring.isClear, Ring.isStandable) orelse unreachable;
     const distance = @abs(@as(i64, landing.x)) + @abs(@as(i64, landing.y));
     try std.testing.expectEqual(@as(u64, 2), distance);
+}
+
+test "softlock correction prefers a farther landing that stands on a floor" {
+    // The player is sealed in a 3x3 box of unbreakable ore, with one ledge to the east.
+    const Box = struct {
+        fn canEnter(_: *const @This(), dx: i64, dy: i64) bool {
+            return @max(@abs(dx), @abs(dy)) != 1;
+        }
+
+        fn isClear(_: *const @This(), dx: i64, dy: i64) bool {
+            return @max(@abs(dx), @abs(dy)) != 1;
+        }
+
+        fn isStandable(_: *const @This(), dx: i64, dy: i64) bool {
+            return dx == 3 and dy == 0;
+        }
+    };
+
+    const box = Box{};
+    try std.testing.expect(!canReachOutside(&box, Box.canEnter));
+
+    // Four clear points sit two blocks away, but only the ledge keeps the player off a fall.
+    const landing = nearestExteriorLanding(&box, Box.canEnter, Box.isClear, Box.isStandable) orelse unreachable;
+    try std.testing.expectEqual(@as(i16, 3), landing.x);
+    try std.testing.expectEqual(@as(i16, 0), landing.y);
 }
