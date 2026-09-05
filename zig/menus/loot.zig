@@ -47,9 +47,6 @@ const total_weight = blk: {
     break :blk sum;
 };
 
-/// Salt separating chest-loot rolls from every other consumer of the world seed.
-const LOOT_SALT: u64 = 0xC4E5;
-
 /// One filled (or empty, `.none`) loot slot.
 const Stack = struct { item: Sprite = .none, count: u32 = 0 };
 
@@ -167,17 +164,28 @@ pub fn draw() void {
 
     const mouse_px = util.mousePx();
 
-    // Background panel:
+    // Background panel (with a 2px border)
+    dw.entity.addEntitySized(.{
+        .sprite = .rectangle,
+        .position = MENU_POS - Vec2f32{ 2.0, 2.0 } / Vec2f32{ dw.SCREEN_WIDTH, dw.SCREEN_HEIGHT },
+        .size = MENU_SIZE + Vec2f32{ 4.0, 4.0 } / Vec2f32{ dw.SCREEN_WIDTH, dw.SCREEN_HEIGHT },
+        .lcha = .{ 0.25, 0.05, 1.2, 1.0 },
+    });
     dw.entity.addEntitySized(.{
         .sprite = .rectangle,
         .position = MENU_POS,
         .size = MENU_SIZE,
-        // Warm chest brown.
-        .lcha = .{ 0.45, 0.12, 1.2, 1.0 },
+        .lcha = .{ 0.35, 0.14, 1.5, 1.0 },
     });
 
     // Title icon: the chest itself.
     const title = grid.titleCenterPx(MENU_POS);
+    dw.entity.addEntity(.{
+        .sprite = .chest,
+        .position = .{ @floatCast(title[0] - 1), @floatCast(title[1] - 1) },
+        .size = 12.0,
+        .lcha = .{ 0.25, 0.0, 0.0, 0.8 },
+    });
     dw.entity.addEntity(.{
         .sprite = .chest,
         .position = .{ @floatCast(title[0]), @floatCast(title[1]) },

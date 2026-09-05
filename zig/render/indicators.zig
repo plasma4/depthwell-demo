@@ -61,7 +61,7 @@ pub var nearby_cores: NearbyCores = .{};
 /// The slot sprite is white, so hue is ADDED onto it and replaces nothing.
 /// See `DEFAULT_ENTITY_LCHA`.
 /// These are tuning knobs.
-const PORTAL_SLOT_HUE: f32 = -1.9;
+const PORTAL_SLOT_HUE: f32 = -1.5;
 const INVPORTAL_SLOT_HUE: f32 = 1.1;
 
 /// Which menu an in-world block's indicator opens, if any.
@@ -319,64 +319,67 @@ const DrawVisitor = struct {
         // Undo the camera scale multiply, because slot_size is scale-relative
         const rel_size: f32 = @floatCast(geom.slot_size / @as(f32, @floatCast(memory.game.camera_scale)));
 
-        // Only clickable indicators react; a display-only one, such as a tree, just draws
-        if (kind.clickableAt(ref) and geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
-            // Down-capture for .indicator is claimed centrally in mouse.processDownCaptures(),
-            // through isHoveringIndicator, so this frame's click_focus is already settled
-
-            // Only change mouse appearance if current focus permits UI actions
-            if (mouse.click_focus.permits(.indicator)) mouse.requestCursorType(.pointer);
-
-            // Toggle safely when a click both starts and ends on this indicator
-            if (!self.click_used and mouse.isClicked(.indicator, true)) {
-                self.click_used = true;
-                if (flag) |f| {
-                    f.* = !f.*;
-                    // The loot menu is per-chest, so tell it which block backs it, or that it lost one
-                    if (kind == .loot) {
-                        const loot = @import("../menus/loot.zig");
-                        if (f.*) loot.open(ref) else loot.close();
-                    }
-                } else kind.activate(ref);
-            }
-        }
-
         // Background inventory slot (color shifts while its menu is open)
-        dw.entity.addEntity(.{
-            // This creates an interesting style, just go with it
-            .sprite = if (kind == .furnace or kind == .portal or kind == .invportal) .wood_frame else .wood,
-            .position = .{ geom.screen_x, geom.screen_y },
-            .size = geom.slot_size,
-            .lcha = if (kind == .portal or kind == .invportal)
-                // Brightens as the player closes in, to read as "this takes you somewhere".
-                // The hue is what separates going down from going up
-                .{
-                    0.85 + 0.15 * geom.opacity,
-                    0.06 + rel_size * 0.006,
-                    if (kind == .portal) PORTAL_SLOT_HUE else INVPORTAL_SLOT_HUE,
-                    geom.opacity,
-                }
-            else if (kind == .furnace)
-                // Wood style if furnace
-                if (is_open)
-                    .{ 1.0, rel_size * 0.007, 0.3, geom.opacity }
-                else
-                    .{ 0.8, -0.1 + rel_size * 0.005, 0.0, geom.opacity }
-            else
-            // red/pink-ish vibe color instead
-            if (is_open)
-                .{ 1.0, 0.03 + rel_size * 0.01, -0.9, geom.opacity }
-            else
-                .{ 0.7, -0.014 + rel_size * 0.005, -0.78, geom.opacity },
-        });
+        if (kind != .loot or !is_open) {
 
-        // Mini preview centered inside the container slot
-        dw.entity.addEntity(.{
-            .sprite = kind.previewSprite(),
-            .position = .{ geom.screen_x, geom.screen_y },
-            .size = geom.slot_size * 0.8,
-            .lcha = .{ if (is_open) 1.0 else 0.8, 0.0, 0.0, geom.opacity },
-        });
+            // Only clickable indicators react; a display-only one, such as a tree, just draws
+            if (kind.clickableAt(ref) and geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
+                // Down-capture for .indicator is claimed centrally in mouse.processDownCaptures(),
+                // through isHoveringIndicator, so this frame's click_focus is already settled
+
+                // Only change mouse appearance if current focus permits UI actions
+                if (mouse.click_focus.permits(.indicator)) mouse.requestCursorType(.pointer);
+
+                // Toggle safely when a click both starts and ends on this indicator
+                if (!self.click_used and mouse.isClicked(.indicator, true)) {
+                    self.click_used = true;
+                    if (flag) |f| {
+                        f.* = !f.*;
+                        // The loot menu is per-chest, so tell it which block backs it, or that it lost one
+                        if (kind == .loot) {
+                            const loot = @import("../menus/loot.zig");
+                            if (f.*) loot.open(ref) else loot.close();
+                        }
+                    } else kind.activate(ref);
+                }
+            }
+
+            dw.entity.addEntity(.{
+                // This creates an interesting textured style given the right filters
+                .sprite = if (kind == .furnace or kind == .portal or kind == .invportal) .wood_frame else .wood,
+                .position = .{ geom.screen_x, geom.screen_y },
+                .size = geom.slot_size,
+                .lcha = if (kind == .portal or kind == .invportal)
+                    // Brightens as the player closes in, to read as "this takes you somewhere".
+                    // The hue is what separates going down from going up
+                    .{
+                        0.85 + 0.15 * geom.opacity,
+                        0.06 + rel_size * 0.006,
+                        (if (kind == .portal) PORTAL_SLOT_HUE else INVPORTAL_SLOT_HUE) + 0.3 * geom.opacity,
+                        geom.opacity,
+                    }
+                else if (kind == .furnace)
+                    // Wood style if furnace
+                    if (is_open)
+                        .{ 1.0, rel_size * 0.007, 0.3, geom.opacity }
+                    else
+                        .{ 0.8, -0.1 + rel_size * 0.005, 0.0, geom.opacity }
+                else
+                // red/pink-ish vibe color instead
+                if (is_open)
+                    .{ 1.0, 0.03 + rel_size * 0.01, -0.9, geom.opacity }
+                else
+                    .{ 0.7, -0.014 + rel_size * 0.005, -0.78, geom.opacity },
+            });
+
+            // Mini preview centered inside the container slot
+            dw.entity.addEntity(.{
+                .sprite = kind.previewSprite(),
+                .position = .{ geom.screen_x, geom.screen_y },
+                .size = geom.slot_size * 0.8,
+                .lcha = .{ if (is_open) 1.0 else 0.8, 0.0, 0.0, geom.opacity },
+            });
+        }
 
         return false; // keep scanning; multiple indicators can be on screen
     }
