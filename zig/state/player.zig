@@ -421,25 +421,25 @@ pub fn move(logic_speed: f64) void {
         // - falling under 3.0, key up  1.20  a snappier drop back to the ground.
         // - everything else            1.00  key still down, or already falling fast.
         const gravity_mult: f64 = if (@abs(y_vel) < REDUCED_GRAVITY_RANGE)
-            (if (up_key_held) 0.6 else 1.0)
-        else if (up_key_held or y_vel > 3.0)
-            1.0
+            (if (up_key_held) 0.60 else 1.00)
+        else if (up_key_held or y_vel > 3.00)
+            1.00
         else if (y_vel >= 0)
             1.20
         else
-            1.8;
+            1.80;
         y_vel += (GRAVITY * y_mult * (1.0 - pow_fy) / DECAY_RATE_Y) * gravity_mult;
 
         // The second brake on a released jump. The multiplier above scales with current speed,
         // so additional linear logic helps keep a "baseline" that forces the player to fall faster.
         const LINEAR_Y_DECAY = 0.2 * logic_speed;
-        if (y_vel <= -LINEAR_Y_DECAY and !up_key_held) {
-            y_vel += LINEAR_Y_DECAY;
+        if (y_vel < 0 and !up_key_held) {
+            y_vel = @min(y_vel + LINEAR_Y_DECAY, 0);
         }
 
-        // Terminal velocity, about 28 blocks per second.
+        // The terminal velocity is about 28 blocks per second.
         // Decay alone would settle at ~7.76, so this cap only trims the last of that creep.
-        y_vel = @min(y_vel, 7.5);
+        y_vel = @min(y_vel, 7.50);
 
         game.player_velocity[1] = y_vel;
     }

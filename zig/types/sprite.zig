@@ -27,11 +27,14 @@ const STONE_END = STONE_START + 25;
 /// Index where smelted bar sprites begin.
 const BAR_START = STONE_END + 4;
 
+/// Number of ore types.
+const ORE_COUNT = 6;
+
 /// Index where ore sprites begin.
-pub const ORE_START = BAR_START + 6;
+pub const ORE_START = BAR_START + ORE_COUNT;
 
 /// Index where gem sprites begin.
-pub const GEM_START = ORE_START + 6;
+pub const GEM_START = ORE_START + ORE_COUNT;
 
 /// Number of gem types.
 pub const GEM_COUNT = 7;
@@ -209,11 +212,10 @@ pub const Sprite = enum(u16) {
     core2 = CORE_ID + 4,
     core3 = CORE_ID + 6,
     core4 = CORE_ID + 8,
-    campfire = CORE_ID + 10, // 4 variations + 4 water variations, 8 total
-    campfire_water = CORE_ID + 10 + 4,
-    chest = CORE_ID + 10 + 8,
-    invportal,
-    portal,
+    campfire_base = CORE_ID + 10, // base, plus 4 flame frames, 5 total
+    chest = CORE_ID + 10 + 5, // 2 variants
+    invportal = CORE_ID + 10 + 7, // 2 variants
+    portal = CORE_ID + 10 + 9, // 2 variants
     portal_visual = CORE_ID + 10 + 11, // indicator visual variant
 
     /// Unselected inventory sprite. Looks like a blue rounded rectangle.
@@ -327,7 +329,7 @@ pub const Sprite = enum(u16) {
     /// The bar range is parallel to and sits directly before the ore range,
     /// so the mapping is a constant offset. Precondition: `self.isOre()`.
     pub inline fn oreToBar(self: Sprite) Sprite {
-        return @enumFromInt(@intFromEnum(self) - (ORE_START - BAR_START));
+        return @enumFromInt(@intFromEnum(self) - ORE_COUNT);
     }
 
     /// Determines if the sprite is a gem.
@@ -761,7 +763,7 @@ const RULE_LIST = [_]SpriteRule{
             .big_mushroom,
             .small_tree,
 
-            .campfire,
+            .campfire_base,
             .forest_furnace,
             .lava_furnace,
             .basic_core,
@@ -1357,8 +1359,8 @@ comptime {
 
     // oreToBar() relies on the bar range sitting directly before the ore range with the same length,
     // so the mapping is a constant offset. Enforce that here.
-    if (ORE_START - BAR_START != GEM_START - ORE_START)
-        @compileError("Bar range is not parallel to the ore range; oreToBar() would be wrong.");
+    if (ORE_START - BAR_START != GEM_START - ORE_START or ORE_START - BAR_START != ORE_COUNT)
+        @compileError("Bar range is not parallel to the ore range or the correct length; oreToBar() would be wrong.");
 
     // Equal-length ranges are not enough: the two must also line up name-for-name, or a reordered ore
     // would smelt into someone else's bar. Catches an insertion into either range!

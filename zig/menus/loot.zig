@@ -10,7 +10,6 @@ const dw = @import("../root.zig");
 const util = @import("util.zig");
 
 const Sprite = dw.Sprite;
-const Vec2f = dw.utils.Vec2f;
 const Vec2f32 = dw.utils.Vec2f32;
 const mouse = dw.mouse;
 const memory = dw.memory;
@@ -23,32 +22,23 @@ pub const MAX_LOOT = 10;
 /// Fewest stacks a chest rolls.
 const MIN_LOOT = 3;
 
-/// One rollable chest drop: an inclusive count range and a relative pick weight.
-const LootEntry = struct { item: Sprite, min: u32, max: u32, weight: u32 };
+/// One rollable chest drop: an item and the inclusive count range it comes in.
+const LootRoll = struct { item: Sprite, min: u32, max: u32 };
 
 /// The chest drop pool.
-/// Weights are relative, and a new row adds a drop.
-const loot_table = [_]LootEntry{
-    .{ .item = .wood, .min = 4, .max = 12, .weight = 20 },
-    .{ .item = .leaves, .min = 3, .max = 8, .weight = 3 },
-    .{ .item = .campfire, .min = 1, .max = 1, .weight = 4 },
-    .{ .item = .copper_bar, .min = 2, .max = 6, .weight = 10 },
-    .{ .item = .iron_bar, .min = 1, .max = 4, .weight = 7 },
-    .{ .item = .silver_bar, .min = 1, .max = 3, .weight = 4 },
-    .{ .item = .gold_bar, .min = 1, .max = 2, .weight = 2 },
-    .{ .item = .quartz, .min = 1, .max = 3, .weight = 6 },
-    .{ .item = .amethyst, .min = 1, .max = 2, .weight = 3 },
-    .{ .item = .sapphire, .min = 1, .max = 1, .weight = 2 },
-};
-
-const total_weight = blk: {
-    var sum: u64 = 0;
-    for (loot_table) |e| sum += e.weight;
-    break :blk sum;
-};
-
-/// Salt separating chest-loot rolls from every other consumer of the world seed.
-const LOOT_SALT: u64 = 0xC4E5;
+/// Weights are relative and adjust themselves, so a new drop is one new row.
+const loot_pool = seeding.WeightedPicker(LootRoll, &.{
+    .{ .value = .{ .item = .wood, .min = 4, .max = 12 }, .weight = 20 },
+    .{ .value = .{ .item = .leaves, .min = 3, .max = 8 }, .weight = 3 },
+    .{ .value = .{ .item = .campfire_base, .min = 1, .max = 1 }, .weight = 4 },
+    .{ .value = .{ .item = .copper_bar, .min = 2, .max = 6 }, .weight = 10 },
+    .{ .value = .{ .item = .iron_bar, .min = 1, .max = 4 }, .weight = 7 },
+    .{ .value = .{ .item = .silver_bar, .min = 1, .max = 3 }, .weight = 4 },
+    .{ .value = .{ .item = .gold_bar, .min = 1, .max = 2 }, .weight = 2 },
+    .{ .value = .{ .item = .quartz, .min = 1, .max = 3 }, .weight = 6 },
+    .{ .value = .{ .item = .amethyst, .min = 1, .max = 2 }, .weight = 3 },
+    .{ .value = .{ .item = .sapphire, .min = 1, .max = 1 }, .weight = 2 },
+});
 
 /// One filled (or empty, `.none`) loot slot.
 const Stack = struct { item: Sprite = .none, count: u32 = 0 };
@@ -107,12 +97,7 @@ fn rollLoot(ref: dw.indicators.BlockRef) void {
     var filled_slots: usize = 0;
 
     for (0..n) |_| {
-        var roll = rng.next() % total_weight;
-        const entry = for (loot_table) |e| {
-            if (roll < e.weight) break e;
-            roll -= e.weight;
-        } else unreachable;
-
+        const entry = loot_pool.pick(rng.next());
         const rolled_count = entry.min + @as(u32, @intCast(rng.next() % (entry.max - entry.min + 1)));
 
         // Check if the item type already exists in our filled slots
@@ -142,7 +127,8 @@ fn lootAll(ref: dw.indicators.BlockRef) void {
         if (stack.item != .none) inventory.addToInventory(stack.item, stack.count);
     }
 
-    dw.particles.spawnSpriteBurst(.chest, dw.indicators.blockScreenPx(ref.coord, ref.bx, ref.by), .{
+    const burst_px = dw.entity.blockScreenPx(dw.entity.worldView(), ref.coord, ref.bx, ref.by);
+    dw.particles.spawnSpriteBurst(.chest, burst_px, .{
         .count = @intCast(40 + dw.particles.seed.next() % 16),
         .speed_max = 2.2,
     });
@@ -167,22 +153,21 @@ pub fn draw() void {
 
     const mouse_px = util.mousePx();
 
-    // Background panel:
-    dw.entity.addEntitySized(.{
+    // Background panel (with a 2px border)
+    dw.entity.addEntitySizedOutlined(.{
         .sprite = .rectangle,
         .position = MENU_POS,
         .size = MENU_SIZE,
-        // Warm chest brown.
-        .lcha = .{ 0.45, 0.12, 1.2, 1.0 },
-    });
+        .lcha = .{ 0.35, 0.14, 1.5, 1.0 },
+    }, 2.0, .{ 0.25, 0.05, 1.2, 1.0 });
 
     // Title icon: the chest itself.
     const title = grid.titleCenterPx(MENU_POS);
-    dw.entity.addEntity(.{
+    dw.entity.addEntityShadowed(.{
         .sprite = .chest,
-        .position = .{ @floatCast(title[0]), @floatCast(title[1]) },
+        .position = util.toPx32(title),
         .size = 12.0,
-    });
+    }, .{ .offset = .{ -1.0, -1.0 }, .light = 0.25, .alpha = 0.8 });
 
     for (stacks, 0..) |stack, i| {
         const center = grid.slotCenterPx(MENU_POS, i);
@@ -190,7 +175,7 @@ pub fn draw() void {
         // Slot frame (also drawn under empty slots so the grid shape reads).
         dw.entity.addEntity(.{
             .sprite = .wood_frame,
-            .position = .{ @floatCast(center[0]), @floatCast(center[1]) },
+            .position = util.toPx32(center),
             .size = @as(f32, @floatCast(grid.SLOT)),
             .lcha = .{ 0.65, -0.08, 0.0, 1.0 },
         });
@@ -207,11 +192,11 @@ pub fn draw() void {
 
         dw.entity.addEntity(.{
             .sprite = stack.item,
-            .position = .{ @floatCast(center[0]), @floatCast(center[1]) },
+            .position = util.toPx32(center),
             .size = @as(f32, @floatCast(grid.SLOT - 4.0)),
         });
         if (stack.count > 1) {
-            util.drawCount(stack.count, .{ center[0] + 3.0, center[1] + 5.0 }, .{ 0.78, 0.19, 1.2, 1.0 }, 1.0);
+            util.drawCount(stack.count, center, .{ 0.78, 0.19, 1.2, 1.0 }, 1.0);
         }
     }
 }
