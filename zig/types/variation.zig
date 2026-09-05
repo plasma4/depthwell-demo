@@ -69,6 +69,7 @@ const rules = [_]struct { Sprite, VariantRule }{
     // edge stone alternates in a checkerboard
     .{ .edge_stone, .{ .kind = .checkerboard, .count = 2 } },
     // seed variations: non-uniform, see the VariantKind definition
+    .{ .chest, .{ .kind = .random, .count = 2 } },
     .{ .bush, .{ .kind = .random, .count = 2 } },
     .{ .rock, .{ .kind = .random, .count = 2 } },
     .{ .aqua_stone, .{ .kind = .random, .count = 2 } },
