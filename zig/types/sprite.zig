@@ -27,11 +27,14 @@ const STONE_END = STONE_START + 25;
 /// Index where smelted bar sprites begin.
 const BAR_START = STONE_END + 4;
 
+/// Number of ore types.
+const ORE_COUNT = 6;
+
 /// Index where ore sprites begin.
-pub const ORE_START = BAR_START + 6;
+pub const ORE_START = BAR_START + ORE_COUNT;
 
 /// Index where gem sprites begin.
-pub const GEM_START = ORE_START + 6;
+pub const GEM_START = ORE_START + ORE_COUNT;
 
 /// Number of gem types.
 pub const GEM_COUNT = 7;
@@ -51,7 +54,7 @@ const BUSH_ID = GEAR_ID + 23;
 const CORE_ID = BUSH_ID + 14;
 
 /// Index where inventory slot sprites start.
-pub const INVENTORY_START = CORE_ID + 22;
+pub const INVENTORY_START = CORE_ID + 23;
 /// Index where numbers (0-9) start.
 pub const NUMBER_START = INVENTORY_START + 4;
 /// ID for `Sprite.particle`, which is after a bunch of character glyphs.
@@ -59,7 +62,7 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 320) {
+    if (max_sprite_value != 321) {
         var buf: [64]u8 = undefined;
         @compileError("Max sprite value of " ++
             (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
@@ -212,9 +215,9 @@ pub const Sprite = enum(u16) {
     campfire = CORE_ID + 10, // 4 variations + 4 water variations, 8 total
     campfire_water = CORE_ID + 10 + 4,
     chest = CORE_ID + 10 + 8,
-    invportal,
+    invportal = CORE_ID + 10 + 10,
     portal,
-    portal_visual = CORE_ID + 10 + 11, // indicator visual variant
+    portal_visual = CORE_ID + 10 + 12, // indicator visual variant
 
     /// Unselected inventory sprite. Looks like a blue rounded rectangle.
     inventory = INVENTORY_START,
@@ -327,7 +330,7 @@ pub const Sprite = enum(u16) {
     /// The bar range is parallel to and sits directly before the ore range,
     /// so the mapping is a constant offset. Precondition: `self.isOre()`.
     pub inline fn oreToBar(self: Sprite) Sprite {
-        return @enumFromInt(@intFromEnum(self) - (ORE_START - BAR_START));
+        return @enumFromInt(@intFromEnum(self) - ORE_COUNT);
     }
 
     /// Determines if the sprite is a gem.
@@ -1357,8 +1360,8 @@ comptime {
 
     // oreToBar() relies on the bar range sitting directly before the ore range with the same length,
     // so the mapping is a constant offset. Enforce that here.
-    if (ORE_START - BAR_START != GEM_START - ORE_START)
-        @compileError("Bar range is not parallel to the ore range; oreToBar() would be wrong.");
+    if (ORE_START - BAR_START != GEM_START - ORE_START or ORE_START - BAR_START != ORE_COUNT)
+        @compileError("Bar range is not parallel to the ore range or the correct length; oreToBar() would be wrong.");
 
     // Equal-length ranges are not enough: the two must also line up name-for-name, or a reordered ore
     // would smelt into someone else's bar. Catches an insertion into either range!
