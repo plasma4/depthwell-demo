@@ -194,7 +194,7 @@ pub const GameState = extern struct {
     /// Characters used in `seed_string`, never above `SEED_STRING_MAX`.
     seed_string_len: u8 = 0,
 
-    /// The deepest depth the player has reached, called the FRONTIER.
+    /// The deepest depth the player has reached, called the "frontier".
     /// Never decreases for the life of a world.
     ///
     /// This is the timeline authority (see `world.isShallowerThanFrontier()`).
@@ -237,7 +237,9 @@ pub const GameState = extern struct {
     /// Teleports the player, resetting the player position and camera position,
     /// as well as movement constants such as gravity.
     ///
-    /// Also fully clears caches.
+    /// Also fully clears caches, and re-seats the particle anchor on the destination.
+    /// An anchored particle holds a world point that the camera jump leaves behind.
+    /// The anchor has to follow the camera at ANY distance (see `particles.syncAnchor()`).
     pub inline fn teleport(self: *@This(), coord: ?Coordinate, new_position: Vec2i) void {
         // Clears the airborne/jump bookkeeping too, not just the accumulator: arriving somewhere new
         // must not carry over a coyote window earned before the teleport.
@@ -255,6 +257,8 @@ pub const GameState = extern struct {
         // Snap BOTH current and previous camera to the destination (preventing interpolation funnies).
         self.camera_pos = new_position;
         self.last_camera_pos = new_position;
+        // After the camera lands, never before it.
+        dw.particles.syncAnchor();
         world.clearCaches(false);
     }
 
@@ -283,6 +287,7 @@ pub const GameState = extern struct {
         player.subpixel_accum = .{ 0.0, 0.0 };
         self.camera_pos = new_position;
         self.last_camera_pos = new_position;
+        dw.particles.syncAnchor(); // the camera jumped, so the particle anchor jumps with it
     }
 };
 

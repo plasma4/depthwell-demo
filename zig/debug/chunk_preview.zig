@@ -232,7 +232,7 @@ pub fn drawChunkPreview() void {
         // Render approximate player indicator in D-1
         const p_sub_x = @as(f32, @floatFromInt(bx_idx % 4)) / 4.0;
         const p_sub_y = @as(f32, @floatFromInt(by_idx % 4)) / 4.0;
-        const player_entity: Entity = .{
+        dw.entity.addEntityShadowed(.{
             .sprite = .player,
             .position = .{
                 deeper_preview_x + (1.0 + @as(f32, @floatFromInt(bx_idx / 4)) + p_sub_x - 0.5) * tile_size,
@@ -240,14 +240,8 @@ pub fn drawChunkPreview() void {
             },
             .size = tile_size * 0.8,
             .lcha = .{ 1.0, 0.1, -0.2, 1.0 },
-        };
-        var player_entity_bg = player_entity;
-
-        // make a sort of larger border/shadow
-        player_entity_bg.lcha[0] *= 0.6;
-        player_entity_bg.position -= .{ tile_size / 8.0, tile_size / 8.0 };
-        addEntity(player_entity_bg);
-        addEntity(player_entity);
+            // make a sort of larger border/shadow
+        }, .{ .offset = @splat(-tile_size / 8.0), .light = 0.6, .chroma = 1.0 });
 
         if (depth > start_zoom + 1) {
             const p_info = dw.ancestor.getParentInfo(
@@ -339,18 +333,30 @@ pub fn drawChunkPreview() void {
             }
         }
 
-        // Render approximate player indicator in the active quadrant
-        const qx = memory.game.player_quadrant % 2;
-        const qy = memory.game.player_quadrant / 2;
-        addEntity(.{
-            .sprite = .player,
-            .position = .{
-                deeper_preview_x + @as(f32, @floatFromInt(qx + 1)) * tile_size,
-                preview_y_ancestor + @as(f32, @floatFromInt(qy + 1)) * tile_size,
-            },
-            .size = tile_size * 0.8,
-            .lcha = .{ 1.0, 0.1, 0.0, 0.7 },
-        });
+        // Render the player at the cell the window really answers for them.
+        // The window is centered on the descent's recorded trace, and the player is not always in it,
+        // so drawing them on their quadrant instead hides exactly the drift that empties a depth.
+        // No marker at all means the drift has left this 4x4 slice.
+        if (dw.world.quad_cache.liveTrace()) |trace| {
+            const idx = dw.world.horizonWindowIndex(
+                memory.game.getPlayerCoord(),
+                memory.game.getBlockXInChunk(),
+                memory.game.getBlockYInChunk(),
+                trace,
+                depth - dw.HORIZON_DEPTH,
+            );
+            const px = idx[0] - first;
+            const py = idx[1] - first;
+            if (px >= 0 and px < 4 and py >= 0 and py < 4) addEntity(.{
+                .sprite = .player,
+                .position = .{
+                    deeper_preview_x + @as(f32, @floatFromInt(px)) * tile_size,
+                    preview_y_ancestor + @as(f32, @floatFromInt(py)) * tile_size,
+                },
+                .size = tile_size * 0.8,
+                .lcha = .{ 1.0, 0.1, 0.0, 0.7 },
+            });
+        }
     }
 
     // render the player now!
@@ -360,17 +366,11 @@ pub fn drawChunkPreview() void {
     const scale = tile_size / dw.CHUNK_SIZE_SQ;
     const origin: Vec2f32 = .{ preview_x_origin, preview_y_origin };
 
-    const player_entity: Entity = .{
+    dw.entity.addEntityShadowed(.{
         .sprite = .player,
         .position = origin + @as(Vec2f32, @floatFromInt(relative_pos)) * @as(Vec2f32, @splat(scale)),
         .size = tile_size,
-    };
-    var player_entity_bg = player_entity;
-
-    player_entity_bg.position -= .{ tile_size / 8.0, tile_size / 8.0 };
-    player_entity_bg.lcha = .{ 0.5, 0.0, 0.0, 0.8 };
-    addEntity(player_entity_bg);
-    addEntity(player_entity);
+    }, .{ .offset = @splat(-tile_size / 8.0), .light = 0.5, .alpha = 0.8 });
 }
 
 /// Draws a line.

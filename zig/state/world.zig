@@ -521,13 +521,13 @@ pub const ModificationStore = struct {
     pub fn beginWrite(self: *@This(), key: DepthCoordinate) ModWriter {
         // sanity: not in animation, not in impossible depth
         std.debug.assert(!dw.portal.isActive());
-        std.debug.assert(key.depth <= frontier());
+        std.debug.assert(key.depth <= getFrontier());
         return .{
             .entry = self.entries.at(self.reserve(key, .edit)),
             .key = key,
             // shallower than the frontier this depth is frozen for its descendants,
             // so each cell must give up its inherited value before the edit lands.
-            .capture_legacy = self == &mod_store and key.depth < frontier(),
+            .capture_legacy = self == &mod_store and key.depth < getFrontier(),
         };
     }
 
@@ -700,7 +700,7 @@ pub const AscentStep = struct {
     }
 };
 
-/// Depths the player has ascended past, deepest last. Empty at the deepest depth ever visited.
+/// Depths the player has ascended past, deepest last. Empty at the frontier (deepest depth visited).
 /// Lives on `main_allocator` because it can be pushed or popped.
 pub var ascent_stack: std.ArrayList(AscentStep) = .empty;
 
@@ -713,12 +713,12 @@ pub inline fn canRetrace() bool {
     return ascent_stack.items.len != 0;
 }
 
-/// The deepest depth the player has reached: the FRONTIER.
+/// The deepest depth the player has reached: the frontier.
 ///
 /// Floored at the current depth, which can never be deeper than the deepest one reached.
 /// Read this rather than `max_depth_reached` directly:
 /// the floor holds the invariant even when the depth is set without a `commitLayer()`.
-pub inline fn frontier() u64 {
+pub inline fn getFrontier() u64 {
     return @max(memory.game.max_depth_reached, memory.game.depth);
 }
 
@@ -728,14 +728,7 @@ pub inline fn frontier() u64 {
 /// so the deeper depths hold the material they inherited at that moment.
 /// See `legacy_store` for how that material is kept.
 pub inline fn isShallowerThanFrontier() bool {
-    return memory.game.depth < frontier();
-}
-
-/// The deepest depth the player has reached.
-/// Retrace is the only descent from shallower than the frontier, so this also equals
-/// `game.depth + ascent_stack.items.len` during play.
-pub inline fn deepestDepth() u64 {
-    return frontier();
+    return memory.game.depth < getFrontier();
 }
 
 /// Whether there is a shallower depth to ascend into.
@@ -743,7 +736,7 @@ pub inline fn canAscend() bool {
     return memory.game.depth > STARTING_ZOOM_TIMES;
 }
 
-/// The step a descent must retrace, or null when the player is already at their deepest depth.
+/// The step a descent must retrace, or null when the player is already at their deepest depth (frontier).
 pub inline fn retraceStep() ?AscentStep {
     return if (canRetrace()) ascent_stack.items[ascent_stack.items.len - 1] else null;
 }
@@ -818,8 +811,10 @@ pub const Coordinate = struct {
             const delta: u64 = if (is_pos) @intCast(dx) else @intCast(-%dx);
             const ov = if (is_pos) @addWithOverflow(res.suffix[0], delta) else @subWithOverflow(res.suffix[0], delta);
             if (ov[1] != 0) {
-                // world-edge :(
-                if (depth < HORIZON_DEPTH) return null;
+                // The suffix ran off its end. At or before HORIZON_DEPTH the world is one suffix wide
+                // (4**32 chunks), so that IS the world edge. Past it the quadrant bit carries one more
+                // step, and only leaving the OUTER quadrant ends the world.
+                if (depth <= HORIZON_DEPTH) return null;
                 if (is_pos == ((res.quadrant & 1) != 0)) return null;
                 res.quadrant ^= 1;
             }
@@ -834,8 +829,8 @@ pub const Coordinate = struct {
             const delta: u64 = if (is_pos) @intCast(dy) else @intCast(-%dy);
             const ov = if (is_pos) @addWithOverflow(res.suffix[1], delta) else @subWithOverflow(res.suffix[1], delta);
             if (ov[1] != 0) {
-                if (depth < HORIZON_DEPTH) return null;
-                // world-edge :(
+                // Same as the X axis above: one suffix is the whole world at or before HORIZON_DEPTH.
+                if (depth <= HORIZON_DEPTH) return null;
                 if (is_pos == ((res.quadrant & 2) != 0)) return null;
                 res.quadrant ^= 2;
             }
@@ -953,11 +948,12 @@ pub const DepthCoordinate = struct {
         const origin_y = quad_cache.getOriginY(self.depth);
 
         // The absolute cell within the parent QuadCache uses BOTH the origin offset AND the child's quadrant.
-        const child_qx = self.quadrant % 2;
-        const child_qy = self.quadrant / 2;
+        const child_qx: u3 = @intCast(self.quadrant % 2);
+        const child_qy: u3 = @intCast(self.quadrant / 2);
 
-        const cell_x = origin_x + child_qx;
-        const cell_y = origin_y + child_qy;
+        // The window's far cell is maxOriginCell() + 1 at most, so 3 bits always hold this.
+        const cell_x: u3 = origin_x + child_qx;
+        const cell_y: u3 = origin_y + child_qy;
 
         // Parent quadrant is the macro-cell this child belonged to.
         const parent_qx = cell_x / ZOOM_FACTOR;
@@ -973,8 +969,8 @@ pub const DepthCoordinate = struct {
 
         // Effectively, take the top X/Y cell bits, and add in the significant bits of the original suffix at the bottom.
         const shift: u6 = dw.HORIZON_DEPTH * dw.ZOOM_LOG2 - dw.ZOOM_LOG2;
-        const px = (top_x << shift) | (self.suffix[0] >> dw.ZOOM_LOG2);
-        const py = (top_y << shift) | (self.suffix[1] >> dw.ZOOM_LOG2);
+        const px = (@as(u64, top_x) << shift) | (self.suffix[0] >> dw.ZOOM_LOG2);
+        const py = (@as(u64, top_y) << shift) | (self.suffix[1] >> dw.ZOOM_LOG2);
 
         return .{
             .suffix = .{ px, py },
@@ -1724,13 +1720,6 @@ pub const ChunkCache = struct {
 
 pub var chunk_cache: ChunkCache = .{};
 
-const QuadrantEdgeDetails = struct {
-    most_top: bool,
-    most_bottom: bool,
-    most_left: bool,
-    most_right: bool,
-};
-
 /// The horizon material window: `ANCESTOR_GRID` blocks square, the sole record of material at H.
 pub const HorizonWindow = [QuadCache.ANCESTOR_GRID][QuadCache.ANCESTOR_GRID]Block;
 
@@ -1752,6 +1741,35 @@ pub const HorizonTrace = struct {
     /// Quadrant of the chunk descended from, one depth up.
     source_quadrant: u2,
 };
+
+/// Grid position of the block (`lx`, `ly`) of chunk `coord` inside a `HorizonWindow` at `depth`.
+/// Returns `{ x, y }`, which can fall outside the grid; the caller decides what that means.
+///
+/// A window is centered on the TRACE that built it, never on where the player stands now.
+/// `refineHorizonWindow()` puts `trace.bx`/`trace.by` of `trace.suffix` at `ANCESTOR_CENTER`
+/// plus the trace's own quadrant bits, so every read has to measure from the same origin.
+/// Measuring from the player instead answers with a different H block whenever the two have parted,
+/// which a retrace or a debug teleport can do; at H one block is a whole world at D.
+pub fn horizonWindowIndex(coord: Coordinate, lx: u4, ly: u4, trace: HorizonTrace, depth: u64) Vec2i {
+    // Chunk indices at H are absolute below the horizon and quadrant-extended past it.
+    const shift: u7 = if (depth >= HORIZON_DEPTH) HORIZON_DEPTH * dw.ZOOM_LOG2 else @intCast(depth * dw.ZOOM_LOG2);
+
+    var out: Vec2i = undefined;
+    inline for (0..2) |axis| {
+        const q_bit: u2 = if (axis == 0) 1 else 2;
+        const query: i128 = (@as(i128, @intFromBool((coord.quadrant & q_bit) != 0)) << shift) | @as(i128, coord.suffix[axis]);
+        const center: i128 = (@as(i128, @intFromBool((trace.quadrant & q_bit) != 0)) << shift) | @as(i128, trace.suffix[axis]);
+        // Clamped because anything past 2 chunks is off the window either way, and the raw difference
+        // spans the whole world.
+        const diff_chunk: i64 = @intCast(std.math.clamp(query - center, -2, 2));
+
+        const block: i64 = if (axis == 0) @intCast(lx) else @intCast(ly);
+        const center_block: i64 = if (axis == 0) @intCast(trace.bx) else @intCast(trace.by);
+        const quadrant_offset: i64 = @intFromBool((trace.player_quadrant & q_bit) != 0);
+        out[axis] = diff_chunk * CHUNK_SIZE + block - center_block + QuadCache.ANCESTOR_CENTER + quadrant_offset;
+    }
+    return out;
+}
 
 /// A static 2x2 grid of seeds only updated during when depth increase or game startup.
 pub const QuadCache = struct {
@@ -1825,12 +1843,6 @@ pub const QuadCache = struct {
     /// for `4 KiB / MATERIALS_CHECKPOINT_STRIDE` bytes a depth.
     materials_windows: SegmentedList(HorizonWindow, MATERIALS_WINDOW_PREALLOC),
 
-    // These 4 properties are used to determine if a QuadCache is at the very edge of the world for chunk gen/zooming in.
-    most_top: bool = true,
-    most_bottom: bool = true,
-    most_left: bool = true,
-    most_right: bool = true,
-
     /// 4-way set-associative cache keys.
     seed_cache_keys: [SEED_CACHE_SETS][SEED_CACHE_WAYS]DepthCoordinate = @splat(@splat(DepthCoordinate.invalid)),
     /// Cached seed values corresponding to `seed_cache_keys`.
@@ -1840,17 +1852,24 @@ pub const QuadCache = struct {
     /// Clock hand per set.
     seed_hand: [SEED_CACHE_SETS]u2 = @splat(0),
 
-    /// Resets the `SimBuffer` completely, clearing tracking, ring buffer offsets, and background scanners.
-    /// Precondition: the world arena MUST be reset to prevent memory leaks/odd issues!
+    /// Drops every memoized chunk seed.
+    ///
+    /// A key carries its depth, but not the rebase window that depth was computed under.
+    /// An entry stays true only while that depth keeps the same window.
+    /// Anything that can give a depth a different window has to call this.
+    pub fn clearSeedCache(self: *@This()) void {
+        @memset(&self.seed_clock_bits, 0);
+        @memset(&self.seed_hand, 0);
+        @memset(&self.seed_cache_keys, @splat(DepthCoordinate.invalid));
+    }
+
+    /// Drops the whole descent history: the path lists, the horizon traces, and the rebuilt windows.
+    /// Precondition: the world arena MUST be reset first, since those lists live in it.
     pub fn reset(self: *@This()) void {
         self.left_path = .{};
         self.top_path = .{};
         self.materials_path = .{};
         self.materials_windows = .{};
-        self.most_top = true;
-        self.most_bottom = true;
-        self.most_left = true;
-        self.most_right = true;
     }
 
     /// First depth whose `ancestor_materials` is recorded,
@@ -1906,7 +1925,9 @@ pub const QuadCache = struct {
 
         while (i <= slot) : (i += 1) {
             const d = MATERIALS_START_DEPTH + i;
-            grid = refineHorizonWindow(&grid, self.materials_path.at(i).*, d - HORIZON_DEPTH);
+            // Slot 0 is the base window, which is generated outright and reads no previous window.
+            const prev_trace: ?HorizonTrace = if (i == 0) null else self.materials_path.at(i - 1).*;
+            grid = refineHorizonWindow(&grid, prev_trace, self.materials_path.at(i).*, d - HORIZON_DEPTH);
 
             // Every stride boundary this walk crosses is a checkpoint the next rebuild can start from.
             // Only ever appended in order, so a slot's checkpoint is built from the traces below it.
@@ -1921,28 +1942,48 @@ pub const QuadCache = struct {
         return true;
     }
 
+    /// The trace `ancestor_materials` is centered on, or null when this depth records no window.
+    /// Read this rather than walking the player up to H:
+    /// the player is not always in the block the descent landed in (see `horizonWindowIndex()`).
+    pub fn liveTrace(self: *const @This()) ?HorizonTrace {
+        const slot = materialsSlot(memory.game.depth) orelse return null;
+        if (slot >= self.materials_path.len) return null;
+        return self.materials_path.at(slot).*;
+    }
+
     /// Drops every checkpoint that a change to `slot`'s trace would invalidate.
     /// Free to be over-eager: a dropped checkpoint costs refinements, never correctness.
     pub fn invalidateMaterialsFrom(self: *@This(), slot: usize) void {
         self.materials_windows.len = @min(self.materials_windows.len, checkpointsBelow(slot));
     }
 
-    /// Gets the rebase origin X for a given depth (which is asserted to be > `HORIZON_DEPTH`).
-    pub inline fn getOriginX(self: *const @This(), depth: u64) u64 {
-        std.debug.assert(depth > dw.HORIZON_DEPTH);
-        const idx = depth - dw.HORIZON_DEPTH - 1;
-        const slot: usize = @intCast(idx / 21);
-        const shift: u6 = @intCast((idx % 21) * 3);
-        return (self.left_path.at(slot).* >> shift) & 7;
+    /// Rebase origin cells packed into one `left_path`/`top_path` word: 3 bits each, so 21 with a bit to spare.
+    pub const PATH_CELLS_PER_SLOT = 64 / 3;
+
+    /// Word index in `left_path`/`top_path` that holds `depth`'s origin cell,
+    /// or null when `depth` records no rebase at all.
+    /// The first rebase is at `HORIZON_DEPTH + 1`, so that depth is index 0.
+    pub inline fn pathSlot(depth: u64) ?usize {
+        if (depth <= dw.HORIZON_DEPTH) return null;
+        return @intCast((depth - dw.HORIZON_DEPTH - 1) / PATH_CELLS_PER_SLOT);
     }
 
-    /// Gets the rebase origin Y for a given depth (which is asserted to be > `HORIZON_DEPTH`).
-    pub inline fn getOriginY(self: *const @This(), depth: u64) u64 {
+    /// Bit offset of `depth`'s origin cell inside its `pathSlot()` word.
+    /// Asserts `depth > HORIZON_DEPTH`, matching `pathSlot()` returning non-null.
+    pub inline fn pathShift(depth: u64) u6 {
         std.debug.assert(depth > dw.HORIZON_DEPTH);
-        const idx = depth - dw.HORIZON_DEPTH - 1;
-        const slot: usize = @intCast(idx / 21);
-        const shift: u6 = @intCast((idx % 21) * 3);
-        return (self.top_path.at(slot).* >> shift) & 7;
+        return @intCast(((depth - dw.HORIZON_DEPTH - 1) % PATH_CELLS_PER_SLOT) * 3);
+    }
+
+    /// X of the rebase window's left cell at `depth` (see `LayerTransition` for what a cell is).
+    /// Asserts `depth > HORIZON_DEPTH`, since no shallower depth rebases.
+    pub inline fn getOriginX(self: *const @This(), depth: u64) u3 {
+        return @intCast((self.left_path.at(pathSlot(depth).?).* >> pathShift(depth)) & 7);
+    }
+
+    /// Y of the rebase window's top cell at `depth`. See `getOriginX()`.
+    pub inline fn getOriginY(self: *const @This(), depth: u64) u3 {
+        return @intCast((self.top_path.at(pathSlot(depth).?).* >> pathShift(depth)) & 7);
     }
 
     /// Gets the `ancestor_materials` sprite for a specific quadrant.
@@ -1952,27 +1993,23 @@ pub const QuadCache = struct {
         return self.ancestor_materials[ANCESTOR_CENTER + (quadrant >> 1)][ANCESTOR_CENTER + quadrant % 2];
     }
 
-    /// Returns the 512-bit seed of a specified quadrant (or the global seed if the current depth is <= HORIZON_DEPTH).
+    /// Returns the 512-bit seed of a specified quadrant (or the global seed if `depth` is <= `HORIZON_DEPTH`).
     ///
     /// A depth is reached by exactly one of the three branches below depending on where the player happens to be standing,
     /// so ALL of them have to answer the same thing for the same depth,
     /// or a block would generate differently depending on the route the player took to look at it.
     ///
-    /// Below the horizon that is the world seed, and above it the recorded rebase path (see
+    /// At or before the horizon that is the world seed, and past it the recorded rebase path (see
     /// `computeLayer()`, which only steps `path_hashes` past `HORIZON_DEPTH`).
     pub inline fn getQuadrantSeed(self: *const @This(), quadrant: u2, depth: u64) seeding.Seed {
         std.debug.assert(memory.game.depth > HORIZON_DEPTH or quadrant == 0);
-        if (depth == memory.game.depth) {
-            // verify seeds are the same and make sense
-            // if (depth <= dw.HORIZON_DEPTH)
-            //     std.debug.assert(std.mem.eql(u64, &self.path_hashes.value[quadrant].value, &memory.game.seed.value));
-            return self.path_hashes.value[quadrant];
-        }
 
-        // At or shallower than HORIZON_DEPTH there's simply no coordinate rebasing.
-        if (depth <= dw.HORIZON_DEPTH) {
-            return memory.game.seed;
-        }
+        // Asked FIRST, before the current-depth branch.
+        // Only a rebase steps path_hashes, so at HORIZON_DEPTH it still holds whatever the deepest
+        // descent left there, and an ascent back to HORIZON_DEPTH does not clear it.
+        if (depth <= dw.HORIZON_DEPTH) return memory.game.seed;
+
+        if (depth == memory.game.depth) return self.path_hashes.value[quadrant];
 
         // The ring aliases every HISTORY_LEN depths, so only a depth inside the live
         // window names its own slot. A caller outside the window would read another
@@ -2022,24 +2059,6 @@ pub const QuadCache = struct {
             }
         }
     }
-
-    /// Returns details on a specific quadrant and what "edges" of the world it touches.
-    pub inline fn getQuadrantEdgeDetails(self: *const @This(), quadrant: u2, depth: u64) QuadrantEdgeDetails {
-        if (depth <= HORIZON_DEPTH) {
-            return .{
-                .most_top = true,
-                .most_bottom = true,
-                .most_left = true,
-                .most_right = true,
-            };
-        }
-        return .{
-            .most_top = quadrant < 2 and self.most_top,
-            .most_bottom = quadrant >= 2 and self.most_bottom,
-            .most_left = (quadrant % 2 == 0) and self.most_left,
-            .most_right = (quadrant % 2 == 1) and self.most_right,
-        };
-    }
 };
 
 /// The QuadCache that stores information about the 4 quadrants and their history.
@@ -2077,12 +2096,15 @@ pub inline fn getMaxSuffixAtDepth(depth: u64) u64 {
 
 /// Whether the world at `depth` actually has the chunk `coord` names.
 ///
-/// Past `HORIZON_DEPTH` the suffix uses its full width and the quadrant carries the top bit,
-/// so every value names a real chunk and only `Coordinate.moveAtDepth()` can tell you that you left.
+/// At or before `HORIZON_DEPTH` the world is one suffix wide, so there is no quadrant to stand in.
+/// Past it the suffix uses its full width and the quadrant carries the top bit.
+/// Every value then names a real chunk,
+/// and only `Coordinate.moveAtDepth()` can tell you that you left.
 ///
 /// Worth asserting wherever the PLAYER's chunk is written: it is the frame every other world coordinate
 /// is measured from, so a chunk off the world displaces the whole visible world instead of failing outright.
 pub inline fn isInWorld(coord: Coordinate, depth: u64) bool {
+    if (depth <= HORIZON_DEPTH and coord.quadrant != 0) return false;
     const max = getMaxSuffixAtDepth(depth);
     return coord.suffix[0] <= max and coord.suffix[1] <= max;
 }
@@ -2934,12 +2956,15 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
 
                 if (broken) {
                     if (item.bx == bx and item.by == by and item.coord.eql(coord)) original_block_broken = true;
+                    // A 2x1 decor drops from the half the player pressed, not from whichever half owns the drop.
+                    // Only a sideways neighbor qualifies, so a collapsing vertical stack still pops each block from its own cell.
+                    const from_pressed = dy == 0 and (dx == 1 or dx == -1);
                     // water already drops in modifyBlockHp()
                     if (current_sprite != .water) dw.inventory.dropItem(
                         current_sprite,
-                        target_coord,
-                        lbx,
-                        lby,
+                        if (from_pressed) item.coord else target_coord,
+                        if (from_pressed) item.bx else lbx,
+                        if (from_pressed) item.by else lby,
                     );
 
                     // Internal block modification to avoid recursion.
@@ -3090,48 +3115,15 @@ pub fn getBlockAt(coord: Coordinate, lx: u4, ly: u4, depth: u64) Block {
         return getChunkPtr(coord).blocks[(@as(usize, ly) << CHUNK_SIZE_LOG2) | lx];
     }
 
-    if (memory.game.depth >= dw.HORIZON_DEPTH) {
-        const horizon_depth = memory.game.depth - dw.HORIZON_DEPTH;
-        if (depth == horizon_depth) {
-            // Evaluates where within the H (D-32) active event horizon query corresponds to, bypassing standard `getInheritedMaterial` calls.
-            var center_coord = memory.game.getPlayerCoord().asDepthCoordinate(memory.game.depth);
-            var t_bx = memory.game.getBlockXInChunk();
-            var t_by = memory.game.getBlockYInChunk();
-            while (center_coord.depth > horizon_depth) {
-                const p = dw.ancestor.getParentInfo(center_coord, t_bx, t_by);
-                center_coord = p.coord.asDepthCoordinate(center_coord.depth - 1);
-                t_bx = p.bx;
-                t_by = p.by;
-            }
+    if (dw.ancestor.isHorizonDepth(depth)) {
+        const idx = horizonWindowIndex(coord, lx, ly, quad_cache.liveTrace() orelse panicUnresolvedAncestor(), depth);
 
-            const shift_amt: u7 = if (horizon_depth >= dw.HORIZON_DEPTH) dw.HORIZON_DEPTH * dw.ZOOM_LOG2 else @intCast(horizon_depth * dw.ZOOM_LOG2);
-
-            const p_qx: i128 = coord.quadrant % 2;
-            const old_qx: i128 = center_coord.quadrant % 2;
-            const abs_chunk_x_p: i128 = (p_qx << shift_amt) | @as(i128, coord.suffix[0]);
-            const abs_chunk_x_old: i128 = (old_qx << shift_amt) | @as(i128, center_coord.suffix[0]);
-            const diff_chunk_x: i64 = @intCast(std.math.clamp(abs_chunk_x_p - abs_chunk_x_old, -2, 2));
-
-            const p_qy: i128 = coord.quadrant / 2;
-            const old_qy: i128 = center_coord.quadrant / 2;
-            const abs_chunk_y_p: i128 = (p_qy << shift_amt) | @as(i128, coord.suffix[1]);
-            const abs_chunk_y_old: i128 = (old_qy << shift_amt) | @as(i128, center_coord.suffix[1]);
-            const diff_chunk_y: i64 = @intCast(std.math.clamp(abs_chunk_y_p - abs_chunk_y_old, -2, 2));
-
-            const diff_block_x = diff_chunk_x * 16 + @as(i64, lx) - @as(i64, t_bx);
-            const diff_block_y = diff_chunk_y * 16 + @as(i64, ly) - @as(i64, t_by);
-
-            // center queries on the active quadrants within the window.
-            const x_idx = diff_block_x + QuadCache.ANCESTOR_CENTER + @as(i64, memory.game.player_quadrant % 2);
-            const y_idx = diff_block_y + QuadCache.ANCESTOR_CENTER + @as(i64, memory.game.player_quadrant / 2);
-
-            // The window is the ONLY record of material at H, so a query it cannot represent has no
-            // answer at all. It used to be given air, which is the worst possible guess: the caller
-            // is generating terrain from this, and air here erases every depth that descends from it.
-            const grid: i64 = QuadCache.ANCESTOR_GRID;
-            if (x_idx < 0 or x_idx >= grid or y_idx < 0 or y_idx >= grid) panicUnresolvedAncestor();
-            return quad_cache.ancestor_materials[@intCast(y_idx)][@intCast(x_idx)];
-        }
+        // The window is the ONLY record of material at H, so a query it cannot represent has no
+        // answer at all. It used to be given air, which is the worst possible guess: the caller
+        // is generating terrain from this, and air here erases every depth that descends from it.
+        const grid: i64 = QuadCache.ANCESTOR_GRID;
+        if (idx[0] < 0 or idx[0] >= grid or idx[1] < 0 or idx[1] >= grid) panicUnresolvedAncestor();
+        return quad_cache.ancestor_materials[@intCast(idx[1])][@intCast(idx[0])];
     }
 
     // not the current depth ):
@@ -3148,9 +3140,7 @@ pub fn clearCaches(comptime clear_ancestors: bool) void {
     SimBuffer.clear();
     chunk_cache.clear();
     dw.lighting.invalidateMiningLight();
-    @memset(&quad_cache.seed_clock_bits, 0);
-    @memset(&quad_cache.seed_hand, 0);
-    @memset(&quad_cache.seed_cache_keys, @splat(DepthCoordinate.invalid));
+    quad_cache.clearSeedCache();
     dw.ancestor.clearChunkNoise();
     dw.ancestor.clearParentHoods();
     clearLegacyScratch();
@@ -3200,7 +3190,25 @@ const PLAYER_FEET_OFFSET = CHUNK_SIZE_SQ / 2;
 /// The split lets the same transition be installed more than once.
 /// The portal animation installs it every frame as a throwaway.
 /// That generates the new depth's chunks while the committed world still sits at the old depth.
-/// Fields past `rebase` mean nothing at or before `HORIZON_DEPTH`, where no rebase happens.
+///
+/// Two words for the fields past `rebase`, which are the ones that need them:
+///
+///   cell    one whole suffix worth of chunks: 2**64 per axis.
+///           A depth change multiplies every chunk address by `ZOOM_FACTOR`,
+///           so one cell at D becomes `ZOOM_FACTOR` cells at D+1.
+///   window  the cells a `Coordinate` can name at one depth: 2 per axis,
+///           because the quadrant is one bit per axis on top of the 64-bit suffix.
+///           `left_cell` and `top_cell` name its top-left cell,
+///           and the four quadrants ARE the four cells of the window (0=NW, 1=NE, 2=SW, 3=SE).
+///
+/// The world at D+1 is 4 cells per axis when D is `HORIZON_DEPTH`, and 8 when D is deeper.
+/// Either way that is more cells than one window can name.
+/// A descent picks which 2 to keep, and that choice is the rebase.
+/// `maxOriginCell()` is how far the choice can reach.
+///
+/// `computeLayer()` derives every field below.
+/// `computeParentLayer()` and `computeRetraceLayer()` read them back out of `quad_cache` instead,
+/// because a depth's frame belongs to the descent that first reached it.
 pub const LayerTransition = struct {
     /// The depth being entered: one deeper for `computeLayer()`, one shallower for `computeParentLayer()`.
     depth: u64,
@@ -3210,16 +3218,15 @@ pub const LayerTransition = struct {
     player_quadrant: u2,
     max_possible_suffix: u64,
 
-    /// Whether the fields below carry meaning (false at or before `HORIZON_DEPTH`).
+    /// Whether the fields below carry meaning (false at or before `HORIZON_DEPTH`, which does not rebase).
     rebase: bool = false,
+    /// Quadrant seeds at `depth`, one per cell of the window (see `stepQuadrantSeeds()`).
     path_hashes: ChunkSeeds = undefined,
-    /// Top-left cell of the rebase window for `depth`; see `QuadCache.getOriginX()`.
-    left_cell: u64 = 0,
-    top_cell: u64 = 0,
-    most_top: bool = true,
-    most_bottom: bool = true,
-    most_left: bool = true,
-    most_right: bool = true,
+    /// X of the window's left cell at `depth`, from 0 to `maxOriginCell(depth)`.
+    /// Recorded by `writeRebasePath()` and read back by `QuadCache.getOriginX()`.
+    left_cell: u3 = 0,
+    /// Y of the window's top cell at `depth`. See `left_cell`.
+    top_cell: u3 = 0,
     /// The horizon window for `depth`.
     /// Only built once the horizon has a real ancestor depth to summarize.
     ancestor_materials: HorizonWindow = undefined,
@@ -3235,8 +3242,13 @@ pub const LayerTransition = struct {
 
 /// The exact slice of global state `installLayer()` overwrites, captured so a preview install can be undone.
 ///
-/// This mirrors `installLayer()` field for field: if one gains a write, the other MUST gain a capture,
-/// or a preview would leak D+1 state into the live D world.
+/// One capture per write `installLayer()` makes, in the same order.
+/// If one gains a write the other MUST gain a capture, or a preview would leak D+1 state into the live D world.
+/// The "a preview install puts every global back" test fails when the two drift.
+///
+/// `quad_cache.materials_windows` is deliberately absent.
+/// A rebase truncates it through `invalidateMaterialsFrom()`,
+/// but it is only a memo of `getMaterials()`, so a lost checkpoint costs a rebuild and never an answer.
 pub const LayerSnapshot = struct {
     depth: u64,
     player_chunk: Vec2u,
@@ -3248,13 +3260,10 @@ pub const LayerSnapshot = struct {
     origin_x: u3,
     origin_y: u3,
     historical_seed: ChunkSeeds,
-    ancestor_materials: [QuadCache.ANCESTOR_GRID][QuadCache.ANCESTOR_GRID]Block,
-    most_top: bool,
-    most_bottom: bool,
-    most_left: bool,
-    most_right: bool,
+    ancestor_materials: HorizonWindow,
     /// Length of both path lists, so an append made by the install can be dropped.
     path_len: usize,
+    /// The `QuadCache.pathSlot()` word the install can patch, and what it held.
     path_slot: usize,
     /// Whether `path_slot` already existed (and so must be restored rather than truncated away).
     path_slot_live: bool,
@@ -3262,32 +3271,33 @@ pub const LayerSnapshot = struct {
     path_top: u64,
     /// Length of `materials_path`, so an append made by the install can be dropped.
     materials_len: usize,
+    /// The `QuadCache.materialsSlot()` entry the install can patch, and what it held.
     materials_slot: usize,
     /// Whether `materials_slot` already existed (and so must be restored rather than truncated away).
     materials_slot_live: bool,
     materials_prev: HorizonTrace,
 };
 
-/// Records the rebase origin cell for `depth` in the packed path lists (21 3-bit cells per u64).
-/// Only the first cell of a fresh slot grows the list; every other write patches an existing slot,
+/// Records the rebase window origin for `depth` in the packed path lists.
+/// Only the first cell of a fresh word grows the list; every other write patches an existing word,
 /// so a re-descent cannot corrupt earlier depths.
-fn writeRebasePath(depth: u64, left_cell: u64, top_cell: u64) void {
-    const path_start_depth = dw.HORIZON_DEPTH + 1; // first depth that records a rebase path entry
-    if (depth < path_start_depth) return;
+///
+/// Precondition: depths are recorded in order, so the word is never more than one past the end.
+/// That holds because the only way to reach a depth is through the depth above it.
+fn writeRebasePath(depth: u64, left_cell: u3, top_cell: u3) void {
+    const slot = QuadCache.pathSlot(depth) orelse return;
+    std.debug.assert(slot <= quad_cache.left_path.len);
+    const bit_shift = QuadCache.pathShift(depth);
 
-    const path_idx = depth - path_start_depth; // 0-based index of this depth in the path history
-    const slot: usize = @intCast(path_idx / 21); // packed-array slot (21 3-bit cells per u64)
-    const bit_shift: u6 = @intCast((path_idx % 21) * 3); // bit offset of this cell within its slot
-
-    if (bit_shift == 0 and slot >= quad_cache.left_path.len) {
+    if (bit_shift == 0 and slot == quad_cache.left_path.len) {
         quad_cache.left_path.append(alloc, left_cell) catch memory.oom();
         quad_cache.top_path.append(alloc, top_cell) catch memory.oom();
     } else {
         const cell_mask = @as(u64, 0b111) << bit_shift;
         const lx: *u64 = quad_cache.left_path.at(slot);
-        lx.* = (lx.* & ~cell_mask) | (left_cell << bit_shift);
+        lx.* = (lx.* & ~cell_mask) | (@as(u64, left_cell) << bit_shift);
         const ty: *u64 = quad_cache.top_path.at(slot);
-        ty.* = (ty.* & ~cell_mask) | (top_cell << bit_shift);
+        ty.* = (ty.* & ~cell_mask) | (@as(u64, top_cell) << bit_shift);
     }
 }
 
@@ -3310,11 +3320,14 @@ fn writeMaterialsPath(depth: u64, trace: HorizonTrace) void {
 }
 
 /// Captures the state a transition into `next_depth` would overwrite, for `restoreLayer()`.
+///
+/// A rebase touches one global, one slot of a rolling buffer, or one entry of a path list.
+/// That is why a whole undo record is this small.
 pub fn snapshotLayer(next_depth: u64) LayerSnapshot {
     const ring: usize = @intCast(next_depth % QuadCache.HISTORY_LEN);
+    // The two path lists are written together, and only by writeRebasePath().
     std.debug.assert(quad_cache.left_path.len == quad_cache.top_path.len);
 
-    // we save a LOT of things!
     var snapshot: LayerSnapshot = .{
         .depth = memory.game.depth,
         .player_chunk = memory.game.player_chunk,
@@ -3326,10 +3339,6 @@ pub fn snapshotLayer(next_depth: u64) LayerSnapshot {
         .origin_y = quad_cache.origins_y[ring],
         .historical_seed = quad_cache.historical_seeds[ring],
         .ancestor_materials = quad_cache.ancestor_materials,
-        .most_top = quad_cache.most_top,
-        .most_bottom = quad_cache.most_bottom,
-        .most_left = quad_cache.most_left,
-        .most_right = quad_cache.most_right,
         .path_len = quad_cache.left_path.len,
         .path_slot = 0,
         .path_slot_live = false,
@@ -3341,8 +3350,7 @@ pub fn snapshotLayer(next_depth: u64) LayerSnapshot {
         .materials_prev = undefined,
     };
 
-    if (next_depth > dw.HORIZON_DEPTH) {
-        const slot: usize = @intCast((next_depth - dw.HORIZON_DEPTH - 1) / 21);
+    if (QuadCache.pathSlot(next_depth)) |slot| {
         snapshot.path_slot = slot;
         if (slot < quad_cache.left_path.len) {
             snapshot.path_slot_live = true;
@@ -3373,10 +3381,6 @@ pub fn restoreLayer(snapshot: LayerSnapshot) void {
     quad_cache.origins_y[snapshot.ring] = snapshot.origin_y;
     quad_cache.historical_seeds[snapshot.ring] = snapshot.historical_seed;
     quad_cache.ancestor_materials = snapshot.ancestor_materials;
-    quad_cache.most_top = snapshot.most_top;
-    quad_cache.most_bottom = snapshot.most_bottom;
-    quad_cache.most_left = snapshot.most_left;
-    quad_cache.most_right = snapshot.most_right;
 
     // A fresh slot only ever appends at the end, so dropping the length is enough to forget it.
     if (snapshot.path_slot_live) {
@@ -3411,14 +3415,10 @@ pub fn installLayer(t: LayerTransition) void {
     if (!t.rebase) return;
 
     quad_cache.path_hashes = t.path_hashes;
-    quad_cache.most_top = t.most_top;
-    quad_cache.most_bottom = t.most_bottom;
-    quad_cache.most_left = t.most_left;
-    quad_cache.most_right = t.most_right;
 
     const ring: usize = @intCast(t.depth % QuadCache.HISTORY_LEN);
-    quad_cache.origins_x[ring] = @intCast(t.left_cell);
-    quad_cache.origins_y[ring] = @intCast(t.top_cell);
+    quad_cache.origins_x[ring] = t.left_cell;
+    quad_cache.origins_y[ring] = t.top_cell;
     quad_cache.historical_seeds[ring] = t.path_hashes;
     writeRebasePath(t.depth, t.left_cell, t.top_cell);
 
@@ -3460,58 +3460,61 @@ pub fn pushLayer(coord: Coordinate, bx: u4, by: u4) void {
 
 /// Reseeds the four quadrants for `depth` from its parent's seeds and the rebase origin it landed on.
 ///
-/// A pure function of `(parent, depth, left_cell, top_cell)`, which is what lets `replayQuadrantSeeds()`
-/// rebuild any depth's seeds from the recorded origin path instead of from `quad_cache.historical_seeds`,
-/// whose ring aliases once an ascent runs deeper than `HISTORY_LEN`.
-fn stepQuadrantSeeds(parent: ChunkSeeds, depth: u64, left_cell: u64, top_cell: u64) ChunkSeeds {
+/// A quadrant is named by the ABSOLUTE cell it covers, never by the route that reached it.
+/// Two descents that land on the same cell therefore seed it the same way.
+/// The result is a pure function of `(parent, depth, left_cell, top_cell)`.
+/// That is what lets `replayQuadrantSeeds()` rebuild a depth's seeds from the recorded origin path.
+/// It cannot read `quad_cache.historical_seeds` instead:
+/// that ring aliases once an ascent runs deeper than `HISTORY_LEN`.
+fn stepQuadrantSeeds(parent: ChunkSeeds, depth: u64, left_cell: u3, top_cell: u3) ChunkSeeds {
     var next: ChunkSeeds = undefined;
     inline for (0..4) |q_id| {
-        // Cell this quadrant covers, 0 to 7 per axis (see computeLayer step 3 for what a cell is).
-        const cell_x = left_cell + utils.intFromBool(u64, q_id % 2 == 1);
-        const cell_y = top_cell + utils.intFromBool(u64, q_id >= 2);
-        // Which of the parent's two quadrant columns and rows that cell came out of.
+        // Cell this quadrant covers (see LayerTransition for what a cell is).
+        const cell_x: u3 = left_cell + utils.intFromBool(u3, q_id % 2 == 1);
+        const cell_y: u3 = top_cell + utils.intFromBool(u3, q_id >= 2);
+        // Which of the parent's own cells that cell was split out of: ZOOM_FACTOR children each.
         const old_q_id = utils.intFromBool(usize, cell_x >= ZOOM_FACTOR) + utils.intFromBool(usize, cell_y >= ZOOM_FACTOR) * 2;
         next.value[q_id] = seeding.mixCoordinateSeed(
             parent.value[old_q_id],
-            @intCast(cell_x % ZOOM_FACTOR),
-            @intCast(cell_y % ZOOM_FACTOR),
+            cell_x % ZOOM_FACTOR,
+            cell_y % ZOOM_FACTOR,
             depth,
         );
     }
     return next;
 }
 
-/// The rebase state at `depth`, rebuilt from the recorded origin path rather than read back from the rolling buffers.
+/// Last cell the rebase window's left (or top) cell can sit on at `depth`.
+/// Asserts `depth > HORIZON_DEPTH`.
 ///
-/// Both fields here are accumulations down the path: the seeds chain through `stepQuadrantSeeds()`,
-/// and the edge flags are `and`-folds.
-const RebaseState = struct {
-    hashes: ChunkSeeds,
-    edges: QuadrantEdgeDetails,
-};
-
-/// Replays the recorded rebase path down to `depth`. Asserts `depth > HORIZON_DEPTH`.
-fn replayRebaseState(depth: u64) RebaseState {
+/// A window is 2 cells per axis, and a depth change splits each parent cell into `ZOOM_FACTOR`.
+/// `HORIZON_DEPTH` is ONE cell wide, since 4**32 chunks is exactly one suffix.
+/// So the depth under it is 4 cells, and its window starts at 2 at the latest.
+/// Every deeper parent is a 2-cell window, so its children are 8 cells and the range is 0 to 6.
+///
+/// Cell 4 at `HORIZON_DEPTH + 1` has no parent chunk.
+/// Without the first case a descent could put the window there.
+/// It then reads back as a copy of cell 0, and hides the edge of the world.
+inline fn maxOriginCell(depth: u64) u3 {
     std.debug.assert(depth > dw.HORIZON_DEPTH);
-    // Last cell the window's top-left corner can sit on. Same value as in computeLayer step 3.
-    const max_origin_cell = ZOOM_FACTOR * 2 - 2;
+    const parent_cells: u4 = if (depth == dw.HORIZON_DEPTH + 1) 1 else 2;
+    return @intCast(parent_cells * ZOOM_FACTOR - 2);
+}
 
-    var state: RebaseState = .{
-        .hashes = .{ .value = @splat(memory.game.seed) },
-        .edges = .{ .most_top = true, .most_bottom = true, .most_left = true, .most_right = true },
-    };
+/// The quadrant seeds at `depth`, rebuilt by replaying the recorded origin path.
+///
+/// Read this rather than `quad_cache.historical_seeds`:
+/// that ring aliases once an ascent runs deeper than `HISTORY_LEN`.
+/// Asserts `depth > HORIZON_DEPTH`, since no shallower depth has quadrant seeds.
+fn replayQuadrantSeeds(depth: u64) ChunkSeeds {
+    std.debug.assert(depth > dw.HORIZON_DEPTH);
 
+    var seeds: ChunkSeeds = .{ .value = @splat(memory.game.seed) };
     var d: u64 = dw.HORIZON_DEPTH + 1;
     while (d <= depth) : (d += 1) {
-        const left_cell = quad_cache.getOriginX(d);
-        const top_cell = quad_cache.getOriginY(d);
-        state.hashes = stepQuadrantSeeds(state.hashes, d, left_cell, top_cell);
-        state.edges.most_left = state.edges.most_left and left_cell == 0;
-        state.edges.most_right = state.edges.most_right and left_cell == max_origin_cell;
-        state.edges.most_top = state.edges.most_top and top_cell == 0;
-        state.edges.most_bottom = state.edges.most_bottom and top_cell == max_origin_cell;
+        seeds = stepQuadrantSeeds(seeds, d, quad_cache.getOriginX(d), quad_cache.getOriginY(d));
     }
-    return state;
+    return seeds;
 }
 
 /// Where a player stands inside block (`bx`, `by`) of a chunk: horizontally centered, standing on the floor!
@@ -3582,12 +3585,7 @@ pub fn computeParentLayer(coord: Coordinate, pos: Vec2i) LayerTransition {
     t.left_cell = quad_cache.getOriginX(depth);
     t.top_cell = quad_cache.getOriginY(depth);
 
-    const state = replayRebaseState(depth);
-    t.path_hashes = state.hashes;
-    t.most_top = state.edges.most_top;
-    t.most_bottom = state.edges.most_bottom;
-    t.most_left = state.edges.most_left;
-    t.most_right = state.edges.most_right;
+    t.path_hashes = replayQuadrantSeeds(depth);
 
     // Rebuilt from the recorded traces rather than recomputed, so `horizon_trace` stays null:
     // this depth's trace was fixed by the descent that first reached it (see `LayerTransition`).
@@ -3651,12 +3649,7 @@ pub fn computeRetraceLayer(step: AscentStep) LayerTransition {
     t.left_cell = quad_cache.getOriginX(depth);
     t.top_cell = quad_cache.getOriginY(depth);
 
-    const state = replayRebaseState(depth);
-    t.path_hashes = state.hashes;
-    t.most_top = state.edges.most_top;
-    t.most_bottom = state.edges.most_bottom;
-    t.most_left = state.edges.most_left;
-    t.most_right = state.edges.most_right;
+    t.path_hashes = replayQuadrantSeeds(depth);
 
     t.has_materials = quad_cache.getMaterials(depth, &t.ancestor_materials);
     return t;
@@ -3687,14 +3680,47 @@ pub fn commitRetrace(t: LayerTransition) void {
 /// `coord` is the chunk that holds the block being descended into,
 /// and (`bx`, `by`) is that block inside it.
 ///
+/// The whole walk, in order (`cell` and `window` are defined on `LayerTransition`):
+/// ```
+/// - save every global this writes, and put them all back on the way out
+/// - stand the player inside the block's 4x4 child region
+/// - build the landing chunk's suffix from the source suffix and the block's child-chunk index
+///
+/// - at or before HORIZON_DEPTH: nothing fell off the top of the suffix, so no rebase;
+///   the landing keeps the source quadrant
+/// past it, the suffix is full, so the top path step has to move into the quadrant:
+///   1. read that step back out, and find the cell the landing falls in
+///   2. see which half of the cell it falls in
+///   3. put the window on the nearer neighbor cell, clamped to the world
+///   4. fold the world-edge flags
+///   5. reseed the four quadrants from the cells they were split out of
+///   6. record the window origin for this depth
+///
+/// then cleanup occurs:
+/// - name the landing chunk (its quadrant is its place in the window) and install it
+/// - refine the horizon window, once the horizon has real terrain to summarize
+/// ```
+///
 /// Past `HORIZON_DEPTH` the rebase math reads the very globals it derives:
 /// the quadrant seeds, the rebase origins, and the ancestor grid.
 /// So this installs the in-progress state while it works, and puts it back before it returns.
 /// Callers see no change; apply the result with `commitLayer()` or `installLayer()`.
 pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) LayerTransition {
+    std.debug.assert(isInWorld(coord, memory.game.depth));
+    // A .player landing reads the player position rather than the block, so the two must agree.
+    // Every other field here is derived from coord, and a mismatch would mix two frames.
+    if (anchor == .player) std.debug.assert(coord.eql(memory.game.getPlayerCoord()));
+
     const new_depth = memory.game.depth + 1;
     const snapshot = snapshotLayer(new_depth);
-    defer restoreLayer(snapshot); // neat use of Zig semantics!
+    defer {
+        restoreLayer(snapshot); // neat use of Zig semantics!
+        // The horizon step generates under the frame this just chose, which memoizes seeds at the
+        // new depth. Nothing at D reads them, but a LATER descent to the same depth picks a
+        // different window and would read them as its own.
+        // Once per descent, and never on a preview install.
+        quad_cache.clearSeedCache();
+    }
 
     // A point keeps its place in the world, so its subpixel offset inside a chunk grows ZOOM_FACTOR times!
     const scale_vec: Vec2i = .{ ZOOM_FACTOR, ZOOM_FACTOR };
@@ -3714,7 +3740,8 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
             // Scale the player position and keep only the part inside one chunk. The whole chunks it
             // crossed are already accounted for by the suffix bits taken from bx and by further below.
             new_pos = @mod(memory.game.player_pos * scale_vec, @as(Vec2i, @splat(dw.SUBPIXELS_IN_CHUNK))) + Vec2i{ 0, pivot_y };
-            // The pivot can push the player out of the bottom of the chunk. Move them a chunk down.
+            // The pivot can push the player out of the bottom of the chunk, into the one under it.
+            // The landing takes that step once it exists, further below.
             if (new_pos[1] >= dw.SUBPIXELS_IN_CHUNK) {
                 new_pos[1] -= dw.SUBPIXELS_IN_CHUNK;
                 chunk_offset[1] = 1;
@@ -3722,8 +3749,8 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
         },
         .block_floor => {
             // The block becomes a ZOOM_FACTOR by ZOOM_FACTOR region of blocks in the child chunk.
-            // The low bits of bx and by pick that region, and the high bits pick the child chunk
-            // itself further below, so the two agree wherever the player was standing.
+            // The low bits of bx and by pick that region, and the high bits pick the child chunk itself further below,
+            // so the two agree wherever the player was standing.
             const region: i64 = dw.CHUNK_SIZE_SQ * ZOOM_FACTOR; // subpixels the region spans per axis
             const cell_x: i64 = @intCast(bx % ZOOM_FACTOR);
             const cell_y: i64 = @intCast(by % ZOOM_FACTOR);
@@ -3735,6 +3762,8 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
         },
     }
 
+    // Where the player is now, so the four fields have a value. All four are replaced further below,
+    // once the landing chunk is known.
     var t: LayerTransition = .{
         .depth = new_depth,
         .new_pos = new_pos,
@@ -3746,134 +3775,130 @@ pub fn computeLayer(coord: Coordinate, bx: u4, by: u4, anchor: LayerAnchor) Laye
     // The coordinate helpers below resolve quadrants against the depth being entered, not the one being left.
     memory.game.depth = new_depth;
 
-    // The suffix of the chunk the player lands in. One depth step multiplies every chunk address by
-    // ZOOM_FACTOR, which is a ZOOM_LOG2-bit left shift of the suffix. The freed low bits name which
-    // of the ZOOM_FACTOR child chunks holds the block: a chunk is CHUNK_SIZE blocks wide and each
-    // child covers CHUNK_SIZE / ZOOM_FACTOR of them, so bx >> (CHUNK_SIZE_LOG2 - ZOOM_LOG2) is it.
+    // The suffix of the chunk the player lands in. One depth step multiplies every chunk address by ZOOM_FACTOR.
+    // A chunk is CHUNK_SIZE blocks wide and each child covers CHUNK_SIZE / ZOOM_FACTOR of them,
+    // so bx >> (CHUNK_SIZE_LOG2 - ZOOM_LOG2) does the trick to find the lower (two) bits.
     const landing_suffix: Vec2u = .{
         (coord.suffix[0] *% ZOOM_FACTOR) | (bx >> (CHUNK_SIZE_LOG2 - dw.ZOOM_LOG2)),
         (coord.suffix[1] *% ZOOM_FACTOR) | (by >> (CHUNK_SIZE_LOG2 - dw.ZOOM_LOG2)),
     };
 
-    if (new_depth <= HORIZON_DEPTH) {
-        // Before the horizon the suffix still has room for the new path step, so nothing falls off
-        // the top and there is no rebase. The quadrant is always 0 here.
-        var landing: Coordinate = .{
-            .suffix = landing_suffix,
-            .quadrant = @intCast(memory.game.player_quadrant),
-        };
-        if (chunk_offset[1] != 0) {
-            landing = landing.moveAtDepth(chunk_offset, new_depth) orelse landing;
-        }
+    // The landing chunk.
+    // At or before the horizon the suffix has room for the new step, so the quadrant carries over.
+    // A rebase replaces it below.
+    var landing: Coordinate = .{ .suffix = landing_suffix, .quadrant = coord.quadrant };
 
-        t.player_chunk = landing.suffix;
-        t.player_quadrant = landing.quadrant;
+    if (new_depth > HORIZON_DEPTH) {
+        // Brief explanation blurb:
+        // An address at D is quadrant * 2**64 + suffix, so 65 bits.
+        // An address at D+1 is 4 times that, plus the child index, so 67 bits.
+        // A window is 2 cells, which is 65 bits again.
+        // The 2 extra bits do not fit, so the descent keeps 2 child cells and drops the rest.
+        // That choice is the rebase, and its 3 bits per axis go to the path lists and stay there.
+        t.rebase = true;
 
-        // Stops growing at depth 32, where a suffix is a full 64 bits.
-        t.max_possible_suffix = getMaxSuffixAtDepth(new_depth);
-        return t;
+        // Bit position of the top path step in the suffix.
+        // HORIZON_DEPTH steps of ZOOM_LOG2 bits, minus the one step being read: 32 * 2 - 2 = 62.
+        const top_step_shift = dw.HORIZON_DEPTH * dw.ZOOM_LOG2 - dw.ZOOM_LOG2;
+        const cell_offset_mask = (@as(u64, 1) << top_step_shift) - 1; // the bits under the top step
+
+        // Step 1: find the cell the landing falls in.
+        // The source quadrant picks a group of ZOOM_FACTOR cells,
+        // and the top step of the source suffix picks one cell in that group.
+        const source_quadrant_x = utils.intFromBool(u3, (coord.quadrant % 2) != 0);
+        const source_quadrant_y = utils.intFromBool(u3, (coord.quadrant / 2) != 0);
+        const landing_cell_x: u3 = source_quadrant_x * ZOOM_FACTOR + @as(u3, @intCast(coord.suffix[0] >> top_step_shift));
+        const landing_cell_y: u3 = source_quadrant_y * ZOOM_FACTOR + @as(u3, @intCast(coord.suffix[1] >> top_step_shift));
+
+        // Step 2: find which half of that cell it falls in.
+        // Both depths scale by ZOOM_FACTOR, so the source's own low suffix bits give the same answer.
+        const half_cell: u64 = 1 << (top_step_shift - 1);
+        const in_left_half = (coord.suffix[0] & cell_offset_mask) < half_cell;
+        const in_top_half = (coord.suffix[1] & cell_offset_mask) < half_cell;
+
+        // Step 3: place the window so the landing sits near the middle of it.
+        // In the left half of its cell, take the cell to the left.
+        // In the top half, take the cell above.
+        // The landing is then half a cell from the window center at most,
+        // which is 2**63 chunks of room in every direction.
+        // The saturating subtract and the clamp keep the window inside the world.
+        // Both only fire at a world edge, where the neighbor cell does not exist.
+        const max_cell = maxOriginCell(new_depth);
+        const left_cell_x = @min(landing_cell_x -| utils.intFromBool(u3, in_left_half), max_cell);
+        const top_cell_y = @min(landing_cell_y -| utils.intFromBool(u3, in_top_half), max_cell);
+
+        // The landing has to be one of the 2 cells the window kept,
+        // or its quadrant would need more than 2 bits.
+        // The clamp only moves the window at a world edge, and that is the side it already sits on.
+        std.debug.assert(landing_cell_x <= @as(u4, max_cell) + 1);
+        std.debug.assert(landing_cell_y <= @as(u4, max_cell) + 1);
+
+        // Step 4: keep the window origin, which is the whole record of this rebase.
+        t.left_cell = left_cell_x;
+        t.top_cell = top_cell_y;
+
+        // Step 5: reseed the four quadrants from the cells they were split out of.
+        // HORIZON_DEPTH is one cell wide and has no rebased parent to read,
+        // so the first rebase starts from the world seed.
+        const old_hashes: ChunkSeeds = if (new_depth == HORIZON_DEPTH + 1) blk: {
+            // The window stays inside that one cell, so all four quadrants read lane 0.
+            // The other three lanes are never used.
+            std.debug.assert(left_cell_x + 1 < ZOOM_FACTOR and top_cell_y + 1 < ZOOM_FACTOR);
+            break :blk .{ .value = @splat(memory.game.seed) };
+        } else quad_cache.path_hashes;
+        quad_cache.path_hashes = stepQuadrantSeeds(old_hashes, new_depth, left_cell_x, top_cell_y);
+        t.path_hashes = quad_cache.path_hashes;
+
+        // Step 6: record the window origin.
+        // The path lists keep it forever, and the rolling buffers answer for the live depths.
+        // See QuadCache.getOriginX() for more details!
+        const ring: usize = @intCast(new_depth % QuadCache.HISTORY_LEN);
+        writeRebasePath(new_depth, left_cell_x, top_cell_y);
+        quad_cache.origins_x[ring] = left_cell_x;
+        quad_cache.origins_y[ring] = top_cell_y;
+        quad_cache.historical_seeds[ring] = quad_cache.path_hashes;
+
+        // The landing's quadrant is its place in the window: 0 or 1 per axis.
+        landing.quadrant = @intCast((landing_cell_x - left_cell_x) + (landing_cell_y - top_cell_y) * 2);
     }
 
-    // Past the horizon the suffix is full, so a descent must REBASE.
-    // Two words, used for the rest of this walk:
-    //
-    //   cell    one suffix worth of chunks, 2^64 wide. The address space at D+1 is 8 cells per axis:
-    //           ZOOM_FACTOR child cells for each of the 2 quadrant columns at D.
-    //   window  the 2 by 2 cells that the four quadrants at D+1 can name. left_cell and top_cell
-    //           name its top-left cell, so each of them runs from 0 to 6.
-    //
-    // A chunk address at D is quadrant_x * 2^64 + suffix_x, which needs 65 bits. Zooming multiplies
-    // it by ZOOM_FACTOR and adds the child index, which needs 67: two more than the window can name.
-    // The rebase is the choice of WHICH 2 of the 8 cells to keep. That 3-bit choice per axis is what
-    // goes into the prefix stack, and it replaces the top path step the suffix just lost.
-    t.rebase = true;
-
-    // Bit position of the suffix's top path step: HORIZON_DEPTH steps of ZOOM_LOG2 bits, minus the
-    // one step being read. 32 * 2 - 2 = 62.
-    const top_step_shift = dw.HORIZON_DEPTH * dw.ZOOM_LOG2 - dw.ZOOM_LOG2;
-    const cell_offset_mask = (@as(u64, 1) << top_step_shift) - 1; // the bits under the top step
-
-    // Step 1: which of the 8 cells the landing chunk falls in.
-    // The quadrant picks one group of ZOOM_FACTOR cells, and the top path step picks one inside it.
-    const parent_quadrant_x = utils.intFromBool(u64, (memory.game.player_quadrant % 2) != 0);
-    const parent_quadrant_y = utils.intFromBool(u64, (memory.game.player_quadrant / 2) != 0);
-    const landing_cell_x = parent_quadrant_x * ZOOM_FACTOR + (coord.suffix[0] >> top_step_shift);
-    const landing_cell_y = parent_quadrant_y * ZOOM_FACTOR + (coord.suffix[1] >> top_step_shift);
-
-    // Step 2: which half of that cell it falls in. Everything scales by the same ZOOM_FACTOR, so the
-    // parent's own low suffix bits answer this before the zoom.
-    const half_cell: u64 = 1 << (top_step_shift - 1);
-    const in_left_half = (coord.suffix[0] & cell_offset_mask) < half_cell;
-    const in_top_half = (coord.suffix[1] & cell_offset_mask) < half_cell;
-
-    // Step 3: place the window so the landing chunk sits near its center. Take the cell to the left
-    // when the chunk is in the left half of its own cell, and the cell above when it is in the top
-    // half. The chunk then ends up within half a cell of the window center, which leaves at least
-    // 2^63 chunks of travel in every direction before an address runs out.
-    // The saturating subtract and the clamp hold the window inside the 8 cells. They only fire at
-    // the edge of the address space, where the neighbor cell to take does not exist.
-    const max_origin_cell = ZOOM_FACTOR * 2 - 2; // 8 cells per axis, and the window is 2 of them
-    var left_cell_x: u64 = landing_cell_x -| utils.intFromBool(u64, in_left_half);
-    var top_cell_y: u64 = landing_cell_y -| utils.intFromBool(u64, in_top_half);
-    left_cell_x = @min(left_cell_x, max_origin_cell);
-    top_cell_y = @min(top_cell_y, max_origin_cell);
-
-    // Step 4: world edges. The window still touches the left edge of the world only if EVERY rebase
-    // so far kept it against cell 0, so these are and-folds down the whole descent path.
-    quad_cache.most_left = quad_cache.most_left and left_cell_x == 0;
-    quad_cache.most_right = quad_cache.most_right and left_cell_x == max_origin_cell;
-    quad_cache.most_top = quad_cache.most_top and top_cell_y == 0;
-    quad_cache.most_bottom = quad_cache.most_bottom and top_cell_y == max_origin_cell;
-    t.most_left = quad_cache.most_left;
-    t.most_right = quad_cache.most_right;
-    t.most_top = quad_cache.most_top;
-    t.most_bottom = quad_cache.most_bottom;
-    t.left_cell = left_cell_x;
-    t.top_cell = top_cell_y;
-
-    // Step 5: reseed the four quadrants from the four they descend from. A new quadrant is named by
-    // its absolute cell, so its seed does not depend on the route taken here (see stepQuadrantSeeds).
-    // The first rebase depth has no rebased parent, so it starts from the world seed.
-    const old_hashes: ChunkSeeds = if (new_depth == HORIZON_DEPTH + 1) .{ .value = @splat(memory.game.seed) } else quad_cache.path_hashes;
-    quad_cache.path_hashes = stepQuadrantSeeds(old_hashes, new_depth, left_cell_x, top_cell_y);
-
-    t.path_hashes = quad_cache.path_hashes;
-
-    // Step 6: record the window origin. The prefix stack keeps it forever, and the rolling buffers
-    // answer for the depths that are still live (see QuadCache.getOriginX).
-    writeRebasePath(new_depth, left_cell_x, top_cell_y);
-    quad_cache.origins_x[@intCast(new_depth % QuadCache.HISTORY_LEN)] = @intCast(left_cell_x);
-    quad_cache.origins_y[@intCast(new_depth % QuadCache.HISTORY_LEN)] = @intCast(top_cell_y);
-    quad_cache.historical_seeds[@intCast(new_depth % QuadCache.HISTORY_LEN)] = quad_cache.path_hashes;
-
-    // Step 7: the landing chunk. Its quadrant is where it fell inside the window, 0 or 1 per axis.
-    // Its suffix is the one built above, whose lost top step is exactly what step 1 read out.
-    const window_x = landing_cell_x - left_cell_x;
-    const window_y = landing_cell_y - top_cell_y;
-    var landing: Coordinate = .{
-        .suffix = landing_suffix,
-        .quadrant = @intCast(window_x + (window_y * 2)),
-    };
+    // The pivot can push the player out of the bottom of their chunk.
+    // The landing then moves into the chunk under it.
+    // At the world floor there is no chunk under it, so the player stands on the bottom of this one.
     if (chunk_offset[1] != 0) {
-        landing = landing.moveAtDepth(chunk_offset, new_depth) orelse landing;
+        if (landing.moveAtDepth(chunk_offset, new_depth)) |moved| {
+            landing = moved;
+        } else {
+            new_pos[1] = dw.SUBPIXELS_IN_CHUNK - 1 - PLAYER_FEET_OFFSET;
+        }
     }
 
     // Installed, and not only recorded: the horizon window below reads the entered quadrant and suffix.
     memory.game.player_chunk = landing.suffix;
     memory.game.player_quadrant = landing.quadrant;
-    max_possible_suffix = std.math.maxInt(u64); // every suffix bit is addressable past the horizon
+    max_possible_suffix = getMaxSuffixAtDepth(new_depth); // stops growing at HORIZON_DEPTH, where a suffix is full
+    t.new_pos = new_pos;
     t.player_chunk = landing.suffix;
     t.player_quadrant = landing.quadrant;
     t.max_possible_suffix = max_possible_suffix;
 
-    // Step 8: the horizon. H sits HORIZON_DEPTH shallower than the depth being entered, so it moved
-    // one depth deeper too, and its window is one refinement step from the window before it.
-    const depth_at_horizon = new_depth - dw.HORIZON_DEPTH;
-    if (depth_at_horizon >= STARTING_ZOOM_TIMES) {
-        const trace = traceHorizon(landing, new_pos, new_depth, @intCast(coord.quadrant));
+    // The horizon.
+    // H sits HORIZON_DEPTH shallower than the depth being entered, so it moved one depth deeper too.
+    // Its window is one refinement step from the window before it.
+    // There is nothing to refine until H reaches the first generated depth.
+    if (t.rebase and new_depth - dw.HORIZON_DEPTH >= STARTING_ZOOM_TIMES) {
+        const depth_at_horizon = new_depth - dw.HORIZON_DEPTH;
+        const trace = traceHorizon(landing, new_pos, new_depth, coord.quadrant);
         t.horizon_trace = trace;
+        // The live window belongs to the depth being left, so its own recorded trace is what centers it.
+        const prev_slot = QuadCache.materialsSlot(new_depth - 1);
+        const prev_trace: ?HorizonTrace = if (prev_slot != null and prev_slot.? < quad_cache.materials_path.len)
+            quad_cache.materials_path.at(prev_slot.?).*
+        else
+            null;
         t.ancestor_materials = refineHorizonWindow(
             &quad_cache.ancestor_materials,
+            prev_trace,
             trace,
             depth_at_horizon,
         );
@@ -3913,14 +3938,22 @@ fn traceHorizon(landing_coord: Coordinate, new_pos: Vec2i, depth: u64, source_qu
 }
 
 /// Refines the horizon window one depth: `prev` is the window at `target_horizon_depth - 1`,
-/// and the returned window is the one at `target_horizon_depth`.
+/// `prev_trace` is the trace THAT window is centered on, and the returned window is the one at
+/// `target_horizon_depth`.
 ///
-/// Reads only `prev`, `trace` and the procedural world, never `quad_cache.ancestor_materials`.
+/// `prev_trace` is null only at the base depth, which generates its window outright and never reads `prev`.
+///
+/// Reads only `prev`, the two traces and the procedural world, never `quad_cache.ancestor_materials`.
 /// That independence is the whole point: it is what lets `QuadCache.getMaterials()` rebuild a window that was
 /// never stored, by feeding this its own previous output (pinned by a test).
 ///
 /// Installs `depth - 1` while it works and puts the game depth back before returning.
-fn refineHorizonWindow(prev: *const HorizonWindow, trace: HorizonTrace, target_horizon_depth: u64) HorizonWindow {
+fn refineHorizonWindow(
+    prev: *const HorizonWindow,
+    prev_trace: ?HorizonTrace,
+    trace: HorizonTrace,
+    target_horizon_depth: u64,
+) HorizonWindow {
     const depth = target_horizon_depth + HORIZON_DEPTH;
     var next: HorizonWindow = undefined;
 
@@ -3938,21 +3971,14 @@ fn refineHorizonWindow(prev: *const HorizonWindow, trace: HorizonTrace, target_h
     memory.game.depth = depth - 1;
     defer memory.game.depth = saved_depth;
 
-    var old_trace_coord = trace_coord;
-    var old_t_bx = t_bx;
-    var old_t_by = t_by;
-    if (target_horizon_depth > STARTING_ZOOM_TIMES) {
-        const pp = dw.ancestor.getParentInfo(trace_coord, t_bx, t_by);
-        old_trace_coord = pp.coord.asDepthCoordinate(old_trace_coord.depth - 1);
-        old_t_bx = pp.bx;
-        old_t_by = pp.by;
-    }
+    // `prev` was built around its OWN trace, so that is the only origin it can be read from.
+    // Walking this trace up a depth instead assumes the player still stands in the block the previous
+    // descent landed in, which a retrace or a debug teleport breaks.
+    const prev_center = prev_trace orelse trace; // the base depth ignores `prev` entirely
+    const prev_depth = if (target_horizon_depth > STARTING_ZOOM_TIMES) target_horizon_depth - 1 else target_horizon_depth;
 
     const qx: i32 = @intCast(trace.player_quadrant % 2);
     const qy: i32 = @intCast(trace.player_quadrant / 2);
-    const shift_amt: u7 = if (old_trace_coord.depth >= dw.HORIZON_DEPTH) dw.HORIZON_DEPTH * dw.ZOOM_LOG2 else @intCast(old_trace_coord.depth * dw.ZOOM_LOG2);
-    const old_qx = @as(i128, old_trace_coord.quadrant % 2);
-    const old_qy = @as(i128, old_trace_coord.quadrant / 2);
 
     for (0..QuadCache.ANCESTOR_GRID) |y_idx| {
         for (0..QuadCache.ANCESTOR_GRID) |x_idx| {
@@ -3973,31 +3999,21 @@ fn refineHorizonWindow(prev: *const HorizonWindow, trace: HorizonTrace, target_h
                     next[y_idx][x_idx] = dw.ancestor.getInheritedMaterial(child_key, local_bx, local_by);
                 } else {
                     const p = dw.ancestor.getParentInfo(child_key, local_bx, local_by);
-                    const p_qx_128: i128 = p.coord.quadrant % 2;
-                    const p_qy_128: i128 = p.coord.quadrant / 2;
-
-                    const abs_chunk_x_p: i128 = (p_qx_128 << shift_amt) | @as(i128, p.coord.suffix[0]);
-                    const abs_chunk_x_old: i128 = (old_qx << shift_amt) | @as(i128, old_trace_coord.suffix[0]);
-                    const diff_chunk_x: i64 = @intCast(std.math.clamp(abs_chunk_x_p - abs_chunk_x_old, -2, 2));
-
-                    const abs_chunk_y_p: i128 = (p_qy_128 << shift_amt) | @as(i128, p.coord.suffix[1]);
-                    const abs_chunk_y_old: i128 = (old_qy << shift_amt) | @as(i128, old_trace_coord.suffix[1]);
-                    const diff_chunk_y: i64 = @intCast(std.math.clamp(abs_chunk_y_p - abs_chunk_y_old, -2, 2));
 
                     var p_neighbors: [8]Block align(8) = @splat(.empty);
 
-                    const px_idx = diff_chunk_x * 16 + @as(i64, p.bx) - @as(i64, old_t_bx) + QuadCache.ANCESTOR_CENTER + @as(i64, trace.source_quadrant % 2);
-                    const py_idx = diff_chunk_y * 16 + @as(i64, p.by) - @as(i64, old_t_by) + QuadCache.ANCESTOR_CENTER + @as(i64, trace.source_quadrant / 2);
+                    const parent_idx = horizonWindowIndex(p.coord, p.bx, p.by, prev_center, prev_depth);
+                    const px_idx = parent_idx[0];
+                    const py_idx = parent_idx[1];
 
                     // The window is a WINDOW onto a larger world, not an island in a void, so anything off its edge
                     // is edge-extended rather than read as air.
                     const grid_max = prev.len - 1;
 
-                    // A cell's parent sits at most `ANCESTOR_GRID / 2 / BLOCKS_PER_PARENT` blocks from the window's
-                    // center, so every lookup here (and its 3x3 ring) lands well inside the window.
-                    // Leaving it means the lineage itself is wrong, and the clamp below would then quietly fill the
-                    // whole layer from one edge cell: a dead, uniform world with nothing to point at.
-                    // Asserted rather than trusted, because that failure has no other symptom.
+                    // A cell's parent sits at most ANCESTOR_GRID / 2 / BLOCKS_PER_PARENT blocks from the window's center,
+                    // so every lookup here (and its 3x3 ring) lands well inside the window.
+                    // Leaving it means the lineage itself is wrong,
+                    // and the clamp below would then quietly fill the whole layer from one edge cell.
                     std.debug.assert(px_idx >= 1 and px_idx < @as(i64, @intCast(grid_max)));
                     std.debug.assert(py_idx >= 1 and py_idx < @as(i64, @intCast(grid_max)));
 
@@ -4031,7 +4047,7 @@ fn refineHorizonWindow(prev: *const HorizonWindow, trace: HorizonTrace, target_h
 
                 // the traces above are purely procedural, so the player's edit at this exact cell (if any) wins
                 const block_idx: u8 = @intCast((@as(usize, local_by) << 4) | local_bx);
-                // `inheritedCell()`, as in `ancestor.getInheritedMaterial()`: this trace feeds deeper depths.
+                // inheritedCell(), as in ancestor.getInheritedMaterial(): this trace feeds deeper depths.
                 if (inheritedCell(child_key, block_idx)) |cell| {
                     cell.applyTo(&next[y_idx][x_idx]);
                 }
@@ -4054,7 +4070,7 @@ test "moveAtDepth: the world ends at the outer quadrants rather than wrapping" {
     try testing.expectEqual(@as(u64, 0), inward.suffix[0]);
 
     // Crossing OUTWARD leaves the world: flipping the bit anyway would wrap edge to edge and hand back
-    // a coordinate 2^64 chunks away, which `refineHorizonWindow()` reads as an enormous parent delta.
+    // a coordinate 2^64 chunks away, which refineHorizonWindow() reads as an enormous parent delta.
     try testing.expectEqual(
         @as(?Coordinate, null),
         (Coordinate{ .suffix = .{ max, 0 }, .quadrant = 1 }).moveAtDepth(.{ 1, 0 }, depth),
@@ -4189,10 +4205,215 @@ test "computeLayer: a block_floor landing leaves the feet clear of the floor" {
             try testing.expect(feet >= cell_y * region);
             try testing.expect(feet < (cell_y + 1) * region);
 
-            // The landing must stay inside the chunk, since `player_pos` is chunk-relative.
+            // The landing must stay inside the chunk, since player_pos is chunk-relative.
             try testing.expect(t.new_pos[1] >= 0 and t.new_pos[1] < dw.SUBPIXELS_IN_CHUNK);
         }
     }
+}
+
+test "rebase: the first window cannot name a cell the horizon depth does not have" {
+    // HORIZON_DEPTH is exactly one suffix wide, so the depth under it is 4 cells and a 2-cell window starts at 2 at the latest.
+    // A window at 3 would cover cell 4, which has no parent chunk at all:
+    // it seeds identically to cell 0 and hides the east edge of the world.
+    const saved_game = memory.game;
+    const saved_suffix = max_possible_suffix;
+    const saved_path_len = quad_cache.left_path.len;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+        max_possible_suffix = saved_suffix;
+        quad_cache.left_path.len = saved_path_len;
+        quad_cache.top_path.len = saved_path_len;
+    }
+
+    memory.game = .{};
+    memory.game.depth = HORIZON_DEPTH;
+    max_possible_suffix = getMaxSuffixAtDepth(HORIZON_DEPTH);
+    quad_cache.path_hashes.value[0] = memory.game.seed;
+
+    const top_step: u6 = HORIZON_DEPTH * dw.ZOOM_LOG2 - dw.ZOOM_LOG2; // 62
+    const last_cell: u64 = 3; // the deepest of the 4 cells the child depth has
+
+    // In the RIGHT half of the last cell, which is where the window used to run off the world.
+    memory.game.player_chunk = @splat((last_cell << top_step) | (@as(u64, 3) << (top_step - 2)));
+    const right = computeLayer(memory.game.getPlayerCoord(), 0, 0, .player);
+    try testing.expectEqual(@as(u3, 2), right.left_cell);
+    try testing.expectEqual(@as(u3, 2), right.top_cell);
+    // Landing in the far cell of the window: quadrant 1 on each axis.
+    try testing.expectEqual(@as(u2, 3), right.player_quadrant);
+    // Against the east and south edges of the world, which the old range of 0 to 6 could not say.
+    try testing.expectEqual(maxOriginCell(HORIZON_DEPTH + 1), right.left_cell);
+    try testing.expectEqual(maxOriginCell(HORIZON_DEPTH + 1), right.top_cell);
+
+    // In the LEFT half of the same cell the window has room to center, and lands on 2 as well.
+    memory.game.player_chunk = @splat(last_cell << top_step);
+    const left_half = computeLayer(memory.game.getPlayerCoord(), 0, 0, .player);
+    try testing.expectEqual(@as(u3, 2), left_half.left_cell);
+    try testing.expectEqual(@as(u2, 3), left_half.player_quadrant);
+
+    // The west edge of the world clamps the other way, through the saturating subtract.
+    memory.game.player_chunk = .{ 0, 0 };
+    const origin = computeLayer(memory.game.getPlayerCoord(), 0, 0, .player);
+    try testing.expectEqual(@as(u3, 0), origin.left_cell);
+    try testing.expectEqual(@as(u2, 0), origin.player_quadrant);
+    try testing.expectEqual(@as(u3, 0), origin.top_cell);
+}
+
+test "quadrant seed: the horizon depth answers the world seed, whatever a descent left behind" {
+    // Only a rebase steps path_hashes, so an ascent from HORIZON_DEPTH + 1 back to HORIZON_DEPTH
+    // leaves the deeper depth's quadrant seeds in it. Reading those at HORIZON_DEPTH regenerates the
+    // whole depth from a seed the descent never used: the player walks back up into a different world.
+    const saved_game = memory.game;
+    const saved_hashes = quad_cache.path_hashes;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+        quad_cache.path_hashes = saved_hashes;
+    }
+
+    memory.game = .{};
+    memory.game.depth = HORIZON_DEPTH;
+    // What a descent to HORIZON_DEPTH + 1 and back would have left there.
+    quad_cache.path_hashes = .{
+        .value = @splat(seeding.mixCoordinateSeed(memory.game.seed, 1, 2, HORIZON_DEPTH + 1)),
+    };
+
+    try testing.expectEqualSlices(
+        u64,
+        &memory.game.seed.value,
+        &quad_cache.getQuadrantSeed(0, HORIZON_DEPTH).value,
+    );
+}
+
+test "moveAtDepth: the horizon depth ends at its suffix, having no quadrant bit to spend" {
+    // The world at HORIZON_DEPTH is 4**32 chunks, which is one full suffix.
+    // Letting the quadrant bit carry there would hand back an address 2**64 chunks away that generates as a copy of this one.
+    const max = std.math.maxInt(u64);
+    const at: Coordinate = .{ .suffix = .{ max, max }, .quadrant = 0 };
+    const origin: Coordinate = .{ .suffix = .{ 0, 0 }, .quadrant = 0 };
+
+    try testing.expectEqual(@as(?Coordinate, null), at.moveAtDepth(.{ 1, 0 }, HORIZON_DEPTH));
+    try testing.expectEqual(@as(?Coordinate, null), at.moveAtDepth(.{ 0, 1 }, HORIZON_DEPTH));
+    try testing.expectEqual(@as(?Coordinate, null), origin.moveAtDepth(.{ -1, 0 }, HORIZON_DEPTH));
+    try testing.expectEqual(@as(?Coordinate, null), origin.moveAtDepth(.{ 0, -1 }, HORIZON_DEPTH));
+
+    // One step in from the edge still moves, and stays in quadrant 0.
+    const inward = (Coordinate{ .suffix = .{ max - 1, 0 }, .quadrant = 0 }).moveAtDepth(.{ 1, 0 }, HORIZON_DEPTH).?;
+    try testing.expectEqual(@as(u2, 0), inward.quadrant);
+    try testing.expectEqual(max, inward.suffix[0]);
+}
+
+test "a preview install puts every global back" {
+    // The portal preview installs D+1, generates chunks under it, then restores D, every frame.
+    // Anything installLayer() writes that snapshotLayer() forgets leaks the deeper depth into the live world,
+    // where it reads as terrain that regenerates differently on the very next frame.
+    const saved_game = memory.game;
+    const saved_suffix = max_possible_suffix;
+    const saved_path_len = quad_cache.left_path.len;
+    const saved_materials_len = quad_cache.materials_path.len;
+    const saved_windows_len = quad_cache.materials_windows.len;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+        max_possible_suffix = saved_suffix;
+        quad_cache.left_path.len = saved_path_len;
+        quad_cache.top_path.len = saved_path_len;
+        quad_cache.materials_path.len = saved_materials_len;
+        quad_cache.materials_windows.len = saved_windows_len;
+    }
+
+    memory.game = .{};
+    const depth = QuadCache.MATERIALS_START_DEPTH + 1; // deep enough to write a horizon trace as well
+    memory.game.depth = depth - 1;
+    memory.game.player_chunk = .{ 12345, 6789 };
+    memory.game.player_quadrant = 2;
+    max_possible_suffix = getMaxSuffixAtDepth(depth - 1);
+
+    // The state the install has to overwrite, all of it distinct from what the transition carries.
+    quad_cache.path_hashes = .{ .value = @splat(seeding.mixCoordinateSeed(memory.game.seed, 1, 1, 1)) };
+    quad_cache.ancestor_materials = @splat(@splat(world_edge_block));
+    // One live word and one live trace, so the install patches rather than appends. Both paths matter:
+    // a fresh descent appends, and a re-descent (the preview, every frame after the first) patches.
+    quad_cache.left_path.len = 0;
+    quad_cache.top_path.len = 0;
+    quad_cache.materials_path.len = 0;
+    quad_cache.materials_windows.len = 0;
+    quad_cache.left_path.append(alloc, 0o777) catch unreachable;
+    quad_cache.top_path.append(alloc, 0o707) catch unreachable;
+    quad_cache.materials_path.append(alloc, .{
+        .suffix = .{ 1, 2 },
+        .quadrant = 0,
+        .bx = 3,
+        .by = 4,
+        .player_quadrant = 1,
+        .source_quadrant = 2,
+    }) catch unreachable;
+
+    const ring: usize = @intCast(depth % QuadCache.HISTORY_LEN);
+    quad_cache.origins_x[ring] = 1;
+    quad_cache.origins_y[ring] = 4;
+    quad_cache.historical_seeds[ring] = quad_cache.path_hashes;
+
+    const before_game = memory.game;
+    const before_suffix = max_possible_suffix;
+    const before_hashes = quad_cache.path_hashes;
+    const before_materials = quad_cache.ancestor_materials;
+    const before_origin_x = quad_cache.origins_x[ring];
+    const before_origin_y = quad_cache.origins_y[ring];
+    const before_historical = quad_cache.historical_seeds[ring];
+    const before_left_word = quad_cache.left_path.at(0).*;
+    const before_top_word = quad_cache.top_path.at(0).*;
+    const before_trace = quad_cache.materials_path.at(0).*;
+
+    var window: HorizonWindow = @splat(@splat(Block.empty));
+    window[0][0] = world_edge_block;
+    const t: LayerTransition = .{
+        .depth = depth,
+        .new_pos = .{ 0, 0 },
+        .player_chunk = .{ 99, 100 },
+        .player_quadrant = 1,
+        .max_possible_suffix = getMaxSuffixAtDepth(depth),
+        .rebase = true,
+        .path_hashes = .{ .value = @splat(seeding.mixCoordinateSeed(memory.game.seed, 2, 2, 2)) },
+        .left_cell = 5,
+        .top_cell = 6,
+        .ancestor_materials = window,
+        .horizon_trace = .{
+            .suffix = .{ 7, 8 },
+            .quadrant = 3,
+            .bx = 9,
+            .by = 10,
+            .player_quadrant = 2,
+            .source_quadrant = 1,
+        },
+        .has_materials = true,
+    };
+
+    const snapshot = snapshotLayer(depth);
+    installLayer(t);
+
+    // The install must really have moved the world, or the restore below proves nothing.
+    try testing.expectEqual(depth, memory.game.depth);
+    try testing.expect(!std.mem.eql(u8, std.mem.asBytes(&before_hashes), std.mem.asBytes(&quad_cache.path_hashes)));
+    try testing.expect(quad_cache.materials_path.len > 1);
+
+    restoreLayer(snapshot);
+
+    try testing.expectEqual(before_game.depth, memory.game.depth);
+    try testing.expectEqual(before_game.player_chunk, memory.game.player_chunk);
+    try testing.expectEqual(before_game.player_quadrant, memory.game.player_quadrant);
+    try testing.expectEqual(before_suffix, max_possible_suffix);
+    try testing.expectEqualSlices(u8, std.mem.asBytes(&before_hashes), std.mem.asBytes(&quad_cache.path_hashes));
+    try testing.expectEqualSlices(u8, std.mem.asBytes(&before_materials), std.mem.asBytes(&quad_cache.ancestor_materials));
+    try testing.expectEqual(before_origin_x, quad_cache.origins_x[ring]);
+    try testing.expectEqual(before_origin_y, quad_cache.origins_y[ring]);
+    try testing.expectEqualSlices(u8, std.mem.asBytes(&before_historical), std.mem.asBytes(&quad_cache.historical_seeds[ring]));
+    try testing.expectEqual(@as(usize, 1), quad_cache.left_path.len);
+    try testing.expectEqual(@as(usize, 1), quad_cache.top_path.len);
+    try testing.expectEqual(before_left_word, quad_cache.left_path.at(0).*);
+    try testing.expectEqual(before_top_word, quad_cache.top_path.at(0).*);
+    try testing.expectEqual(@as(usize, 1), quad_cache.materials_path.len);
+    try testing.expectEqualSlices(u8, std.mem.asBytes(&before_trace), std.mem.asBytes(quad_cache.materials_path.at(0)));
 }
 
 test "horizon window: a replay from the base reproduces every stored window" {
@@ -4211,28 +4432,30 @@ test "horizon window: a replay from the base reproduces every stored window" {
     legacy_store.init(testing.allocator);
     defer legacy_store.deinit();
 
-    // A handful of arbitrary but fixed traces, standing in for a descent path.
+    // A fixed stand-in descent path. Each trace is a CHILD of the one above it, chunk and block:
+    // the window at a depth is refined from the one above through exactly that relation,
+    // and a chain that breaks it names a lineage no descent could have produced.
     const traces = [_]HorizonTrace{
         .{ .suffix = .{ 4, 7 }, .quadrant = 0, .bx = 3, .by = 9, .player_quadrant = 0, .source_quadrant = 0 },
-        .{ .suffix = .{ 17, 29 }, .quadrant = 1, .bx = 11, .by = 2, .player_quadrant = 1, .source_quadrant = 0 },
-        .{ .suffix = .{ 70, 118 }, .quadrant = 1, .bx = 6, .by = 14, .player_quadrant = 3, .source_quadrant = 1 },
+        .{ .suffix = .{ 16, 30 }, .quadrant = 0, .bx = 13, .by = 5, .player_quadrant = 1, .source_quadrant = 0 },
+        .{ .suffix = .{ 67, 121 }, .quadrant = 0, .bx = 6, .by = 7, .player_quadrant = 3, .source_quadrant = 1 },
     };
 
-    // Forward pass, exactly as `installLayer()` would accumulate it on the way down.
+    // Forward pass, exactly as installLayer() would accumulate it on the way down.
     var stepwise: [traces.len]HorizonWindow = undefined;
     var running: HorizonWindow = @splat(@splat(world_edge_block));
     for (traces, 0..) |trace, i| {
         const d = QuadCache.MATERIALS_START_DEPTH + i;
-        running = refineHorizonWindow(&running, trace, d - HORIZON_DEPTH);
+        running = refineHorizonWindow(&running, if (i == 0) null else traces[i - 1], trace, d - HORIZON_DEPTH);
         stepwise[i] = running;
     }
 
-    // Replay pass, exactly as `getMaterials()` rebuilds it: from the base, every time, for each depth.
+    // Replay pass, exactly as getMaterials() rebuilds it: from the base, every time, for each depth.
     for (0..traces.len) |target| {
         var replayed: HorizonWindow = @splat(@splat(world_edge_block));
         for (0..target + 1) |i| {
             const d = QuadCache.MATERIALS_START_DEPTH + i;
-            replayed = refineHorizonWindow(&replayed, traces[i], d - HORIZON_DEPTH);
+            replayed = refineHorizonWindow(&replayed, if (i == 0) null else traces[i - 1], traces[i], d - HORIZON_DEPTH);
         }
         for (0..QuadCache.ANCESTOR_GRID) |y| {
             for (0..QuadCache.ANCESTOR_GRID) |x| {
@@ -4243,10 +4466,11 @@ test "horizon window: a replay from the base reproduces every stored window" {
 }
 
 test "horizon trace: only a first descent records one" {
-    // `installLayer()` stamps `horizon_trace` into `materials_path`, which is the authoritative record
-    // of a depth. An ascent and a retrace REBUILD their window from that record, so if either of them
-    // reported a trace it would write one that was never derived, and every depth refined from it would
-    // regenerate as void or as fill. Nothing about that failure is visible until the world is entered.
+    // installLayer() stamps horizon_trace into materials_path, which is the authoritative record of a depth.
+    // An ascent and a retrace REBUILD their window from that record,
+    // so if either of them reported a trace it would write one that was never derived,
+    // and every depth refined from it would regenerate as void or as fill.
+    // Nothing about that failure is visible until the world is entered!
     const ascent: LayerTransition = .{
         .depth = 40,
         .new_pos = .{ 0, 0 },
@@ -4257,13 +4481,13 @@ test "horizon trace: only a first descent records one" {
     try testing.expectEqual(@as(?HorizonTrace, null), ascent.horizon_trace);
 
     // Writing an unset trace must be impossible to express rather than merely avoided by convention,
-    // so the field stays optional and `writeMaterialsPath()` keeps taking a plain `HorizonTrace`.
+    // so the field stays optional and writeMaterialsPath() keeps taking a plain HorizonTrace.
     try testing.expectEqual(HorizonTrace, @typeInfo(@FieldType(LayerTransition, "horizon_trace")).optional.child);
     try testing.expectEqual(HorizonTrace, @typeInfo(@TypeOf(writeMaterialsPath)).@"fn".params[1].type.?);
 }
 
 test "horizon window: a checkpointed rebuild matches replaying from the base" {
-    // The checkpoints are what keep `getMaterials()` off an O(depth) walk, so they have to be
+    // The checkpoints are what keep getMaterials() off an O(depth) walk, so they have to be
     // indistinguishable from one. Long enough to cross two stride boundaries, since the first
     // checkpoint is the easy case.
     const saved_game = memory.game;
@@ -4299,17 +4523,40 @@ test "horizon window: a checkpointed rebuild matches replaying from the base" {
         quad_cache.left_path.append(alloc, 0) catch unreachable;
         quad_cache.top_path.append(alloc, 0) catch unreachable;
     }
-    for (0..count) |i| {
-        // Arbitrary but fixed, and varied enough that a wrong starting window cannot coincide.
-        quad_cache.materials_path.append(alloc, .{
-            .suffix = .{ i *% 37 + 4, i *% 61 + 9 },
-            .quadrant = @intCast(i % 4),
-            .bx = @intCast((i * 5) % 16),
-            .by = @intCast((i * 11) % 16),
-            .player_quadrant = @intCast((i / 2) % 4),
-            .source_quadrant = @intCast((i / 3) % 4),
-        }) catch unreachable;
+    // A stand-in descent path. Every trace has to be the PARENT of the next one, chunk and block:
+    // that relation is what a window at one depth is refined through, and a chain that breaks it
+    // names a lineage no descent could produce.
+    // Built by walking one arbitrary deep block UP with the same function the refinement uses,
+    // which makes the chain coherent by construction rather than by inspection.
+    var chain: [count]HorizonTrace = undefined;
+    var walk: DepthCoordinate = .{
+        .suffix = .{ 0x0001_2345_6789_abcd, 0x0000_fedc_ba98_7654 },
+        .quadrant = 0,
+        .depth = QuadCache.MATERIALS_START_DEPTH + count - 1 - HORIZON_DEPTH,
+    };
+    var walk_bx: u4 = 6;
+    var walk_by: u4 = 11;
+    var step: usize = count;
+    while (step > 0) {
+        step -= 1;
+        chain[step] = .{
+            .suffix = walk.suffix,
+            .quadrant = @intCast(walk.quadrant),
+            .bx = walk_bx,
+            .by = walk_by,
+            .player_quadrant = @intCast(step % 4),
+            .source_quadrant = @intCast((step / 3) % 4),
+        };
+        if (step == 0) break;
+        // The depth refineHorizonWindow() resolves this same step against.
+        memory.game.depth = walk.depth + HORIZON_DEPTH - 1;
+        const p = dw.ancestor.getParentInfo(walk, walk_bx, walk_by);
+        walk = p.coord.asDepthCoordinate(walk.depth - 1);
+        walk_bx = p.bx;
+        walk_by = p.by;
     }
+    memory.game.depth = 0;
+    for (chain) |trace| quad_cache.materials_path.append(alloc, trace) catch unreachable;
 
     // Walking depths in order is what actually fills the checkpoints, so later targets read one back
     // rather than replaying, which is the case under test.
@@ -4320,7 +4567,8 @@ test "horizon window: a checkpointed rebuild matches replaying from the base" {
         var from_base: HorizonWindow = @splat(@splat(world_edge_block));
         for (0..target + 1) |i| {
             const d = QuadCache.MATERIALS_START_DEPTH + i;
-            from_base = refineHorizonWindow(&from_base, quad_cache.materials_path.at(i).*, d - HORIZON_DEPTH);
+            const prev_trace: ?HorizonTrace = if (i == 0) null else quad_cache.materials_path.at(i - 1).*;
+            from_base = refineHorizonWindow(&from_base, prev_trace, quad_cache.materials_path.at(i).*, d - HORIZON_DEPTH);
         }
 
         for (0..QuadCache.ANCESTOR_GRID) |y| {
@@ -4343,6 +4591,62 @@ test "horizon window: a checkpointed rebuild matches replaying from the base" {
     try testing.expectEqual(@as(usize, 0), quad_cache.materials_windows.len);
 }
 
+test "horizon window: a read is measured from the trace, not from the player" {
+    // The window is centered on the block the descent traced up to, and NOTHING keeps the player in it:
+    // a retrace lands on a recorded ascent origin, and a debug teleport moves the player outright.
+    // Reading it as if the player sat at its center answers with a neighboring block at H,
+    // and one block at H is the whole world at D, so the depth generates as void.
+    const saved_game = memory.game;
+    const saved_suffix = max_possible_suffix;
+    const saved_len = quad_cache.materials_path.len;
+    const saved_materials = quad_cache.ancestor_materials;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+        max_possible_suffix = saved_suffix;
+        quad_cache.materials_path.len = saved_len;
+        quad_cache.ancestor_materials = saved_materials;
+    }
+
+    memory.game = .{};
+    // One past the first recorded depth, so the horizon is deeper than the base and the branch is live.
+    memory.game.depth = QuadCache.MATERIALS_START_DEPTH + 1;
+    max_possible_suffix = getMaxSuffixAtDepth(memory.game.depth);
+
+    const trace: HorizonTrace = .{
+        .suffix = .{ 40, 70 },
+        .quadrant = 0,
+        .bx = 6,
+        .by = 9,
+        .player_quadrant = 3,
+        .source_quadrant = 0,
+    };
+    quad_cache.materials_path.len = 0;
+    quad_cache.materials_path.append(alloc, trace) catch unreachable; // the depth above
+    quad_cache.materials_path.append(alloc, trace) catch unreachable;
+
+    // Every cell distinguishable, so a read off by one block cannot pass by luck.
+    for (0..QuadCache.ANCESTOR_GRID) |y| {
+        for (0..QuadCache.ANCESTOR_GRID) |x| {
+            quad_cache.ancestor_materials[y][x] = .makeBasicBlock(.stone, y * QuadCache.ANCESTOR_GRID + x);
+        }
+    }
+
+    // The player is somewhere else entirely, which is exactly the case that used to empty a depth.
+    memory.game.player_quadrant = 1;
+    memory.game.player_chunk = .{ 0, 0 };
+
+    const horizon = memory.game.depth - HORIZON_DEPTH;
+    const center = getBlockAt(.{ .suffix = trace.suffix, .quadrant = trace.quadrant }, trace.bx, trace.by, horizon);
+    const cy = QuadCache.ANCESTOR_CENTER + @as(usize, trace.player_quadrant / 2);
+    const cx = QuadCache.ANCESTOR_CENTER + @as(usize, trace.player_quadrant % 2);
+    try testing.expectEqual(quad_cache.ancestor_materials[cy][cx].seed, center.seed);
+
+    // One block right of the trace is one cell right in the window, whoever the player is.
+    const beside = getBlockAt(.{ .suffix = trace.suffix, .quadrant = trace.quadrant }, trace.bx + 1, trace.by, horizon);
+    try testing.expectEqual(quad_cache.ancestor_materials[cy][cx + 1].seed, beside.seed);
+}
+
 test "refineHorizonWindow: leaves the game depth exactly as it found it" {
     // It installs depth - 1 to resolve parent quadrants against the old threshold.
     // A transition computes several of these in a row, so leaking that install would shift every later lookup.
@@ -4361,7 +4665,7 @@ test "refineHorizonWindow: leaves the game depth exactly as it found it" {
     memory.game.depth = 61;
     const before = memory.game.depth;
     var grid: HorizonWindow = @splat(@splat(world_edge_block));
-    grid = refineHorizonWindow(&grid, .{
+    grid = refineHorizonWindow(&grid, null, .{
         .suffix = .{ 2, 3 },
         .quadrant = 0,
         .bx = 5,
@@ -4396,7 +4700,7 @@ test "computeParentLayer: scales a point into its parent chunk with no pivot" {
     try testing.expectEqual(@as(Vec2u, .{ 3, 5 }), up.player_chunk);
 
     // The chunk keeps its place inside the parent: cell * span + pos / ZOOM_FACTOR,
-    // then the landing snaps onto the block that point falls in (see `snapToBlock()`).
+    // then the landing snaps onto the block that point falls in (see snapToBlock()).
     const span = @divExact(@as(i64, dw.SUBPIXELS_IN_CHUNK), ZOOM_FACTOR);
     const scaled: Vec2i = .{
         @as(i64, 13 % ZOOM_FACTOR) * span + @divFloor(@as(i64, 1000), ZOOM_FACTOR),
@@ -4407,7 +4711,7 @@ test "computeParentLayer: scales a point into its parent chunk with no pivot" {
     try testing.expectEqual(@divFloor(scaled[0], CHUNK_SIZE_SQ), @divFloor(up.new_pos[0], CHUNK_SIZE_SQ));
     try testing.expectEqual(@divFloor(scaled[1], CHUNK_SIZE_SQ), @divFloor(up.new_pos[1], CHUNK_SIZE_SQ));
 
-    // The landing must stay inside the parent chunk, since `player_pos` is chunk-relative.
+    // The landing must stay inside the parent chunk, since player_pos is chunk-relative.
     try testing.expect(up.new_pos[0] >= 0 and up.new_pos[0] < dw.SUBPIXELS_IN_CHUNK);
     try testing.expect(up.new_pos[1] >= 0 and up.new_pos[1] < dw.SUBPIXELS_IN_CHUNK);
 }
@@ -4578,7 +4882,7 @@ test "ModEntry: applyTo overwrites exactly the modified cells" {
     for (chunk.blocks, 0..) |b, i| {
         switch (i) {
             5, 200 => {
-                // A replayed cell takes a fresh position-hashed seed, since `ModCell` stores none
+                // A replayed cell takes a fresh position-hashed seed, since ModCell stores none
                 // and the cell under it may have generated as air (seed zero).
                 const want: u28 = @truncate(seeding.FastHash.hash2d(
                     lane,
@@ -4627,7 +4931,7 @@ test "ModificationStore: remove drops the chunk and recycles its slot" {
     try testing.expect(!mod_store.contains(a));
     try testing.expectEqual(@as(?ModCell, null), mod_store.getCell(a, 10));
 
-    // The freed slot is handed out again instead of appending, so `entries` does not grow.
+    // The freed slot is handed out again instead of appending, so entries does not grow.
     mod_store.beginWrite(b).setCell(20, testCell(20));
     try testing.expectEqual(@as(usize, 1), mod_store.entries.len);
     try testing.expectEqual(testCell(20), mod_store.getCell(b, 20).?);
@@ -4822,7 +5126,7 @@ test "coordinate consistency: a block is the same whatever route reached it" {
     max_possible_suffix = getMaxSuffixAtDepth(depth);
     const parent_key = key.getParent().asCoord().asDepthCoordinate(depth - 1);
     // The edit has to be frontier-era to reach the depth below it. An edit made after the player
-    // descended past the parent stays at the parent (see `legacy_store`), which is a different test.
+    // descended past the parent stays at the parent (see legacy_store), which is a different test.
     testEnterDepth(depth - 1);
     mod_store.beginWrite(parent_key).setCell(37, .{ .id = .lava_stone, .base_id = .none, .hp = 0 });
     mod_store.beginWrite(parent_key).setCell(38, .{ .id = .none, .base_id = .none, .hp = 0 });
@@ -5037,7 +5341,7 @@ test "frozen ancestry: an edit made after a depth is left never reaches the dept
     const parent_key = key.getParent().asCoord().asDepthCoordinate(depth - 1);
     const parent_idx: u8 = 37;
 
-    // The player is at the parent, which is the deepest depth reached: this edit shapes what comes below.
+    // The player is at the parent, which is the deepest depth (frontier) reached: this edit shapes what comes below.
     testEnterDepth(depth - 1);
     max_possible_suffix = getMaxSuffixAtDepth(depth - 1);
     mod_store.beginWrite(parent_key).setCell(parent_idx, .{ .id = .lava_stone, .base_id = .none, .hp = 0 });
@@ -5095,7 +5399,7 @@ test "frozen ancestry: an edit shallower than the frontier is playable at its ow
     try testing.expect(isShallowerThanFrontier());
 
     const key: DepthCoordinate = .{ .suffix = .{ 3, 4 }, .depth = shallow, .quadrant = 0 };
-    try testing.expectEqual(@as(u64, shallow + 100), frontier());
+    try testing.expectEqual(@as(u64, shallow + 100), getFrontier());
 
     // A cell that was never modified freezes as its procedural value, so deeper depths keep it.
     mod_store.beginWrite(key).setCell(11, .{ .id = .sand, .base_id = .none, .hp = 0 });
