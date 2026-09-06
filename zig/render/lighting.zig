@@ -75,9 +75,15 @@ const Emission = struct {
 };
 
 /// Returns the light emission of a sprite (strength and color).
+///
+/// Read on the block's own ID, before `chunk.finishTiles()` picks a variant frame,
+/// so a row here always names the base sprite.
 fn blockEmission(id: Sprite) Emission {
     return switch (id) {
-        .campfire => .{ .strength = 240, .color = .fire },
+        // The whole campfire, not just the tile. Its flame is a separate entity drawn over the
+        // base (see `entity.blockOverlay()`) and carries no light of its own.
+        // Just under the player's starting 255, so the player stays the brightest thing in the world.
+        .campfire_base => .{ .strength = 240, .color = .fire },
         .forest_furnace, .lava_furnace => .{ .strength = 0, .color = .fire },
         .lava_stone, .molten_stone => .{ .strength = 60, .color = .fire },
         .portal => .{ .strength = 200, .color = .{ .hue = Hue.violet, .chroma = 0.75 } },

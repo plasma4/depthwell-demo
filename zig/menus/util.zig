@@ -36,17 +36,21 @@ pub fn slotHitbox(center_px: Vec2f, size: f64) dw.geometry.Shape {
     return .roundSquare(center_px - @as(Vec2f, @splat(size / 2.0)), size, 0.2);
 }
 
-/// Draws a number (with a darker drop-shadow).
-pub fn drawCount(count: u64, center_px: Vec2f, color: Vec4f32, alpha: f32) void {
-    const pos: Vec2f32 = .{ @floatCast(center_px[0]), @floatCast(center_px[1]) };
-    dw.entity.drawNumber(count, pos - Vec2f32{ 0.5, 0.5 }, .{
-        .font_size = 6.0,
-        .lcha = .{ color[0] * 0.4, color[1] * 0.8, color[2] - 0.25, 0.75 * alpha },
-    });
-    dw.entity.drawNumber(count, pos, .{
+/// Where a slot's count label sits relative to the CENTER of that slot, in viewport pixels.
+/// Every menu shares it, so no two slot grids badge their counts differently.
+const COUNT_OFFSET: Vec2f = .{ 3.0, 5.0 };
+
+/// Draws a slot's count label, badged below and right of the slot center, over its own shadow.
+pub fn drawCount(count: u64, slot_center_px: Vec2f, color: Vec4f32, alpha: f32) void {
+    dw.entity.drawNumberShadowed(count, toPx32(slot_center_px + COUNT_OFFSET), .{
         .font_size = 6.0,
         .lcha = .{ color[0], color[1], color[2], color[3] * alpha },
-    });
+    }, .{ .light = 0.4, .chroma = 0.8, .hue = -0.25, .alpha = 0.75 });
+}
+
+/// Narrows a viewport-pixel position to the f32 an entity carries.
+pub inline fn toPx32(px: Vec2f) Vec2f32 {
+    return .{ @floatCast(px[0]), @floatCast(px[1]) };
 }
 
 /// Layout options for `Grid()`. All lengths are in viewport pixels.
