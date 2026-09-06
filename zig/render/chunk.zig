@@ -208,6 +208,10 @@ pub const LayerPass = struct {
     player: [2]f64,
     /// Logical zoom for this layer, portal zoom multiplier already folded in.
     zoom: f64,
+    /// Opacity this layer's tiles are drawn at.
+    /// `render.zig` hands it straight to `handleVisibleChunks()`,
+    /// and a block-anchored entity fades with it so the two never disagree.
+    opacity: f64,
     source: Source,
 };
 
@@ -247,6 +251,7 @@ fn liveLayer(dt: f64) LayerPass {
         // A descent zooms the whole world in without touching camera_scale,
         // so the committed view (D+1 chunks) is still there to fall back to the moment it ends.
         .zoom = interpolated_zoom * dw.portal.zoomFactor(),
+        .opacity = dw.portal.worldOpacity() * @as(f64, dw.player.softlockFadeOpacity()),
         .source = .live,
     };
 }
@@ -269,6 +274,7 @@ fn overlayLayer() LayerPass {
         .cam = .{ cam_x, cam_y },
         .player = .{ cam_x, cam_y },
         .zoom = memory.game.camera_scale * dw.portal.overlayScale(),
+        .opacity = dw.portal.overlayOpacity(),
         .source = .preview,
     };
 }
@@ -276,22 +282,24 @@ fn overlayLayer() LayerPass {
 /// Adds visible chunk data for the live world to the scratch buffer, as well as properties.
 /// This is used in `render.prepareVisibleData()`.
 ///
-/// Returns whether anything was rasterized.
-/// False means `portal.liveLayerHidden()` hid the layer outright.
+/// Returns the opacity the layer's tiles must be drawn at.
+/// Null means `portal.liveLayerHidden()` hid the layer outright.
 /// The caller must then skip its draw calls, because nothing was published for them to read.
 /// The player is still placed, since the entity pass draws it over both layers.
-pub fn updateVisibleChunks(dt: f64, canvas_w: f64, canvas_h: f64) bool {
+pub fn updateVisibleChunks(dt: f64, canvas_w: f64, canvas_h: f64) ?f64 {
     current_dt = dt;
     // rolled once per render frame, before either pass, so both layers are handed the same warp!
     updateShake(dw.portal.shakeIntensity());
+    // both layers queue into it below, and the entity pass drains it after both have run
+    dw.entity.resetBlockEntities();
 
     const pass = liveLayer(dt);
     if (dw.portal.liveLayerHidden()) {
         placePlayer(pass);
-        return false;
+        return null;
     }
     rasterizeLayer(pass, canvas_w, canvas_h);
-    return true;
+    return pass.opacity;
 }
 
 /// Adds the portal descent's D+1 preview to the scratch buffer, ready for a second tile draw call.
@@ -411,20 +419,53 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
     const player_by: f32 = @floatCast(@as(f64, @floatFromInt(-min_cy * CHUNK_SIZE)) + pass.player[1] / subpixels_per_block);
     dw.lighting.applyLighting(out, wb, hb, player_bx, player_by);
 
-    applyVariation(out, wb, game.frame);
+    // same world-to-screen mapping placePlayer() uses, so a queued entity is pixel-aligned
+    // with the tile under it (one viewport pixel is CHUNK_SIZE subpixels, scaled by zoom)
+    const px_per_sub = interpolated_zoom / CHUNK_SIZE_FLOAT;
+    const grid_origin_sub_x = @as(f64, @floatFromInt(min_cx)) * subpixels_per_chunk;
+    const grid_origin_sub_y = @as(f64, @floatFromInt(min_cy)) * subpixels_per_chunk;
+    const half_block: f64 = subpixels_per_block / 2.0;
+
+    finishTiles(out, wb, game.frame, .{
+        .origin_px = .{
+            @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + (grid_origin_sub_x + half_block - interp_cam_x) * px_per_sub),
+            @floatCast(@as(f64, dw.SCREEN_HEIGHT_HALF) + (grid_origin_sub_y + half_block - interp_cam_y) * px_per_sub),
+        },
+        .step_px = @floatCast(subpixels_per_block * px_per_sub),
+        .zoom = @floatCast(interpolated_zoom),
+        .opacity = @floatCast(pass.opacity),
+    });
     updateRenderProperties(pass, interp_cam_x, interp_cam_y, wb, hb, min_cx, min_cy, effective_zoom, interpolated_zoom);
     publishBackgroundGrid(effective_zoom, canvas_w, canvas_h);
 }
 
-/// Applies sprite variation/animation to the final visible buffer, in place, just before it is sent to the GPU.
+/// Where a tile pass places the entities its blocks ask for; see `entity.queueBlockEntity()`.
+/// Every length is in viewport pixels, and the layer's own camera is already folded in,
+/// so a portal transition needs no special case downstream.
+const TilePlacement = struct {
+    /// Center of the tile at grid index (0, 0).
+    origin_px: dw.utils.Vec2f32,
+    /// Distance between neighboring tile centers.
+    step_px: f32,
+    /// Viewport pixels per world pixel (16 world pixels is one block).
+    zoom: f32,
+    /// Opacity this layer's tiles are drawn at.
+    opacity: f32,
+};
+
+/// Finishes the visible buffer in place, just before it is sent to the GPU.
+/// It applies sprite variation, and queues the entities blocks want drawn over themselves.
 /// Runs AFTER lighting so the lighting pass sees base (unvaried) sprite IDs.
+///
+/// Both jobs walk the same cells, and the grid is the largest thing this frame touches.
+/// So they share one pass rather than reading it twice.
 ///
 /// Uses grid-relative tile coordinates, `i % wb` and `i / wb`.
 /// The grid origin is chunk-aligned, an even tile offset, so their parity matches
 /// absolute tile parity.
 /// A positional variant, such as 2x2 stone or checkerboard edge stone, then shows no
 /// join across the world, exactly as the old shader did.
-fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
+fn finishTiles(out: []memory.Block, wb: u32, frame: u32, place: TilePlacement) void {
     // Walked row by row rather than by flat index. The tile coordinates are the only thing
     // the index was ever for, and recovering them per block costs a divide and a modulo on
     // every cell of the screen.
@@ -434,7 +475,19 @@ fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
         row_start += wb;
         ty += 1;
     }) {
+        const row_px = place.origin_px[1] + @as(f32, @floatFromInt(ty)) * place.step_px;
+
         for (out[row_start..][0..wb], 0..) |*block, tx| {
+            // Asked on the unvaried ID, so a rule here never has to name a variant frame.
+            if (dw.entity.blockOverlay(block.*, frame)) |overlay| {
+                dw.entity.queueBlockEntity(
+                    overlay,
+                    .{ place.origin_px[0] + @as(f32, @floatFromInt(tx)) * place.step_px, row_px },
+                    place.zoom,
+                    place.opacity,
+                );
+            }
+
             block.id = dw.variation.resolveVariant(block.*, tx, ty, frame);
             // Underlay sprites (ore/gem backgrounds) get the same variation treatment, so plain stone tiles for example.
             if (block.base_id != .none) {
