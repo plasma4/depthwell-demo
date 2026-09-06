@@ -69,6 +69,7 @@ const rules = [_]struct { Sprite, VariantRule }{
     // edge stone alternates in a checkerboard
     .{ .edge_stone, .{ .kind = .checkerboard, .count = 2 } },
     // seed variations: non-uniform, see the VariantKind definition
+    .{ .chest, .{ .kind = .random, .count = 2 } },
     .{ .bush, .{ .kind = .random, .count = 2 } },
     .{ .rock, .{ .kind = .random, .count = 2 } },
     .{ .aqua_stone, .{ .kind = .random, .count = 2 } },
@@ -137,11 +138,8 @@ const rules = [_]struct { Sprite, VariantRule }{
         },
     },
 
-    // campfire animation: 4 contiguous frames, one step every 6 render frames
-    // resolveVariant() has a HARDCODED check that swaps in the underwater variant when waterlogged
-    .{ .campfire, .{ .kind = .animate, .count = 4, .period_frames = 6 } },
-    // needed for custom variant
-    .{ .campfire_water, .{ .kind = .animate, .count = 4, .period_frames = 7 } },
+    .{ .portal, .{ .kind = .animate, .count = 2, .period_frames = 6 } },
+    .{ .invportal, .{ .kind = .animate, .count = 2, .period_frames = 7 } },
 
     .{ .basic_core, .{ .kind = .animate, .count = 2, .period_frames = 17 } },
     .{ .core1, .{ .kind = .animate, .count = 2, .period_frames = 8 } },
@@ -289,14 +287,8 @@ fn seedPick(seed: u32, count: u8) u16 {
 /// `tx`/`ty` are ABSOLUTE tile coordinates; `frame` is the current render frame.
 /// Returns `block.id` unchanged when the sprite has no variation rule.
 pub fn resolveVariant(block: Block, tx: u64, ty: u64, frame: u32) Sprite {
-    var id = block.id;
-    // special hardcode for campfire
-    if (id == .campfire and dw.water.getVolume(block) > 0) {
-        id = .campfire_water;
-    }
-
     return resolveSpriteVariant(
-        id,
+        block.id,
         block.seed,
         block.edge_flags,
         tx,
