@@ -112,6 +112,18 @@ const player_sliders = [_]SliderDef{
         .max = 50.0,
         .val = &player.JUMP_FORCE,
     },
+    .{
+        .name = "Wall slide decay",
+        .min = 0.03,
+        .max = 0.60,
+        .val = &player.DECAY_RATE_Y_SLIDE,
+    },
+    .{
+        .name = "Dust tint from block",
+        .min = 0.0,
+        .max = 1.0,
+        .val = &player.DUST_TINT,
+    },
     // .{
     //     .name = "Ghost speed mult",
     //     .min = 1.0,
