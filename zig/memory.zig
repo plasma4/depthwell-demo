@@ -194,7 +194,7 @@ pub const GameState = extern struct {
     /// Characters used in `seed_string`, never above `SEED_STRING_MAX`.
     seed_string_len: u8 = 0,
 
-    /// The deepest depth the player has reached, called the FRONTIER.
+    /// The deepest depth the player has reached, called the "frontier".
     /// Never decreases for the life of a world.
     ///
     /// This is the timeline authority (see `world.isShallowerThanFrontier()`).
