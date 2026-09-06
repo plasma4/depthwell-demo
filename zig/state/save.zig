@@ -322,10 +322,6 @@ fn writeQuadCache(w: *Writer) !void {
     try w.bytes(std.mem.asBytes(&qc.origins_x));
     try w.bytes(std.mem.asBytes(&qc.origins_y));
     try w.bytes(std.mem.asBytes(&qc.historical_seeds));
-    try w.int(u8, @as(u8, @intFromBool(qc.most_top)) |
-        (@as(u8, @intFromBool(qc.most_bottom)) << 1) |
-        (@as(u8, @intFromBool(qc.most_left)) << 2) |
-        (@as(u8, @intFromBool(qc.most_right)) << 3));
 
     std.debug.assert(qc.left_path.len == qc.top_path.len);
     const len = qc.left_path.len;
@@ -346,11 +342,6 @@ fn readQuadCache(r: *Reader) !void {
     try r.readInto(std.mem.asBytes(&qc.origins_x));
     try r.readInto(std.mem.asBytes(&qc.origins_y));
     try r.readInto(std.mem.asBytes(&qc.historical_seeds));
-    const edges = try r.int(u8);
-    qc.most_top = (edges & 1) != 0;
-    qc.most_bottom = (edges & 2) != 0;
-    qc.most_left = (edges & 4) != 0;
-    qc.most_right = (edges & 8) != 0;
 
     // prealloc-all-at-once pattern
     // we actually do NOT need to clear the old data, if applicable
@@ -386,7 +377,7 @@ fn readQuadCache(r: *Reader) !void {
 }
 
 /// Writes the ascent stack (the blocks the player has ascended past, deepest last).
-/// Present but empty when the player is at their deepest depth.
+/// Present but empty when the player is at their deepest depth visited (frontier).
 /// Its length is the route back down, and it recovers `max_depth_reached` for a save that predates it.
 fn writeAscentStack(w: *Writer) !void {
     const at = try w.beginSection(.ascent_stack, 1);
@@ -536,7 +527,7 @@ fn readMisc(r: *Reader) !void {
     dw.player.facing_right = try r.boolean();
 }
 
-// MOD_STORE record (section version 3), per modified chunk:
+// MOD_STORE record (section version 0), per modified chunk:
 //   key         : suffix[0] u64 | suffix[1] u64 | depth u64 | quadrant u32 (28 bytes)
 //   flags       : u8 (reserved, always 0)
 //   modified    : [CHUNK_SIZE_SQ / 64]u64  (32 bytes; which cells the player owns)
@@ -765,6 +756,15 @@ pub fn finalizeLoad() void {
     dw.sound.seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .sound));
     dw.particles.seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .particles));
     dw.chunks.shake_seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .screen_shake));
+
+    // At or before the horizon the world is one suffix wide, so quadrant 0 is the only one there
+    // (see world.isInWorld()). A save written before the first-rebase clamp can hold a phantom
+    // quadrant at HORIZON_DEPTH. Nothing at those depths reads the quadrant when it generates,
+    // so the same suffix in quadrant 0 lands the player on the terrain they left.
+    if (g.depth <= dw.HORIZON_DEPTH) {
+        g.player_quadrant = 0;
+        g.portal_quadrant = 0;
+    }
 
     world.max_possible_suffix = world.getMaxSuffixAtDepth(g.depth);
 
@@ -999,7 +999,7 @@ pub fn beginSnapshot() i64 {
 fn openStoreSection(w: *Writer, id: StoreId, count: usize) !void {
     const slot = @intFromEnum(id);
     try w.int(u16, @intFromEnum(id.tag()));
-    try w.int(u16, 3); // section version
+    try w.int(u16, 0); // section version
     store_len_off[slot] = save_buf.items.len;
     try w.int(u64, store_payload_len[slot]);
     try w.varint(count);
@@ -1191,7 +1191,7 @@ test "mod_store: encoding/decoding is correct" {
     // The precomputed size the snapshot plan budgets must match what the writer actually emits.
     try testing.expectEqual(entryPayloadBytes(entry), buf.items.len);
 
-    // Re-read into a fresh store, exactly as readModStore() does!
+    // Re-read into a fresh store!
     for ([_]Sprite{ .stone, .water, .none }) |s| {
         try id_remap.put(save_alloc, @intFromEnum(s), s);
     }
