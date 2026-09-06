@@ -54,6 +54,10 @@ pub var JUMP_FORCE: f64 = 6.00;
 pub var REDUCED_GRAVITY_RANGE: f64 = 0.50;
 /// Decay rate of player movement (vertical), multiplies Y speed by (1.0 - this value).
 pub var DECAY_RATE_Y: f64 = 0.03;
+/// Extra Y decay while the player slides along a horizontal wall.
+pub var SLIDE_DECAY_RATE_Y: f64 = 0.05;
+/// Maximum downward velocity while the player slides along a horizontal wall.
+pub var SLIDE_TERMINAL_VELOCITY: f64 = 4.0;
 
 /// The size of the player's width. The player is assumed to be centered at the bottom as a rectangle.
 pub const PLAYER_HITBOX_WIDTH = 160;
@@ -461,32 +465,234 @@ pub fn move(logic_speed: f64) void {
 
     game.last_player_pos = game.player_pos;
 
-    // Vertical first, then horizontal, with the ground test between them.
-    // So a player who walks off a ledge is still grounded for the tick that leaves it,
-    // and coyote time starts on the tick after.
-    moveAxis(1, total_move[1]);
+    // The move is walked in sub-steps of at most one block on each axis.
+    // Each sub-step follows its diagonal line. The ground test keeps the first sub-step's
+    // pre-move support, so a player who walks off a ledge is still grounded for that tick.
+    const steps = subStepCount(total_move);
+    var walked: Vec2i = .{ 0, 0 };
+    var sliding_this_tick = false;
+    for (1..steps + 1) |i| {
+        const n: i64 = @intCast(i);
+        const target: Vec2i = .{
+            @divTrunc(total_move[0] * n, @as(i64, @intCast(steps))),
+            @divTrunc(total_move[1] * n, @as(i64, @intCast(steps))),
+        };
 
-    is_grounded = isColliding(game.player_pos[0], game.player_pos[1] + 1);
+        const ground_before_move = i == 1 and !jumped_this_frame and
+            isColliding(game.player_pos[0], game.player_pos[1] + 1);
 
-    if (is_grounded) {
-        coyote_frames = COYOTE_FRAMES;
-        jumps_left = MAX_JUMPS;
-    } else if (coyote_frames > 0) {
-        coyote_frames -= logic_speed; // this CAN be negative!
+        if (moveVector(target - walked)) sliding_this_tick = true;
+
+        if (i == 1) {
+            is_grounded = ground_before_move or isColliding(game.player_pos[0], game.player_pos[1] + 1);
+
+            if (is_grounded) {
+                coyote_frames = COYOTE_FRAMES;
+                jumps_left = MAX_JUMPS;
+            } else if (coyote_frames > 0) {
+                coyote_frames -= logic_speed; // this CAN be negative!
+            }
+
+            std.debug.assert(jumps_left >= 0); // sanity check
+            if (up_key_pressed and !jumped_this_frame) {
+                jump_leniency_frames = JUMP_LENIENCY_FRAMES;
+            } else if (jump_leniency_frames > 0) {
+                jump_leniency_frames -= logic_speed; // this CAN be negative!
+            }
+        }
+
+        walked = target;
     }
 
-    std.debug.assert(jumps_left >= 0); // sanity check
-    if (up_key_pressed and !jumped_this_frame) {
-        jump_leniency_frames = JUMP_LENIENCY_FRAMES;
-    } else if (jump_leniency_frames > 0) {
-        jump_leniency_frames -= logic_speed; // this CAN be negative!
+    if (sliding_this_tick) {
+        game.player_velocity[1] *= std.math.pow(f64, 1.0 - SLIDE_DECAY_RATE_Y, logic_speed);
+        game.player_velocity[1] = @min(game.player_velocity[1], SLIDE_TERMINAL_VELOCITY);
     }
-
-    moveAxis(0, total_move[0]);
 
     // Finally, tell SimBuffer and the camera to update.
     world.SimBuffer.sync(game.getPlayerCoord());
     updateCamera(logic_speed);
+}
+
+/// How many sub-moves one tick's displacement is split into, so that neither axis
+/// advances more than `CCD_STEP_SIZE` (one block) in a single sub-move.
+/// The sub-move is then swept as a line, so a diagonal cannot cut across a solid block.
+///
+/// Returns 1 at the 60 FPS default, where a tick moves at most 0.47 blocks, so the split costs nothing.
+fn subStepCount(total: Vec2i) usize {
+    const longest = @max(@abs(total[0]), @abs(total[1]));
+    if (longest <= CCD_STEP_SIZE) return 1;
+    return @intCast(@divTrunc(longest + CCD_STEP_SIZE - 1, CCD_STEP_SIZE));
+}
+
+/// Moves along one displacement line and slides on the first solid contact.
+///
+/// The hitbox corners trace the same line as the player center.
+/// A solid cell touched by one of those lines is a collision.
+/// The scan checks only the cells in those four short line bounds.
+/// Returns whether the move hit a horizontal wall.
+fn moveVector(amount: Vec2i) bool {
+    if (@reduce(.And, amount == @as(Vec2i, @splat(0)))) return false;
+
+    const game = &memory.game;
+    if (isColliding(game.player_pos[0], game.player_pos[1])) return false;
+
+    const start = game.player_pos;
+    var collision_t: f64 = undefined;
+    const collision_axis = firstVectorCollision(start, amount, &collision_t);
+    if (collision_axis == null) {
+        game.player_pos += amount;
+        _ = handleLocalWrap(0);
+        _ = handleLocalWrap(1);
+        return false;
+    }
+
+    const axis = collision_axis.?;
+    const direction: i64 = if (axis == 0)
+        (if (amount[0] > 0) 1 else -1)
+    else
+        (if (amount[1] > 0) 1 else -1);
+    var contact_pos: Vec2i = .{
+        start[0] + @as(i64, @intFromFloat(@as(f64, @floatFromInt(amount[0])) * collision_t)),
+        start[1] + @as(i64, @intFromFloat(@as(f64, @floatFromInt(amount[1])) * collision_t)),
+    };
+
+    // The contact coordinate is the first blocked integer position. Step back before testing it.
+    if (axis == 0) {
+        contact_pos[0] -= direction;
+        while (isColliding(contact_pos[0], contact_pos[1])) contact_pos[0] -= direction;
+    } else {
+        contact_pos[1] -= direction;
+        while (isColliding(contact_pos[0], contact_pos[1])) contact_pos[1] -= direction;
+    }
+
+    game.player_pos = contact_pos;
+    _ = handleLocalWrap(0);
+    _ = handleLocalWrap(1);
+    if (axis == 0) {
+        game.player_velocity[0] = 0;
+        subpixel_accum[0] = 0;
+        return true;
+    } else {
+        game.player_velocity[1] = 0;
+        subpixel_accum[1] = 0;
+        moveAxis(0, start[0] + amount[0] - game.player_pos[0]);
+        return false;
+    }
+}
+
+/// Returns the first solid contact on a player-center line and its blocking axis.
+/// `collision_t` is the fraction of `amount` at that contact, from 0 to 1.
+fn firstVectorCollision(start: Vec2i, amount: Vec2i, collision_t: *f64) ?u1 {
+    const game = &memory.game;
+    const player_coord = game.getPlayerCoord();
+    const corners = playerCorners(start[0], start[1]);
+    var best_t: f64 = 2.0;
+    var best_axis: u1 = 0;
+    var last_coord: ?world.Coordinate = null;
+    var chunk: *const memory.Chunk = undefined;
+
+    for (corners) |corner| {
+        const end = .{
+            corner[0] + amount[0],
+            corner[1] + amount[1],
+        };
+        const first_x = @divFloor(@min(corner[0], end[0]), @as(i64, CHUNK_SIZE_SQ));
+        const last_x = @divFloor(@max(corner[0], end[0]), @as(i64, CHUNK_SIZE_SQ));
+        const first_y = @divFloor(@min(corner[1], end[1]), @as(i64, CHUNK_SIZE_SQ));
+        const last_y = @divFloor(@max(corner[1], end[1]), @as(i64, CHUNK_SIZE_SQ));
+
+        var block_y = first_y;
+        while (block_y <= last_y) : (block_y += 1) {
+            var block_x = first_x;
+            while (block_x <= last_x) : (block_x += 1) {
+                var entry_x: f64 = undefined;
+                var exit_x: f64 = undefined;
+                if (!segmentCellInterval(
+                    corner[0],
+                    amount[0],
+                    block_x * CHUNK_SIZE_SQ,
+                    block_x * CHUNK_SIZE_SQ + CHUNK_SIZE_SQ - 1,
+                    &entry_x,
+                    &exit_x,
+                )) continue;
+
+                var entry_y: f64 = undefined;
+                var exit_y: f64 = undefined;
+                if (!segmentCellInterval(
+                    corner[1],
+                    amount[1],
+                    block_y * CHUNK_SIZE_SQ,
+                    block_y * CHUNK_SIZE_SQ + CHUNK_SIZE_SQ - 1,
+                    &entry_y,
+                    &exit_y,
+                )) continue;
+
+                const entry = @max(entry_x, entry_y, 0.0);
+                const exit = @min(exit_x, exit_y, 1.0);
+                if (entry > exit or entry > best_t or exit < 0.0) continue;
+
+                const target_coord = player_coord.move(.{
+                    @divFloor(block_x, @as(i64, CHUNK_SIZE)),
+                    @divFloor(block_y, @as(i64, CHUNK_SIZE)),
+                });
+
+                var solid = true;
+                if (target_coord) |coord| {
+                    if (last_coord == null or !coord.eql(last_coord.?)) {
+                        chunk = world.getChunkPtr(coord);
+                        last_coord = coord;
+                    }
+                    const bx: usize = @intCast(@mod(block_x, @as(i64, CHUNK_SIZE)));
+                    const by: usize = @intCast(@mod(block_y, @as(i64, CHUNK_SIZE)));
+                    solid = chunk.blocks[by * CHUNK_SIZE + bx].isSolid();
+                }
+                if (!solid) continue;
+
+                const axis: u1 = if (amount[0] == 0)
+                    1
+                else if (amount[1] == 0)
+                    0
+                else if (entry_x > entry_y)
+                    0
+                else
+                    1;
+                if (entry < best_t or (entry == best_t and axis == 1)) {
+                    best_t = entry;
+                    best_axis = axis;
+                }
+            }
+        }
+    }
+
+    if (best_t > 1.0) return null;
+    collision_t.* = best_t;
+    return best_axis;
+}
+
+/// Returns the line interval that lies inside one inclusive block-cell range.
+fn segmentCellInterval(
+    start: i64,
+    amount: i64,
+    cell_min: i64,
+    cell_max: i64,
+    entry: *f64,
+    exit: *f64,
+) bool {
+    if (amount == 0) {
+        if (start < cell_min or start > cell_max) return false;
+        entry.* = 0.0;
+        exit.* = 1.0;
+        return true;
+    }
+
+    const first = (@as(f64, @floatFromInt(cell_min)) - @as(f64, @floatFromInt(start))) /
+        @as(f64, @floatFromInt(amount));
+    const last = (@as(f64, @floatFromInt(cell_max)) - @as(f64, @floatFromInt(start))) /
+        @as(f64, @floatFromInt(amount));
+    entry.* = @min(first, last);
+    exit.* = @max(first, last);
+    return exit.* >= 0.0 and entry.* <= 1.0;
 }
 
 /// Returns whether the player hitbox collides after one axis moves by `delta` subpixels.
@@ -1147,4 +1353,60 @@ test "softlock correction prefers a farther landing that stands on a floor" {
     const landing = nearestExteriorLanding(&box, Box.canEnter, Box.isClear, Box.isStandable) orelse unreachable;
     try std.testing.expectEqual(@as(i16, 3), landing.x);
     try std.testing.expectEqual(@as(i16, 0), landing.y);
+}
+
+test "diagonal movement stops above a block crossed by its line" {
+    const saved_game = memory.game;
+    const saved_max_suffix = world.max_possible_suffix;
+    const saved_creative = dw.inventory.IN_CREATIVE;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+        world.max_possible_suffix = saved_max_suffix;
+        dw.inventory.IN_CREATIVE = saved_creative;
+        world.clearCaches(true);
+    }
+
+    memory.game = .{};
+    memory.game.depth = main.STARTING_ZOOM_TIMES;
+    memory.game.max_depth_reached = memory.game.depth;
+    memory.game.player_chunk = .{ 40, 40 };
+    memory.game.player_pos = .{
+        5 * CHUNK_SIZE_SQ + CHUNK_SIZE_SQ / 2,
+        5 * CHUNK_SIZE_SQ + CHUNK_SIZE_SQ / 2 - 1,
+    };
+    memory.game.last_player_pos = memory.game.player_pos;
+    memory.deriveHashSeeds();
+    world.max_possible_suffix = world.getMaxSuffixAtDepth(memory.game.depth);
+    world.quad_cache.path_hashes.value[0] = memory.game.seed;
+    world.mod_store.init(std.testing.allocator);
+    defer world.mod_store.deinit();
+    world.legacy_store.init(std.testing.allocator);
+    defer world.legacy_store.deinit();
+    dw.inventory.IN_CREATIVE = false;
+
+    const coord = memory.game.getPlayerCoord();
+    const key = coord.asDepthCoordinate(memory.game.depth);
+    var by: u4 = 4;
+    while (by <= 8) : (by += 1) {
+        var bx: u4 = 3;
+        while (bx <= 7) : (bx += 1) {
+            world.mod_store.beginWrite(key).setCell(
+                @intCast(@as(usize, by) * CHUNK_SIZE + bx),
+                .{ .id = .none, .base_id = .none, .hp = 0 },
+            );
+        }
+    }
+    world.mod_store.beginWrite(key).setCell(
+        6 * CHUNK_SIZE + 4,
+        .{ .id = .stone, .base_id = .none, .hp = 0 },
+    );
+    world.clearCaches(true);
+
+    memory.game.player_velocity = .{ 3.0, 3.0 };
+    _ = moveVector(.{ -2 * CHUNK_SIZE_SQ, 2 * CHUNK_SIZE_SQ });
+
+    try std.testing.expect(memory.game.player_pos[1] < 6 * CHUNK_SIZE_SQ);
+    try std.testing.expectEqual(@as(f64, 0.0), memory.game.player_velocity[0]);
+    try std.testing.expect(!isColliding(memory.game.player_pos[0], memory.game.player_pos[1]));
 }

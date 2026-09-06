@@ -728,6 +728,11 @@ pub const WorldView = struct {
     zoom: f64,
     /// Camera position in subpixels, in the same space as `game.camera_pos`.
     cam: Vec2f,
+    /// Player position in subpixels, in the same space as `game.player_pos`.
+    /// Anything that measures a distance TO the player reads this, not `game.player_pos`.
+    /// The raw value sits on a tick boundary.
+    /// Mixing the two makes a size or a fade step once per tick while its own icon glides.
+    player: Vec2f,
 };
 
 /// Interpolates the world camera for this render frame; see `WorldView`.
@@ -735,10 +740,14 @@ pub fn worldView() WorldView {
     const game = &memory.game;
     const cam_vel: Vec2f = @floatFromInt(game.camera_pos - game.last_camera_pos);
     const last_cam: Vec2f = @floatFromInt(game.last_camera_pos);
+    const player_vel: Vec2f = @floatFromInt(game.player_pos - game.last_player_pos);
+    const last_player: Vec2f = @floatFromInt(game.last_player_pos);
+    const shifted: Vec2f = @splat(dw.chunks.current_dt + 1.0);
 
     return .{
         .zoom = game.camera_scale * std.math.pow(f64, game.camera_scale_change, dw.chunks.current_dt),
-        .cam = last_cam + cam_vel * @as(Vec2f, @splat(dw.chunks.current_dt + 1.0)),
+        .cam = last_cam + cam_vel * shifted,
+        .player = last_player + player_vel * shifted,
     };
 }
 

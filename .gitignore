@@ -12,6 +12,7 @@
 /zig-pkg
 
 /.claude
+/.codex
 /.scratch
 /docs
 /skills

@@ -28,6 +28,14 @@ const CHUNK_SIZE_FLOAT = dw.CHUNK_SIZE_FLOAT;
 ///   Equivalently `old_scale * pow(change, current_dt + 1)`, but the raw form avoids recovering `old_scale`.
 pub var current_dt: f64 = 0.0;
 
+/// How far `game.bg_time` moved on the last logic tick, written by `handleTick()`.
+///
+/// The background's noise field is sampled at a clock, so the clock is a position.
+/// Takes the position curve.
+/// `bg_time + bg_time_step * current_dt` walks back toward the previous value.
+/// Not saved, because the first tick after a load rewrites it.
+pub var bg_time_step: f64 = 0.0;
+
 /// Grid-aligned player position in logical viewport pixels, at the center of the sprite.
 /// The viewport is 480x270, and this is recomputed every render frame.
 /// The player is drawn as a render entity, so the entity pass shares this.
@@ -635,7 +643,8 @@ fn updateRenderProperties(
     memory.setScratchProp(10, abs_cam_y);
     // The background's animation clock. Owned by the simulation rather than the host's wall clock so a
     // portal descent can ease it to a standstill (and so a save captures exactly where it stopped).
-    memory.setScratchProp(11, memory.game.bg_time);
+    // Interpolated on the position curve, or the field would step once per tick while the camera glides.
+    memory.setScratchProp(11, memory.game.bg_time + bg_time_step * current_dt);
 
     // Per-frame warp of this layer. The offset is authored in internal viewport pixels, so it is scaled
     // into canvas pixels here to match screen_pos in the shader (which is already resolution-scaled).
