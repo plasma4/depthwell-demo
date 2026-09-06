@@ -308,12 +308,16 @@ inline fn leadPosition(p: *const Particle, lead: f32) Vec2f32 {
 }
 
 /// Moves every live particle for a logic tick.
-pub fn tick(ticks: u32) void {
+/// `frames` is how many 60 FPS frames the tick covers: `logic_speed` times the tick count.
+/// Particles are decoration, so they must trace the same curve per SECOND at any tick rate.
+pub fn tick(frames: f64) void {
     @setFloatMode(.optimized);
-    const dt: f32 = @floatFromInt(ticks);
+    const dt: f32 = @floatCast(frames);
+    // A tick never ages a particle by less than one frame, or a low tick rate would never retire it.
+    const whole: u32 = @intFromFloat(@max(1.0, @round(frames)));
     for (&pool) |*p| {
         if (p.frames_left == 0) continue; // skip!
-        p.frames_left = @intCast(@as(u32, p.frames_left) -| ticks);
+        p.frames_left = @intCast(@as(u32, p.frames_left) -| whole);
         // integrated rather than stepped, so a multi-tick catch-up traces the same curve as single ticks
         const accel = accelOf(p);
         p.position += (p.velocity + accel * @as(Vec2f32, @splat(0.5 * dt))) * @as(Vec2f32, @splat(dt));
