@@ -380,7 +380,6 @@ export class GameEngine {
     /** Function called from Zig (using the `js_handle_visible_entities` function in `env`) that renders entities. */
     public handleVisibleEntities() {
         // Setting the color space flags is not needed; this rides on the previous calls
-        this.renderCallId = 0;
         const scratchPtr = this.getScratchPtr();
         const entityBytes = this.getScratchProperty(0) * 48; // can't trust length as it's a multiple of 64
         if (entityBytes === 0 || !this.renderPass) return;
@@ -391,7 +390,7 @@ export class GameEngine {
                 size: entityBytes,
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             });
-            this.recreateBufferAndBindGroup(0);
+            this.recreateBindGroup(0);
         }
 
         const wasmView = new Uint8Array(
@@ -527,36 +526,45 @@ export class GameEngine {
             });
 
             // Rebuild the bind group because the tileBuffer reference changed
-            this.bindGroups[id] = this.device.createBindGroup({
-                label: `Bind group slot ${id}`,
-                layout: this.tilePipeline.getBindGroupLayout(0),
-                entries: [
-                    {
-                        binding: 0,
-                        resource: {
-                            buffer: this.uniformBuffer,
-                            offset: 0, // Base offset is 0, 256 byte multiple needed for bind groups
-                            size: 256,
-                        },
-                    },
-                    {
-                        binding: 1,
-                        resource: {
-                            buffer: this.tileBuffers[id]!,
-                        },
-                    },
-                    { binding: 2, resource: this.atlasTextureView },
-                    { binding: 3, resource: this.atlasTextureMaskView },
-                    { binding: 4, resource: this.pixelSampler },
-                    {
-                        binding: 5,
-                        resource: {
-                            buffer: this.entityBuffer,
-                        },
-                    },
-                ],
-            });
+            this.bindGroups[id] = this.createBindGroup(id);
         }
+    }
+
+    private recreateBindGroup(id: number) {
+        if (!this.tileBuffers[id]) return;
+        this.bindGroups[id] = this.createBindGroup(id);
+    }
+
+    private createBindGroup(id: number) {
+        return this.device.createBindGroup({
+            label: `Bind group slot ${id}`,
+            layout: this.tilePipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: {
+                        buffer: this.uniformBuffer,
+                        offset: 0, // Base offset is 0, 256 byte multiple needed for bind groups
+                        size: 256,
+                    },
+                },
+                {
+                    binding: 1,
+                    resource: {
+                        buffer: this.tileBuffers[id]!,
+                    },
+                },
+                { binding: 2, resource: this.atlasTextureView },
+                { binding: 3, resource: this.atlasTextureMaskView },
+                { binding: 4, resource: this.pixelSampler },
+                {
+                    binding: 5,
+                    resource: {
+                        buffer: this.entityBuffer,
+                    },
+                },
+            ],
+        });
     }
 
     /*

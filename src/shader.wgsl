@@ -15,7 +15,7 @@ const STONE_START: u32 = 32u;
 const ORE_START: u32 = 67u;
 const GEM_START: u32 = 73u;
 const GEM_MASK_START: u32 = 87u;
-const WATER_START: u32 = 320u;
+const WATER_START: u32 = 319u;
 
 // OKLAB chroma a fully saturated light source adds at full lightness.
 const LIGHT_CHROMA_MAX: f32 = 0.16;
