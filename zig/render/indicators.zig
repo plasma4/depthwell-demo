@@ -162,11 +162,9 @@ pub fn closeAllMenus() void {
 /// Handed to indicator visitors (and menus like loot) so a menu can act on the exact block that opened it.
 pub const BlockRef = struct { coord: dw.world.Coordinate, bx: u4, by: u4 };
 
-/// Per-frame camera interpolation shared by every indicator, matching the world's position/zoom curves.
+/// The shared world camera for this frame, plus the mouse position every indicator hit-tests against.
 const CameraView = struct {
-    zoom: f64,
-    cam_x: f64,
-    cam_y: f64,
+    world: dw.entity.WorldView,
     mouse_px: Vec2f,
 };
 
@@ -183,21 +181,8 @@ const IndicatorGeom = struct {
 
 /// Computes the shared camera interpolation for this frame.
 fn cameraView() CameraView {
-    const game = &memory.game;
-
-    // Zoom uses the raw fraction; position uses the +1.0-shifted fraction. See dw.chunks.current_dt.
-    const interpolated_zoom = game.camera_scale *
-        std.math.pow(f64, game.camera_scale_change, dw.chunks.current_dt);
-    const cam_dt = dw.chunks.current_dt + 1.0;
-
-    // Interpolate last_camera_pos toward camera_pos, matching the world's position curve
-    const cam_vel_x = game.camera_pos[0] - game.last_camera_pos[0];
-    const cam_vel_y = game.camera_pos[1] - game.last_camera_pos[1];
-
     return .{
-        .zoom = interpolated_zoom,
-        .cam_x = @as(f64, @floatFromInt(game.last_camera_pos[0])) + (@as(f64, @floatFromInt(cam_vel_x)) * cam_dt),
-        .cam_y = @as(f64, @floatFromInt(game.last_camera_pos[1])) + (@as(f64, @floatFromInt(cam_vel_y)) * cam_dt),
+        .world = dw.entity.worldView(),
         .mouse_px = mouse.uv_position * Vec2f{ dw.SCREEN_WIDTH, dw.SCREEN_HEIGHT },
     };
 }
@@ -232,10 +217,10 @@ fn indicatorGeom(
     const slot_size: f32 = @floatCast((10.0 + 5.0 * t) * game.camera_scale);
 
     // Position slightly above the physical block (-200 subpixels)
-    const delta_x_sp = @as(f64, @floatFromInt(block_sub_x)) - view.cam_x;
-    const delta_y_sp = @as(f64, @floatFromInt(block_sub_y - 200)) - view.cam_y;
-    const screen_x: f32 = @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + delta_x_sp * (view.zoom / 16.0));
-    const screen_y: f32 = @floatCast(@as(f64, dw.SCREEN_HEIGHT_HALF) + delta_y_sp * (view.zoom / 16.0));
+    const delta_x_sp = @as(f64, @floatFromInt(block_sub_x)) - view.world.cam[0];
+    const delta_y_sp = @as(f64, @floatFromInt(block_sub_y - 200)) - view.world.cam[1];
+    const screen_x: f32 = @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + delta_x_sp * (view.world.zoom / 16.0));
+    const screen_y: f32 = @floatCast(@as(f64, dw.SCREEN_HEIGHT_HALF) + delta_y_sp * (view.world.zoom / 16.0));
 
     return .{
         .screen_x = screen_x,
@@ -407,22 +392,6 @@ pub fn drawIndicators() void {
             if (flag.* and !drawer.seen.contains(kind)) closeMenu(kind);
         }
     }
-}
-
-/// Screen-space center of a block, in viewport pixels, using this frame's interpolated camera
-/// (same position math as `indicatorGeom()`, without the icon's upward offset).
-pub fn blockScreenPx(coord: dw.world.Coordinate, bx: u4, by: u4) dw.utils.Vec2f32 {
-    const view = cameraView();
-    const player_coord = memory.game.getPlayerCoord();
-    const chunk_dx: i64 = @bitCast(coord.suffix[0] -% player_coord.suffix[0]);
-    const chunk_dy: i64 = @bitCast(coord.suffix[1] -% player_coord.suffix[1]);
-    const block_sub_x = chunk_dx * dw.SUBPIXELS_IN_CHUNK + @as(i64, bx) * 256 + 128;
-    const block_sub_y = chunk_dy * dw.SUBPIXELS_IN_CHUNK + @as(i64, by) * 256 + 128;
-    const zoom_px = view.zoom / 16.0;
-    return .{
-        @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + (@as(f64, @floatFromInt(block_sub_x)) - view.cam_x) * zoom_px),
-        @floatCast(@as(f64, dw.SCREEN_HEIGHT_HALF) + (@as(f64, @floatFromInt(block_sub_y)) - view.cam_y) * zoom_px),
-    };
 }
 
 /// Accumulates whether the cursor is over any active indicator icon.

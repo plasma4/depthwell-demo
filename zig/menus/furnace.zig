@@ -215,7 +215,7 @@ fn drawDragIcon(mouse_px: Vec2f) void {
         const off = offsets[i];
         addEntity(.{
             .sprite = dragged,
-            .position = .{ @floatCast(drag_pos_px[0] + off[0]), @floatCast(drag_pos_px[1] + off[1]) },
+            .position = util.toPx32(drag_pos_px + off),
             .size = if (is_front) 16.0 else 14.0,
             .rotation = wiggle,
             // Partial opacity; the front copy is a touch more opaque so the stack reads clearly.
@@ -277,7 +277,7 @@ pub fn draw() void {
     inline for (.{ input_px, output_px }) |slot_px| {
         addEntity(.{
             .sprite = .wood_frame,
-            .position = .{ @floatCast(slot_px[0]), @floatCast(slot_px[1]) },
+            .position = util.toPx32(slot_px),
             .size = @floatCast(SLOT_SIZE),
             .lcha = .{ 0.65, -0.08, 0.0, 1.0 },
         });
@@ -287,21 +287,21 @@ pub fn draw() void {
     if (loaded_ore != .none) {
         addEntity(.{
             .sprite = loaded_ore,
-            .position = .{ @floatCast(input_px[0]), @floatCast(input_px[1]) },
+            .position = util.toPx32(input_px),
             .size = ITEM_SIZE,
         });
 
-        util.drawCount(loaded_count, .{ input_px[0] + 3.0, input_px[1] + 5.0 }, .{ 0.85, 0.30, 1.2, 1.0 }, 1.0);
+        util.drawCount(loaded_count, input_px, .{ 0.85, 0.30, 1.2, 1.0 }, 1.0);
     }
 
     // Finished bars and count go in the output slot.
     if (output_bar != .none) {
         addEntity(.{
             .sprite = output_bar,
-            .position = .{ @floatCast(output_px[0]), @floatCast(output_px[1]) },
+            .position = util.toPx32(output_px),
             .size = ITEM_SIZE,
         });
-        util.drawCount(output_count, .{ output_px[0] + 3.0, output_px[1] + 5.0 }, .{ 0.85, 0.30, 1.8, 1.0 }, 1.0);
+        util.drawCount(output_count, output_px, .{ 0.85, 0.30, 1.8, 1.0 }, 1.0);
     }
 
     // Progress bar between the slots.
