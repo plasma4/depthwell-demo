@@ -87,6 +87,13 @@ pub var just_mouse_down: bool = false;
 /// Determines if the mouse was just released; reset via `clearFrameFlags()` at the end of the frame.
 pub var just_mouse_up: bool = false;
 
+/// Whether a logic tick has already run with the current press held.
+/// Set by `endTick()`, cleared on each pointerdown.
+var press_seen_by_tick: bool = false;
+/// Whether a pointerup arrived before any logic tick saw the press.
+/// The release then waits for `endTick()`, so a tap shorter than one frame still mines or places once.
+var release_deferred: bool = false;
+
 /// Chunk the mouse is on; only updated when `updateMouseBlock()` is called.
 /// Assume to be invalid if null.
 pub var mouse_chunk_coord: ?world.Coordinate = null;
@@ -140,7 +147,7 @@ pub fn isClicked(category: ClickFocus, is_hovered: bool) bool {
 }
 
 /// Handles a fresh pointerdown across every interactive UI layer BEFORE world mining runs.
-/// Must be called once per tick, ahead of `mining.handleMiningAndPlacing()` (see `state/tick.zig`).
+/// Called from `handleMouse()` only, at event time, so the capture uses the pointer's own position.
 ///
 /// `handleMouse()` optimistically sets `click_focus = .canvas` on pointerdown.
 /// Without this pass, a first-frame click goes to whichever of the render and the logical tick runs first.
@@ -186,20 +193,46 @@ pub fn processDownCaptures() void {
 /// Action 3 (RIGHT CLICK): pointerdown
 /// Action 4 (RIGHT CLICK): pointerup
 /// Action 5 (INVALIDATE) : N/A (blur/resize happened)
+///
+/// Pointer events arrive between frames, so a tap can go down and up with no logic tick between them.
+/// Such a release is held back until `endTick()` runs, which gives the press exactly one tick of `click_focus`.
 pub fn handleMouse(x: f64, y: f64, action: u32) void {
     uv_position = .{ x, y };
 
     if (action == 1 or action == 3) {
         just_mouse_down = true;
         click_focus = .canvas;
+        press_seen_by_tick = false;
+        release_deferred = false;
     } else if (action == 2 or action == 4 or action == 5) {
         if (action == 2 or action == 4) {
             just_mouse_up = true;
             released_focus = click_focus;
+            if (!press_seen_by_tick) {
+                // the tap was faster than a frame: keep the focus for the next tick
+                release_deferred = true;
+                processDownCaptures();
+                return;
+            }
         }
+        release_deferred = false;
+        press_seen_by_tick = true;
         click_focus = .none;
     }
     processDownCaptures();
+}
+
+/// Ends a logic tick's view of the mouse.
+/// Must be called at the end of `handleTick()`, after every reader of `click_focus`.
+///
+/// A press is live for at least one tick.
+/// Without this, a sub-frame tap sets and clears `click_focus` between ticks and never mines or places.
+pub fn endTick() void {
+    press_seen_by_tick = true;
+    if (release_deferred) {
+        release_deferred = false;
+        click_focus = .none;
+    }
 }
 
 /// Resets transient frame transition flags. Called at the end of `updateEntities()`.
