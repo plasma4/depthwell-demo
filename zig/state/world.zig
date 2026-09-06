@@ -2934,12 +2934,15 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
 
                 if (broken) {
                     if (item.bx == bx and item.by == by and item.coord.eql(coord)) original_block_broken = true;
+                    // A 2x1 decor drops from the half the player pressed, not from whichever half owns the drop.
+                    // Only a sideways neighbor qualifies, so a collapsing vertical stack still pops each block from its own cell.
+                    const from_pressed = dy == 0 and (dx == 1 or dx == -1);
                     // water already drops in modifyBlockHp()
                     if (current_sprite != .water) dw.inventory.dropItem(
                         current_sprite,
-                        target_coord,
-                        lbx,
-                        lby,
+                        if (from_pressed) item.coord else target_coord,
+                        if (from_pressed) item.bx else lbx,
+                        if (from_pressed) item.by else lby,
                     );
 
                     // Internal block modification to avoid recursion.
