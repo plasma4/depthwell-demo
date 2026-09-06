@@ -1,5 +1,6 @@
 //! Block-drop resolution: handles how a destroyed block turns into item sprites.
 //! `SpriteProps.drops` holds a `DropConfig`; data gets consumed in `input/inventory.zig`.
+const std = @import("std");
 const dw = @import("../root.zig");
 
 const memory = dw.memory;
@@ -29,11 +30,25 @@ pub const DropConfig = struct {
     dynamic_fn: ?DropFn = null,
 };
 
+/// What a bush drops, and how often relative to the other rows.
+/// Odds automatically adjust to 100%.
+const bush_drops = dw.seeding.WeightedPicker([]const Sprite, &.{
+    .{ .value = &.{.ruby_candy}, .weight = 5 },
+    .{ .value = &.{.splittyfruit}, .weight = 10 },
+    .{ .value = &.{.teal_lemon_fruit}, .weight = 15 },
+    .{ .value = &.{.blemon_fruit}, .weight = 15 },
+    .{ .value = &.{.copperfruit}, .weight = 15 },
+    .{ .value = &.{.ploopus1}, .weight = 10 },
+    .{ .value = &.{.ploopus2}, .weight = 10 },
+    .{ .value = &.{.divato}, .weight = 10 },
+    .{ .value = &.{.circuspin}, .weight = 6 },
+    .{ .value = &.{.bacon}, .weight = 4 },
+});
+
 /// Custom `dynamic_fn` handlers referenced by `DropConfig` entries in the sprite rule table.
 pub const DropHandlers = struct {
     /// Converts a bush drop to various fruits based on world coordinates and seeds.
     pub fn bushDrop(coord: Coordinate, bx: u4, by: u4) []const Sprite {
-        const oddsNum = dw.seeding.oddsNum;
         const depth = memory.game.depth;
         const key = coord.asDepthCoordinate(depth);
         const chunk_seeds = dw.world.quad_cache.getChunkSeeds(key);
@@ -47,27 +62,6 @@ pub const DropHandlers = struct {
             abs_y,
         );
 
-        const roll = seed_val;
-        if (roll <= oddsNum(0.05)) {
-            return &[_]Sprite{.ruby_candy};
-        } else if (roll <= oddsNum(0.15)) {
-            return &[_]Sprite{.splittyfruit};
-        } else if (roll <= oddsNum(0.30)) {
-            return &[_]Sprite{.teal_lemon_fruit};
-        } else if (roll <= oddsNum(0.45)) {
-            return &[_]Sprite{.blemon_fruit};
-        } else if (roll <= oddsNum(0.60)) {
-            return &[_]Sprite{.copperfruit};
-        } else if (roll <= oddsNum(0.70)) {
-            return &[_]Sprite{.ploopus1};
-        } else if (roll <= oddsNum(0.80)) {
-            return &[_]Sprite{.ploopus2};
-        } else if (roll <= oddsNum(0.90)) {
-            return &[_]Sprite{.divato};
-        } else if (roll <= oddsNum(0.96)) {
-            return &[_]Sprite{.circuspin};
-        } else {
-            return &[_]Sprite{.bacon};
-        }
+        return bush_drops.pick(seed_val);
     }
 };
