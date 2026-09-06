@@ -167,6 +167,90 @@ pub inline fn oddsNum(chance: comptime_float) u64 {
     return @intFromFloat(chance * POW_2_64 + 0.5);
 }
 
+/// One row of a weighted table: a value, and how often it comes up relative to the other rows.
+/// Weights are plain counts, so a row of 15 against a row of 5 lands three times as often.
+pub fn Weighted(comptime T: type) type {
+    return struct { value: T, weight: u32 };
+}
+
+/// Builds a picker over a fixed table of weighted values.
+///
+/// The alternative is a chain of `if (roll <= oddsNum(0.30))` thresholds,
+/// where every row's number depends on the rows above it,
+/// so inserting one drop means rewriting the rest and hoping the last branch still totals 1.0.
+/// Here a row states only its own share, and nothing else moves.
+///
+/// `pick()` maps the roll onto `[0, total_weight)` with a multiply and a shift
+/// (Lemire's method, the same one `HashState.getLimit()` uses):
+/// `(roll >> 32) * total >> 32` scales the top 32 bits into the range without a division.
+/// It costs a relative bias under `total / 2^32`, far under the bias already in `FastHash`.
+/// Then it walks the running weight totals, which are comptime constants,
+/// so the whole pick becomes one multiply and a chain of compares against literals.
+pub fn WeightedPicker(comptime T: type, comptime entries: []const Weighted(T)) type {
+    return struct {
+        /// The type of value a pick returns.
+        pub const Value = T;
+
+        /// Sum of every row's weight. A row's share of picks is its weight over this.
+        pub const total_weight: u64 = blk: {
+            var sum: u64 = 0;
+            for (entries) |e| sum += e.weight;
+            break :blk sum;
+        };
+
+        /// Running totals, so `thresholds[i]` is the exclusive upper bound of row `i`.
+        const thresholds: [entries.len]u64 = blk: {
+            var out: [entries.len]u64 = undefined;
+            var sum: u64 = 0;
+            for (entries, 0..) |e, i| {
+                sum += e.weight;
+                out[i] = sum;
+            }
+            break :blk out;
+        };
+
+        comptime {
+            if (entries.len == 0) @compileError("A WeightedPicker needs at least one entry.");
+            if (total_weight == 0) @compileError("A WeightedPicker needs at least one non-zero weight.");
+            // The multiply in pick() takes 32 bits of roll times the total, and must not overflow 64.
+            if (total_weight > std.math.maxInt(u32)) @compileError("Total weight must fit in 32 bits.");
+        }
+
+        /// Picks a row from a uniform 64-bit roll, reading its top 32 bits.
+        pub inline fn pick(roll: u64) T {
+            const scaled = ((roll >> 32) * total_weight) >> 32;
+            inline for (entries, thresholds) |e, limit| {
+                if (scaled < limit) return e.value;
+            }
+            // scaled < total_weight always holds, and the last threshold IS total_weight.
+            unreachable;
+        }
+    };
+}
+
+test "WeightedPicker splits rolls in proportion to the weights" {
+    const Picker = WeightedPicker(u8, &.{
+        .{ .value = 10, .weight = 1 },
+        .{ .value = 20, .weight = 3 },
+        .{ .value = 30, .weight = 4 },
+    });
+    try testing.expectEqual(@as(u64, 8), Picker.total_weight);
+
+    // Ends of the roll space land on the first and last rows.
+    try testing.expectEqual(@as(u8, 10), Picker.pick(0));
+    try testing.expectEqual(@as(u8, 30), Picker.pick(std.math.maxInt(u64)));
+
+    // A power-of-two total divides the 32-bit roll space exactly, so an even sweep of it gives
+    // exact counts and this test never has to talk about tolerances.
+    var counts = [_]u32{0} ** 3;
+    const steps = 1 << 16;
+    for (0..steps) |i| {
+        const roll = @as(u64, i) << 48; // sweeps the top 32 bits at a fixed stride
+        counts[(Picker.pick(roll) - 10) / 10] += 1;
+    }
+    try testing.expectEqual([_]u32{ steps / 8, steps * 3 / 8, steps * 4 / 8 }, counts);
+}
+
 /// Simple compile-time getter for hashing data, incrementing `y` over time.
 pub const HashState = struct {
     /// `getChance()` max margin of error is `2^-GET_CHANCE_MARGIN_BITS`.
@@ -292,6 +376,12 @@ pub const HashState = struct {
         const hi = (mid >> 32) +% a1b1 +% (carry1 << 32) +% carry0;
 
         return .{ .lo = lo, .hi = hi };
+    }
+
+    /// Picks one row of a comptime weighted table; see `WeightedPicker()`.
+    /// Consumes a whole fresh 64-bit word, of which the pick reads the top 32 bits.
+    pub inline fn getWeighted(self: *HashState, comptime Picker: type) Picker.Value {
+        return Picker.pick(self.getRaw());
     }
 
     /// Returns an integer of type `T` in the range `[0, limit)` for non-power-of-two limits.
