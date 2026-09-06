@@ -219,26 +219,18 @@ pub fn addDroppedItemsAsEntities(time_diff: f64) void {
             const curr_item_sp_x = curr_offset[0] * 4096 + @as(i64, item.subpixel_x);
             const curr_item_sp_y = curr_offset[1] * 4096 + @as(i64, item.subpixel_y);
 
-            // Position interpolation uses the +1.0-shifted fraction; zoom below uses the raw one. See dw.chunks.current_dt.
+            // The item interpolates prev->curr, so it takes the +1.0-shifted fraction, and so does
+            // the camera in worldView(). See dw.chunks.current_dt.
             const dt = dw.chunks.current_dt + 1.0;
             const interp_item_sp_x = @as(f64, @floatFromInt(prev_item_sp_x)) +
                 @as(f64, @floatFromInt(curr_item_sp_x - prev_item_sp_x)) * dt;
             const interp_item_sp_y = @as(f64, @floatFromInt(prev_item_sp_y)) +
                 @as(f64, @floatFromInt(curr_item_sp_y - prev_item_sp_y)) * dt;
 
-            // Camera interpolated position
-            const cam_vel_x = memory.game.camera_pos[0] - memory.game.last_camera_pos[0];
-            const cam_vel_y = memory.game.camera_pos[1] - memory.game.last_camera_pos[1];
-
-            // Base the camera on last_camera_pos so items track the world (item position above also interpolates prev->curr).
-            const interp_cam_x = @as(f64, @floatFromInt(memory.game.last_camera_pos[0])) + (@as(f64, @floatFromInt(cam_vel_x)) * dt);
-            const interp_cam_y = @as(f64, @floatFromInt(memory.game.last_camera_pos[1])) + (@as(f64, @floatFromInt(cam_vel_y)) * dt);
-
-            const delta_x_sp = interp_item_sp_x - interp_cam_x;
-            const delta_y_sp = interp_item_sp_y - interp_cam_y;
-
-            // Zoom bases on the current camera_scale, so it takes the RAW fraction (dt - 1.0), not the shifted one.
-            const interpolated_zoom = memory.game.camera_scale * std.math.pow(f64, memory.game.camera_scale_change, dt - 1.0);
+            const view = dw.entity.worldView();
+            const delta_x_sp = interp_item_sp_x - view.cam[0];
+            const delta_y_sp = interp_item_sp_y - view.cam[1];
+            const interpolated_zoom = view.zoom;
 
             // Translate subpixels offset to screen space (1 pixel becomes 16 subpixels!)
             const screen_x: f32 = @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + delta_x_sp * (interpolated_zoom / 16.0));
@@ -622,25 +614,20 @@ pub fn drawInventory(time_diff: f64) void {
         const color_hue: f32 = @floatCast(@rem(@as(f64, @floatFromInt(i)) * 0.2 - @abs(wobble_angle * 2.0), std.math.tau));
 
         if (!isInCreative()) {
-            drawNumber( // shadow of inventory number
-                count,
-                pos + Vec2f32{ base_size / 3.5, base_size / 3.5 },
-                .{
-                    .lcha = .{ 0.5, 0.2, color_hue, 0.8 },
-                    .font_size = number_size,
-                    .ltr = false,
-                    .rotation = wobble_angle, // text wobbles when you mine something!
-                },
-            );
-
-            drawNumber( // actual value
+            dw.entity.drawNumberShadowed(
                 count,
                 pos + Vec2f32{ base_size / 3.2, base_size / 3.2 },
                 .{
                     .lcha = .{ 0.9, 0.2, color_hue, 1.0 },
                     .font_size = number_size,
                     .ltr = false,
-                    .rotation = wobble_angle,
+                    .rotation = wobble_angle, // text wobbles when you mine something!
+                },
+                .{
+                    .offset = @splat(base_size / 3.5 - base_size / 3.2),
+                    .light = 5.0 / 9.0,
+                    .chroma = 1.0,
+                    .alpha = 0.8,
                 },
             );
         }
@@ -729,18 +716,7 @@ fn drawSelectedName(time_diff: f64) void {
     const light1 = @max(@min(prim_light, second_light), 0.4);
     const light2 = @max(@max(prim_light, second_light), 0.4);
 
-    dw.entity.drawStringWave(
-        name,
-        origin - Vec2f32{ 0.6, 0.6 },
-        .{
-            .starting_lcha = .{ light1 * 0.35, primary[1] * 1.2, hue1 - 0.2, 0.7 },
-            .ending_lcha = .{ light2 * 0.4, secondary[1] * 1.2, hue2, 0.7 },
-            .font_size = font_size,
-            .phase = name_phase,
-            .amplitude = amplitude,
-        },
-    );
-    dw.entity.drawStringWave(
+    dw.entity.drawStringWaveShadowed(
         name,
         origin,
         .{
@@ -750,6 +726,7 @@ fn drawSelectedName(time_diff: f64) void {
             .phase = name_phase,
             .amplitude = amplitude,
         },
+        .{ .offset = .{ -0.6, -0.6 }, .light = 1.0 / 3.0, .chroma = 1.1, .hue = -0.2, .alpha = 0.7 },
     );
 }
 

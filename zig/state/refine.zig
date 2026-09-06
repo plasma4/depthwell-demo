@@ -312,7 +312,7 @@ const rules = [_]struct { Sprite, Rule }{
 
     // Installations: one and only one, like a portal.
     .{ .chest, floor_single },
-    .{ .campfire, floor_single },
+    .{ .campfire_base, floor_single },
     .{ .forest_furnace, floor_single },
     .{ .lava_furnace, floor_single },
     .{ .lathe, floor_single },
@@ -1036,7 +1036,7 @@ test "only the flower's base rebuilds it, and it rebuilds the whole shaft" {
 test "an installation is never duplicated" {
     var neighbors: [8]Block = @splat(.empty);
     neighbors[6] = .makeBasicBlock(.stone, 1);
-    for ([_]Sprite{ .chest, .forest_furnace, .campfire, .lathe, .portal }) |sprite| {
+    for ([_]Sprite{ .chest, .forest_furnace, .campfire_base, .lathe, .portal }) |sprite| {
         for (0..64) |py| {
             const report = sweepRegion(sprite, .makeBasicBlock(sprite, 9), neighbors, 3, py);
             try testing.expectEqual(@as(usize, 1), report.filled);
