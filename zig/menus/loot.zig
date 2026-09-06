@@ -10,7 +10,6 @@ const dw = @import("../root.zig");
 const util = @import("util.zig");
 
 const Sprite = dw.Sprite;
-const Vec2f = dw.utils.Vec2f;
 const Vec2f32 = dw.utils.Vec2f32;
 const mouse = dw.mouse;
 const memory = dw.memory;
@@ -139,7 +138,8 @@ fn lootAll(ref: dw.indicators.BlockRef) void {
         if (stack.item != .none) inventory.addToInventory(stack.item, stack.count);
     }
 
-    dw.particles.spawnSpriteBurst(.chest, dw.indicators.blockScreenPx(ref.coord, ref.bx, ref.by), .{
+    const burst_px = dw.entity.blockScreenPx(dw.entity.worldView(), ref.coord, ref.bx, ref.by);
+    dw.particles.spawnSpriteBurst(.chest, burst_px, .{
         .count = @intCast(40 + dw.particles.seed.next() % 16),
         .speed_max = 2.2,
     });
@@ -165,32 +165,20 @@ pub fn draw() void {
     const mouse_px = util.mousePx();
 
     // Background panel (with a 2px border)
-    dw.entity.addEntitySized(.{
-        .sprite = .rectangle,
-        .position = MENU_POS - Vec2f32{ 2.0, 2.0 } / Vec2f32{ dw.SCREEN_WIDTH, dw.SCREEN_HEIGHT },
-        .size = MENU_SIZE + Vec2f32{ 4.0, 4.0 } / Vec2f32{ dw.SCREEN_WIDTH, dw.SCREEN_HEIGHT },
-        .lcha = .{ 0.25, 0.05, 1.2, 1.0 },
-    });
-    dw.entity.addEntitySized(.{
+    dw.entity.addEntitySizedOutlined(.{
         .sprite = .rectangle,
         .position = MENU_POS,
         .size = MENU_SIZE,
         .lcha = .{ 0.35, 0.14, 1.5, 1.0 },
-    });
+    }, 2.0, .{ 0.25, 0.05, 1.2, 1.0 });
 
     // Title icon: the chest itself.
     const title = grid.titleCenterPx(MENU_POS);
-    dw.entity.addEntity(.{
+    dw.entity.addEntityShadowed(.{
         .sprite = .chest,
-        .position = .{ @floatCast(title[0] - 1), @floatCast(title[1] - 1) },
+        .position = util.toPx32(title),
         .size = 12.0,
-        .lcha = .{ 0.25, 0.0, 0.0, 0.8 },
-    });
-    dw.entity.addEntity(.{
-        .sprite = .chest,
-        .position = .{ @floatCast(title[0]), @floatCast(title[1]) },
-        .size = 12.0,
-    });
+    }, .{ .offset = .{ -1.0, -1.0 }, .light = 0.25, .alpha = 0.8 });
 
     for (stacks, 0..) |stack, i| {
         const center = grid.slotCenterPx(MENU_POS, i);
@@ -198,7 +186,7 @@ pub fn draw() void {
         // Slot frame (also drawn under empty slots so the grid shape reads).
         dw.entity.addEntity(.{
             .sprite = .wood_frame,
-            .position = .{ @floatCast(center[0]), @floatCast(center[1]) },
+            .position = util.toPx32(center),
             .size = @as(f32, @floatCast(grid.SLOT)),
             .lcha = .{ 0.65, -0.08, 0.0, 1.0 },
         });
@@ -215,11 +203,11 @@ pub fn draw() void {
 
         dw.entity.addEntity(.{
             .sprite = stack.item,
-            .position = .{ @floatCast(center[0]), @floatCast(center[1]) },
+            .position = util.toPx32(center),
             .size = @as(f32, @floatCast(grid.SLOT - 4.0)),
         });
         if (stack.count > 1) {
-            util.drawCount(stack.count, .{ center[0] + 3.0, center[1] + 5.0 }, .{ 0.78, 0.19, 1.2, 1.0 }, 1.0);
+            util.drawCount(stack.count, center, .{ 0.78, 0.19, 1.2, 1.0 }, 1.0);
         }
     }
 }
