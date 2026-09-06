@@ -343,7 +343,7 @@ engine.renderLoop = function (_t: number) {
         debugElem.style.color = color;
     }
 
-    let timeInterpolated = Math.min(accumulator - 1, 0);
+    let timeInterpolated = accumulator - 1; // accumulator is always between [0, 1)
     engine.renderFrame(timeInterpolated, lastFrameTime);
 
     requestAnimationFrame(engine.renderLoop);
@@ -431,6 +431,8 @@ document.addEventListener("pointerdown", (e) => {
         return;
     }
 
+    engine.canvas.setPointerCapture(e.pointerId); // guarantees the matching up/cancel
+    if (e.button === 1) return; // no middle-scroll-wheel
     const action = e.button === 2 ? 3 : 1; // see zig/mouse.zig for what these actions mean
     dispatch(e, action);
 });
@@ -439,6 +441,8 @@ document.addEventListener("pointerup", (e) => {
     const action = e.button === 2 ? 4 : 2;
     dispatch(e, action);
 });
+
+document.addEventListener("pointercancel", () => dispatch(null, 5));
 
 engine.canvas.style.touchAction = "none"; // prevent touch gesture interception
 
