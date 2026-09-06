@@ -108,6 +108,7 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
     dw.particles.tick(iterations);
 
     // Iterations may be > 1 if FPS is low as a correction factor.
+    // Do note this is intentionally integeric to prevent logical misc imprecision issues.
     for (0..iterations) |_| {
         dw.player.tickSoftlockFade();
         const descending = dw.portal.isActive(); // portal animation override stuff
@@ -130,6 +131,10 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
 
             inventory.tickDroppedItems(); // process item animation ticks and inventory collection!
         }
+
+        // A press that lived through one iteration can now be released (see mouse.endTick()).
+        // Inside the loop, so a sub-frame tap gets exactly one tick even when `iterations` is 5.
+        dw.mouse.endTick();
 
         memory.game.frame +%= 1;
     }
