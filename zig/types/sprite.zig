@@ -17,7 +17,7 @@ const DropHandlers = dw.drops.DropHandlers;
 pub const UNMINEABLE_STRENGTH: u64 = std.math.maxInt(u64);
 
 /// ID for `Sprite.wood`, which is after edge stone.
-pub const WOOD_ID = 13;
+pub const WOOD_ID = 14;
 
 /// Index where stone-like sprites begin.
 pub const STONE_START = WOOD_ID + 19;
@@ -42,7 +42,7 @@ pub const GEM_COUNT = 7;
 /// Index where gem masks (not gem sprites) begin.
 pub const MASK_START = GEM_START + GEM_COUNT * 2;
 /// Index after the HP mask ends, and decorations begin.
-const DECOR_START = MASK_START + 24;
+const DECOR_START = MASK_START + 25;
 
 /// Number of fruit sprites.
 const FRUIT_COUNT = 10;
@@ -57,8 +57,8 @@ const CORE_ID = BUSH_ID + 14;
 pub const INVENTORY_START = CORE_ID + 22;
 /// Index where numbers (0-9) start.
 pub const NUMBER_START = INVENTORY_START + 4;
-/// ID for `Sprite.particle`, which is after a bunch of character glyphs.
-pub const PARTICLE_START = NUMBER_START + 10 + 94;
+/// ID for `Sprite.arrow`.
+pub const ARROW_ID = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
@@ -85,9 +85,10 @@ pub const Sprite = enum(u16) {
     player_walk2,
     player_walk3,
     player_walk4,
+    player_walk5,
 
     /// Edge stone (2 variations).
-    edge_stone = 11,
+    edge_stone = 12,
 
     wood = WOOD_ID,
     black_plate,
@@ -158,7 +159,12 @@ pub const Sprite = enum(u16) {
 
     // internal assets (not valid for placement or as a foundation)
     gem_mask = MASK_START, // 8 masks
-    hp_mask = MASK_START + 8, // 16 masks
+
+    /// Sprite for a particle; a full white rectangle but with corner pixels cut off.
+    particle = MASK_START + 8,
+    /// Full rectangle sprite; no corner pixels cut off.
+    /// Also functions as the mask at HP=0 for a sprite.
+    rectangle = MASK_START + 9, // 16 masks
 
     // decor (THIS IS COUPLED TO WGSL CODE)
     small_tree = DECOR_START,
@@ -229,31 +235,27 @@ pub const Sprite = enum(u16) {
 
     text_0 = NUMBER_START, // sprite with text 0
 
-    /// Sprite for a particle; a full white rectangle but with corner pixels cut off.
-    particle = PARTICLE_START,
-    /// Full rectangle sprite; no corner pixels cut off.
-    rectangle,
     /// Simple up-arrow icon.
-    arrow,
+    arrow = ARROW_ID,
 
     /// Quarter portion of a center part of the progress bar that is unfilled.
-    progress_small_unfilled = PARTICLE_START + 3,
+    progress_small_unfilled = ARROW_ID + 1,
     /// Quarter portion of a center part of the progress that is unfilled.
-    progress_small_filled,
+    progress_small_filled = ARROW_ID + 2,
     /// Leftmost part of the progress bar.
-    progress_left = PARTICLE_START + 5,
+    progress_left = ARROW_ID + 3,
     /// Center part of the progress bar.
-    progress_center = PARTICLE_START + 10,
+    progress_center = ARROW_ID + 8,
     /// Right part of the progress bar.
-    progress_right = PARTICLE_START + 15,
+    progress_right = ARROW_ID + 13,
 
     /// Crafting icon.
-    craft = PARTICLE_START + 20,
+    craft = ARROW_ID + 18,
 
     /// Pickaxe icon.
-    pickaxe = PARTICLE_START + 21,
+    pickaxe = ARROW_ID + 19,
     /// Generic water block (filled). Default internal water type; after all pickaxes.
-    water = PARTICLE_START + 21 + (@as(u16, @intCast(@intFromEnum(dw.mining.Tools.gold))) + 1),
+    water = ARROW_ID + 19 + (@as(u16, @intCast(@intFromEnum(dw.mining.Tools.gold))) + 1),
     water_icon,
 
     /// A special type for mining and inventory logic.

@@ -199,6 +199,7 @@ const clips: std.EnumArray(AnimState, Clip) = .init(.{
         .player_walk2,
         .player_walk3,
         .player_walk4,
+        .player_walk5,
     }, .frame_ticks = 6 },
     .jump = .{ .frames = &.{
         .player_jump1,
