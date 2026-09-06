@@ -14,6 +14,15 @@ const TICK_RATE: f64 = 60.0;
 
 /// The root of ALL actions that need to be handled every logical tick.
 /// `logic_speed` should be 1 at a 60FPS default and is unrelated to frame drop correction.
+///
+/// Two knobs, and mixing them up is the standing trap here.
+/// `iterations` is a catch-up count after a stall.
+/// `logic_speed` is how many 60 FPS frames ONE iteration stands for,
+/// and `logicLoop()` in `src/main.ts` raises it when the tick rate drops.
+/// So anything that advances a counter per tick must scale that step by `logic_speed`,
+/// or it runs slower in real seconds at a low tick rate.
+/// A visual then interpolates its own last-to-current values with `chunks.current_dt`,
+/// which is what makes a long tick read as smooth motion instead of a jump.
 pub fn handleTick(logic_speed: f64, iterations: u32) void {
     var buffer: inventory.SlotBuffer = undefined;
     const active_slots = inventory.getSpritesInInventory(&buffer);
@@ -105,11 +114,12 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
     const changed_depth = just_increased_depth or just_decreased_depth;
 
     // update particles
-    dw.particles.tick(iterations);
+    dw.particles.tick(logic_speed * @as(f64, @floatFromInt(iterations)));
 
     // Iterations may be > 1 if FPS is low as a correction factor.
+    // Do note this is intentionally integeric to prevent logical misc imprecision issues.
     for (0..iterations) |_| {
-        dw.player.tickSoftlockFade();
+        dw.player.tickSoftlockFade(logic_speed);
         const descending = dw.portal.isActive(); // portal animation override stuff
         memory.game.bg_time += (logic_speed / TICK_RATE) * dw.portal.backgroundRate();
 
@@ -125,11 +135,15 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
             if (!changed_depth) dw.mining.handleMiningAndPlacing(logic_speed);
 
             dw.player.move(logic_speed); // logic that moves the player/camera based on keys
-            dw.player.tickAnimation(); // advance player sprite animation + facing on the logic tick
+            dw.player.tickAnimation(logic_speed); // advance player sprite animation + facing on the logic tick
             dw.water.tickWater(); // fluid sim
 
-            inventory.tickDroppedItems(); // process item animation ticks and inventory collection!
+            inventory.tickDroppedItems(logic_speed); // process item animation ticks and inventory collection!
         }
+
+        // A press that lived through one iteration can now be released (see mouse.endTick()).
+        // Inside the loop so a sub-frame tap gets exactly one tick regardless of iteration count.
+        dw.mouse.endTick();
 
         memory.game.frame +%= 1;
     }

@@ -10,11 +10,9 @@ const dw = @import("../root.zig");
 const util = @import("util.zig");
 
 const Sprite = dw.Sprite;
-const Vec2f = dw.utils.Vec2f;
 const Vec2f32 = dw.utils.Vec2f32;
 const addEntity = dw.entity.addEntity;
 const addEntitySized = dw.entity.addEntitySized;
-const drawNumber = dw.entity.drawNumber;
 const mouse = dw.mouse;
 const inventory = dw.inventory;
 
@@ -33,7 +31,7 @@ const recipes = [_]Recipe{
             .{ .item = .wood, .count = 3 },
             .{ .item = .leaves, .count = 2 },
         },
-        .output = .{ .item = .campfire },
+        .output = .{ .item = .campfire_base },
     },
     // placeholder slot for the dynamic pickaxe upgrades
     .{
@@ -48,7 +46,7 @@ const grid = util.Grid(.{ .len = recipes.len, .cols = 5 });
 /// Menu panel size/placement in UV space (top-left aligned),
 /// anchored to the bottom-right so it never overlaps the bottom-left furnace panel.
 const MENU_SIZE: Vec2f32 = grid.SIZE_UV;
-const MENU_POS: Vec2f32 = .{ 0.98 - MENU_SIZE[0], 0.96 - MENU_SIZE[1] };
+const MENU_POS: Vec2f32 = .{ 0.98 - MENU_SIZE[0], util.MENU_BOTTOM_UV - MENU_SIZE[1] };
 
 /// Number color for a satisfied requirement / the output count.
 const NUM_OK: dw.utils.Vec4f32 = .{ 0.78, 0.19, 1.2, 1.0 };
@@ -155,20 +153,21 @@ fn drawRequirements(recipe: Recipe) void {
         const cx = start_x + @as(f64, @floatFromInt(idx)) * CELL;
 
         // Low-opacity selected-inventory frame centered below the inputs (not the wood variant).
+        const cell_px = util.toPx32(.{ cx, row_y });
         addEntity(.{
             .sprite = .inventory_selected,
-            .position = .{ @floatCast(cx), @floatCast(row_y) },
+            .position = cell_px,
             .size = 22.0,
             .lcha = .{ 1.0, 0.0, 0.0, 0.7 },
         });
         addEntity(.{
             .sprite = in.item,
-            .position = .{ @floatCast(cx), @floatCast(row_y) },
+            .position = cell_px,
             .size = 14.0,
         });
         const have = availableCount(in.item);
         const color = if (have < in.count) NUM_RED else NUM_OK;
-        util.drawCount(in.count, .{ cx + 3.0, row_y + 4.5 }, color, 1.0);
+        util.drawCount(in.count, .{ cx, row_y }, color, 1.0);
     }
 }
 
@@ -180,19 +179,19 @@ pub fn draw() void {
     const mouse_px = util.mousePx();
 
     // Background panel.
-    addEntitySized(.{
+    const panel_lcha: dw.utils.Vec4f32 = .{ 0.52, 0.22, 3.8, 1.0 }; // blue!
+    dw.entity.addEntitySizedOutlined(.{
         .sprite = .rectangle,
         .position = MENU_POS,
         .size = MENU_SIZE,
-        // blue!
-        .lcha = .{ 0.52, 0.22, 3.8, 1.0 },
-    });
+        .lcha = panel_lcha,
+    }, util.PANEL_BORDER_PX, util.panelOutline(panel_lcha));
 
     // Draw a little craft/hammer icon.
     const title_px = grid.titleCenterPx(MENU_POS);
     addEntity(.{
         .sprite = .craft,
-        .position = .{ @floatCast(title_px[0]), @floatCast(title_px[1]) },
+        .position = util.toPx32(title_px),
         .size = 12.0,
     });
 
@@ -213,20 +212,13 @@ pub fn draw() void {
         }
 
         // Draw the background where the item rests in.
-        addEntity(.{
+        dw.entity.addEntityShadowed(.{
             .sprite = .wood_frame,
-            .position = .{ @floatCast(center[0] - 1.6), @floatCast(center[1] - 1.6) },
-            .size = @as(f32, @floatCast(grid.SLOT)),
-            // Looks blue
-            .lcha = .{ 0.3, 0.06, 3.0, 1.0 },
-        });
-        addEntity(.{
-            .sprite = .wood_frame,
-            .position = .{ @floatCast(center[0]), @floatCast(center[1]) },
+            .position = util.toPx32(center),
             .size = @as(f32, @floatCast(grid.SLOT)),
             // Looks blue
             .lcha = .{ 0.9, 0.15, 3.0, 1.0 },
-        });
+        }, .{ .offset = .{ -1.6, -1.6 }, .light = 1.0 / 3.0, .chroma = 0.4 });
 
         // Draw the actual item now...
 
@@ -238,13 +230,13 @@ pub fn draw() void {
 
         addEntity(.{
             .sprite = item,
-            .position = .{ @floatCast(center[0]), @floatCast(center[1]) },
+            .position = util.toPx32(center),
             .size = @as(f32, @floatCast(grid.SLOT - 4.0)),
             .lcha = .{ 1.0, if (craftable) 0.0 else -1.0, 0.0, 1.0 },
         });
         // Draw quantity (only shown when craft produces more than one).
         if (recipe.output.count > 1) {
-            util.drawCount(recipe.output.count, .{ center[0] + 3.0, center[1] + 5.0 }, NUM_OK, if (craftable) 1.0 else 0.75);
+            util.drawCount(recipe.output.count, center, NUM_OK, if (craftable) 1.0 else 0.75);
         }
     }
 
