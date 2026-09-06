@@ -12,9 +12,11 @@
 /zig-pkg
 
 /.claude
+/.codex
 /.scratch
 /docs
 /skills
 /AGENTS.md
 /CLAUDE.md
+/NEXT.md
 /DESIGN.md
