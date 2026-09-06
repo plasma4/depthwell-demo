@@ -134,6 +134,9 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
         memory.game.frame +%= 1;
     }
 
+    // A press held over one tick can now be released (see mouse.endTick()).
+    dw.mouse.endTick();
+
     // Generate chunks around the SimBuffer in the background.
     // See the function doc comment for amount justification and context.
     dw.world.SimBuffer.precacheChunks(
