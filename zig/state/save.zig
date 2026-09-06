@@ -386,7 +386,7 @@ fn readQuadCache(r: *Reader) !void {
 }
 
 /// Writes the ascent stack (the blocks the player has ascended past, deepest last).
-/// Present but empty when the player is at their deepest depth.
+/// Present but empty when the player is at their deepest depth visited (frontier).
 /// Its length is the route back down, and it recovers `max_depth_reached` for a save that predates it.
 fn writeAscentStack(w: *Writer) !void {
     const at = try w.beginSection(.ascent_stack, 1);
@@ -1191,7 +1191,7 @@ test "mod_store: encoding/decoding is correct" {
     // The precomputed size the snapshot plan budgets must match what the writer actually emits.
     try testing.expectEqual(entryPayloadBytes(entry), buf.items.len);
 
-    // Re-read into a fresh store, exactly as readModStore() does!
+    // Re-read into a fresh store!
     for ([_]Sprite{ .stone, .water, .none }) |s| {
         try id_remap.put(save_alloc, @intFromEnum(s), s);
     }
