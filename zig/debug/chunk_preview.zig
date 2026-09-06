@@ -232,7 +232,7 @@ pub fn drawChunkPreview() void {
         // Render approximate player indicator in D-1
         const p_sub_x = @as(f32, @floatFromInt(bx_idx % 4)) / 4.0;
         const p_sub_y = @as(f32, @floatFromInt(by_idx % 4)) / 4.0;
-        const player_entity: Entity = .{
+        dw.entity.addEntityShadowed(.{
             .sprite = .player,
             .position = .{
                 deeper_preview_x + (1.0 + @as(f32, @floatFromInt(bx_idx / 4)) + p_sub_x - 0.5) * tile_size,
@@ -240,14 +240,8 @@ pub fn drawChunkPreview() void {
             },
             .size = tile_size * 0.8,
             .lcha = .{ 1.0, 0.1, -0.2, 1.0 },
-        };
-        var player_entity_bg = player_entity;
-
-        // make a sort of larger border/shadow
-        player_entity_bg.lcha[0] *= 0.6;
-        player_entity_bg.position -= .{ tile_size / 8.0, tile_size / 8.0 };
-        addEntity(player_entity_bg);
-        addEntity(player_entity);
+            // make a sort of larger border/shadow
+        }, .{ .offset = @splat(-tile_size / 8.0), .light = 0.6, .chroma = 1.0 });
 
         if (depth > start_zoom + 1) {
             const p_info = dw.ancestor.getParentInfo(
@@ -360,17 +354,11 @@ pub fn drawChunkPreview() void {
     const scale = tile_size / dw.CHUNK_SIZE_SQ;
     const origin: Vec2f32 = .{ preview_x_origin, preview_y_origin };
 
-    const player_entity: Entity = .{
+    dw.entity.addEntityShadowed(.{
         .sprite = .player,
         .position = origin + @as(Vec2f32, @floatFromInt(relative_pos)) * @as(Vec2f32, @splat(scale)),
         .size = tile_size,
-    };
-    var player_entity_bg = player_entity;
-
-    player_entity_bg.position -= .{ tile_size / 8.0, tile_size / 8.0 };
-    player_entity_bg.lcha = .{ 0.5, 0.0, 0.0, 0.8 };
-    addEntity(player_entity_bg);
-    addEntity(player_entity);
+    }, .{ .offset = @splat(-tile_size / 8.0), .light = 0.5, .alpha = 0.8 });
 }
 
 /// Draws a line.
