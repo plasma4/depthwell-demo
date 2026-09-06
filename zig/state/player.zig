@@ -461,32 +461,62 @@ pub fn move(logic_speed: f64) void {
 
     game.last_player_pos = game.player_pos;
 
-    // Vertical first, then horizontal, with the ground test between them.
-    // So a player who walks off a ledge is still grounded for the tick that leaves it,
-    // and coyote time starts on the tick after.
-    moveAxis(1, total_move[1]);
+    // The move is walked in sub-steps of at most one block on each axis; see sweep().
+    // Vertical runs first within a sub-step, then horizontal, with the ground test between
+    // them on the FIRST sub-step. So a player who walks off a ledge is still grounded for the
+    // tick that leaves it, and coyote time starts on the tick after.
+    const steps = subStepCount(total_move);
+    var walked: Vec2i = .{ 0, 0 };
+    for (1..steps + 1) |i| {
+        const n: i64 = @intCast(i);
+        const target: Vec2i = .{
+            @divTrunc(total_move[0] * n, @as(i64, @intCast(steps))),
+            @divTrunc(total_move[1] * n, @as(i64, @intCast(steps))),
+        };
 
-    is_grounded = isColliding(game.player_pos[0], game.player_pos[1] + 1);
+        moveAxis(1, target[1] - walked[1]);
 
-    if (is_grounded) {
-        coyote_frames = COYOTE_FRAMES;
-        jumps_left = MAX_JUMPS;
-    } else if (coyote_frames > 0) {
-        coyote_frames -= logic_speed; // this CAN be negative!
+        if (i == 1) {
+            is_grounded = isColliding(game.player_pos[0], game.player_pos[1] + 1);
+
+            if (is_grounded) {
+                coyote_frames = COYOTE_FRAMES;
+                jumps_left = MAX_JUMPS;
+            } else if (coyote_frames > 0) {
+                coyote_frames -= logic_speed; // this CAN be negative!
+            }
+
+            std.debug.assert(jumps_left >= 0); // sanity check
+            if (up_key_pressed and !jumped_this_frame) {
+                jump_leniency_frames = JUMP_LENIENCY_FRAMES;
+            } else if (jump_leniency_frames > 0) {
+                jump_leniency_frames -= logic_speed; // this CAN be negative!
+            }
+        }
+
+        moveAxis(0, target[0] - walked[0]);
+        walked = target;
     }
-
-    std.debug.assert(jumps_left >= 0); // sanity check
-    if (up_key_pressed and !jumped_this_frame) {
-        jump_leniency_frames = JUMP_LENIENCY_FRAMES;
-    } else if (jump_leniency_frames > 0) {
-        jump_leniency_frames -= logic_speed; // this CAN be negative!
-    }
-
-    moveAxis(0, total_move[0]);
 
     // Finally, tell SimBuffer and the camera to update.
     world.SimBuffer.sync(game.getPlayerCoord());
     updateCamera(logic_speed);
+}
+
+/// How many sub-moves one tick's displacement is split into, so that neither axis
+/// advances more than `CCD_STEP_SIZE` (one block) in a single sub-move.
+///
+/// One Y sweep followed by one X sweep walks an L, not the line the player really travelled.
+/// At 60 FPS that L is under half a block on each axis, so nothing shows.
+/// When the tick rate drops, `logic_speed` makes one tick worth many frames of motion,
+/// and the L cuts corners: the player rounds a solid block diagonally and appears to pass through it.
+/// Sub-stepping keeps the walked path within one block of the true line at any tick rate.
+///
+/// Returns 1 at the 60 FPS default, where a tick moves at most 0.47 blocks, so the split costs nothing.
+fn subStepCount(total: Vec2i) usize {
+    const longest = @max(@abs(total[0]), @abs(total[1]));
+    if (longest <= CCD_STEP_SIZE) return 1;
+    return @intCast(@divTrunc(longest + CCD_STEP_SIZE - 1, CCD_STEP_SIZE));
 }
 
 /// Returns whether the player hitbox collides after one axis moves by `delta` subpixels.

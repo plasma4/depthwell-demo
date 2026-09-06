@@ -124,7 +124,7 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
         memory.game.bg_time += (logic_speed / TICK_RATE) * dw.portal.backgroundRate();
 
         if (descending) {
-            dw.portal.tick();
+            dw.portal.tick(logic_speed);
         } else {
             // Smelting only advances while the furnace menu is open (paused otherwise).
             if (dw.indicators.menus.furnace) @import("../menus/furnace.zig").updateSmelting();
