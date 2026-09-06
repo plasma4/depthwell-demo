@@ -61,7 +61,7 @@ pub var nearby_cores: NearbyCores = .{};
 /// The slot sprite is white, so hue is ADDED onto it and replaces nothing.
 /// See `DEFAULT_ENTITY_LCHA`.
 /// These are tuning knobs.
-const PORTAL_SLOT_HUE: f32 = -1.9;
+const PORTAL_SLOT_HUE: f32 = -1.5;
 const INVPORTAL_SLOT_HUE: f32 = 1.1;
 
 /// Which menu an in-world block's indicator opens, if any.
@@ -162,11 +162,9 @@ pub fn closeAllMenus() void {
 /// Handed to indicator visitors (and menus like loot) so a menu can act on the exact block that opened it.
 pub const BlockRef = struct { coord: dw.world.Coordinate, bx: u4, by: u4 };
 
-/// Per-frame camera interpolation shared by every indicator, matching the world's position/zoom curves.
+/// The shared world camera for this frame, plus the mouse position every indicator hit-tests against.
 const CameraView = struct {
-    zoom: f64,
-    cam_x: f64,
-    cam_y: f64,
+    world: dw.entity.WorldView,
     mouse_px: Vec2f,
 };
 
@@ -175,6 +173,10 @@ const IndicatorGeom = struct {
     screen_x: f32,
     screen_y: f32,
     slot_size: f32,
+    /// `slot_size` before the world zoom multiply, which is what the chroma tints read.
+    /// Kept here rather than divided back out, so the tint cannot be scaled by one clock
+    /// and un-scaled by another.
+    rel_size: f32,
     opacity: f32,
     dx_mouse: f32,
     dy_mouse: f32,
@@ -183,21 +185,8 @@ const IndicatorGeom = struct {
 
 /// Computes the shared camera interpolation for this frame.
 fn cameraView() CameraView {
-    const game = &memory.game;
-
-    // Zoom uses the raw fraction; position uses the +1.0-shifted fraction. See dw.chunks.current_dt.
-    const interpolated_zoom = game.camera_scale *
-        std.math.pow(f64, game.camera_scale_change, dw.chunks.current_dt);
-    const cam_dt = dw.chunks.current_dt + 1.0;
-
-    // Interpolate last_camera_pos toward camera_pos, matching the world's position curve
-    const cam_vel_x = game.camera_pos[0] - game.last_camera_pos[0];
-    const cam_vel_y = game.camera_pos[1] - game.last_camera_pos[1];
-
     return .{
-        .zoom = interpolated_zoom,
-        .cam_x = @as(f64, @floatFromInt(game.last_camera_pos[0])) + (@as(f64, @floatFromInt(cam_vel_x)) * cam_dt),
-        .cam_y = @as(f64, @floatFromInt(game.last_camera_pos[1])) + (@as(f64, @floatFromInt(cam_vel_y)) * cam_dt),
+        .world = dw.entity.worldView(),
         .mouse_px = mouse.uv_position * Vec2f{ dw.SCREEN_WIDTH, dw.SCREEN_HEIGHT },
     };
 }
@@ -213,34 +202,36 @@ fn indicatorGeom(
     local_bx: u4,
     local_by: u4,
 ) ?IndicatorGeom {
-    const game = &memory.game;
-
     // Center subpixels relative to player coordinates
     const block_sub_x = chunk_dx * 4096 + @as(i64, local_bx) * 256 + 128;
     const block_sub_y = chunk_dy * 4096 + @as(i64, local_by) * 256 + 128;
 
-    const dx_sub = block_sub_x - game.player_pos[0];
-    const dy_sub = block_sub_y - game.player_pos[1];
-    const dist_sq = dx_sub * dx_sub + dy_sub * dy_sub;
-    const distance = @sqrt(@as(f64, @floatFromInt(dist_sq)));
+    // Distance, scale and fade all read the SAME interpolated frame the screen position does.
+    // Reading the raw player position and camera scale here instead made an indicator pop once
+    // per tick while it glided, which only shows once a tick is worth many frames.
+    const dx_sub = @as(f64, @floatFromInt(block_sub_x)) - view.world.player[0];
+    const dy_sub = @as(f64, @floatFromInt(block_sub_y)) - view.world.player[1];
+    const distance = @sqrt(dx_sub * dx_sub + dy_sub * dy_sub);
 
     const max_dist = kind.maxBlockDistance() * 256.0; // start showing this many blocks away
     const min_dist = @min(1.5 * 256.0, max_dist * 0.5); // fully scaled close up, never past the cutoff
     if (distance >= max_dist) return null;
 
     const t: f32 = @floatCast(if (distance <= min_dist) 1.0 else (max_dist - distance) / (max_dist - min_dist));
-    const slot_size: f32 = @floatCast((10.0 + 5.0 * t) * game.camera_scale);
+    const rel_size: f32 = 10.0 + 5.0 * t;
+    const slot_size: f32 = @floatCast(@as(f64, rel_size) * view.world.zoom);
 
     // Position slightly above the physical block (-200 subpixels)
-    const delta_x_sp = @as(f64, @floatFromInt(block_sub_x)) - view.cam_x;
-    const delta_y_sp = @as(f64, @floatFromInt(block_sub_y - 200)) - view.cam_y;
-    const screen_x: f32 = @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + delta_x_sp * (view.zoom / 16.0));
-    const screen_y: f32 = @floatCast(@as(f64, dw.SCREEN_HEIGHT_HALF) + delta_y_sp * (view.zoom / 16.0));
+    const delta_x_sp = @as(f64, @floatFromInt(block_sub_x)) - view.world.cam[0];
+    const delta_y_sp = @as(f64, @floatFromInt(block_sub_y - 200)) - view.world.cam[1];
+    const screen_x: f32 = @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + delta_x_sp * (view.world.zoom / 16.0));
+    const screen_y: f32 = @floatCast(@as(f64, dw.SCREEN_HEIGHT_HALF) + delta_y_sp * (view.world.zoom / 16.0));
 
     return .{
         .screen_x = screen_x,
         .screen_y = screen_y,
         .slot_size = slot_size,
+        .rel_size = rel_size,
         .opacity = t * 0.9 + 0.1,
         .dx_mouse = @as(f32, @floatCast(view.mouse_px[0])) - screen_x,
         .dy_mouse = @as(f32, @floatCast(view.mouse_px[1])) - screen_y,
@@ -316,67 +307,69 @@ const DrawVisitor = struct {
 
         const flag = kind.menuFlag();
         const is_open = if (flag) |f| f.* else false;
-        // Undo the camera scale multiply, because slot_size is scale-relative
-        const rel_size: f32 = @floatCast(geom.slot_size / @as(f32, @floatCast(memory.game.camera_scale)));
-
-        // Only clickable indicators react; a display-only one, such as a tree, just draws
-        if (kind.clickableAt(ref) and geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
-            // Down-capture for .indicator is claimed centrally in mouse.processDownCaptures(),
-            // through isHoveringIndicator, so this frame's click_focus is already settled
-
-            // Only change mouse appearance if current focus permits UI actions
-            if (mouse.click_focus.permits(.indicator)) mouse.requestCursorType(.pointer);
-
-            // Toggle safely when a click both starts and ends on this indicator
-            if (!self.click_used and mouse.isClicked(.indicator, true)) {
-                self.click_used = true;
-                if (flag) |f| {
-                    f.* = !f.*;
-                    // The loot menu is per-chest, so tell it which block backs it, or that it lost one
-                    if (kind == .loot) {
-                        const loot = @import("../menus/loot.zig");
-                        if (f.*) loot.open(ref) else loot.close();
-                    }
-                } else kind.activate(ref);
-            }
-        }
+        const rel_size = geom.rel_size;
 
         // Background inventory slot (color shifts while its menu is open)
-        dw.entity.addEntity(.{
-            // This creates an interesting style, just go with it
-            .sprite = if (kind == .furnace or kind == .portal or kind == .invportal) .wood_frame else .wood,
-            .position = .{ geom.screen_x, geom.screen_y },
-            .size = geom.slot_size,
-            .lcha = if (kind == .portal or kind == .invportal)
-                // Brightens as the player closes in, to read as "this takes you somewhere".
-                // The hue is what separates going down from going up
-                .{
-                    0.85 + 0.15 * geom.opacity,
-                    0.06 + rel_size * 0.006,
-                    if (kind == .portal) PORTAL_SLOT_HUE else INVPORTAL_SLOT_HUE,
-                    geom.opacity,
-                }
-            else if (kind == .furnace)
-                // Wood style if furnace
-                if (is_open)
-                    .{ 1.0, rel_size * 0.007, 0.3, geom.opacity }
-                else
-                    .{ 0.8, -0.1 + rel_size * 0.005, 0.0, geom.opacity }
-            else
-            // red/pink-ish vibe color instead
-            if (is_open)
-                .{ 1.0, 0.03 + rel_size * 0.01, -0.9, geom.opacity }
-            else
-                .{ 0.7, -0.014 + rel_size * 0.005, -0.78, geom.opacity },
-        });
+        if (kind != .loot or !is_open) {
 
-        // Mini preview centered inside the container slot
-        dw.entity.addEntity(.{
-            .sprite = kind.previewSprite(),
-            .position = .{ geom.screen_x, geom.screen_y },
-            .size = geom.slot_size * 0.8,
-            .lcha = .{ if (is_open) 1.0 else 0.8, 0.0, 0.0, geom.opacity },
-        });
+            // Only clickable indicators react; a display-only one, such as a tree, just draws
+            if (kind.clickableAt(ref) and geom.hitbox.contains(.{ geom.dx_mouse, geom.dy_mouse })) {
+                // Down-capture for .indicator is claimed centrally in mouse.processDownCaptures(),
+                // through isHoveringIndicator, so this frame's click_focus is already settled
+
+                // Only change mouse appearance if current focus permits UI actions
+                if (mouse.click_focus.permits(.indicator)) mouse.requestCursorType(.pointer);
+
+                // Toggle safely when a click both starts and ends on this indicator
+                if (!self.click_used and mouse.isClicked(.indicator, true)) {
+                    self.click_used = true;
+                    if (flag) |f| {
+                        f.* = !f.*;
+                        // The loot menu is per-chest, so tell it which block backs it, or that it lost one
+                        if (kind == .loot) {
+                            const loot = @import("../menus/loot.zig");
+                            if (f.*) loot.open(ref) else loot.close();
+                        }
+                    } else kind.activate(ref);
+                }
+            }
+
+            dw.entity.addEntity(.{
+                // This creates an interesting textured style given the right filters
+                .sprite = if (kind == .furnace or kind == .portal or kind == .invportal) .wood_frame else .wood,
+                .position = .{ geom.screen_x, geom.screen_y },
+                .size = geom.slot_size,
+                .lcha = if (kind == .portal or kind == .invportal)
+                    // Brightens as the player closes in, to read as "this takes you somewhere".
+                    // The hue is what separates going down from going up
+                    .{
+                        0.85 + 0.15 * geom.opacity,
+                        0.06 + rel_size * 0.006,
+                        (if (kind == .portal) PORTAL_SLOT_HUE else INVPORTAL_SLOT_HUE) + 0.3 * geom.opacity,
+                        geom.opacity,
+                    }
+                else if (kind == .furnace)
+                    // Wood style if furnace
+                    if (is_open)
+                        .{ 1.0, rel_size * 0.007, 0.3, geom.opacity }
+                    else
+                        .{ 0.8, -0.1 + rel_size * 0.005, 0.0, geom.opacity }
+                else
+                // red/pink-ish vibe color instead
+                if (is_open)
+                    .{ 1.0, 0.03 + rel_size * 0.01, -0.9, geom.opacity }
+                else
+                    .{ 0.7, -0.014 + rel_size * 0.005, -0.78, geom.opacity },
+            });
+
+            // Mini preview centered inside the container slot
+            dw.entity.addEntity(.{
+                .sprite = kind.previewSprite(),
+                .position = .{ geom.screen_x, geom.screen_y },
+                .size = geom.slot_size * 0.8,
+                .lcha = .{ if (is_open) 1.0 else 0.8, 0.0, 0.0, geom.opacity },
+            });
+        }
 
         return false; // keep scanning; multiple indicators can be on screen
     }
@@ -404,22 +397,6 @@ pub fn drawIndicators() void {
             if (flag.* and !drawer.seen.contains(kind)) closeMenu(kind);
         }
     }
-}
-
-/// Screen-space center of a block, in viewport pixels, using this frame's interpolated camera
-/// (same position math as `indicatorGeom()`, without the icon's upward offset).
-pub fn blockScreenPx(coord: dw.world.Coordinate, bx: u4, by: u4) dw.utils.Vec2f32 {
-    const view = cameraView();
-    const player_coord = memory.game.getPlayerCoord();
-    const chunk_dx: i64 = @bitCast(coord.suffix[0] -% player_coord.suffix[0]);
-    const chunk_dy: i64 = @bitCast(coord.suffix[1] -% player_coord.suffix[1]);
-    const block_sub_x = chunk_dx * dw.SUBPIXELS_IN_CHUNK + @as(i64, bx) * 256 + 128;
-    const block_sub_y = chunk_dy * dw.SUBPIXELS_IN_CHUNK + @as(i64, by) * 256 + 128;
-    const zoom_px = view.zoom / 16.0;
-    return .{
-        @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + (@as(f64, @floatFromInt(block_sub_x)) - view.cam_x) * zoom_px),
-        @floatCast(@as(f64, dw.SCREEN_HEIGHT_HALF) + (@as(f64, @floatFromInt(block_sub_y)) - view.cam_y) * zoom_px),
-    };
 }
 
 /// Accumulates whether the cursor is over any active indicator icon.

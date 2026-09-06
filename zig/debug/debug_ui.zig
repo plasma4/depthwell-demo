@@ -112,6 +112,18 @@ const player_sliders = [_]SliderDef{
         .max = 50.0,
         .val = &player.JUMP_FORCE,
     },
+    .{
+        .name = "Wall slide decay",
+        .min = 0.03,
+        .max = 0.60,
+        .val = &player.DECAY_RATE_Y_SLIDE,
+    },
+    .{
+        .name = "Dust tint from block",
+        .min = 0.0,
+        .max = 1.0,
+        .val = &player.DUST_TINT,
+    },
     // .{
     //     .name = "Ghost speed mult",
     //     .min = 1.0,
@@ -189,7 +201,8 @@ fn clearCaches() void {
 /// Internal random number for teleport PRNG.
 /// This is for debugging only and should NOT be used for gameplay.
 var teleport_rand: u64 = std.math.maxInt(u64);
-/// Teleports to a random valid chunk coordinate in the same quadrant, then searches for valid spawn.
+/// Teleports to a random valid chunk coordinate in quadrant 0, then searches for a valid spawn.
+/// Past the horizon that is the NW quadrant, and not the one the player is standing in.
 /// For debugging only and should NOT be used for gameplay!
 fn teleportRandomly() void {
     const game = &memory.game;
