@@ -10,7 +10,12 @@ const inventory = dw.inventory;
 const CHUNK_SIZE = dw.CHUNK_SIZE;
 const Entity = memory.Entity;
 const WGSLEntity = memory.WGSLEntity;
+const Vec2f = dw.utils.Vec2f;
 const Vec2f32 = dw.utils.Vec2f32;
+const Vec2i = dw.utils.Vec2i;
+const Vec2u = dw.utils.Vec2u;
+const Vec4f32 = dw.utils.Vec4f32;
+const Sprite = dw.Sprite;
 
 const NUMBER_START = sprite.NUMBER_START;
 const CHARACTER_START = NUMBER_START + 10;
@@ -50,6 +55,9 @@ pub fn updateEntities(time_diff: f64) void {
     memory.scratchReset();
     // we're doing a new pass of drawing entities, clear anything before
     entity_count = 0;
+
+    // first, so a campfire flame lands over both tile layers and under every other entity
+    drawBlockEntities();
 
     inventory.addDroppedItemsAsEntities(time_diff); // pass in delta time in ms
 
@@ -122,14 +130,10 @@ pub fn updateEntities(time_diff: f64) void {
             .{ blocks_mined, if (blocks_mined == 1) "" else "s" },
         ) catch unreachable;
 
-    dw.entity.drawString(msg, .{ 19.5, 8.5 }, .{
-        .font_size = 3.5,
-        .lcha = .{ 0.45, 0.04, 1.8, 1.0 },
-    });
-    dw.entity.drawString(msg, .{ 20.0, 9.0 }, .{
+    drawStringShadowed(msg, .{ 20.0, 9.0 }, .{
         .font_size = 3.5,
         .lcha = .{ 0.85, 0.08, 1.8, 1.0 },
-    });
+    }, .{ .light = 0.53, .chroma = 0.5 });
 
     memory.setScratchProp(0, entity_count);
     // entity rendering is dispatched to JS right after this function completes
@@ -533,6 +537,83 @@ pub fn drawMultiline(
     }
 }
 
+/// A drop shadow: one offset, darkened copy drawn under a sprite or a string.
+///
+/// The tint is RELATIVE to the main color, never absolute.
+/// L, C and alpha are multiplied, hue is added.
+/// So one `Shadow` reads the same under any color.
+/// A call site that retints its sprite does not retint the shadow too.
+pub const Shadow = struct {
+    /// Where the shadow copy sits, in the same units as the thing it shadows.
+    offset: Vec2f32 = .{ -0.5, -0.5 },
+    /// Lightness multiplier.
+    light: f32 = 0.5,
+    /// Chroma multiplier.
+    chroma: f32 = 0.8,
+    /// Hue shift, in radians.
+    hue: f32 = 0.0,
+    /// Opacity multiplier.
+    alpha: f32 = 1.0,
+
+    /// The shadow's color for a given main color.
+    pub inline fn tint(self: Shadow, lcha: Vec4f32) Vec4f32 {
+        return lcha * Vec4f32{ self.light, self.chroma, 1.0, self.alpha } +
+            Vec4f32{ 0.0, 0.0, self.hue, 0.0 };
+    }
+};
+
+/// Draws `entity` over its own drop shadow. Two entities, shadow first.
+pub fn addEntityShadowed(entity: Entity, shadow: Shadow) void {
+    var back = entity;
+    back.position += shadow.offset;
+    back.lcha = shadow.tint(entity.lcha);
+    addEntity(back);
+    addEntity(entity);
+}
+
+/// Draws a string over its own drop shadow.
+/// `shadow.offset` is in viewport pixels, like `position`.
+pub fn drawStringShadowed(
+    string: []const u8,
+    position: Vec2f32,
+    options: TextConfig,
+    shadow: Shadow,
+) void {
+    var back = options;
+    back.lcha = shadow.tint(options.lcha);
+    drawString(string, position + shadow.offset, back);
+    drawString(string, position, options);
+}
+
+/// Draws an unsigned integer over its own drop shadow.
+/// `shadow.offset` is in viewport pixels, like `position`.
+pub fn drawNumberShadowed(
+    number: u64,
+    position: Vec2f32,
+    options: TextConfig,
+    shadow: Shadow,
+) void {
+    var back = options;
+    back.lcha = shadow.tint(options.lcha);
+    drawNumber(number, position + shadow.offset, back);
+    drawNumber(number, position, options);
+}
+
+/// Draws a rippling string over its own drop shadow.
+/// Both ends of the gradient take the same tint, so the shadow keeps the gradient's shape.
+pub fn drawStringWaveShadowed(
+    string: []const u8,
+    position: Vec2f32,
+    config: WaveConfig,
+    shadow: Shadow,
+) void {
+    var back = config;
+    back.starting_lcha = shadow.tint(config.starting_lcha);
+    back.ending_lcha = shadow.tint(config.ending_lcha);
+    drawStringWave(string, position + shadow.offset, back);
+    drawStringWave(string, position, config);
+}
+
 /// Adds a single entity to the `entities` array by adding a UV-based `WGSLEntity` to the scratch buffer.
 pub fn addRawEntity(entity: WGSLEntity) void {
     @setFloatMode(.optimized);
@@ -609,6 +690,170 @@ pub fn addEntitySized(entity: memory.SizedEntity) void {
         .rotation = entity.rotation,
         .id = sprite.Sprite.asEntity(entity.sprite),
     }});
+}
+
+/// Draws `entity` over a larger copy of itself, which shows as an outline of `width_px` viewport
+/// pixels on every side.
+///
+/// The width is in viewport pixels whatever `entity.system` is.
+/// So a panel sized in UV keeps the same border thickness on screen.
+pub fn addEntitySizedOutlined(entity: memory.SizedEntity, width_px: f32, outline_lcha: Vec4f32) void {
+    const grow: Vec2f32 = switch (entity.system) {
+        // A UV-space entity needs the border converted; a viewport-space one is already in pixels.
+        .top_left_uv, .center_uv => .{ width_px / dw.SCREEN_WIDTH, width_px / dw.SCREEN_HEIGHT },
+        .top_left_viewport, .center_viewport => @splat(width_px),
+    };
+
+    var back = entity;
+    back.size = entity.size + grow * Vec2f32{ 2.0, 2.0 };
+    // A top-left anchor has to walk back by the border; a centered one grows around its own center.
+    switch (entity.system) {
+        .top_left_uv, .top_left_viewport => back.position = entity.position - grow,
+        .center_uv, .center_viewport => {},
+    }
+    back.lcha = outline_lcha;
+
+    addEntitySized(back);
+    addEntitySized(entity);
+}
+
+/// This render frame's interpolated world camera.
+///
+/// Anything drawn over the world in screen space must follow these two curves.
+/// Indicators, dropped items, and block-anchored entities all do.
+/// Otherwise it slides against the terrain between logic frames.
+/// See `chunks.current_dt` for why position and zoom take different fractions.
+///
+/// A portal transition is NOT folded in.
+/// It overrides the camera in `chunk.liveLayer()`, and every current caller stops drawing during one.
+pub const WorldView = struct {
+    /// Logical viewport pixels per world pixel.
+    zoom: f64,
+    /// Camera position in subpixels, in the same space as `game.camera_pos`.
+    cam: Vec2f,
+};
+
+/// Interpolates the world camera for this render frame; see `WorldView`.
+pub fn worldView() WorldView {
+    const game = &memory.game;
+    const cam_vel: Vec2f = @floatFromInt(game.camera_pos - game.last_camera_pos);
+    const last_cam: Vec2f = @floatFromInt(game.last_camera_pos);
+
+    return .{
+        .zoom = game.camera_scale * std.math.pow(f64, game.camera_scale_change, dw.chunks.current_dt),
+        .cam = last_cam + cam_vel * @as(Vec2f, @splat(dw.chunks.current_dt + 1.0)),
+    };
+}
+
+/// Screen-space center of a world block, in viewport pixels.
+///
+/// Precondition: `coord` is within 4096 chunks of the player.
+/// The chunk delta wraps, so a far coordinate would land somewhere meaningless.
+pub fn blockScreenPx(view: WorldView, coord: dw.world.Coordinate, bx: u4, by: u4) Vec2f32 {
+    const player_suffix: Vec2u = memory.game.getPlayerCoord().suffix;
+    const chunk_d: Vec2i = @bitCast(@as(Vec2u, coord.suffix) -% player_suffix);
+    std.debug.assert(@reduce(.Max, @abs(chunk_d)) < 4096);
+
+    const block_sub: Vec2f = @floatFromInt(chunk_d * @as(Vec2i, @splat(dw.SUBPIXELS_IN_CHUNK)) +
+        Vec2i{ @as(i64, bx) * 256 + 128, @as(i64, by) * 256 + 128 });
+
+    const screen = Vec2f{ dw.SCREEN_WIDTH_HALF, dw.SCREEN_HEIGHT_HALF } +
+        (block_sub - view.cam) * @as(Vec2f, @splat(view.zoom / 16.0));
+    return .{ @floatCast(screen[0]), @floatCast(screen[1]) };
+}
+
+/// A sprite a block draws OVER the tile grid instead of inside it; see `blockOverlay()`.
+/// Its lengths are in WORLD pixels (16 is one block), so they follow the camera zoom.
+pub const BlockEntity = struct {
+    /// The sprite type of the entity to use.
+    sprite: Sprite = .none,
+    /// Offset from the center of the block, in world pixels.
+    /// Negative Y is above the block.
+    offset: Vec2f32 = .{ 0.0, 0.0 },
+    /// Width in world pixels; 16 covers the block exactly.
+    size: f32 = 16.0,
+    /// The rotation of the entity (radians).
+    rotation: f32 = 0.0,
+    /// The light, chroma, hue, and opacity components, as in `Entity`.
+    lcha: Vec4f32 = memory.DEFAULT_ENTITY_LCHA,
+};
+
+/// Most block-anchored entities one render frame can carry.
+/// Both tile layers share the budget, and a descent draws both.
+/// Past it the extras are dropped rather than growing the buffer mid-frame.
+const MAX_BLOCK_ENTITIES = 256;
+
+/// Block-anchored entities the tile passes queued this render frame, already in viewport pixels.
+var block_entities: [MAX_BLOCK_ENTITIES]Entity = undefined;
+var block_entity_count: usize = 0;
+
+/// Empties the queue. `chunks.updateVisibleChunks()` calls it once, before either tile layer runs.
+pub fn resetBlockEntities() void {
+    block_entity_count = 0;
+}
+
+/// Queues `entity` on the tile whose center is at `center_px`.
+/// One world pixel is `zoom` viewport pixels, and the layer's tiles are drawn at `opacity`.
+///
+/// Queued, not drawn.
+/// The tile pass owns the scratch buffer while it runs.
+/// An entity pushed there would land in the middle of the block grid.
+/// `updateEntities()` drains the queue first, so these sit over both tile layers.
+/// Everything else the entity pass draws goes over them.
+///
+/// The camera comes from the layer that queued it.
+/// So a portal transition needs no special case here.
+/// `LayerPass` already carries the override and the preview depth.
+pub fn queueBlockEntity(entity: BlockEntity, center_px: Vec2f32, zoom: f32, opacity: f32) void {
+    @setFloatMode(.optimized);
+    if (block_entity_count == MAX_BLOCK_ENTITIES) return;
+
+    const size = entity.size * zoom;
+    const position = center_px + entity.offset * @as(Vec2f32, @splat(zoom));
+
+    // Cheap reject before a slot is spent. The tile grid is padded past the screen by the lighting
+    // margin, so a good number of these are off-screen every frame.
+    const reach = @abs(size);
+    if (position[0] + reach < 0.0 or position[0] - reach > dw.SCREEN_WIDTH) return;
+    if (position[1] + reach < 0.0 or position[1] - reach > dw.SCREEN_HEIGHT) return;
+
+    block_entities[block_entity_count] = .{
+        .sprite = entity.sprite,
+        .position = position,
+        .size = size,
+        .rotation = entity.rotation,
+        .lcha = entity.lcha * Vec4f32{ 1.0, 1.0, 1.0, opacity },
+    };
+    block_entity_count += 1;
+}
+
+/// Draws everything the tile passes queued, in the order they were queued.
+fn drawBlockEntities() void {
+    for (block_entities[0..block_entity_count]) |entity| addEntity(entity);
+}
+
+/// Flame frames sit right after `campfire_base` in the atlas: base+1 through base+4.
+const CAMPFIRE_FLAME_FIRST: u32 = @intFromEnum(Sprite.campfire_base) + 1;
+/// Flame frames, and render frames each one is held for.
+const CAMPFIRE_FLAME_FRAMES: u32 = 6;
+const CAMPFIRE_FLAME_PERIOD: u32 = 4;
+
+/// The entity a block draws over itself, or null for the blocks that are a tile alone.
+/// `render/chunk.zig` asks once per visible tile, so keep this a switch over `block.id`.
+///
+/// The campfire is the reason this exists; its flame is a separate sprite from its base.
+/// The fuel burning in it can tint the fire, and the wood underneath stays the same.
+/// An entity also escapes tile lighting, which is right for the thing making the light!
+pub inline fn blockOverlay(block: memory.Block, frame: u32) ?BlockEntity {
+    return switch (block.id) {
+        // Animated here rather than by a variation.zig rule,
+        // since the frames belong to the entity now and the base tile no longer changes.
+        .campfire_base => .{
+            .sprite = @enumFromInt(CAMPFIRE_FLAME_FIRST +
+                (frame / CAMPFIRE_FLAME_PERIOD) % CAMPFIRE_FLAME_FRAMES),
+        },
+        else => null,
+    };
 }
 
 /// Converts a horizontal width of a sprite to a square within UV coordinates.
