@@ -234,7 +234,9 @@ fn desiredAnimState() AnimState {
 }
 
 /// Advances the player's animation by one logic tick and updates facing. Call once per logic tick.
-pub fn tickAnimation() void {
+/// `logic_speed` is how many 60 FPS frames the tick covers,
+/// so the walk cycle keeps its speed in SECONDS when the tick rate is lowered.
+pub fn tickAnimation(logic_speed: f64) void {
     const vx = memory.game.player_velocity[0];
     if (vx > 0) {
         facing_right = true;
@@ -250,13 +252,18 @@ pub fn tickAnimation() void {
     }
 
     const clip = clips.get(anim_state);
-    anim_timer += 1;
-    if (anim_timer >= clip.frame_ticks) {
-        anim_timer = 0;
+    // A slow tick is worth many frames, so the clip can owe more than one step. The loop pays them
+    // all, which keeps a 2 Hz tick on the same cycle as a 60 Hz one instead of holding each pose 30x.
+    anim_timer += @intFromFloat(@max(1.0, @round(logic_speed)));
+    while (anim_timer >= clip.frame_ticks) {
+        anim_timer -= clip.frame_ticks;
         if (anim_frame + 1 < clip.frames.len) {
             anim_frame += 1;
         } else if (clip.loop) {
             anim_frame = 0;
+        } else {
+            anim_timer = 0; // a clip that holds its last frame has nothing left to owe
+            break;
         }
     }
 }
@@ -294,13 +301,14 @@ pub fn startSoftlockFade() void {
 }
 
 /// Advances the visible correction pulse by one logical frame.
-pub fn tickSoftlockFade() void {
+pub fn tickSoftlockFade(logic_speed: f64) void {
     if (softlock_fade_frame == 0) return;
     if (softlock_fade_frame >= SOFTLOCK_FADE_TOTAL_FRAMES) {
         softlock_fade_frame = 0;
         return;
     }
-    softlock_fade_frame += 1;
+    // The pulse is 24 frames of fade, so it must stay 24 frames of REAL time at any tick rate.
+    softlock_fade_frame +|= @intFromFloat(@max(1.0, @round(logic_speed)));
 }
 
 /// Stops a correction pulse when a game is reset or loaded.
@@ -421,25 +429,25 @@ pub fn move(logic_speed: f64) void {
         // - falling under 3.0, key up  1.20  a snappier drop back to the ground.
         // - everything else            1.00  key still down, or already falling fast.
         const gravity_mult: f64 = if (@abs(y_vel) < REDUCED_GRAVITY_RANGE)
-            (if (up_key_held) 0.6 else 1.0)
-        else if (up_key_held or y_vel > 3.0)
-            1.0
+            (if (up_key_held) 0.60 else 1.00)
+        else if (up_key_held or y_vel > 3.00)
+            1.00
         else if (y_vel >= 0)
             1.20
         else
-            1.8;
+            1.80;
         y_vel += (GRAVITY * y_mult * (1.0 - pow_fy) / DECAY_RATE_Y) * gravity_mult;
 
         // The second brake on a released jump. The multiplier above scales with current speed,
         // so additional linear logic helps keep a "baseline" that forces the player to fall faster.
         const LINEAR_Y_DECAY = 0.2 * logic_speed;
-        if (y_vel <= -LINEAR_Y_DECAY and !up_key_held) {
-            y_vel += LINEAR_Y_DECAY;
+        if (y_vel < 0 and !up_key_held) {
+            y_vel = @min(y_vel + LINEAR_Y_DECAY, 0);
         }
 
-        // Terminal velocity, about 28 blocks per second.
+        // The terminal velocity is about 28 blocks per second.
         // Decay alone would settle at ~7.76, so this cap only trims the last of that creep.
-        y_vel = @min(y_vel, 7.5);
+        y_vel = @min(y_vel, 7.50);
 
         game.player_velocity[1] = y_vel;
     }
