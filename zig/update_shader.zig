@@ -160,7 +160,11 @@ fn writeHueTable(writer: anytype) !void {
 
     for (0..steps) |i| {
         const angle = 2.0 * std.math.pi * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(steps));
-        try writer.print("    vec2f({d}, {d}),\n", .{ @cos(angle), @sin(angle) });
+        try writer.print("    vec2f({d}, {d}),\n", .{ zeroSmallValue(@cos(angle)), zeroSmallValue(@sin(angle)) });
     }
     try writer.writeAll(");\n");
+}
+
+fn zeroSmallValue(a: f64) f64 {
+    return if (@abs(a) > 1e-12) a else 0;
 }
