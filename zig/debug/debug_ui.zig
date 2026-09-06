@@ -112,6 +112,18 @@ const player_sliders = [_]SliderDef{
         .max = 50.0,
         .val = &player.JUMP_FORCE,
     },
+    .{
+        .name = "Wall slide decay",
+        .min = 0.03,
+        .max = 0.60,
+        .val = &player.DECAY_RATE_Y_SLIDE,
+    },
+    .{
+        .name = "Dust tint from block",
+        .min = 0.0,
+        .max = 1.0,
+        .val = &player.DUST_TINT,
+    },
     // .{
     //     .name = "Ghost speed mult",
     //     .min = 1.0,
@@ -189,7 +201,18 @@ fn clearCaches() void {
 /// Internal random number for teleport PRNG.
 /// This is for debugging only and should NOT be used for gameplay.
 var teleport_rand: u64 = std.math.maxInt(u64);
-/// Teleports to a random valid chunk coordinate in the same quadrant, then searches for valid spawn.
+
+/// Chunks a teleport may cover per axis once the world has a horizon window.
+///
+/// Past H the world is only defined near the descent's own lineage:
+/// `quad_cache.ancestor_materials` holds `ANCESTOR_GRID` blocks at H around the recorded trace,
+/// and one block at H is `ZOOM_FACTOR ** HORIZON_DEPTH` blocks at the current depth.
+/// This radius is far under that, so the landing keeps the same H ancestor and the window can still answer.
+/// Landing outside it is `world.panicUnresolvedAncestor()`, not a different place in the world.
+const TELEPORT_RADIUS_CHUNKS: u64 = 1 << 32;
+
+/// Teleports to a random chunk, then searches for a valid spawn.
+/// Anywhere in the world before the horizon exists, and within `TELEPORT_RADIUS_CHUNKS` after it.
 /// For debugging only and should NOT be used for gameplay!
 fn teleportRandomly() void {
     const game = &memory.game;
@@ -208,15 +231,30 @@ fn teleportRandomly() void {
     );
     teleport_rand -%= 0xFFFF;
 
-    const max_suffix = world.getMaxSuffixAtDepth(game.depth);
-    game.teleport(
-        .{ .quadrant = 0, .suffix = .{
-            h1 & max_suffix,
-            h2 & max_suffix,
-        } },
-        .{ 2048, 2048 },
-    );
+    game.teleport(teleportTarget(h1, h2), .{ 2048, 2048 });
     main.findGroundedSpawn();
+}
+
+/// The chunk `teleportRandomly()` lands in, from two random words.
+///
+/// Before the horizon every coordinate names a real chunk, so the whole world is fair game.
+/// After it, only a bounded walk from where the player stands is (see `TELEPORT_RADIUS_CHUNKS`);
+/// an axis that would leave the world simply does not move.
+fn teleportTarget(h1: u64, h2: u64) world.Coordinate {
+    const game = &memory.game;
+    if (game.depth < dw.HORIZON_DEPTH + main.STARTING_ZOOM_TIMES) {
+        const max_suffix = world.getMaxSuffixAtDepth(game.depth);
+        return .{ .quadrant = 0, .suffix = .{ h1 & max_suffix, h2 & max_suffix } };
+    }
+
+    const span = 2 * TELEPORT_RADIUS_CHUNKS;
+    const dx = @as(i64, @intCast(h1 % span)) - TELEPORT_RADIUS_CHUNKS;
+    const dy = @as(i64, @intCast(h2 % span)) - TELEPORT_RADIUS_CHUNKS;
+
+    var target = game.getPlayerCoord();
+    if (target.moveAtDepth(.{ dx, 0 }, game.depth)) |moved| target = moved;
+    if (target.moveAtDepth(.{ 0, dy }, game.depth)) |moved| target = moved;
+    return target;
 }
 
 /// Handles a slider change to a new specified value.
