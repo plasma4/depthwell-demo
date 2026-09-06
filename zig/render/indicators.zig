@@ -173,6 +173,10 @@ const IndicatorGeom = struct {
     screen_x: f32,
     screen_y: f32,
     slot_size: f32,
+    /// `slot_size` before the world zoom multiply, which is what the chroma tints read.
+    /// Kept here rather than divided back out, so the tint cannot be scaled by one clock
+    /// and un-scaled by another.
+    rel_size: f32,
     opacity: f32,
     dx_mouse: f32,
     dy_mouse: f32,
@@ -198,23 +202,24 @@ fn indicatorGeom(
     local_bx: u4,
     local_by: u4,
 ) ?IndicatorGeom {
-    const game = &memory.game;
-
     // Center subpixels relative to player coordinates
     const block_sub_x = chunk_dx * 4096 + @as(i64, local_bx) * 256 + 128;
     const block_sub_y = chunk_dy * 4096 + @as(i64, local_by) * 256 + 128;
 
-    const dx_sub = block_sub_x - game.player_pos[0];
-    const dy_sub = block_sub_y - game.player_pos[1];
-    const dist_sq = dx_sub * dx_sub + dy_sub * dy_sub;
-    const distance = @sqrt(@as(f64, @floatFromInt(dist_sq)));
+    // Distance, scale and fade all read the SAME interpolated frame the screen position does.
+    // Reading the raw player position and camera scale here instead made an indicator pop once
+    // per tick while it glided, which only shows once a tick is worth many frames.
+    const dx_sub = @as(f64, @floatFromInt(block_sub_x)) - view.world.player[0];
+    const dy_sub = @as(f64, @floatFromInt(block_sub_y)) - view.world.player[1];
+    const distance = @sqrt(dx_sub * dx_sub + dy_sub * dy_sub);
 
     const max_dist = kind.maxBlockDistance() * 256.0; // start showing this many blocks away
     const min_dist = @min(1.5 * 256.0, max_dist * 0.5); // fully scaled close up, never past the cutoff
     if (distance >= max_dist) return null;
 
     const t: f32 = @floatCast(if (distance <= min_dist) 1.0 else (max_dist - distance) / (max_dist - min_dist));
-    const slot_size: f32 = @floatCast((10.0 + 5.0 * t) * game.camera_scale);
+    const rel_size: f32 = 10.0 + 5.0 * t;
+    const slot_size: f32 = @floatCast(@as(f64, rel_size) * view.world.zoom);
 
     // Position slightly above the physical block (-200 subpixels)
     const delta_x_sp = @as(f64, @floatFromInt(block_sub_x)) - view.world.cam[0];
@@ -226,6 +231,7 @@ fn indicatorGeom(
         .screen_x = screen_x,
         .screen_y = screen_y,
         .slot_size = slot_size,
+        .rel_size = rel_size,
         .opacity = t * 0.9 + 0.1,
         .dx_mouse = @as(f32, @floatCast(view.mouse_px[0])) - screen_x,
         .dy_mouse = @as(f32, @floatCast(view.mouse_px[1])) - screen_y,
@@ -301,8 +307,7 @@ const DrawVisitor = struct {
 
         const flag = kind.menuFlag();
         const is_open = if (flag) |f| f.* else false;
-        // Undo the camera scale multiply, because slot_size is scale-relative
-        const rel_size: f32 = @floatCast(geom.slot_size / @as(f32, @floatCast(memory.game.camera_scale)));
+        const rel_size = geom.rel_size;
 
         // Background inventory slot (color shifts while its menu is open)
         if (kind != .loot or !is_open) {
