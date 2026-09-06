@@ -57,11 +57,13 @@ pub inline fn dispatchMouseType() void {
 /// A portal descent adds a second layer on top: the D+1 preview, faded in over D.
 /// See `state/portal.zig`.
 pub fn prepareVisibleData(dt: f64, time_diff: f64, canvas_w: f64, canvas_h: f64) void {
-    if (dw.chunks.updateVisibleChunks(dt, canvas_w, canvas_h)) {
-        const world_opacity = dw.portal.worldOpacity();
-        const chunk_opacity = world_opacity * @as(f64, dw.player.softlockFadeOpacity());
-        drawBackground(world_opacity);
+    // The layer owns its own opacity, so the tiles and the entities anchored to them fade together.
+    if (dw.chunks.updateVisibleChunks(dt, canvas_w, canvas_h)) |chunk_opacity| {
+        // The background sits behind the softlock fade rather than inside it.
+        drawBackground(dw.portal.worldOpacity());
         handleVisibleChunks(chunk_opacity, WIREFRAME_BRIGHTNESS);
+        entity.renderBlockEntities();
+        handleVisibleEntities();
     }
 
     if (dw.portal.isActive()) {
@@ -70,6 +72,8 @@ pub fn prepareVisibleData(dt: f64, time_diff: f64, canvas_w: f64, canvas_h: f64)
             dw.chunks.updateOverlayChunks(canvas_w, canvas_h);
             drawBackground(opacity);
             handleVisibleChunks(opacity, WIREFRAME_BRIGHTNESS);
+            entity.renderBlockEntities();
+            handleVisibleEntities();
         }
     }
 
