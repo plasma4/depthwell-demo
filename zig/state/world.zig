@@ -521,13 +521,13 @@ pub const ModificationStore = struct {
     pub fn beginWrite(self: *@This(), key: DepthCoordinate) ModWriter {
         // sanity: not in animation, not in impossible depth
         std.debug.assert(!dw.portal.isActive());
-        std.debug.assert(key.depth <= frontier());
+        std.debug.assert(key.depth <= getFrontier());
         return .{
             .entry = self.entries.at(self.reserve(key, .edit)),
             .key = key,
             // shallower than the frontier this depth is frozen for its descendants,
             // so each cell must give up its inherited value before the edit lands.
-            .capture_legacy = self == &mod_store and key.depth < frontier(),
+            .capture_legacy = self == &mod_store and key.depth < getFrontier(),
         };
     }
 
@@ -700,7 +700,7 @@ pub const AscentStep = struct {
     }
 };
 
-/// Depths the player has ascended past, deepest last. Empty at the deepest depth ever visited.
+/// Depths the player has ascended past, deepest last. Empty at the frontier (deepest depth visited).
 /// Lives on `main_allocator` because it can be pushed or popped.
 pub var ascent_stack: std.ArrayList(AscentStep) = .empty;
 
@@ -713,12 +713,12 @@ pub inline fn canRetrace() bool {
     return ascent_stack.items.len != 0;
 }
 
-/// The deepest depth the player has reached: the FRONTIER.
+/// The deepest depth the player has reached: the frontier.
 ///
 /// Floored at the current depth, which can never be deeper than the deepest one reached.
 /// Read this rather than `max_depth_reached` directly:
 /// the floor holds the invariant even when the depth is set without a `commitLayer()`.
-pub inline fn frontier() u64 {
+pub inline fn getFrontier() u64 {
     return @max(memory.game.max_depth_reached, memory.game.depth);
 }
 
@@ -728,14 +728,7 @@ pub inline fn frontier() u64 {
 /// so the deeper depths hold the material they inherited at that moment.
 /// See `legacy_store` for how that material is kept.
 pub inline fn isShallowerThanFrontier() bool {
-    return memory.game.depth < frontier();
-}
-
-/// The deepest depth the player has reached.
-/// Retrace is the only descent from shallower than the frontier, so this also equals
-/// `game.depth + ascent_stack.items.len` during play.
-pub inline fn deepestDepth() u64 {
-    return frontier();
+    return memory.game.depth < getFrontier();
 }
 
 /// Whether there is a shallower depth to ascend into.
@@ -743,7 +736,7 @@ pub inline fn canAscend() bool {
     return memory.game.depth > STARTING_ZOOM_TIMES;
 }
 
-/// The step a descent must retrace, or null when the player is already at their deepest depth.
+/// The step a descent must retrace, or null when the player is already at their deepest depth (frontier).
 pub inline fn retraceStep() ?AscentStep {
     return if (canRetrace()) ascent_stack.items[ascent_stack.items.len - 1] else null;
 }
@@ -2934,12 +2927,15 @@ fn updateLocalEdgeFlags(coord: Coordinate, bx: u4, by: u4) bool {
 
                 if (broken) {
                     if (item.bx == bx and item.by == by and item.coord.eql(coord)) original_block_broken = true;
+                    // A 2x1 decor drops from the half the player pressed, not from whichever half owns the drop.
+                    // Only a sideways neighbor qualifies, so a collapsing vertical stack still pops each block from its own cell.
+                    const from_pressed = dy == 0 and (dx == 1 or dx == -1);
                     // water already drops in modifyBlockHp()
                     if (current_sprite != .water) dw.inventory.dropItem(
                         current_sprite,
-                        target_coord,
-                        lbx,
-                        lby,
+                        if (from_pressed) item.coord else target_coord,
+                        if (from_pressed) item.bx else lbx,
+                        if (from_pressed) item.by else lby,
                     );
 
                     // Internal block modification to avoid recursion.
@@ -3213,8 +3209,9 @@ pub const LayerTransition = struct {
     /// Whether the fields below carry meaning (false at or before `HORIZON_DEPTH`).
     rebase: bool = false,
     path_hashes: ChunkSeeds = undefined,
-    /// Top-left cell of the rebase window for `depth`; see `QuadCache.getOriginX()`.
+    /// Top-left cell X-coordinate of the rebase window for `depth`; see `QuadCache.getOriginX()`.
     left_cell: u64 = 0,
+    /// Top-left cell Y-coordinate of the rebase window for `depth`; see `QuadCache.getOriginY()`.
     top_cell: u64 = 0,
     most_top: bool = true,
     most_bottom: bool = true,
@@ -5037,7 +5034,7 @@ test "frozen ancestry: an edit made after a depth is left never reaches the dept
     const parent_key = key.getParent().asCoord().asDepthCoordinate(depth - 1);
     const parent_idx: u8 = 37;
 
-    // The player is at the parent, which is the deepest depth reached: this edit shapes what comes below.
+    // The player is at the parent, which is the deepest depth (frontier) reached: this edit shapes what comes below.
     testEnterDepth(depth - 1);
     max_possible_suffix = getMaxSuffixAtDepth(depth - 1);
     mod_store.beginWrite(parent_key).setCell(parent_idx, .{ .id = .lava_stone, .base_id = .none, .hp = 0 });
@@ -5095,7 +5092,7 @@ test "frozen ancestry: an edit shallower than the frontier is playable at its ow
     try testing.expect(isShallowerThanFrontier());
 
     const key: DepthCoordinate = .{ .suffix = .{ 3, 4 }, .depth = shallow, .quadrant = 0 };
-    try testing.expectEqual(@as(u64, shallow + 100), frontier());
+    try testing.expectEqual(@as(u64, shallow + 100), getFrontier());
 
     // A cell that was never modified freezes as its procedural value, so deeper depths keep it.
     mod_store.beginWrite(key).setCell(11, .{ .id = .sand, .base_id = .none, .hp = 0 });
