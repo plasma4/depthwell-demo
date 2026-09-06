@@ -152,7 +152,7 @@ pub fn generate(
                             } else if (stone_rand <= 9) {
                                 return .{ .id = .flint };
                             } else if (stone_rand <= 10) {
-                                return .{ .id = .campfire };
+                                return .{ .id = .campfire_base };
                             } else if (stone_rand <= 20) {
                                 return .{ .id = .aqua_stone };
                             } else if (stone_rand <= 30) {

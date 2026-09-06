@@ -232,8 +232,6 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
         return;
     }
 
-    mouse.updateMouseLocation(); // update to get correct mouse position data
-
     const sprite_type = inventory.selected_sprite;
     if (sprite_type == .unselected) {
         selected_hp = 255;
@@ -244,6 +242,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
     if (mouse_block) |block| {
         // Don't mine a block of the same type you're trying to place!
         if (sprite_type != .none and block.id == sprite_type) {
+            // TODO: knapping
             selected_hp = 0;
             mining_progress = 0;
             return;
