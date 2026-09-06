@@ -89,7 +89,7 @@ export class GameEngine {
     public uniformBuffer!: GPUBuffer;
     /** The array of tile buffers for WebGPU. */
     public tileBuffers: GPUBuffer[] = Array(MAX_DRAW_CALLS);
-    /** The array of entity buffers for WebGPU. There is only one buffer. */
+    /** The GPU buffer for entity data. */
     public entityBuffer!: GPUBuffer;
     /** Determines if the tile buffer is dirty. */
     public tileBufferDirty: boolean = false;
@@ -115,6 +115,8 @@ export class GameEngine {
     private currentTextureView: GPUTextureView | null = null;
     /** Temporary variable to represent the number of times handleVisibleChunks() is called per render request. */
     private renderCallId: number = 0;
+    /** Byte offset for the next entity batch in the current frame. */
+    private entityBufferOffset: number = 0;
 
     private sceneDataBuffer = new ArrayBuffer(256); // allow for both f32 and u32 values to be imported to the uniform data
     private sceneDataF32 = new Float32Array(this.sceneDataBuffer);
@@ -316,6 +318,7 @@ export class GameEngine {
         this.renderPass.setPipeline(this.tilePipeline);
         this.renderPass.setBindGroup(0, this.bindGroups[this.renderCallId], [
             this.renderCallId * 256,
+            0,
         ]);
 
         this.renderPass.setViewport(
@@ -367,6 +370,7 @@ export class GameEngine {
         this.renderPass.setPipeline(this.bgPipeline);
         this.renderPass.setBindGroup(0, this.bindGroups[this.renderCallId], [
             this.renderCallId * 256,
+            0,
         ]);
 
         // One instance per background cell. The grid is world-aligned and covers the canvas with two cells of slack,
@@ -379,31 +383,34 @@ export class GameEngine {
 
     /** Function called from Zig (using the `js_handle_visible_entities` function in `env`) that renders entities. */
     public handleVisibleEntities() {
-        // Setting the color space flags is not needed; this rides on the previous calls
-        this.renderCallId = 0;
         const scratchPtr = this.getScratchPtr();
         const entityBytes = this.getScratchProperty(0) * 48; // can't trust length as it's a multiple of 64
         if (entityBytes === 0 || !this.renderPass) return;
 
-        if (this.entityBuffer.size < entityBytes) {
+        const alignment = this.device.limits.minStorageBufferOffsetAlignment;
+        const entityOffset =
+            Math.ceil(this.entityBufferOffset / alignment) * alignment;
+        const neededBytes = entityOffset + entityBytes;
+        if (this.entityBuffer.size < neededBytes) {
             this.entityBuffer = this.device.createBuffer({
                 label: "Entities",
-                size: entityBytes,
+                size: neededBytes,
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             });
-            this.recreateBufferAndBindGroup(0);
         }
+        this.recreateBindGroup(0, entityBytes);
 
         const wasmView = new Uint8Array(
             this.memory.buffer,
             scratchPtr,
             entityBytes,
         );
-        this.device.queue.writeBuffer(this.entityBuffer, 0, wasmView);
+        this.device.queue.writeBuffer(this.entityBuffer, entityOffset, wasmView);
 
         this.renderPass!.setPipeline(this.entityPipeline);
-        this.renderPass!.setBindGroup(0, this.bindGroups[0], [0]);
+        this.renderPass!.setBindGroup(0, this.bindGroups[0], [0, entityOffset]);
         this.renderPass!.draw(8, entityBytes / 48); // entity size is 48 bytes a piece
+        this.entityBufferOffset = neededBytes;
     }
 
     public setMouseType(type: number) {
@@ -527,36 +534,46 @@ export class GameEngine {
             });
 
             // Rebuild the bind group because the tileBuffer reference changed
-            this.bindGroups[id] = this.device.createBindGroup({
-                label: `Bind group slot ${id}`,
-                layout: this.tilePipeline.getBindGroupLayout(0),
-                entries: [
-                    {
-                        binding: 0,
-                        resource: {
-                            buffer: this.uniformBuffer,
-                            offset: 0, // Base offset is 0, 256 byte multiple needed for bind groups
-                            size: 256,
-                        },
-                    },
-                    {
-                        binding: 1,
-                        resource: {
-                            buffer: this.tileBuffers[id]!,
-                        },
-                    },
-                    { binding: 2, resource: this.atlasTextureView },
-                    { binding: 3, resource: this.atlasTextureMaskView },
-                    { binding: 4, resource: this.pixelSampler },
-                    {
-                        binding: 5,
-                        resource: {
-                            buffer: this.entityBuffer,
-                        },
-                    },
-                ],
-            });
+            this.bindGroups[id] = this.createBindGroup(id);
         }
+    }
+
+    private recreateBindGroup(id: number, entitySize = this.entityBuffer.size) {
+        if (!this.tileBuffers[id]) return;
+        this.bindGroups[id] = this.createBindGroup(id, entitySize);
+    }
+
+    private createBindGroup(id: number, entitySize = this.entityBuffer.size) {
+        return this.device.createBindGroup({
+            label: `Bind group slot ${id}`,
+            layout: this.tilePipeline.getBindGroupLayout(0),
+            entries: [
+                {
+                    binding: 0,
+                    resource: {
+                        buffer: this.uniformBuffer,
+                        offset: 0, // Base offset is 0, 256 byte multiple needed for bind groups
+                        size: 256,
+                    },
+                },
+                {
+                    binding: 1,
+                    resource: {
+                        buffer: this.tileBuffers[id]!,
+                    },
+                },
+                { binding: 2, resource: this.atlasTextureView },
+                { binding: 3, resource: this.atlasTextureMaskView },
+                { binding: 4, resource: this.pixelSampler },
+                {
+                    binding: 5,
+                    resource: {
+                        buffer: this.entityBuffer,
+                        size: entitySize,
+                    },
+                },
+            ],
+        });
     }
 
     /*
@@ -935,6 +952,7 @@ export class GameEngine {
     /** Starts the render logic for a single frame. */
     public renderFrame(timeInterpolated: number, currentTime: number) {
         this.renderCallId = 0; // set to 0 here, as it would otherwise require a (probably non-existent) bind group
+        this.entityBufferOffset = 0;
         if (this.destroyed !== false) return;
 
         this.updateCanvasStyle(); // in case this was overwritten

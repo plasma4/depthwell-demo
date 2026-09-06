@@ -54,7 +54,7 @@ const BUSH_ID = GEAR_ID + 23;
 const CORE_ID = BUSH_ID + 14;
 
 /// Index where inventory slot sprites start.
-pub const INVENTORY_START = CORE_ID + 23;
+pub const INVENTORY_START = CORE_ID + 22;
 /// Index where numbers (0-9) start.
 pub const NUMBER_START = INVENTORY_START + 4;
 /// ID for `Sprite.particle`, which is after a bunch of character glyphs.
@@ -62,7 +62,7 @@ pub const PARTICLE_START = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
-    if (max_sprite_value != 321) {
+    if (max_sprite_value != 320) {
         var buf: [64]u8 = undefined;
         @compileError("Max sprite value of " ++
             (std.fmt.bufPrint(&buf, "{d}", .{max_sprite_value}) catch unreachable) ++
@@ -212,12 +212,11 @@ pub const Sprite = enum(u16) {
     core2 = CORE_ID + 4,
     core3 = CORE_ID + 6,
     core4 = CORE_ID + 8,
-    campfire = CORE_ID + 10, // 4 variations + 4 water variations, 8 total
-    campfire_water = CORE_ID + 10 + 4,
-    chest = CORE_ID + 10 + 8,
-    invportal = CORE_ID + 10 + 10,
-    portal,
-    portal_visual = CORE_ID + 10 + 12, // indicator visual variant
+    campfire_base = CORE_ID + 10, // base, plus 4 flame frames, 5 total
+    chest = CORE_ID + 10 + 5, // 2 variants
+    invportal = CORE_ID + 10 + 7, // 2 variants
+    portal = CORE_ID + 10 + 9, // 2 variants
+    portal_visual = CORE_ID + 10 + 11, // indicator visual variant
 
     /// Unselected inventory sprite. Looks like a blue rounded rectangle.
     inventory = INVENTORY_START,
@@ -764,7 +763,7 @@ const RULE_LIST = [_]SpriteRule{
             .big_mushroom,
             .small_tree,
 
-            .campfire,
+            .campfire_base,
             .forest_furnace,
             .lava_furnace,
             .basic_core,
