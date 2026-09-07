@@ -279,6 +279,11 @@ fn writeSpriteTable(w: *Writer) !void {
 fn readSpriteTable(r: *Reader) !void {
     id_remap.clearRetainingCapacity();
     const n = try r.varint();
+    // A save can name at most one row per sprite id, so a larger count is a corrupt blob,
+    // not a bigger world. Refuse it BEFORE reserving: n is an untrusted varint and would
+    // otherwise size an allocation.
+    if (n > sprite.max_sprite_value + 1) return SaveError.BadData;
+    try id_remap.ensureTotalCapacity(save_alloc, @intCast(n));
     for (0..@intCast(n)) |_| {
         const old_id = try r.int(u16);
         const name = try r.str();
@@ -382,7 +387,7 @@ fn readQuadCache(r: *Reader, section_version: u16) !void {
         try r.readInto(std.mem.asBytes(qc.materials_path.at(i)));
     }
 
-    // Windows are derived, so none were saved; `finalizeLoad()` rebuilds them from these traces.
+    // Windows are derived, so none were saved; finalizeLoad() rebuilds them from these traces.
     qc.materials_windows.len = 0;
 }
 
@@ -542,7 +547,7 @@ fn readMisc(r: *Reader) !void {
 //   flags       : u8 (reserved, always 0)
 //   modified    : [CHUNK_SIZE_SQ / 64]u64  (32 bytes; which cells the player owns)
 //   cells       : PackedCell (u32), once per set bit, ascending            (4 bytes each)
-// The cell count is the population count of `modified`, so it is never stored twice.
+// The cell count is the population count of modified, so it is never stored twice.
 // Sprite IDs are remapped through SPRITE_TABLE on load based on enum names!
 
 /// Bytes one modified cell occupies on disk.
@@ -880,7 +885,7 @@ fn deserialize(buf: []const u8) !void {
         r.pos = section_end;
     }
 
-    // A save from before the frontier existed carries neither the counter nor a `legacy_store`,
+    // A save from before the frontier existed carries neither the counter nor a legacy_store,
     // which is exactly a world that has only ever had one timeline.
     // Retrace is the only descent from shallower than the frontier, so the ascent stack gives the right value.
     memory.game.max_depth_reached = @max(
@@ -957,6 +962,11 @@ var snapshot_entries_len: [2]usize = .{ 0, 0 };
 /// `beginSnapshotInner()` precompute the section length even though entries grow as the player keeps editing.
 var shadow: std.AutoHashMapUnmanaged(ShadowKey, []u8) = .empty;
 
+/// Entries `shadow` is sized for at the start of a snapshot.
+/// A snapshot spans a few frames, so this is how many distinct chunks the player can edit inside
+/// one; well past what a hand on a mouse can reach.
+const SHADOW_RESERVE = 64;
+
 /// Drops every preserved payload. `shadow` owns its values, unlike the old whole-`Chunk` map.
 fn clearShadow() void {
     var it = shadow.valueIterator();
@@ -1028,7 +1038,18 @@ fn beginSnapshotInner() !void {
     try writeMisc(&w);
     try writeAscentStack(&w);
 
-    // `mod_store` first, then `legacy_store`: the cursor crossing `mod_plan_len` is the section break.
+    // The plan is exactly one entry per modified chunk in each store, and both counts are known
+    // now, so it is sized once rather than doubled its way there while the player is mid-build.
+    try plan.ensureTotalCapacity(
+        save_alloc,
+        world.mod_store.index.count() + world.legacy_store.index.count(),
+    );
+    // shadow is filled LAZILY, only for planned entries the player touches before the snapshot
+    // encodes them. That is a handful, not the whole plan, so it gets a small fixed reserve:
+    // sizing it to the plan would allocate for thousands of chunks to hold about three.
+    try shadow.ensureTotalCapacity(save_alloc, SHADOW_RESERVE);
+
+    // mod_store first, then legacy_store: the cursor crossing mod_plan_len is the section break.
     inline for (.{ StoreId.mods, StoreId.legacy }) |id| {
         const store = id.store();
         snapshot_entries_len[@intFromEnum(id)] = store.entries.len;
@@ -1088,7 +1109,7 @@ fn preserve(key: ShadowKey, entry: *const world.ModEntry, size: usize) !void {
 
     var w: Writer = .{ .list = &list };
     try writeEntryPayload(&w, entry);
-    // The plan's precomputed section length counted exactly `size` bytes for this entry.
+    // The plan's precomputed section length counted exactly size bytes for this entry.
     std.debug.assert(list.items.len == size);
 
     try shadow.put(save_alloc, key, try list.toOwnedSlice(save_alloc));
@@ -1130,7 +1151,7 @@ pub fn writeBatch(max_chunks: usize) i64 {
 fn writeBatchInner(w: *Writer, max_chunks: usize) !void {
     const end = @min(plan_cursor + max_chunks, plan.items.len);
     while (plan_cursor < end) : (plan_cursor += 1) {
-        // The plan holds every `mod_store` entry first, so this is where that section ends.
+        // The plan holds every mod_store entry first, so this is where that section ends.
         if (plan_cursor == mod_plan_len) {
             assertStoreSectionLen(.mods);
             try openStoreSection(w, .legacy, plan.items.len - mod_plan_len);
@@ -1155,7 +1176,7 @@ fn assertStoreSectionLen(id: StoreId) void {
 }
 
 fn finalizeSnapshot(w: *Writer) !void {
-    // An empty `legacy_store` never reaches the break in `writeBatchInner()`, so open it here.
+    // An empty legacy_store never reaches the break in writeBatchInner(), so open it here.
     if (plan_cursor == mod_plan_len) {
         assertStoreSectionLen(.mods);
         try openStoreSection(w, .legacy, 0);

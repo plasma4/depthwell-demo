@@ -847,9 +847,9 @@ pub fn renderBlockEntities() void {
 
 /// Flame frames sit right after `campfire_base` in the atlas: base+1 through base+4.
 const CAMPFIRE_FLAME_FIRST: u32 = @intFromEnum(Sprite.campfire_base) + 1;
-/// Flame frames, and render frames each one is held for.
-const CAMPFIRE_FLAME_FRAMES: u32 = 4;
-const CAMPFIRE_FLAME_PERIOD: u32 = 6;
+/// Flame frames, and 60 FPS frames each one is held for.
+const CAMPFIRE_FLAME_FRAMES: u64 = 4;
+const CAMPFIRE_FLAME_PERIOD: f64 = 6.0;
 
 /// The entity a block draws over itself, or null for the blocks that are a tile alone.
 /// `render/chunk.zig` asks once per visible tile, so keep this a switch over `block.id`.
@@ -857,13 +857,17 @@ const CAMPFIRE_FLAME_PERIOD: u32 = 6;
 /// The campfire is the reason this exists; its flame is a separate sprite from its base.
 /// The fuel burning in it can tint the fire, and the wood underneath stays the same.
 /// An entity also escapes tile lighting, which is correct here!
-pub inline fn blockOverlay(block: memory.Block, frame: u32) ?BlockEntity {
+///
+/// `frame` is the interpolated 60 FPS animation clock (`chunks.animFrame()`), never `game.frame`:
+/// a tick counter would run the flame `logic_speed` times slow.
+/// Precondition: `frame` is not negative.
+pub inline fn blockOverlay(block: memory.Block, frame: f64) ?BlockEntity {
     return switch (block.id) {
         // Animated here rather than by a variation.zig rule,
         // since the frames belong to the entity now and the base tile no longer changes.
         .campfire_base => .{
             .sprite = @enumFromInt(CAMPFIRE_FLAME_FIRST +
-                (frame / CAMPFIRE_FLAME_PERIOD) % CAMPFIRE_FLAME_FRAMES),
+                @as(u64, @intFromFloat(frame / CAMPFIRE_FLAME_PERIOD)) % CAMPFIRE_FLAME_FRAMES),
         },
         else => null,
     };

@@ -24,6 +24,9 @@ const TICK_RATE: f64 = 60.0;
 /// A visual then interpolates its own last-to-current values with `chunks.current_dt`,
 /// which is what makes a long tick read as smooth motion instead of a jump.
 pub fn handleTick(logic_speed: f64, iterations: u32) void {
+    // Zeroed here so precacheChunks() at the bottom can see everything this tick generated.
+    dw.world.chunks_generated_this_tick = 0;
+
     var buffer: inventory.SlotBuffer = undefined;
     const active_slots = inventory.getSpritesInInventory(&buffer);
 
@@ -125,6 +128,10 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
         dw.chunks.bg_time_step = (logic_speed / TICK_RATE) * dw.portal.backgroundRate();
         memory.game.bg_time += dw.chunks.bg_time_step;
 
+        // Sprite animation runs on real frames, not on ticks; see chunks.anim_frame.
+        dw.chunks.anim_frame_step = logic_speed;
+        dw.chunks.anim_frame += logic_speed;
+
         if (descending) {
             dw.portal.tick(logic_speed);
         } else {
@@ -151,11 +158,10 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
     }
 
     // Generate chunks around the SimBuffer in the background.
-    // See the function doc comment for amount justification and context.
+    // The budget follows the frames this tick covered, not the tick count: at 15 FPS one tick
+    // moves the player four frames' worth, and a fixed budget would fall four times behind.
     dw.world.SimBuffer.precacheChunks(
         memory.game.getPlayerCoord(),
-        memory.game.player_velocity,
-        1,
-        1,
+        logic_speed * @as(f64, @floatFromInt(iterations)),
     );
 }

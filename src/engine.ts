@@ -407,7 +407,11 @@ export class GameEngine {
             scratchPtr,
             entityBytes,
         );
-        this.device.queue.writeBuffer(this.entityBuffer, entityOffset, wasmView);
+        this.device.queue.writeBuffer(
+            this.entityBuffer,
+            entityOffset,
+            wasmView,
+        );
 
         this.renderPass!.setPipeline(this.entityPipeline);
         this.renderPass!.setBindGroup(0, this.bindGroups[0], [0, entityOffset]);
@@ -617,6 +621,11 @@ export class GameEngine {
                         `assets/furnace.mp3`,
                         `assets/unmineable.mp3`,
                         `assets/toofaraway.mp3`,
+                        `assets/wood1.mp3`,
+                        `assets/wood2.mp3`,
+                        `assets/wood3.mp3`,
+                        `assets/wood4.mp3`,
+                        `assets/wood5.mp3`,
                     ][id],
                 );
 
