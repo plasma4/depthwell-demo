@@ -201,8 +201,8 @@ pub const Sprite = enum(u16) {
     cordage = GEAR_ID + 13,
     plant_haft,
     stone_haft,
-    flint_hatchet,
-    greenstone_hatchet,
+    flint_hatchet_head,
+    greenstone_hatchet_head,
     twinklemoss,
     spiralvine,
     plant_stem,
@@ -449,6 +449,14 @@ pub const Sprite = enum(u16) {
 /// Centralized database describing all sprite properties.
 /// Rules are checked in order, with later rules overriding earlier ones.
 const RULE_LIST = [_]SpriteRule{
+    // Tools that are valid items
+    .{
+        .{ .list = &[_]Sprite{ .flint_hatchet_head, .greenstone_hatchet_head } },
+        .{
+            .item = true,
+        },
+    },
+
     // Weak solid blocks
     .{
         .{ .list = &[_]Sprite{
@@ -757,6 +765,7 @@ const RULE_LIST = [_]SpriteRule{
     .{
         .{ .list = &[_]Sprite{
             .rock,
+            .hammerstone,
             .purple_rock,
             .aqua_stone,
             .flint,
@@ -868,7 +877,7 @@ const RULE_LIST = [_]SpriteRule{
         .{ .anchor = .suspended },
     },
 
-    // Entity ID offsets for `asEntity()`
+    // Entity ID offsets for asEntity()
     .{
         .{ .range = .{ .quartz, .electrit } },
         .{ .entity_offset = @intCast(GEM_COUNT) },

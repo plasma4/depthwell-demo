@@ -29,7 +29,7 @@ pub var seed: dw.seeding.ChaCha12 = undefined;
 pub const MAX_PARTICLES = 8192;
 /// Maximum opacity of any particle (lerped based on lifetime).
 const MAX_OPACITY = 0.8;
-/// Render frames a particle fades in over, so dense emitters build instead of popping on.
+/// Frames a particle fades in over, so dense emitters build instead of popping on.
 const FADE_IN_FRAMES: f32 = 3.0;
 /// Floor on the distance used to aim `Particle.pull`,
 /// so a particle sitting exactly on its attractor gets an actual direction.
@@ -45,7 +45,10 @@ comptime {
 }
 
 /// One live (or dead) particle.
-/// All units are internal-viewport pixels and render frames.
+///
+/// All units are internal-viewport pixels and 60 FPS FRAMES, never ticks.
+/// One logic tick covers `logic_speed` of these frames.
+/// So a particle traces the same curve per second whether the game ticks at 60 or at 15.
 pub const Particle = struct {
     /// Center position in viewport pixels.
     position: Vec2f32 = .{ 0.0, 0.0 },
@@ -70,11 +73,15 @@ pub const Particle = struct {
     pull: f32 = 0.0,
     /// LCHA of the particle (see generic `dw.memory.Particle` struct on specifics).
     lcha: Vec4f32 = .{ 1.0, 0.0, 0.0, 1.0 },
-    /// Render frames remaining; 0 means the slot is dead/free.
-    frames_left: u16 = 0,
-    /// Total lifetime in render frames, used to interpolate opacity.
-    /// Must be >= `frames_left`.
-    lifetime: u16 = 1,
+    /// Frames remaining; 0 or less means the slot is dead/free.
+    ///
+    /// Fractional on purpose.
+    /// A tick ages a particle by exactly the frames it covered.
+    /// `draw()` then reads a value BETWEEN two ticks, so the fade stays smooth.
+    frames_left: f32 = 0.0,
+    /// Total lifetime in frames, used to interpolate opacity.
+    /// Must be positive, and >= `frames_left`.
+    lifetime: f32 = 1.0,
     /// Whether the particle holds a WORLD point instead of a screen point.
     /// An anchored particle scrolls with the camera and does not scale with zoom; see `anchor_cam`.
     /// The effects that anchoring have are different and intentional!
@@ -143,16 +150,17 @@ pub const BurstConfig = struct {
     spin_min: f32 = 0.03,
     /// Spin magnitude maximum (radians per render frame); direction sign is randomized.
     spin_max: f32 = 0.12,
-    /// Lowest possible lifetime of each spawned particle in render frames.
-    lifetime_min: u16 = 12,
-    /// Highest possible lifetime of each spawned particle in render frames.
-    lifetime_max: u16 = 28,
+    /// Lowest possible lifetime of each spawned particle in frames.
+    lifetime_min: f32 = 12.0,
+    /// Highest possible lifetime of each spawned particle in frames.
+    lifetime_max: f32 = 28.0,
 };
 
 /// Kills every particle. Called on world restart from `startup.init()`.
 pub fn reset() void {
-    for (&pool) |*p| p.frames_left = 0;
+    for (&pool) |*p| p.frames_left = 0.0;
     next_slot = 0;
+    last_tick_frames = 1.0;
     syncAnchor();
 }
 
@@ -176,10 +184,7 @@ pub fn spawnBurst(origin: Vec2f32, colors: []const Vec4f32, config: BurstConfig)
         const angle = randRange(0.0, std.math.tau);
         const speed = randRange(config.speed_min, config.speed_max);
         const spin_magnitude = randRange(config.spin_min, config.spin_max);
-        const lifetime: u16 = @intFromFloat(randRange(
-            @floatFromInt(config.lifetime_min),
-            @floatFromInt(config.lifetime_max + 1),
-        ));
+        const lifetime = randRange(config.lifetime_min, config.lifetime_max);
 
         addParticle(.{
             .position = origin,
@@ -214,9 +219,9 @@ pub const OrbitConfig = struct {
     /// Maximum spin rate in radians per frame (direction randomized).
     spin_max: f32 = 0.10,
     /// Minimum particle lifetime and travel duration in frames.
-    travel_min: u16 = 14,
+    travel_min: f32 = 14.0,
     /// Maximum particle lifetime and travel duration in frames.
-    travel_max: u16 = 26,
+    travel_max: f32 = 26.0,
     /// Tangential speed relative to radial speed (controls spiral curvature).
     swirl: f32 = 1.0,
     /// Ratio of outward to inward particles (0.0 = all inward, 1.0 = all outward).
@@ -258,10 +263,7 @@ pub fn spawnOrbitRing(origin: Vec2f32, colors: []const Vec4f32, config: OrbitCon
         // Squared so the ring crowds toward its inner edge!
         const u = seed.float(f32);
         const radius = config.radius_min + (config.radius_max - config.radius_min) * u * u;
-        const travel: u16 = @intFromFloat(randRange(
-            @floatFromInt(config.travel_min),
-            @floatFromInt(config.travel_max + 1),
-        ));
+        const travel = randRange(config.travel_min, config.travel_max);
         const spin_magnitude = randRange(config.spin_min, config.spin_max);
         const outward = seed.float(f32) < config.outward_ratio;
 
@@ -269,7 +271,7 @@ pub fn spawnOrbitRing(origin: Vec2f32, colors: []const Vec4f32, config: OrbitCon
         // Every particle circles the same way, so the ring looks like one rotating body
         const tangent: Vec2f32 = .{ -dir[1], dir[0] };
 
-        const radial_speed = radius / @as(f32, @floatFromInt(travel));
+        const radial_speed = radius / travel;
         const tangential_speed = radial_speed * config.swirl;
         const start_radius = if (outward) radius * OUTWARD_START_FRACTION else radius;
         const radial: f32 = if (outward) OUTWARD_SPEED_GAIN else -1.0;
@@ -357,12 +359,23 @@ fn accelOf(p: *const Particle) Vec2f32 {
         offset * @as(Vec2f32, @splat(p.pull / (distance * (distance_sq + PULL_SOFTENING * PULL_SOFTENING))));
 }
 
-/// Extrapolates a particle's position `lead` frames ahead to avoid curve wobble.
-/// This uses numerical integration thru velocity integration!
+/// A particle's pose `lead` frames from the one stored, along the curve it is actually travelling.
+///
+/// Exact for a constant acceleration in BOTH directions.
+/// That is what lets `draw()` walk backward through a tick:
+/// a step forward by `dt` and then back by `dt` returns the start pose.
+/// `lead` is negative at draw time and positive nowhere.
 inline fn leadPosition(p: *const Particle, lead: f32) Vec2f32 {
     return p.position + (p.velocity + accelOf(p) * @as(Vec2f32, @splat(0.5 * lead))) *
         @as(Vec2f32, @splat(lead));
 }
+
+/// Frames the last `tick()` covered.
+///
+/// `draw()` interpolates back across exactly this span.
+/// Without it a low tick rate would jump every particle a whole tick and then hold it still for the
+/// five render frames that follow.
+var last_tick_frames: f32 = 1.0;
 
 /// Moves every live particle for a logic tick.
 /// `frames` is how many 60 FPS frames the tick covers: `logic_speed` times the tick count.
@@ -372,13 +385,12 @@ inline fn leadPosition(p: *const Particle, lead: f32) Vec2f32 {
 pub fn tick(frames: f64) void {
     @setFloatMode(.optimized);
     const dt: f32 = @floatCast(frames);
-    // A tick never ages a particle by less than one frame, or a low tick rate would never retire it.
-    const whole: u32 = @intFromFloat(@max(1.0, @round(frames)));
+    last_tick_frames = dt;
 
     const scroll = anchorScroll();
     for (&pool) |*p| {
-        if (p.frames_left == 0) continue; // skip!
-        p.frames_left = @intCast(@as(u32, p.frames_left) -| whole);
+        if (p.frames_left <= 0.0) continue; // skip!
+        p.frames_left -= dt;
         // integrated rather than stepped, so a multi-tick catch-up traces the same curve as single ticks
         const accel = accelOf(p);
         p.position += (p.velocity + accel * @as(Vec2f32, @splat(0.5 * dt))) * @as(Vec2f32, @splat(dt));
@@ -442,22 +454,29 @@ fn anchorDrift() Vec2f32 {
     return .{ @floatCast(offset[0]), @floatCast(offset[1]) };
 }
 
-/// Draws all live particles, extrapolating pose to the current render frame.
+/// Draws all live particles, interpolated to the current render frame.
 pub fn draw() void {
     @setFloatMode(.optimized);
     const portal_fade = dw.portal.getDescentFade();
     const drift = anchorDrift();
 
+    // tick() has already run the whole tick, so this walks BACK into it.
+    // current_dt runs -1..0 across the render frames of one tick, so lead sweeps
+    // -last_tick_frames..0: the same interpolation curve the camera takes.
+    // Drawing the ticked pose directly would hold every particle still between ticks and
+    // jump it a whole tick at once, which is what a low tick rate made obvious.
+    const lead: f32 = @as(f32, @floatCast(dw.chunks.current_dt)) * last_tick_frames;
+
     for (&pool) |*p| {
-        if (p.frames_left <= 0) continue;
+        if (p.frames_left <= 0.0) continue;
 
+        // Lifetime is walked back by the same amount, so the fade is smooth between ticks too.
+        // Clamped because a particle spawned DURING the tick was never aged by it.
+        const left = @min(p.frames_left - lead, p.lifetime);
+        const age = p.lifetime - left;
         // non-linear fade keeps particles bright near orbital collapse before fading quickly
-        const age: f32 = @floatFromInt(p.lifetime - p.frames_left);
-        const fade = @sqrt(@as(f32, @floatFromInt(p.frames_left)) / @as(f32, @floatFromInt(p.lifetime))) *
-            @min(age / FADE_IN_FRAMES, 1.0);
+        const fade = @sqrt(left / p.lifetime) * @min(age / FADE_IN_FRAMES, 1.0);
 
-        // frame interpolation!
-        const lead: f32 = @as(f32, @floatCast(dw.chunks.current_dt)) + 1.0;
         dw.entity.addEntity(.{
             .sprite = .particle,
             .position = leadPosition(p, lead) + (if (p.anchored) drift else Vec2f32{ 0.0, 0.0 }),
