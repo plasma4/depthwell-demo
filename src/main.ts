@@ -69,19 +69,9 @@ declare module "./engine" {
         /** Main logic loop (called from `renderLoop` to prevent frame drops). */
         logicLoop: (ticks: number) => void;
         /**
-         * Returns the timeout time between logic frames in milliseconds. Note that the actual logic accounts for lag.
-         * Customize the frame rate and timeout to test frame interpolation with this:
-            ```ts
-            engine.getTimeoutLength = () => 500;
-            engine.getFrameRate = () => 2;
-            ```
-         */
-        getTimeoutLength: () => number;
-        /**
          * Returns the target logic frame rate.
          * Customize the frame rate and timeout to test frame interpolation with this:
             ```ts
-            engine.getTimeoutLength = () => 500;
             engine.getFrameRate = () => 2;
             ```
          */
@@ -178,19 +168,14 @@ document.addEventListener(
 
 let engine = await GameEngine.create();
 
-engine.getTimeoutLength = function () {
-    return ++frame % 3 == 2 ? 16 : 17;
-};
-
 engine.getFrameRate = function () {
     return 60;
 };
 
 engine.baseSpeed = 1;
 
-let lastFrameTime = performance.now(),
-    accumulator = 0,
-    frame = 0;
+let lastFrameTime = performance.now();
+let accumulator = 0;
 if (CONFIG.exportEngine) (globalThis as any).engine = engine;
 
 /** Delay in milliseconds between the *completion* of one autosave and the start of the next. */

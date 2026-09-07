@@ -1153,8 +1153,8 @@ fn spawnIntake() void {
     const surge = intensity * intensity * (INTAKE_PULSE_FLOOR + (1.0 - INTAKE_PULSE_FLOOR) * wave);
     const count: usize = @intFromFloat(3.0 + 46.0 * surge);
 
-    const cap: u16 = @intFromFloat(@round(24.0 - 14.0 * progress()));
-    if (cap > 2) {
+    const cap: f32 = @floatCast(@round(24.0 - 14.0 * progress()));
+    if (cap > 2.0) {
         dw.particles.spawnOrbitRing(effectOrigin(), effectColors(), .{
             .count = count,
             // Held in world scale so the ring keeps hugging the mouth as the view zooms.
@@ -1162,7 +1162,7 @@ fn spawnIntake() void {
             .radius_max = INTAKE_RADIUS_MAX * zoom,
             .size_min = INTAKE_SIZE_MIN * @sqrt(zoom),
             .size_max = INTAKE_SIZE_MAX * @sqrt(zoom),
-            .travel_min = @min(cap, 8),
+            .travel_min = @min(cap, 8.0),
             .travel_max = cap,
             // Tightens as the transition builds, so the swirl visibly winds up.
             .swirl = @floatCast(0.85 + 0.75 * intensity),
@@ -1274,7 +1274,7 @@ fn spawnReturnIntake() void {
     const zoom: f32 = @floatCast(memory.game.camera_scale * @min(zoomFactor(), @as(f64, dw.ZOOM_FACTOR)));
     const count: usize = @intFromFloat(4.0 + 34.0 * intensity);
 
-    const cap: u16 = @intFromFloat(@round(22.0 - 12.0 * t));
+    const cap: f32 = @floatCast(@round(22.0 - 12.0 * t));
     if (cap <= 2) return;
 
     dw.particles.spawnOrbitRing(effectOrigin(), effectColors(), .{
@@ -1283,7 +1283,7 @@ fn spawnReturnIntake() void {
         .radius_max = INTAKE_RADIUS_MAX * zoom,
         .size_min = INTAKE_SIZE_MIN * @sqrt(zoom),
         .size_max = INTAKE_SIZE_MAX * @sqrt(zoom),
-        .travel_min = @min(cap, 8),
+        .travel_min = @min(cap, 8.0),
         .travel_max = cap,
         .swirl = @floatCast(0.85 + 0.75 * intensity),
         .outward_ratio = DESCENT_OUTWARD_RATIO,

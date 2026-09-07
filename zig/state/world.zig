@@ -184,9 +184,11 @@ inline fn columnCellBeyond(coord: Coordinate, r: u32, depth: u64, comptime dir: 
 /// As in, it does not use something like cellular noise that needs a whole map up front.
 pub fn generateBaseChunk(chunk: *Chunk, coord: Coordinate) void {
     const depth = STARTING_ZOOM_TIMES;
-    const chunk_seeds = quad_cache.getChunkSeeds(coord.asDepthCoordinate(depth));
-
-    var rng_seed = seeding.ChaCha12.init(&chunk_seeds.value[3]); // Seed data only.
+    // A block seed is keyed on the cell ADDRESS, exactly as the recursive depths key it
+    // (see seedLane() and ancestor.applyAncestorLogic()).
+    // A per-chunk stream read in loop order would work too, right up until a replayed player edit
+    // had to name the same value without replaying the loop.
+    const lane = seedLane(coord.asDepthCoordinate(depth));
 
     const suffix = coord.suffix;
     const cx = suffix[0];
@@ -200,7 +202,7 @@ pub fn generateBaseChunk(chunk: *Chunk, coord: Coordinate) void {
                 .id = bf.id,
                 // Overlay sprites remember the stone they replaced so the shader can composite them over it.
                 .base_id = if (bf.id.isOverlay()) bf.base else .none,
-                .seed = rng_seed.next(),
+                .seed = seeding.FastHash.hash2d(lane, block_x, block_y),
                 .water_volume = bf.water_volume,
             };
             chunk.blocks[idx] = spec.compile();
@@ -284,7 +286,7 @@ fn computeColumnSeeds(comptime f: dw.decorations.ColumnFeature, key: DepthCoordi
 }
 
 // Everything else in a Block is derived and is rebuilt by materializeChunk(), hence why ModCell is so simple!
-// - seed gets regenerated in block-index order (generateBaseChunk(), generateChunk()).
+// - seed is a property of the cell address, so generation writes the same value every time.
 // - the three light channels are written only into the per-frame render scratch buffer (applyLighting()).
 // - edge_flags, id_edge_flags, and water are recomputed from neighbor id+hp by the flag passes.
 
@@ -363,28 +365,18 @@ pub const ModEntry = struct {
     /// Replays every modified cell over a freshly generated chunk.
     /// The caller MUST then rerun the flag pass: replaying ids invalidates the generated edge and water flags.
     ///
-    /// A replayed cell also takes a FRESH `Block.seed` from `seedLane()`.
-    /// `ModCell` does not store a seed, so a cell keeps whatever the generator left there,
-    /// and an empty cell is left with a seed of zero at every recursive depth
-    /// (`ancestor.applyAncestorLogic()` returns early for air).
-    /// Without this, every block the player builds into open space picks the same
-    /// seed-driven variant (see `variation.seedPick()`).
-    pub fn applyTo(self: *const @This(), chunk: *Chunk, key: DepthCoordinate) void {
-        const lane = seedLane(key);
+    /// `Block.seed` is deliberately left alone.
+    /// `ModCell` stores no seed because the seed belongs to the cell address, not to the block:
+    /// generation already stamped it from `seedLane()`, air cells included.
+    /// So a block the player builds keeps the variant it had the moment it was placed.
+    pub fn applyTo(self: *const @This(), chunk: *Chunk) void {
         var i: usize = 0;
         for (0..MODIFIED_WORDS) |w| {
             var bits = self.modified[w];
             while (bits != 0) : (i += 1) {
                 const bit = @ctz(bits);
                 bits &= bits - 1;
-                const index = (w << 6) | bit;
-                const block = &chunk.blocks[index];
-                self.cells[i].applyTo(block);
-                block.seed = @truncate(seeding.FastHash.hash2d(
-                    lane,
-                    index & (CHUNK_SIZE - 1),
-                    index >> CHUNK_SIZE_LOG2,
-                ));
+                self.cells[i].applyTo(&chunk.blocks[(w << 6) | bit]);
             }
         }
     }
@@ -443,6 +435,13 @@ pub const ModificationStore = struct {
     /// Whether the containers below hold real allocations. Guards `deinit()` before the first `init()`.
     live: bool = false,
 
+    /// Chunks `index` is sized for up front.
+    ///
+    /// A rehash costs time proportional to the map, and it lands exactly when the player is
+    /// building, which is the worst moment to drop a frame.
+    /// 256 chunks is a 4096-block area of edits, and the reservation is about 10 KB.
+    const INDEX_RESERVE = 256;
+
     /// Initializes in-place to avoid stack overflow problems. Frees anything a previous world left behind.
     pub fn init(self: *ModificationStore, allocator: std.mem.Allocator) void {
         self.deinit();
@@ -451,6 +450,7 @@ pub const ModificationStore = struct {
             .live = true,
             .generation = self.generation +% 1,
         };
+        self.index.ensureTotalCapacity(allocator, INDEX_RESERVE) catch memory.oom();
     }
 
     /// Releases every allocation. Safe to call on a store that was never initialized.
@@ -1020,31 +1020,86 @@ comptime {
 pub const SimBuffer = struct {
     /// Size of the outside ring `precacheChunks()` uses.
     const RING_SIZE = 4 * SIM_BUFFER_WIDTH + 4;
+    /// Cells in one ring ROW (top or bottom); the two corners belong to the rows.
+    const RING_ROW_LEN = SIM_BUFFER_WIDTH + 2;
+    /// Cells in one ring COLUMN (left or right), corners excluded.
+    const RING_COLUMN_LEN = SIM_BUFFER_WIDTH;
+    /// Where each side's run begins in `RING_OFFSETS`; see `leadingRunStart()`.
+    const RUN_TOP = 0;
+    const RUN_BOTTOM = RING_ROW_LEN;
+    const RUN_LEFT = RING_ROW_LEN * 2;
+    const RUN_RIGHT = RING_ROW_LEN * 2 + RING_COLUMN_LEN;
+
+    comptime {
+        if (RUN_RIGHT + RING_COLUMN_LEN != RING_SIZE)
+            @compileError("The four ring runs must tile RING_OFFSETS exactly.");
+    }
+
+    /// The ring one chunk outside the window, grouped into four contiguous runs
+    /// (top, bottom, left, right) and ordered CENTER-OUT inside each run.
+    ///
+    /// Both properties are load-bearing.
+    /// Grouping lets a sweep start on the side the player is heading for, instead of wherever a
+    /// round-robin over all `RING_SIZE` cells happened to stop; a full round-robin takes longer
+    /// than the player takes to cross a chunk edge, so it can never get ahead of a sustained fall.
+    /// Center-out means the first cells filled are the ones directly in the travel path.
     const RING_OFFSETS = blk: {
         var offs: [RING_SIZE]Vec2i = undefined;
         var i: usize = 0;
         const half_width = @as(i64, SIM_BUFFER_WIDTH) / 2;
         const min_off = -half_width - 1;
         const max_off = half_width;
-        // Top and bottom rows (2 * (SIM_BUFFER_WIDTH + 2) chunks total)
-        var x: i64 = min_off;
-        while (x <= max_off) : (x += 1) {
-            offs[i] = .{ x, min_off };
-            i += 1;
-            offs[i] = .{ x, max_off };
-            i += 1;
+
+        // The two rows, then the two columns. The span is asymmetric (min_off reaches one
+        // further out than max_off), so each step emits only the sides still inside it.
+        for ([_]i64{ min_off, max_off }) |fixed_y| {
+            var step: i64 = 0;
+            while (step <= -min_off) : (step += 1) {
+                if (step == 0) {
+                    offs[i] = .{ 0, fixed_y };
+                    i += 1;
+                    continue;
+                }
+                if (step <= max_off) {
+                    offs[i] = .{ step, fixed_y };
+                    i += 1;
+                }
+                if (-step >= min_off) {
+                    offs[i] = .{ -step, fixed_y };
+                    i += 1;
+                }
+            }
         }
-        // Left and right columns (avoiding corners already covered)
-        var y: i64 = min_off + 1;
-        while (y <= max_off - 1) : (y += 1) {
-            offs[i] = .{ min_off, y };
-            i += 1;
-            offs[i] = .{ max_off, y };
-            i += 1;
+        for ([_]i64{ min_off, max_off }) |fixed_x| {
+            var step: i64 = 0;
+            while (step <= -min_off) : (step += 1) {
+                if (step == 0) {
+                    offs[i] = .{ fixed_x, 0 };
+                    i += 1;
+                    continue;
+                }
+                if (step <= max_off - 1) {
+                    offs[i] = .{ fixed_x, step };
+                    i += 1;
+                }
+                if (-step >= min_off + 1) {
+                    offs[i] = .{ fixed_x, -step };
+                    i += 1;
+                }
+            }
         }
+        if (i != RING_SIZE) @compileError("RING_OFFSETS did not fill exactly RING_SIZE cells.");
         break :blk offs;
     };
     var bg_scan_id: usize = 0;
+    /// Run `bg_scan_id` was last seated on, so the sweep only restarts when the side changes.
+    var last_run_start: usize = RUN_BOTTOM;
+
+    /// Chunks the last `precacheChunks()` generated, and the budget it was allowed.
+    /// Debug readout only (`render/chunk.zig` prints them as "filled/budget").
+    /// A run that keeps reading `budget/budget` means the budget is too small.
+    pub var precache_filled: u32 = 0;
+    pub var precache_budget: u32 = 0;
 
     pub const sim_buffer_ptr: *[SIM_BUFFER_SIZE]Chunk = chunk_pool[CHUNK_CACHE_SIZE..][0..SIM_BUFFER_SIZE];
     pub var keys: [SIM_BUFFER_SIZE]?Coordinate = @splat(null);
@@ -1486,72 +1541,106 @@ pub const SimBuffer = struct {
         }
     }
 
-    /// Background caching heuristic: scans the boundary immediately outside the 16x16 chunk in the
-    /// direction of movement and creates it in `chunk_cache` before the player reaches it.
+    /// Chunks the window must replace when the player crosses ONE chunk edge:
+    /// a crossing on either axis retires a whole row or column of the 16x16 window.
+    /// A diagonal crossing retires both, minus the corner they share.
+    const CHUNKS_PER_CROSSING: f64 = SIM_BUFFER_WIDTH;
+
+    /// Slack on top of the movement the player is already committed to.
+    ///
+    /// A prefetched side can become the wrong side with no warning.
+    /// A jump ASSIGNS `-JUMP_FORCE`, so Y reverses completely in ONE tick, and X reverses in
+    /// about three. 2 covers one full reversal per axis.
+    /// More than that pays for a direction change the player cannot physically make twice
+    /// before the window has caught up anyway.
+    const TURN_HEADROOM: f64 = 2.0;
+
+    /// Chunks one tick of travel at `speed` costs, where `speed` is world pixels per 60 FPS
+    /// frame on each axis, the same unit as `game.player_velocity`.
+    ///
+    /// `CHUNK_SIZE_SQ` is world pixels per chunk EDGE (16 px a block, 16 blocks a chunk),
+    /// so a speed over it is chunk edges crossed per frame.
+    /// The axes add rather than combine: a diagonal crossing costs a row AND a column.
+    inline fn crossingCost(speed_x: f64, speed_y: f64, frames: f64) f64 {
+        return (@abs(speed_x) + @abs(speed_y)) * frames *
+            CHUNKS_PER_CROSSING / @as(f64, dw.CHUNK_SIZE_SQ);
+    }
+
+    /// Chunks `precacheChunks()` may generate for a tick covering `frames` 60 FPS frames.
+    ///
+    /// Derived from the movement bounds in `player.zig` rather than tuned, so raising
+    /// `JUMP_FORCE` or `PLAYER_ACCEL` moves this on its own.
+    /// Rounded UP: spending 0 chunks on nine ticks and 1 on the tenth buys nothing over
+    /// spending 1 every tick, and the loop exits early when there is nothing left to fill.
+    ///
+    /// Deliberately NOT scaled by the live velocity.
+    /// A jump is instantaneous, so the worst case for the next tick is this bound whatever the
+    /// player is doing now (see the note above `horizontalMovementMax()`).
+    /// An unspent budget costs a ring scan, not a generation.
+    pub fn precacheBudget(frames: f64) u32 {
+        const cost = crossingCost(
+            player.horizontalMovementMax(),
+            player.verticalMovementMax(),
+            frames,
+        ) * TURN_HEADROOM;
+        return @max(1, @as(u32, @intFromFloat(@ceil(cost))));
+    }
+
+    /// Chunks a single tick may generate before `precacheChunks()` stands down for that tick.
+    ///
+    /// One chunk edge crossing costs `SIM_BUFFER_WIDTH`, and a diagonal one nearly twice that,
+    /// so this only trips on work no prefetch could have anticipated: a teleport, a depth change,
+    /// or the first fill of a world.
+    /// Standing down hands that frame back to whatever caused it.
+    const STAND_DOWN_GENERATIONS: u32 = SIM_BUFFER_WIDTH * 2;
+
+    /// Index in `RING_OFFSETS` of the run for the side the player is heading toward.
+    /// Vertical wins a tie, and a still player reads as falling, because gravity means Y is
+    /// almost always the axis that crosses first.
+    fn leadingRunStart(velocity: Vec2f) usize {
+        if (@abs(velocity[1]) >= @abs(velocity[0])) {
+            return if (velocity[1] < 0.0) RUN_TOP else RUN_BOTTOM;
+        }
+        return if (velocity[0] < 0.0) RUN_LEFT else RUN_RIGHT;
+    }
+
+    /// Background caching/streaming logic: fills the ring immediately outside the 16x16 window
+    /// into `chunk_cache`, before the player reaches it.
+    /// `frames` is how many 60 FPS frames this tick covers, which is `logic_speed` times the
+    /// iteration count, so the budget follows the tick rate instead of assuming 60 FPS.
     ///
     /// Fills slots with `materializeChunk()`, never bare `generateChunk()`:
     /// every consumer of `chunk_cache` (`writeChunkSimless()`, `getCachedChunk()`, `getBlockAt()`)
-    /// treats a hit as post-modification data, so a purely procedural slot silently reverts
-    /// the player's edits for as long as it survives eviction.
+    /// treats a hit as post-modification data,
+    /// so a purely procedural slot silently reverts the player's edits for as long as it survives eviction.
     ///
-    /// - Generates at least `default_amount` chunks when called.
-    /// - A higher `max_amount` can help during high-movement situations
-    ///   (suggested value of ~2, so more budget is available in high-velocity falling situations).
-    ///
-    /// Finding the terminal velocity can help: every chunk moved diagonally means up to 33 chunks need to be regenerated near the edge.
-    /// At a worst-case terminal fall around 30 blocks/sec and assuming a similar horizontal move speed (for worst-case chunk stradding),
-    /// that's two blocks per frame for each axis and "1/4th chunk" per frame needs to be generated.
-    /// Considering all this, a maximum of 1 chunk is needed to be precached per frame,
-    /// at least so that amortized gradual chunk generation around the `SimBuffer` doesn't result in frame drops/
-    pub inline fn precacheChunks(
-        player_coord: Coordinate,
-        velocity: Vec2f,
-        default_amount: comptime_int,
-        max_amount: comptime_int,
-    ) void {
-        if (default_amount < 1 or max_amount < 1) {
-            @compileError("Amount of chunks to generate in the background must be positive!");
-        }
-        const game = &memory.game;
-        var generated_count: u32 = 0;
+    /// The sweep starts on the side the player is heading for and works center-out from the
+    /// travel path (see `RING_OFFSETS`), and only restarts when that side changes.
+    /// A round-robin over the whole ring takes about 68 ticks, while a terminal fall crosses a
+    /// chunk edge every 34, so it could never get ahead of a sustained fall.
+    pub fn precacheChunks(player_coord: Coordinate, frames: f64) void {
+        precache_filled = 0;
+        precache_budget = precacheBudget(frames);
 
-        // Determine primary sweep direction based on highest absolute velocity
-        const vx = velocity[0];
-        const vy = velocity[1];
-        const budget: u32 = if (vx * vx + vy * vy < 500.0) default_amount else max_amount;
+        // This tick already paid for more generation than a prefetch could have saved it.
+        if (chunks_generated_this_tick >= STAND_DOWN_GENERATIONS) return;
 
-        const half_width = @as(i64, SIM_BUFFER_WIDTH) / 2;
-        const min_off = -half_width - 1;
-
-        // Priority target based on movement
-        const tx: i64 = if (vx > 1.0) half_width else if (vx < -1.0) min_off else (if (game.frame % 2 == 0) half_width else min_off);
-        const ty: i64 = if (vy > 1.0) half_width else if (vy < -1.0) min_off else half_width; // Default downward for gravity
-
-        // Check the three chunks in the primary direction of travel
-        const targets = if (@abs(vy) > @abs(vx))
-            [_]Vec2i{ .{ 0, ty }, .{ -1, ty }, .{ 1, ty } } // Vertical lead
-        else
-            [_]Vec2i{ .{ tx, 0 }, .{ tx, -1 }, .{ tx, 1 } }; // Horizontal lead
-
-        for (targets) |off| {
-            if (generated_count >= budget) break;
-            if (player_coord.move(off)) |c| {
-                if (get(c) == null and chunk_cache.findIndex(c) == null) {
-                    _ = chunk_cache.fill(c);
-                    generated_count += 1;
-                }
-            }
+        // Seat the sweep on the leading side, but only on an actual turn: reseating every tick
+        // would restart at the travel path and never reach the rest of that side.
+        const run_start = leadingRunStart(memory.game.player_velocity);
+        if (run_start != last_run_start) {
+            last_run_start = run_start;
+            bg_scan_id = run_start;
         }
 
-        // Standard ring sweep for remaining budget
         var checked: usize = 0;
-        while (generated_count < budget and checked < RING_SIZE) : (checked += 1) {
+        while (precache_filled < precache_budget and checked < RING_SIZE) : (checked += 1) {
             const off = RING_OFFSETS[bg_scan_id];
             bg_scan_id = (bg_scan_id + 1) % RING_SIZE;
             if (player_coord.move(off)) |c| {
                 if (get(c) == null and chunk_cache.findIndex(c) == null) {
                     _ = chunk_cache.fill(c);
-                    generated_count += 1;
+                    precache_filled += 1;
                 }
             }
         }
@@ -1667,6 +1756,7 @@ pub const ChunkCache = struct {
     /// the key last means nothing has to keep proving it.
     pub fn fill(self: *@This(), coord: Coordinate) usize {
         const slot = slotOf(coord);
+        chunks_generated_this_tick +|= 1;
         materializeChunk(&self.chunks[slot], coord.asDepthCoordinate(memory.game.depth));
         self.keys[slot] = coord;
         return slot;
@@ -1719,6 +1809,14 @@ pub const ChunkCache = struct {
 };
 
 pub var chunk_cache: ChunkCache = .{};
+
+/// Chunks `chunk_cache.fill()` has generated since `handleTick()` last zeroed this.
+///
+/// The one measure of how much generation a tick has already paid for.
+/// `SimBuffer.precacheChunks()` reads it at the end of the tick and stands down when a teleport
+/// or a depth change has already blown the frame budget (see `STAND_DOWN_GENERATIONS`).
+/// Saturating, because the count only ever feeds a threshold.
+pub var chunks_generated_this_tick: u32 = 0;
 
 /// The horizon material window: `ANCESTOR_GRID` blocks square, the sole record of material at H.
 pub const HorizonWindow = [QuadCache.ANCESTOR_GRID][QuadCache.ANCESTOR_GRID]Block;
@@ -2070,14 +2168,16 @@ pub var quad_cache: QuadCache = .{
     .ancestor_materials = undefined,
 };
 
-/// The `hash2d()` lane a chunk draws every `Block.seed` from.
+/// The `hash2d()` lane a chunk draws every `Block.seed` from:
+/// a cell's seed is `FastHash.hash2d(seedLane(key), bx, by)`.
 ///
-/// One definition, so a replayed player edit (`ModEntry.applyTo()`) and the terrain beside it
-/// (`ancestor.chunkNoise()`) pick their render variants out of the same stream.
+/// One definition for three producers: the base pass (`generateBaseChunk()`),
+/// the recursive pass (`ancestor.chunkNoise()`), and a cell the player built into.
+/// All three name the same value for the same address.
 /// `Block.seed` is cosmetic only, so this lane is deliberately the weakest of the chunk's four.
 pub fn seedLane(key: DepthCoordinate) Vec2u {
     const seeds = quad_cache.getChunkSeeds(key);
-    return .{ seeds.value[0].value[2], seeds.value[0].value[3] };
+    return .{ seeds.value[3].value[5], seeds.value[3].value[7] };
 }
 
 /// Represents the answer to the question "what is the largest possible suffix value"?
@@ -2198,9 +2298,9 @@ fn materializeChunkInner(chunk: *Chunk, key: DepthCoordinate, comptime view: Sto
     const entry = mod_store.get(key);
     // Generation must never touch the store, or the flag pass skipped above would never be made up for.
     std.debug.assert((entry != null) == (mod_store.contains(key)));
-    if (entry) |e| e.applyTo(chunk, key);
+    if (entry) |e| e.applyTo(chunk);
     // A frozen value beats the live one, so it goes on last.
-    if (frozen) legacy_store.get(key).?.applyTo(chunk, key);
+    if (frozen) legacy_store.get(key).?.applyTo(chunk);
 
     if (!is_base) {
         // Exactly the pass `generateChunkInner()` was told to skip, now that the ids are final.
@@ -2638,8 +2738,8 @@ pub const ModifyBlockTypeResult = enum {
     placed,
     /// Support validation removed the requested primary block after it was written.
     collapsed,
-    /// Normal-play safety rejected a placement before any world state changed.
-    rejected_softlock,
+    /// Anti-softlock logic OR invalid placement type rejected a placement before any world state changed.
+    rejected,
 };
 
 /// Works out the exact primary and paired cells that a block placement will write.
@@ -2667,6 +2767,24 @@ fn planBlockTypeChange(coord: Coordinate, bx: u4, by: u4, new_sprite: Sprite, pr
     return plan;
 }
 
+/// The puff a placement throws off: a few of the block's own colors, out of its center, barely moving.
+///
+/// Screen-fixed like the mining chips, because it is feedback about the ACTION and not about the
+/// place (see the file docs in `render/particles.zig`).
+/// Deliberately weaker than a mining burst: a placement is quiet, and this only has to say that the
+/// click landed.
+const PLACE_PUFF: dw.particles.BurstConfig = .{
+    .count = 5,
+    .speed_min = 0.04,
+    .speed_max = 0.22,
+    .size_min = 0.7,
+    .size_max = 1.6,
+    .spin_min = 0.01,
+    .spin_max = 0.05,
+    .lifetime_min = 10.0,
+    .lifetime_max = 20.0,
+};
+
 /// Applies a block modification, changing the `Sprite` type and resetting `hp`.
 ///
 /// Normal-play callers must use this function for every placement.
@@ -2681,6 +2799,7 @@ pub fn modifyBlockType(
     prev_block: Block,
 ) ModifyBlockTypeResult {
     const plan = planBlockTypeChange(coord, bx, by, new_sprite, prev_block);
+    if (!new_sprite.isInWorld()) return .rejected;
 
     if (!dw.inventory.isInCreative()) {
         var pending: [2]player.PendingPlacement = .{
@@ -2692,7 +2811,7 @@ pub fn modifyBlockType(
             pending[pending_len] = .{ .coord = second.coord, .bx = second.bx, .by = by, .sprite = second.sprite };
             pending_len += 1;
         }
-        if (!player.permitsPlacement(pending[0..pending_len])) return .rejected_softlock;
+        if (!player.permitsPlacement(pending[0..pending_len])) return .rejected;
     }
 
     writeBlockType(plan.first.coord, plan.first.bx, by, plan.first.sprite, plan.first.prev);
@@ -2700,7 +2819,16 @@ pub fn modifyBlockType(
         writeBlockType(second.coord, second.bx, by, second.sprite, second.prev);
         _ = updateLocalEdgeFlags(second.coord, second.bx, by);
     }
-    return if (updateLocalEdgeFlags(coord, bx, by)) .collapsed else .placed;
+    const result: ModifyBlockTypeResult = if (updateLocalEdgeFlags(coord, bx, by)) .collapsed else .placed;
+
+    // One puff for the whole action, even when a pair was written: two would read as a mining burst.
+    // A liquid already throws its own splash in writeBlockType().
+    if (result == .placed and !new_sprite.isEmpty() and !new_sprite.isLiquid()) {
+        if (dw.mouse.getMouseBlockCenterPx()) |center| {
+            dw.particles.spawnSpriteBurst(new_sprite, center, PLACE_PUFF);
+        }
+    }
+    return result;
 }
 
 /// The write half of `modifyBlockType()`: updates `mod_store` and every live cache, WITHOUT validating
@@ -4817,6 +4945,76 @@ test "ModEntry: cells stay indexable by block index regardless of insertion orde
     }
 }
 
+test "precache ring: every cell once, grouped by side, ordered center-out" {
+    const S = SimBuffer;
+    const half: i64 = @as(i64, SIM_BUFFER_WIDTH) / 2;
+    const min_off = -half - 1;
+    const max_off = half;
+    const span = SIM_BUFFER_WIDTH + 2;
+
+    // No duplicates, and nothing off the ring. With the array's own length that also proves
+    // coverage: the box has exactly `span * span - SIM_BUFFER_WIDTH ^ 2` edge cells.
+    try testing.expectEqual(span * span - SIM_BUFFER_WIDTH * SIM_BUFFER_WIDTH, S.RING_SIZE);
+    var seen: [span][span]bool = @splat(@splat(false));
+    for (S.RING_OFFSETS) |off| {
+        const on_edge = off[0] == min_off or off[0] == max_off or
+            off[1] == min_off or off[1] == max_off;
+        try testing.expect(on_edge);
+        const ix: usize = @intCast(off[0] - min_off);
+        const iy: usize = @intCast(off[1] - min_off);
+        try testing.expect(!seen[iy][ix]);
+        seen[iy][ix] = true;
+    }
+
+    // Each run covers one side and nothing else, or `leadingRunStart()` would seat the sweep
+    // on cells the player is moving away from.
+    for (S.RING_OFFSETS[S.RUN_TOP..][0..S.RING_ROW_LEN]) |off| try testing.expectEqual(min_off, off[1]);
+    for (S.RING_OFFSETS[S.RUN_BOTTOM..][0..S.RING_ROW_LEN]) |off| try testing.expectEqual(max_off, off[1]);
+    for (S.RING_OFFSETS[S.RUN_LEFT..][0..S.RING_COLUMN_LEN]) |off| try testing.expectEqual(min_off, off[0]);
+    for (S.RING_OFFSETS[S.RUN_RIGHT..][0..S.RING_COLUMN_LEN]) |off| try testing.expectEqual(max_off, off[0]);
+
+    // Center-out: every run opens on the player's own row or column, and never turns back
+    // toward it. That is what puts the travel path first.
+    // `axis` indexes a vector, so the runs are walked with an inline loop to keep it comptime.
+    inline for (.{
+        .{ S.RUN_TOP, S.RING_ROW_LEN, 0 },
+        .{ S.RUN_BOTTOM, S.RING_ROW_LEN, 0 },
+        .{ S.RUN_LEFT, S.RING_COLUMN_LEN, 1 },
+        .{ S.RUN_RIGHT, S.RING_COLUMN_LEN, 1 },
+    }) |run| {
+        const start, const len, const axis = run;
+        try testing.expectEqual(@as(i64, 0), S.RING_OFFSETS[start][axis]);
+        var last: i64 = 0;
+        for (S.RING_OFFSETS[start..][0..len]) |off| {
+            const distance: i64 = @intCast(@abs(off[axis]));
+            try testing.expect(distance >= last);
+            last = distance;
+        }
+    }
+}
+
+test "precache budget covers one tick of worst-case travel at any tick rate" {
+    // Chunks one frame of travel at the movement bounds costs; see `crossingCost()`.
+    const rate = (player.horizontalMovementMax() + player.verticalMovementMax()) *
+        @as(f64, SIM_BUFFER_WIDTH) / @as(f64, CHUNK_SIZE_SQ);
+
+    var previous: u32 = 0;
+    for ([_]f64{ 0.25, 0.5, 1.0, 2.0, 4.0, 6.0 }) |frames| {
+        const budget = SimBuffer.precacheBudget(frames);
+
+        // The property that matters: a tick can never owe the SimBuffer more than the prefetch
+        // was allowed to do, or the difference lands in one lump on a single frame.
+        try testing.expect(@as(f64, @floatFromInt(budget)) >= frames * rate);
+        // A shorter tick must never be allowed MORE work than a longer one.
+        try testing.expect(budget >= previous);
+        previous = budget;
+    }
+
+    // Rounded up, never down to nothing: skipping nine ticks to do ten chunks on the tenth is
+    // strictly worse than one a tick.
+    try testing.expect(SimBuffer.precacheBudget(0.001) >= 1);
+}
+
 test "ModEntry: unmodified cells read as null and rewrites do not grow the entry" {
     const saved_game = memory.game;
     defer {
@@ -4871,24 +5069,11 @@ test "ModEntry: applyTo overwrites exactly the modified cells" {
     var chunk: Chunk = undefined;
     for (&chunk.blocks) |*b| b.* = .makeBasicBlock(.stone, 0xABCD);
 
-    mod_store.get(key).?.applyTo(&chunk, key);
+    mod_store.get(key).?.applyTo(&chunk);
 
-    const lane = seedLane(key);
     for (chunk.blocks, 0..) |b, i| {
-        switch (i) {
-            5, 200 => {
-                // A replayed cell takes a fresh position-hashed seed, since ModCell stores none
-                // and the cell under it may have generated as air (seed zero).
-                const want: u28 = @truncate(seeding.FastHash.hash2d(
-                    lane,
-                    i & (CHUNK_SIZE - 1),
-                    i >> CHUNK_SIZE_LOG2,
-                ));
-                try testing.expectEqual(want, b.seed);
-            },
-            // Everything the replay does not touch keeps the seed the generator gave it.
-            else => try testing.expectEqual(@as(u28, 0xABCD), b.seed),
-        }
+        // The seed belongs to the CELL, so a replay must never touch it.
+        try testing.expectEqual(@as(u28, 0xABCD), b.seed);
         switch (i) {
             5 => try testing.expectEqual(Sprite.none, b.id),
             200 => {
@@ -4898,9 +5083,66 @@ test "ModEntry: applyTo overwrites exactly the modified cells" {
             else => try testing.expectEqual(Sprite.stone, b.id),
         }
     }
+}
 
-    // Two cells of one chunk must not agree on a variant just because both were placed by hand.
-    try testing.expect(chunk.blocks[5].seed != chunk.blocks[200].seed);
+test "Block.seed is the cell's address, at every depth and for air too" {
+    const saved_game = memory.game;
+    const saved_suffix = max_possible_suffix;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+        max_possible_suffix = saved_suffix;
+        clearCaches(true);
+    }
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
+
+    // The base pass and the recursive pass are different generators and must still agree here.
+    for ([_]u64{ STARTING_ZOOM_TIMES, STARTING_ZOOM_TIMES + 1 }) |depth| {
+        memory.game = .{};
+        memory.deriveHashSeeds();
+        quad_cache.path_hashes.value[0] = memory.game.seed;
+        memory.game.depth = depth;
+        memory.game.max_depth_reached = depth;
+        max_possible_suffix = getMaxSuffixAtDepth(depth);
+        clearCaches(true);
+
+        // Air is the case that used to carry a seed of zero, so the sweep must find some.
+        var air_seen: usize = 0;
+        for (0..8) |cy| {
+            for (0..8) |cx| {
+                const key: DepthCoordinate = .{ .suffix = .{ 30 + cx, 45 + cy }, .depth = depth, .quadrant = 0 };
+                const lane = seedLane(key);
+                var chunk: Chunk = undefined;
+                materializeChunk(&chunk, key);
+
+                for (chunk.blocks, 0..) |b, i| {
+                    if (b.isEmpty()) air_seen += 1;
+                    const want: u28 = @truncate(seeding.FastHash.hash2d(
+                        lane,
+                        i & (CHUNK_SIZE - 1),
+                        i >> CHUNK_SIZE_LOG2,
+                    ));
+                    try testing.expectEqual(want, b.seed);
+                }
+
+                // A replayed player edit must leave every one of those seeds alone.
+                for (0..CHUNK_SIZE_SQ) |i| {
+                    mod_store.beginWrite(key).setCell(@intCast(i), .{ .id = .stone, .base_id = .none, .hp = 0 });
+                }
+                var edited: Chunk = undefined;
+                materializeChunk(&edited, key);
+                for (chunk.blocks, edited.blocks) |g, e| {
+                    try testing.expectEqual(Sprite.stone, e.id);
+                    try testing.expectEqual(g.seed, e.seed);
+                }
+                mod_store.remove(key);
+            }
+        }
+        try testing.expect(air_seen > 100);
+    }
 }
 
 test "ModificationStore: remove drops the chunk and recycles its slot" {
@@ -5212,7 +5454,7 @@ test "placement guard blocks self-encasement and keeps pairs coherent" {
     };
     SimBuffer.sync(memory.game.getPlayerCoord());
     try testing.expectEqual(
-        ModifyBlockTypeResult.rejected_softlock,
+        ModifyBlockTypeResult.rejected,
         modifyBlockType(coord, at.bx, at.by, .stone, .empty),
     );
     try testing.expect(mod_store.get(key) == null);
@@ -5240,7 +5482,7 @@ test "placement guard blocks self-encasement and keeps pairs coherent" {
     SimBuffer.sync(memory.game.getPlayerCoord());
 
     try testing.expectEqual(
-        ModifyBlockTypeResult.rejected_softlock,
+        ModifyBlockTypeResult.rejected,
         modifyBlockType(coord, at.bx, lower_by, .amethyst, .empty),
     );
     try testing.expectEqual(Sprite.none, mod_store.getCell(key, lower_idx).?.id);
@@ -5280,7 +5522,7 @@ test "placement guard blocks self-encasement and keeps pairs coherent" {
     };
     try testing.expect(!player.permitsPlacement(&portal_pending));
     try testing.expectEqual(
-        ModifyBlockTypeResult.rejected_softlock,
+        ModifyBlockTypeResult.rejected,
         modifyBlockType(coord, at.bx, at.by, .portal, .empty),
     );
     try testing.expect(mod_store.getCell(key, center_idx) == null);

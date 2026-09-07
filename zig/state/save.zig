@@ -279,6 +279,11 @@ fn writeSpriteTable(w: *Writer) !void {
 fn readSpriteTable(r: *Reader) !void {
     id_remap.clearRetainingCapacity();
     const n = try r.varint();
+    // A save can name at most one row per sprite id, so a larger count is a corrupt blob,
+    // not a bigger world. Refuse it BEFORE reserving: `n` is an untrusted varint and would
+    // otherwise size an allocation.
+    if (n > sprite.max_sprite_value + 1) return SaveError.BadData;
+    try id_remap.ensureTotalCapacity(save_alloc, @intCast(n));
     for (0..@intCast(n)) |_| {
         const old_id = try r.int(u16);
         const name = try r.str();
@@ -957,6 +962,11 @@ var snapshot_entries_len: [2]usize = .{ 0, 0 };
 /// `beginSnapshotInner()` precompute the section length even though entries grow as the player keeps editing.
 var shadow: std.AutoHashMapUnmanaged(ShadowKey, []u8) = .empty;
 
+/// Entries `shadow` is sized for at the start of a snapshot.
+/// A snapshot spans a few frames, so this is how many distinct chunks the player can edit inside
+/// one; well past what a hand on a mouse can reach.
+const SHADOW_RESERVE = 64;
+
 /// Drops every preserved payload. `shadow` owns its values, unlike the old whole-`Chunk` map.
 fn clearShadow() void {
     var it = shadow.valueIterator();
@@ -1027,6 +1037,17 @@ fn beginSnapshotInner() !void {
     try writeTools(&w);
     try writeMisc(&w);
     try writeAscentStack(&w);
+
+    // The plan is exactly one entry per modified chunk in each store, and both counts are known
+    // now, so it is sized once rather than doubled its way there while the player is mid-build.
+    try plan.ensureTotalCapacity(
+        save_alloc,
+        world.mod_store.index.count() + world.legacy_store.index.count(),
+    );
+    // `shadow` is filled LAZILY, only for planned entries the player touches before the snapshot
+    // encodes them. That is a handful, not the whole plan, so it gets a small fixed reserve:
+    // sizing it to the plan would allocate for thousands of chunks to hold about three.
+    try shadow.ensureTotalCapacity(save_alloc, SHADOW_RESERVE);
 
     // `mod_store` first, then `legacy_store`: the cursor crossing `mod_plan_len` is the section break.
     inline for (.{ StoreId.mods, StoreId.legacy }) |id| {

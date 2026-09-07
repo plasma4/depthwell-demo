@@ -95,6 +95,51 @@ comptime {
         @compileError("`GRAVITY_MULT_BASE` is the unshaped case and must leave gravity alone.");
 }
 
+// ----
+// Movement limits.
+//
+// `world.SimBuffer.precacheChunks()` sizes its per-tick budget from these, so they must stay
+// true when a tuning slider moves. That is why they are functions and not constants: with
+// `dev_menu` off every knob below is a `const` and each one folds to a literal anyway.
+//
+// Every value is in world pixels per 60 FPS FRAME, the same unit as `game.player_velocity`,
+// and none of them depends on `logic_speed`. `move()` integrates the decay in closed form, so
+// its steady state is a fixed point of that map and one tick at speed 2 lands where two ticks
+// at speed 1 do.
+// ----
+
+/// Fastest the player can ever travel horizontally.
+///
+/// `move()` is a damped linear system: `v' = v * (1 - r) + input * (1 - r)`.
+/// Its fixed point is `input * (1 - r) / r`, so the top speed moves when either
+/// `PLAYER_ACCEL` or `DECAY_RATE_ACCEL_X` does.
+/// Ghost mode feeds the SAME equation a `GHOST_SPEED_MULT` times larger input,
+/// so it sets the ceiling wherever the debug menu is compiled in.
+pub inline fn horizontalMovementMax() f64 {
+    const input = PLAYER_ACCEL * (if (dw.dev_menu) GHOST_SPEED_MULT else 1.0);
+    return input * (1.0 - DECAY_RATE_ACCEL_X) / DECAY_RATE_ACCEL_X;
+}
+
+/// Fastest the player can ever travel vertically.
+///
+/// Falling is capped outright by `VELOCITY_FALL_MAX`.
+/// Rising is NOT a steady state: a jump assigns `-JUMP_FORCE` in one tick, so the rise is
+/// bounded by the jump itself rather than by any decay.
+/// A ghost flies on the X constants (see `move()`), so it reuses that bound here.
+pub inline fn verticalMovementMax() f64 {
+    const flight = if (dw.dev_menu) horizontalMovementMax() else 0.0;
+    return @max(@max(VELOCITY_FALL_MAX, JUMP_FORCE), flight);
+}
+
+/// Why the prefetch cannot budget from the LIVE velocity, only from the two bounds above.
+///
+/// X reverses in about three ticks, so it is at least predictable.
+/// Y is not: a jump ASSIGNS `-JUMP_FORCE` in one tick rather than accelerating into it, and a
+/// grounded player at rest is always one keypress from that. So the worst case for the next
+/// tick is the global bound whatever the player is doing right now, and there is nothing to
+/// gain by scaling the budget down when they happen to be standing still.
+/// The live velocity does still pick the DIRECTION to prefetch first.
+
 /// The size of the player's width. The player is assumed to be centered at the bottom as a rectangle.
 pub const PLAYER_HITBOX_WIDTH = 128;
 /// The size of the player's height. The player is assumed to be centered at the bottom as a rectangle.
@@ -743,17 +788,16 @@ fn addDust(
     origin: Vec2f32,
     kick: Vec2f32,
     size: f32,
-    life: u16,
+    life: f32,
     sink: f32,
     ground: Sprite,
     ground_chroma_mult: f32,
 ) void {
-    std.debug.assert(life > 0); // the brake divides by it
-    const frames: f32 = @floatFromInt(life);
+    std.debug.assert(life > 0.0); // the brake divides by it
     dw.particles.addParticle(.{
         .position = origin,
         .velocity = kick,
-        .accel = .{ -kick[0] / frames, -kick[1] / frames + sink },
+        .accel = .{ -kick[0] / life, -kick[1] / life + sink },
         .rotation = dustRand(0.0, std.math.tau),
         .spin = dustRand(-DUST_SPIN_MAX, DUST_SPIN_MAX),
         .size = size,
@@ -825,7 +869,7 @@ fn spawnRunDust(zoom: f32, frac: f64) void {
     var adjacent_floor = false;
     const ground = floorUnder(point, &adjacent_floor);
 
-    const life: u16 = @intFromFloat(dustRand(24.0, 44.0));
+    const life = dustRand(24.0, 44.0);
     const kick: Vec2f32 = .{
         -dir * dustRand(0.12, 0.34) * speed,
         -dustRand(0.10, 0.34),
@@ -861,7 +905,7 @@ fn spawnJumpDust(zoom: f32) void {
         // A downward half circle: the puff is the ground being pushed, not the player rising.
         const angle = dustRand(0.20, std.math.pi - 0.20);
         const speed = dustRand(0.40, 1.15);
-        const life: u16 = @intFromFloat(dustRand(20.0, 36.0));
+        const life = dustRand(20.0, 36.0);
         const kick: Vec2f32 = .{ @cos(angle) * speed, @sin(angle) * speed * 0.5 };
         addDust(
             origin,
@@ -902,7 +946,7 @@ fn spawnLandDust(zoom: f32, impact_velocity: f64) void {
         var adjacent_floor = false;
         const ground = floorUnder(point, &adjacent_floor);
 
-        const life: u16 = @intFromFloat(dustRand(26.0, 50.0));
+        const life = dustRand(26.0, 50.0);
         const kick: Vec2f32 = .{
             side * dustRand(0.45, 1.05) * (0.6 + strength),
             -dustRand(0.05, 0.45) * (0.4 + strength),
@@ -931,7 +975,7 @@ fn spawnSlideDust(zoom: f32, frac: f64) void {
     const point = pathPointSub(frac, contact);
     const origin = dw.particles.anchorScreenPx(point);
 
-    const life: u16 = @intFromFloat(dustRand(22.0, 40.0));
+    const life = dustRand(22.0, 40.0);
     const kick: Vec2f32 = .{
         -dir * dustRand(0.06, 0.26),
         -dustRand(0.05, 0.22),
@@ -970,7 +1014,7 @@ fn spawnCeilingDust(zoom: f32, impact_velocity: f64) void {
         // Downward cone: dislodged particles shower downward and scatter slightly outward
         const angle = dustRand(0.15 * std.math.pi, 0.85 * std.math.pi);
         const speed = dustRand(0.30, 1.10) * (0.6 + strength * 0.5);
-        const life: u16 = @intFromFloat(dustRand(18.0, 36.0));
+        const life = dustRand(18.0, 36.0);
         const kick: Vec2f32 = .{ @cos(angle) * speed, @sin(angle) * speed };
         addDust(
             dw.particles.anchorScreenPx(point) + Vec2f32{ 0.0, dustRand(0.0, 1.5) * zoom },

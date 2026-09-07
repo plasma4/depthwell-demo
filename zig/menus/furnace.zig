@@ -196,7 +196,7 @@ fn drawDragIcon(mouse_px: Vec2f) void {
     }
 
     // Sine-wave wiggle effect that changes based no drag speed
-    const frame: f32 = @floatFromInt(dw.memory.game.frame);
+    const frame: f32 = @floatCast(dw.chunks.animFrame());
     const wiggle_amount: f32 = @min(@as(f32, @floatCast(uv_speed)) * 14.0, 1.0);
     const wiggle: f32 = @sin(frame * 0.6) * wiggle_amount; // radians
 
