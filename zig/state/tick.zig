@@ -125,6 +125,10 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
         dw.chunks.bg_time_step = (logic_speed / TICK_RATE) * dw.portal.backgroundRate();
         memory.game.bg_time += dw.chunks.bg_time_step;
 
+        // Sprite animation runs on real frames, not on ticks; see chunks.anim_frame.
+        dw.chunks.anim_frame_step = logic_speed;
+        dw.chunks.anim_frame += logic_speed;
+
         if (descending) {
             dw.portal.tick(logic_speed);
         } else {

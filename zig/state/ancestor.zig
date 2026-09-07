@@ -802,20 +802,25 @@ pub fn applyAncestorLogic(
     by: u4,
 ) memory.BlockSpec {
     const parent_sprite = parent_block.id;
+    const chunk_noise = chunkNoise(key);
+
+    // `Block.seed` belongs to the cell ADDRESS, not to what occupies it, so EVERY branch below
+    // carries this value, air included.
+    // A cell that generated air with a seed of zero would hand the block the player builds into it
+    // variant 0, then a different variant the first time the chunk regenerates.
+    const noise_hash_2 = seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by);
+    const air: memory.BlockSpec = .{ .seed = noise_hash_2 };
 
     // Empty parents do not create terrain. Only an enclosed outer corner can borrow foundation terrain.
     if (parent_sprite.isEmpty()) {
         const lx: u4 = @intCast(bx % dw.BLOCKS_PER_PARENT);
         const ly: u4 = @intCast(by % dw.BLOCKS_PER_PARENT);
-        const source = enclosedInfillSource(parent_neighbors, lx, ly) orelse return .{};
-        const chunk_noise = chunkNoise(key);
+        const source = enclosedInfillSource(parent_neighbors, lx, ly) orelse return air;
         const wx = worldBlock(@intCast(key.quadrant % 2), key.suffix[0], bx);
         const wy = worldBlock(@intCast(key.quadrant / 2), key.suffix[1], by);
-        if (!infillsCorner(chunk_noise.noise_seed, wx, wy)) return .{};
-        return infillSpec(source, seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by));
+        if (!infillsCorner(chunk_noise.noise_seed, wx, wy)) return air;
+        return infillSpec(source, noise_hash_2);
     }
-    const chunk_noise = chunkNoise(key);
-    const noise_hash_2 = seeding.FastHash.hash2d(chunk_noise.hash_lane, bx, by);
     if (parent_sprite == .edge_stone)
         return .{ .id = parent_sprite, .seed = noise_hash_2 };
 
@@ -849,6 +854,9 @@ pub fn applyAncestorLogic(
     // Water fills its unclaimed cells first. A dry plan can borrow support terrain into an enclosed corner.
     if (dw.refine.ruleFor(parent_sprite)) |rule| {
         var refined = dw.refine.refineChild(rule, cell);
+        // Same value `refineChild()` already wrote through `cell.seed`, restated so an unclaimed
+        // (air) cell keeps its address seed too.
+        refined.seed = noise_hash_2;
         if (refined.id.isSolid()) refined.water_volume = 0;
         if (refined.id != .none) return refined;
 
@@ -877,7 +885,7 @@ pub fn applyAncestorLogic(
         }
 
         const volume = inheritedLiquidVolume(parent_block.hp, ly);
-        if (volume == 0) return .{};
+        if (volume == 0) return air;
         return .{
             .id = dw.refine.evolve(parent_sprite, cell).id,
             .seed = noise_hash_2,
@@ -903,7 +911,7 @@ pub fn applyAncestorLogic(
     const warp = warpField(noise_seed, wx, wy);
     if (!anchorsPortal(parent_neighbors) and
         !dw.refine.protectsSurfaceCell(parent_neighbors, noise_seed, wx, wy, lx, ly) and
-        carvesSlope(parent_block, parent_neighbors, noise_seed, warp, wx, wy, lx, ly)) return .{};
+        carvesSlope(parent_block, parent_neighbors, noise_seed, warp, wx, wy, lx, ly)) return air;
 
     // The child survived. Select its source material from this parent or a warped neighbor.
     const source = warpedMaterial(parent_block, parent_neighbors, warp, lx, ly);

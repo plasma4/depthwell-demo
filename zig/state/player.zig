@@ -743,17 +743,16 @@ fn addDust(
     origin: Vec2f32,
     kick: Vec2f32,
     size: f32,
-    life: u16,
+    life: f32,
     sink: f32,
     ground: Sprite,
     ground_chroma_mult: f32,
 ) void {
-    std.debug.assert(life > 0); // the brake divides by it
-    const frames: f32 = @floatFromInt(life);
+    std.debug.assert(life > 0.0); // the brake divides by it
     dw.particles.addParticle(.{
         .position = origin,
         .velocity = kick,
-        .accel = .{ -kick[0] / frames, -kick[1] / frames + sink },
+        .accel = .{ -kick[0] / life, -kick[1] / life + sink },
         .rotation = dustRand(0.0, std.math.tau),
         .spin = dustRand(-DUST_SPIN_MAX, DUST_SPIN_MAX),
         .size = size,
@@ -825,7 +824,7 @@ fn spawnRunDust(zoom: f32, frac: f64) void {
     var adjacent_floor = false;
     const ground = floorUnder(point, &adjacent_floor);
 
-    const life: u16 = @intFromFloat(dustRand(24.0, 44.0));
+    const life = dustRand(24.0, 44.0);
     const kick: Vec2f32 = .{
         -dir * dustRand(0.12, 0.34) * speed,
         -dustRand(0.10, 0.34),
@@ -861,7 +860,7 @@ fn spawnJumpDust(zoom: f32) void {
         // A downward half circle: the puff is the ground being pushed, not the player rising.
         const angle = dustRand(0.20, std.math.pi - 0.20);
         const speed = dustRand(0.40, 1.15);
-        const life: u16 = @intFromFloat(dustRand(20.0, 36.0));
+        const life = dustRand(20.0, 36.0);
         const kick: Vec2f32 = .{ @cos(angle) * speed, @sin(angle) * speed * 0.5 };
         addDust(
             origin,
@@ -902,7 +901,7 @@ fn spawnLandDust(zoom: f32, impact_velocity: f64) void {
         var adjacent_floor = false;
         const ground = floorUnder(point, &adjacent_floor);
 
-        const life: u16 = @intFromFloat(dustRand(26.0, 50.0));
+        const life = dustRand(26.0, 50.0);
         const kick: Vec2f32 = .{
             side * dustRand(0.45, 1.05) * (0.6 + strength),
             -dustRand(0.05, 0.45) * (0.4 + strength),
@@ -931,7 +930,7 @@ fn spawnSlideDust(zoom: f32, frac: f64) void {
     const point = pathPointSub(frac, contact);
     const origin = dw.particles.anchorScreenPx(point);
 
-    const life: u16 = @intFromFloat(dustRand(22.0, 40.0));
+    const life = dustRand(22.0, 40.0);
     const kick: Vec2f32 = .{
         -dir * dustRand(0.06, 0.26),
         -dustRand(0.05, 0.22),
@@ -970,7 +969,7 @@ fn spawnCeilingDust(zoom: f32, impact_velocity: f64) void {
         // Downward cone: dislodged particles shower downward and scatter slightly outward
         const angle = dustRand(0.15 * std.math.pi, 0.85 * std.math.pi);
         const speed = dustRand(0.30, 1.10) * (0.6 + strength * 0.5);
-        const life: u16 = @intFromFloat(dustRand(18.0, 36.0));
+        const life = dustRand(18.0, 36.0);
         const kick: Vec2f32 = .{ @cos(angle) * speed, @sin(angle) * speed };
         addDust(
             dw.particles.anchorScreenPx(point) + Vec2f32{ 0.0, dustRand(0.0, 1.5) * zoom },
