@@ -184,9 +184,11 @@ inline fn columnCellBeyond(coord: Coordinate, r: u32, depth: u64, comptime dir: 
 /// As in, it does not use something like cellular noise that needs a whole map up front.
 pub fn generateBaseChunk(chunk: *Chunk, coord: Coordinate) void {
     const depth = STARTING_ZOOM_TIMES;
-    const chunk_seeds = quad_cache.getChunkSeeds(coord.asDepthCoordinate(depth));
-
-    var rng_seed = seeding.ChaCha12.init(&chunk_seeds.value[3]); // Seed data only.
+    // `Block.seed` is keyed on the cell ADDRESS, exactly as the recursive depths key it
+    // (see `seedLane()` and `ancestor.applyAncestorLogic()`).
+    // A per-chunk stream read in loop order would work too, right up until a replayed player edit
+    // had to name the same value without replaying the loop.
+    const lane = seedLane(coord.asDepthCoordinate(depth));
 
     const suffix = coord.suffix;
     const cx = suffix[0];
@@ -200,7 +202,7 @@ pub fn generateBaseChunk(chunk: *Chunk, coord: Coordinate) void {
                 .id = bf.id,
                 // Overlay sprites remember the stone they replaced so the shader can composite them over it.
                 .base_id = if (bf.id.isOverlay()) bf.base else .none,
-                .seed = rng_seed.next(),
+                .seed = seeding.FastHash.hash2d(lane, block_x, block_y),
                 .water_volume = bf.water_volume,
             };
             chunk.blocks[idx] = spec.compile();
@@ -284,7 +286,7 @@ fn computeColumnSeeds(comptime f: dw.decorations.ColumnFeature, key: DepthCoordi
 }
 
 // Everything else in a Block is derived and is rebuilt by materializeChunk(), hence why ModCell is so simple!
-// - seed gets regenerated in block-index order (generateBaseChunk(), generateChunk()).
+// - seed is a property of the cell address, so generation writes the same value every time.
 // - the three light channels are written only into the per-frame render scratch buffer (applyLighting()).
 // - edge_flags, id_edge_flags, and water are recomputed from neighbor id+hp by the flag passes.
 
@@ -363,28 +365,18 @@ pub const ModEntry = struct {
     /// Replays every modified cell over a freshly generated chunk.
     /// The caller MUST then rerun the flag pass: replaying ids invalidates the generated edge and water flags.
     ///
-    /// A replayed cell also takes a FRESH `Block.seed` from `seedLane()`.
-    /// `ModCell` does not store a seed, so a cell keeps whatever the generator left there,
-    /// and an empty cell is left with a seed of zero at every recursive depth
-    /// (`ancestor.applyAncestorLogic()` returns early for air).
-    /// Without this, every block the player builds into open space picks the same
-    /// seed-driven variant (see `variation.seedPick()`).
-    pub fn applyTo(self: *const @This(), chunk: *Chunk, key: DepthCoordinate) void {
-        const lane = seedLane(key);
+    /// `Block.seed` is deliberately left alone.
+    /// `ModCell` stores no seed because the seed belongs to the cell address, not to the block:
+    /// generation already stamped it from `seedLane()`, air cells included.
+    /// So a block the player builds keeps the variant it had the moment it was placed.
+    pub fn applyTo(self: *const @This(), chunk: *Chunk) void {
         var i: usize = 0;
         for (0..MODIFIED_WORDS) |w| {
             var bits = self.modified[w];
             while (bits != 0) : (i += 1) {
                 const bit = @ctz(bits);
                 bits &= bits - 1;
-                const index = (w << 6) | bit;
-                const block = &chunk.blocks[index];
-                self.cells[i].applyTo(block);
-                block.seed = @truncate(seeding.FastHash.hash2d(
-                    lane,
-                    index & (CHUNK_SIZE - 1),
-                    index >> CHUNK_SIZE_LOG2,
-                ));
+                self.cells[i].applyTo(&chunk.blocks[(w << 6) | bit]);
             }
         }
     }
@@ -2070,10 +2062,12 @@ pub var quad_cache: QuadCache = .{
     .ancestor_materials = undefined,
 };
 
-/// The `hash2d()` lane a chunk draws every `Block.seed` from.
+/// The `hash2d()` lane a chunk draws every `Block.seed` from:
+/// a cell's seed is `FastHash.hash2d(seedLane(key), bx, by)`.
 ///
-/// One definition, so a replayed player edit (`ModEntry.applyTo()`) and the terrain beside it
-/// (`ancestor.chunkNoise()`) pick their render variants out of the same stream.
+/// One definition, so the base pass (`generateBaseChunk()`), the recursive pass
+/// (`ancestor.chunkNoise()`), and a cell the player built into all name the same value for the
+/// same address.
 /// `Block.seed` is cosmetic only, so this lane is deliberately the weakest of the chunk's four.
 pub fn seedLane(key: DepthCoordinate) Vec2u {
     const seeds = quad_cache.getChunkSeeds(key);
@@ -2198,9 +2192,9 @@ fn materializeChunkInner(chunk: *Chunk, key: DepthCoordinate, comptime view: Sto
     const entry = mod_store.get(key);
     // Generation must never touch the store, or the flag pass skipped above would never be made up for.
     std.debug.assert((entry != null) == (mod_store.contains(key)));
-    if (entry) |e| e.applyTo(chunk, key);
+    if (entry) |e| e.applyTo(chunk);
     // A frozen value beats the live one, so it goes on last.
-    if (frozen) legacy_store.get(key).?.applyTo(chunk, key);
+    if (frozen) legacy_store.get(key).?.applyTo(chunk);
 
     if (!is_base) {
         // Exactly the pass `generateChunkInner()` was told to skip, now that the ids are final.
@@ -2638,8 +2632,8 @@ pub const ModifyBlockTypeResult = enum {
     placed,
     /// Support validation removed the requested primary block after it was written.
     collapsed,
-    /// Normal-play safety rejected a placement before any world state changed.
-    rejected_softlock,
+    /// Anti-softlock logic OR invalid placement type rejected a placement before any world state changed.
+    rejected,
 };
 
 /// Works out the exact primary and paired cells that a block placement will write.
@@ -2681,6 +2675,7 @@ pub fn modifyBlockType(
     prev_block: Block,
 ) ModifyBlockTypeResult {
     const plan = planBlockTypeChange(coord, bx, by, new_sprite, prev_block);
+    if (!new_sprite.isInWorld()) return .rejected;
 
     if (!dw.inventory.isInCreative()) {
         var pending: [2]player.PendingPlacement = .{
@@ -2692,7 +2687,7 @@ pub fn modifyBlockType(
             pending[pending_len] = .{ .coord = second.coord, .bx = second.bx, .by = by, .sprite = second.sprite };
             pending_len += 1;
         }
-        if (!player.permitsPlacement(pending[0..pending_len])) return .rejected_softlock;
+        if (!player.permitsPlacement(pending[0..pending_len])) return .rejected;
     }
 
     writeBlockType(plan.first.coord, plan.first.bx, by, plan.first.sprite, plan.first.prev);
@@ -4871,24 +4866,11 @@ test "ModEntry: applyTo overwrites exactly the modified cells" {
     var chunk: Chunk = undefined;
     for (&chunk.blocks) |*b| b.* = .makeBasicBlock(.stone, 0xABCD);
 
-    mod_store.get(key).?.applyTo(&chunk, key);
+    mod_store.get(key).?.applyTo(&chunk);
 
-    const lane = seedLane(key);
     for (chunk.blocks, 0..) |b, i| {
-        switch (i) {
-            5, 200 => {
-                // A replayed cell takes a fresh position-hashed seed, since ModCell stores none
-                // and the cell under it may have generated as air (seed zero).
-                const want: u28 = @truncate(seeding.FastHash.hash2d(
-                    lane,
-                    i & (CHUNK_SIZE - 1),
-                    i >> CHUNK_SIZE_LOG2,
-                ));
-                try testing.expectEqual(want, b.seed);
-            },
-            // Everything the replay does not touch keeps the seed the generator gave it.
-            else => try testing.expectEqual(@as(u28, 0xABCD), b.seed),
-        }
+        // The seed belongs to the CELL, so a replay must never touch it.
+        try testing.expectEqual(@as(u28, 0xABCD), b.seed);
         switch (i) {
             5 => try testing.expectEqual(Sprite.none, b.id),
             200 => {
@@ -4898,9 +4880,66 @@ test "ModEntry: applyTo overwrites exactly the modified cells" {
             else => try testing.expectEqual(Sprite.stone, b.id),
         }
     }
+}
 
-    // Two cells of one chunk must not agree on a variant just because both were placed by hand.
-    try testing.expect(chunk.blocks[5].seed != chunk.blocks[200].seed);
+test "Block.seed is the cell's address, at every depth and for air too" {
+    const saved_game = memory.game;
+    const saved_suffix = max_possible_suffix;
+    defer {
+        memory.game = saved_game;
+        memory.deriveHashSeeds();
+        max_possible_suffix = saved_suffix;
+        clearCaches(true);
+    }
+    mod_store.init(testing.allocator);
+    defer mod_store.deinit();
+    legacy_store.init(testing.allocator);
+    defer legacy_store.deinit();
+
+    // The base pass and the recursive pass are different generators and must still agree here.
+    for ([_]u64{ STARTING_ZOOM_TIMES, STARTING_ZOOM_TIMES + 1 }) |depth| {
+        memory.game = .{};
+        memory.deriveHashSeeds();
+        quad_cache.path_hashes.value[0] = memory.game.seed;
+        memory.game.depth = depth;
+        memory.game.max_depth_reached = depth;
+        max_possible_suffix = getMaxSuffixAtDepth(depth);
+        clearCaches(true);
+
+        // Air is the case that used to carry a seed of zero, so the sweep must find some.
+        var air_seen: usize = 0;
+        for (0..8) |cy| {
+            for (0..8) |cx| {
+                const key: DepthCoordinate = .{ .suffix = .{ 30 + cx, 45 + cy }, .depth = depth, .quadrant = 0 };
+                const lane = seedLane(key);
+                var chunk: Chunk = undefined;
+                materializeChunk(&chunk, key);
+
+                for (chunk.blocks, 0..) |b, i| {
+                    if (b.isEmpty()) air_seen += 1;
+                    const want: u28 = @truncate(seeding.FastHash.hash2d(
+                        lane,
+                        i & (CHUNK_SIZE - 1),
+                        i >> CHUNK_SIZE_LOG2,
+                    ));
+                    try testing.expectEqual(want, b.seed);
+                }
+
+                // A replayed player edit must leave every one of those seeds alone.
+                for (0..CHUNK_SIZE_SQ) |i| {
+                    mod_store.beginWrite(key).setCell(@intCast(i), .{ .id = .stone, .base_id = .none, .hp = 0 });
+                }
+                var edited: Chunk = undefined;
+                materializeChunk(&edited, key);
+                for (chunk.blocks, edited.blocks) |g, e| {
+                    try testing.expectEqual(Sprite.stone, e.id);
+                    try testing.expectEqual(g.seed, e.seed);
+                }
+                mod_store.remove(key);
+            }
+        }
+        try testing.expect(air_seen > 100);
+    }
 }
 
 test "ModificationStore: remove drops the chunk and recycles its slot" {
@@ -5212,7 +5251,7 @@ test "placement guard blocks self-encasement and keeps pairs coherent" {
     };
     SimBuffer.sync(memory.game.getPlayerCoord());
     try testing.expectEqual(
-        ModifyBlockTypeResult.rejected_softlock,
+        ModifyBlockTypeResult.rejected,
         modifyBlockType(coord, at.bx, at.by, .stone, .empty),
     );
     try testing.expect(mod_store.get(key) == null);
@@ -5240,7 +5279,7 @@ test "placement guard blocks self-encasement and keeps pairs coherent" {
     SimBuffer.sync(memory.game.getPlayerCoord());
 
     try testing.expectEqual(
-        ModifyBlockTypeResult.rejected_softlock,
+        ModifyBlockTypeResult.rejected,
         modifyBlockType(coord, at.bx, lower_by, .amethyst, .empty),
     );
     try testing.expectEqual(Sprite.none, mod_store.getCell(key, lower_idx).?.id);
@@ -5280,7 +5319,7 @@ test "placement guard blocks self-encasement and keeps pairs coherent" {
     };
     try testing.expect(!player.permitsPlacement(&portal_pending));
     try testing.expectEqual(
-        ModifyBlockTypeResult.rejected_softlock,
+        ModifyBlockTypeResult.rejected,
         modifyBlockType(coord, at.bx, at.by, .portal, .empty),
     );
     try testing.expect(mod_store.getCell(key, center_idx) == null);

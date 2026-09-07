@@ -434,8 +434,13 @@ pub const Block = packed struct(u128) {
     /// - For solid blocks: how "mined" the block is (0 means unmined, 15 is most mined).
     /// - For liquid (water) and decoration blocks: the water volume level from 0 to 15.
     hp: u4,
-    /// Per-block seed for procedural variation in the shader.
+    /// Per-cell seed for procedural variation in the shader and in `variation.seedPick()`.
     /// Any seed value here should be considered poor and insecure.
+    ///
+    /// Keyed on the cell ADDRESS, never on what occupies it: `world.seedLane()` hashed with the
+    /// block's position in its chunk.
+    /// Generation writes it for air as well as for terrain, and a replayed player edit leaves it
+    /// alone, so a cell's variant survives a save, a cache eviction, and being built into.
     seed: u28,
 
     /// The background tile behind an overlay sprite, such as the stone an ore grew inside.
