@@ -88,7 +88,7 @@ pub var selected_row: u16 = 0;
 /// Slice array type for possible slots.
 pub const SlotBuffer = [sprite.item_sprite_count + 1]Sprite;
 
-/// Current sprite selected to place.
+/// Current sprite selected to use or place.
 /// A value of `.none` represents the pickaxe; `.unselected` represents nothing being chosen.
 pub var selected_sprite: Sprite = .none;
 

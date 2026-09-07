@@ -36,6 +36,32 @@ pub var current_dt: f64 = 0.0;
 /// Not saved, because the first tick after a load rewrites it.
 pub var bg_time_step: f64 = 0.0;
 
+/// Sprite animation clock, counted in 60 FPS FRAMES rather than in ticks.
+///
+/// `game.frame` counts ticks, so a `variation.animate` rule and the campfire flame both ran
+/// `logic_speed` times slower in real seconds whenever the tick rate dropped.
+/// `handleTick()` advances this by `logic_speed` instead, so a period stays a period in SECONDS.
+///
+/// A period shorter than one tick still strobes at a low tick rate.
+/// That is accepted: the floor is 15 FPS, so the shortest honest period is about 4 frames.
+///
+/// Not saved: an animation phase is not worth a save field, and a load restarting it at 0 is invisible.
+pub var anim_frame: f64 = 0.0;
+
+/// How far `anim_frame` moved on the last logic tick; see `bg_time_step`.
+pub var anim_frame_step: f64 = 0.0;
+
+/// `anim_frame` interpolated to THIS render frame.
+/// Every animated sprite must read this, not `game.frame`.
+///
+/// Takes the position curve (see `current_dt`).
+/// So six render frames of one 10 FPS tick show six animation frames,
+/// instead of one held frame and then a jump.
+/// Never negative, so a caller can convert it to an integer frame index directly.
+pub inline fn animFrame() f64 {
+    return @max(0.0, anim_frame + anim_frame_step * current_dt);
+}
+
 /// Grid-aligned player position in logical viewport pixels, at the center of the sprite.
 /// The viewport is 480x270, and this is recomputed every render frame.
 /// The player is drawn as a render entity, so the entity pass shares this.
@@ -344,7 +370,8 @@ pub fn updateOverlayChunks(canvas_w: f64, canvas_h: f64) void {
 
 /// Rasterizes one layer into the scratch buffer and publishes its render properties.
 fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
-    const game = &memory.game;
+    // read once, so both layers of a portal descent animate on the same frame
+    const anim = animFrame();
     // calculate effective zoom
     const resolution_scale = canvas_w / @as(f64, dw.SCREEN_WIDTH);
     const interpolated_zoom = pass.zoom;
@@ -430,7 +457,7 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
 
                         // asked here, rather than in the later grid walk, because this loop
                         // still knows which chunk cell the tile came from.
-                        if (dw.entity.blockOverlay(block, game.frame)) |overlay| {
+                        if (dw.entity.blockOverlay(block, anim)) |overlay| {
                             dw.entity.queueBlockEntity(
                                 overlay,
                                 .{
@@ -470,7 +497,7 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
     const player_by: f32 = @floatCast(@as(f64, @floatFromInt(-min_cy * CHUNK_SIZE)) + pass.player[1] / subpixels_per_block);
     dw.lighting.applyLighting(out, wb, hb, player_bx, player_by);
 
-    applyVariation(out, wb, game.frame);
+    applyVariation(out, wb, anim);
     updateRenderProperties(pass, interp_cam_x, interp_cam_y, wb, hb, min_cx, min_cy, effective_zoom, interpolated_zoom);
     publishBackgroundGrid(effective_zoom, canvas_w, canvas_h);
 }
@@ -522,7 +549,7 @@ fn tilePlacement(pass: LayerPass, cam_x: f64, cam_y: f64, min_cx: i32, min_cy: i
 /// absolute tile parity.
 /// A positional variant, such as 2x2 stone or checkerboard edge stone, then shows no
 /// join across the world, exactly as the old shader did.
-fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
+fn applyVariation(out: []memory.Block, wb: u32, frame: f64) void {
     // Walked row by row rather than by flat index. The tile coordinates are the only thing
     // the index was ever for, and recovering them per block costs a divide and a modulo on
     // every cell of the screen.
