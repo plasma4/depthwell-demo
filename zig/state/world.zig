@@ -2638,8 +2638,8 @@ pub const ModifyBlockTypeResult = enum {
     placed,
     /// Support validation removed the requested primary block after it was written.
     collapsed,
-    /// Normal-play safety rejected a placement before any world state changed.
-    rejected_softlock,
+    /// Anti-softlock logic OR invalid placement type rejected a placement before any world state changed.
+    rejected,
 };
 
 /// Works out the exact primary and paired cells that a block placement will write.
@@ -2681,6 +2681,7 @@ pub fn modifyBlockType(
     prev_block: Block,
 ) ModifyBlockTypeResult {
     const plan = planBlockTypeChange(coord, bx, by, new_sprite, prev_block);
+    if (!new_sprite.isInWorld()) return .rejected;
 
     if (!dw.inventory.isInCreative()) {
         var pending: [2]player.PendingPlacement = .{
@@ -2692,7 +2693,7 @@ pub fn modifyBlockType(
             pending[pending_len] = .{ .coord = second.coord, .bx = second.bx, .by = by, .sprite = second.sprite };
             pending_len += 1;
         }
-        if (!player.permitsPlacement(pending[0..pending_len])) return .rejected_softlock;
+        if (!player.permitsPlacement(pending[0..pending_len])) return .rejected;
     }
 
     writeBlockType(plan.first.coord, plan.first.bx, by, plan.first.sprite, plan.first.prev);
@@ -5212,7 +5213,7 @@ test "placement guard blocks self-encasement and keeps pairs coherent" {
     };
     SimBuffer.sync(memory.game.getPlayerCoord());
     try testing.expectEqual(
-        ModifyBlockTypeResult.rejected_softlock,
+        ModifyBlockTypeResult.rejected,
         modifyBlockType(coord, at.bx, at.by, .stone, .empty),
     );
     try testing.expect(mod_store.get(key) == null);
@@ -5240,7 +5241,7 @@ test "placement guard blocks self-encasement and keeps pairs coherent" {
     SimBuffer.sync(memory.game.getPlayerCoord());
 
     try testing.expectEqual(
-        ModifyBlockTypeResult.rejected_softlock,
+        ModifyBlockTypeResult.rejected,
         modifyBlockType(coord, at.bx, lower_by, .amethyst, .empty),
     );
     try testing.expectEqual(Sprite.none, mod_store.getCell(key, lower_idx).?.id);
@@ -5280,7 +5281,7 @@ test "placement guard blocks self-encasement and keeps pairs coherent" {
     };
     try testing.expect(!player.permitsPlacement(&portal_pending));
     try testing.expectEqual(
-        ModifyBlockTypeResult.rejected_softlock,
+        ModifyBlockTypeResult.rejected,
         modifyBlockType(coord, at.bx, at.by, .portal, .empty),
     );
     try testing.expect(mod_store.getCell(key, center_idx) == null);

@@ -222,6 +222,16 @@ pub fn handleMouse(x: f64, y: f64, action: u32) void {
     processDownCaptures();
 }
 
+/// Simulates a mouse-up; useful for overriding events that apply every logical frame.
+pub fn simulateMouseUp() void {
+    just_mouse_up = true;
+    released_focus = click_focus;
+
+    release_deferred = false;
+    press_seen_by_tick = true;
+    click_focus = .none;
+}
+
 /// Ends a logic tick's view of the mouse.
 /// Must be called at the end of `handleTick()`, after every reader of `click_focus`.
 ///
