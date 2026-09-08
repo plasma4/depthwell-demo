@@ -32,7 +32,8 @@ pub const VariantKind = enum {
     /// Seed-based pick of `0..count-1`, biased towards 0.
     /// Reads `ceil(log2 count)` seed bits; an out-of-range roll collapses to 0.
     random,
-    /// Time-based cycling: offset `(frame / period_frames) % count`.
+    /// Time-based cycling: offset `(frame / period_frames) % count`,
+    /// where `frame` is the 60 FPS animation clock, NOT a tick count.
     animate,
 };
 
@@ -54,7 +55,7 @@ pub const VariantRule = struct {
     kind: VariantKind = .default,
     /// Number of contiguous atlas frames, including the base (must be >= 2).
     count: u8 = 2,
-    /// `animate` only: render frames per displayed frame (must be >= 1).
+    /// `animate` only: 60 FPS frames per displayed frame (must be >= 1).
     period_frames: u8 = 1,
     /// Edge pattern rules evaluated in priority order.
     edge_rules: []const EdgeRule = &.{},
@@ -69,6 +70,7 @@ const rules = [_]struct { Sprite, VariantRule }{
     // edge stone alternates in a checkerboard
     .{ .edge_stone, .{ .kind = .checkerboard, .count = 2 } },
     // seed variations: non-uniform, see the VariantKind definition
+    .{ .chest, .{ .kind = .random, .count = 2 } },
     .{ .bush, .{ .kind = .random, .count = 2 } },
     .{ .rock, .{ .kind = .random, .count = 2 } },
     .{ .aqua_stone, .{ .kind = .random, .count = 2 } },
@@ -137,11 +139,8 @@ const rules = [_]struct { Sprite, VariantRule }{
         },
     },
 
-    // campfire animation: 4 contiguous frames, one step every 6 render frames
-    // resolveVariant() has a HARDCODED check that swaps in the underwater variant when waterlogged
-    .{ .campfire, .{ .kind = .animate, .count = 4, .period_frames = 6 } },
-    // needed for custom variant
-    .{ .campfire_water, .{ .kind = .animate, .count = 4, .period_frames = 7 } },
+    .{ .portal, .{ .kind = .animate, .count = 2, .period_frames = 6 } },
+    .{ .invportal, .{ .kind = .animate, .count = 2, .period_frames = 7 } },
 
     .{ .basic_core, .{ .kind = .animate, .count = 2, .period_frames = 17 } },
     .{ .core1, .{ .kind = .animate, .count = 2, .period_frames = 8 } },
@@ -286,17 +285,14 @@ fn seedPick(seed: u32, count: u8) u16 {
 }
 
 /// Resolves the final atlas sprite ID for a block, applying positional, seed-based, or time-based (animation) variation.
-/// `tx`/`ty` are ABSOLUTE tile coordinates; `frame` is the current render frame.
+///
+/// `tx`/`ty` are ABSOLUTE tile coordinates.
+/// `frame` is the interpolated 60 FPS animation clock (`chunks.animFrame()`), and should be non-negative.
+///
 /// Returns `block.id` unchanged when the sprite has no variation rule.
-pub fn resolveVariant(block: Block, tx: u64, ty: u64, frame: u32) Sprite {
-    var id = block.id;
-    // special hardcode for campfire
-    if (id == .campfire and dw.water.getVolume(block) > 0) {
-        id = .campfire_water;
-    }
-
+pub fn resolveVariant(block: Block, tx: u64, ty: u64, frame: f64) Sprite {
     return resolveSpriteVariant(
-        id,
+        block.id,
         block.seed,
         block.edge_flags,
         tx,
@@ -311,7 +307,7 @@ pub fn resolveSpriteVariant(
     edge_flags: u8,
     tx: u64,
     ty: u64,
-    frame: u32,
+    frame: f64,
 ) Sprite {
     const id = @intFromEnum(sprite);
     if (id >= dw.sprite.MAX_SPRITE_ID) return sprite;
@@ -340,7 +336,9 @@ pub fn resolveSpriteVariant(
         .x_parity => @intCast(tx & 1),
         .y_parity => @intCast(ty & 1),
         .random => seedPick(seed, active_count),
-        .animate => @intCast((frame / rule.period_frames) % active_count),
+        .animate => @intCast(@as(u64, @intFromFloat(
+            frame / @as(f64, @floatFromInt(rule.period_frames)),
+        )) % active_count),
         .default => 0,
     };
 
