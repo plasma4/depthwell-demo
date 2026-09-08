@@ -14,7 +14,6 @@ const Vec2f = dw.utils.Vec2f;
 const Vec2f32 = dw.utils.Vec2f32;
 const addEntity = dw.entity.addEntity;
 const addEntitySized = dw.entity.addEntitySized;
-const drawNumber = dw.entity.drawNumber;
 const toSize = dw.entity.toSizeUv;
 const mouse = dw.mouse;
 const inventory = dw.inventory;
@@ -28,8 +27,9 @@ const TOTAL_PROGRESS = SMELTING_STEPS * FRAMES_PER_STEP;
 
 /// Menu panel placement and size in UV space (top-left aligned).
 /// Single-sourced so `draw()` and the `isHoveringMenu()` hit test can never drift apart.
-const MENU_POS: Vec2f32 = .{ 0.02, 0.75 };
+/// The bottom edge sits on `MENU_BOTTOM_UV`, the same line the loot and corecraft panels rest on.
 const MENU_SIZE: Vec2f32 = toSize(0.3) * Vec2f32{ 1.0, 0.5 };
+const MENU_POS: Vec2f32 = .{ 0.02, util.MENU_BOTTOM_UV - MENU_SIZE[1] };
 
 /// Whether the cursor is over the furnace panel.
 /// Always false while the menu is closed.
@@ -196,7 +196,7 @@ fn drawDragIcon(mouse_px: Vec2f) void {
     }
 
     // Sine-wave wiggle effect that changes based no drag speed
-    const frame: f32 = @floatFromInt(dw.memory.game.frame);
+    const frame: f32 = @floatCast(dw.chunks.animFrame());
     const wiggle_amount: f32 = @min(@as(f32, @floatCast(uv_speed)) * 14.0, 1.0);
     const wiggle: f32 = @sin(frame * 0.6) * wiggle_amount; // radians
 
@@ -215,7 +215,7 @@ fn drawDragIcon(mouse_px: Vec2f) void {
         const off = offsets[i];
         addEntity(.{
             .sprite = dragged,
-            .position = .{ @floatCast(drag_pos_px[0] + off[0]), @floatCast(drag_pos_px[1] + off[1]) },
+            .position = util.toPx32(drag_pos_px + off),
             .size = if (is_front) 16.0 else 14.0,
             .rotation = wiggle,
             // Partial opacity; the front copy is a touch more opaque so the stack reads clearly.
@@ -266,18 +266,19 @@ pub fn draw() void {
         if (mouse.isClicked(.smelting, true)) collectOutput();
     }
 
-    addEntitySized(.{ // menu background panel (top-left aligned, UV space)
+    const panel_lcha: dw.utils.Vec4f32 = .{ 0.26, 0.2, 3.2, 1.0 };
+    dw.entity.addEntitySizedOutlined(.{ // menu background panel (top-left aligned, UV space)
         .sprite = .rectangle,
         .position = menu_pos,
         .size = menu_size,
-        .lcha = .{ 0.26, 0.2, 3.2, 1.0 },
-    });
+        .lcha = panel_lcha,
+    }, util.PANEL_BORDER_PX, util.panelOutline(panel_lcha));
 
     // Slot frames.
     inline for (.{ input_px, output_px }) |slot_px| {
         addEntity(.{
             .sprite = .wood_frame,
-            .position = .{ @floatCast(slot_px[0]), @floatCast(slot_px[1]) },
+            .position = util.toPx32(slot_px),
             .size = @floatCast(SLOT_SIZE),
             .lcha = .{ 0.65, -0.08, 0.0, 1.0 },
         });
@@ -287,21 +288,21 @@ pub fn draw() void {
     if (loaded_ore != .none) {
         addEntity(.{
             .sprite = loaded_ore,
-            .position = .{ @floatCast(input_px[0]), @floatCast(input_px[1]) },
+            .position = util.toPx32(input_px),
             .size = ITEM_SIZE,
         });
 
-        util.drawCount(loaded_count, .{ input_px[0] + 3.0, input_px[1] + 5.0 }, .{ 0.85, 0.30, 1.2, 1.0 }, 1.0);
+        util.drawCount(loaded_count, input_px, .{ 0.85, 0.30, 1.2, 1.0 }, 1.0);
     }
 
     // Finished bars and count go in the output slot.
     if (output_bar != .none) {
         addEntity(.{
             .sprite = output_bar,
-            .position = .{ @floatCast(output_px[0]), @floatCast(output_px[1]) },
+            .position = util.toPx32(output_px),
             .size = ITEM_SIZE,
         });
-        util.drawCount(output_count, .{ output_px[0] + 3.0, output_px[1] + 5.0 }, .{ 0.85, 0.30, 1.8, 1.0 }, 1.0);
+        util.drawCount(output_count, output_px, .{ 0.85, 0.30, 1.8, 1.0 }, 1.0);
     }
 
     // Progress bar between the slots.

@@ -17,7 +17,7 @@ const DropHandlers = dw.drops.DropHandlers;
 pub const UNMINEABLE_STRENGTH: u64 = std.math.maxInt(u64);
 
 /// ID for `Sprite.wood`, which is after edge stone.
-pub const WOOD_ID = 13;
+pub const WOOD_ID = 14;
 
 /// Index where stone-like sprites begin.
 pub const STONE_START = WOOD_ID + 19;
@@ -27,11 +27,14 @@ const STONE_END = STONE_START + 25;
 /// Index where smelted bar sprites begin.
 const BAR_START = STONE_END + 4;
 
+/// Number of ore types.
+const ORE_COUNT = 6;
+
 /// Index where ore sprites begin.
-pub const ORE_START = BAR_START + 6;
+pub const ORE_START = BAR_START + ORE_COUNT;
 
 /// Index where gem sprites begin.
-pub const GEM_START = ORE_START + 6;
+pub const GEM_START = ORE_START + ORE_COUNT;
 
 /// Number of gem types.
 pub const GEM_COUNT = 7;
@@ -39,7 +42,7 @@ pub const GEM_COUNT = 7;
 /// Index where gem masks (not gem sprites) begin.
 pub const MASK_START = GEM_START + GEM_COUNT * 2;
 /// Index after the HP mask ends, and decorations begin.
-const DECOR_START = MASK_START + 24;
+const DECOR_START = MASK_START + 25;
 
 /// Number of fruit sprites.
 const FRUIT_COUNT = 10;
@@ -54,8 +57,8 @@ const CORE_ID = BUSH_ID + 14;
 pub const INVENTORY_START = CORE_ID + 22;
 /// Index where numbers (0-9) start.
 pub const NUMBER_START = INVENTORY_START + 4;
-/// ID for `Sprite.particle`, which is after a bunch of character glyphs.
-pub const PARTICLE_START = NUMBER_START + 10 + 94;
+/// ID for `Sprite.arrow`.
+pub const ARROW_ID = NUMBER_START + 10 + 94;
 
 comptime {
     // modify this value manually, simple sanity check
@@ -82,9 +85,10 @@ pub const Sprite = enum(u16) {
     player_walk2,
     player_walk3,
     player_walk4,
+    player_walk5,
 
     /// Edge stone (2 variations).
-    edge_stone = 11,
+    edge_stone = 12,
 
     wood = WOOD_ID,
     black_plate,
@@ -155,7 +159,12 @@ pub const Sprite = enum(u16) {
 
     // internal assets (not valid for placement or as a foundation)
     gem_mask = MASK_START, // 8 masks
-    hp_mask = MASK_START + 8, // 16 masks
+
+    /// Sprite for a particle; a full white rectangle but with corner pixels cut off.
+    particle = MASK_START + 8,
+    /// Full rectangle sprite; no corner pixels cut off.
+    /// Also functions as the mask at HP=0 for a sprite.
+    rectangle = MASK_START + 9, // 16 masks
 
     // decor (THIS IS COUPLED TO WGSL CODE)
     small_tree = DECOR_START,
@@ -192,8 +201,8 @@ pub const Sprite = enum(u16) {
     cordage = GEAR_ID + 13,
     plant_haft,
     stone_haft,
-    flint_hatchet,
-    greenstone_hatchet,
+    flint_hatchet_head,
+    greenstone_hatchet_head,
     twinklemoss,
     spiralvine,
     plant_stem,
@@ -209,11 +218,10 @@ pub const Sprite = enum(u16) {
     core2 = CORE_ID + 4,
     core3 = CORE_ID + 6,
     core4 = CORE_ID + 8,
-    campfire = CORE_ID + 10, // 4 variations + 4 water variations, 8 total
-    campfire_water = CORE_ID + 10 + 4,
-    chest = CORE_ID + 10 + 8,
-    invportal,
-    portal,
+    campfire_base = CORE_ID + 10, // base, plus 4 flame frames, 5 total
+    chest = CORE_ID + 10 + 5, // 2 variants
+    invportal = CORE_ID + 10 + 7, // 2 variants
+    portal = CORE_ID + 10 + 9, // 2 variants
     portal_visual = CORE_ID + 10 + 11, // indicator visual variant
 
     /// Unselected inventory sprite. Looks like a blue rounded rectangle.
@@ -227,31 +235,27 @@ pub const Sprite = enum(u16) {
 
     text_0 = NUMBER_START, // sprite with text 0
 
-    /// Sprite for a particle; a full white rectangle but with corner pixels cut off.
-    particle = PARTICLE_START,
-    /// Full rectangle sprite; no corner pixels cut off.
-    rectangle,
     /// Simple up-arrow icon.
-    arrow,
+    arrow = ARROW_ID,
 
     /// Quarter portion of a center part of the progress bar that is unfilled.
-    progress_small_unfilled = PARTICLE_START + 3,
+    progress_small_unfilled = ARROW_ID + 1,
     /// Quarter portion of a center part of the progress that is unfilled.
-    progress_small_filled,
+    progress_small_filled = ARROW_ID + 2,
     /// Leftmost part of the progress bar.
-    progress_left = PARTICLE_START + 5,
+    progress_left = ARROW_ID + 3,
     /// Center part of the progress bar.
-    progress_center = PARTICLE_START + 10,
+    progress_center = ARROW_ID + 8,
     /// Right part of the progress bar.
-    progress_right = PARTICLE_START + 15,
+    progress_right = ARROW_ID + 13,
 
     /// Crafting icon.
-    craft = PARTICLE_START + 20,
+    craft = ARROW_ID + 18,
 
     /// Pickaxe icon.
-    pickaxe = PARTICLE_START + 21,
+    pickaxe = ARROW_ID + 19,
     /// Generic water block (filled). Default internal water type; after all pickaxes.
-    water = PARTICLE_START + 21 + (@as(u16, @intCast(@intFromEnum(dw.mining.Tools.gold))) + 1),
+    water = ARROW_ID + 19 + (@as(u16, @intCast(@intFromEnum(dw.mining.Tools.gold))) + 1),
     water_icon,
 
     /// A special type for mining and inventory logic.
@@ -291,7 +295,7 @@ pub const Sprite = enum(u16) {
         return self.props().in_world;
     }
 
-    /// Determines if the sprite's type is something that could be in the player's inventory.
+    /// Determines if the sprite's type is something that could be in the player's inventory without cheating.
     pub inline fn isItem(self: Sprite) bool {
         return self.props().item;
     }
@@ -327,7 +331,7 @@ pub const Sprite = enum(u16) {
     /// The bar range is parallel to and sits directly before the ore range,
     /// so the mapping is a constant offset. Precondition: `self.isOre()`.
     pub inline fn oreToBar(self: Sprite) Sprite {
-        return @enumFromInt(@intFromEnum(self) - (ORE_START - BAR_START));
+        return @enumFromInt(@intFromEnum(self) - ORE_COUNT);
     }
 
     /// Determines if the sprite is a gem.
@@ -352,7 +356,7 @@ pub const Sprite = enum(u16) {
 
     /// Returns every neighbor cell this sprite needs to stay in the world.
     /// That is its `anchor` constraint, then any extra `SpriteProps.requires` entries,
-    /// flattened into one list at compile time.
+    /// flattened into one list at compile-time.
     /// The cascade in `state/world.zig` clears the block as soon as one entry fails.
     pub inline fn supports(self: Sprite) []const Support {
         const val = @intFromEnum(self);
@@ -445,6 +449,14 @@ pub const Sprite = enum(u16) {
 /// Centralized database describing all sprite properties.
 /// Rules are checked in order, with later rules overriding earlier ones.
 const RULE_LIST = [_]SpriteRule{
+    // Tools that are valid items
+    .{
+        .{ .list = &[_]Sprite{ .flint_hatchet_head, .greenstone_hatchet_head } },
+        .{
+            .item = true,
+        },
+    },
+
     // Weak solid blocks
     .{
         .{ .list = &[_]Sprite{
@@ -753,6 +765,7 @@ const RULE_LIST = [_]SpriteRule{
     .{
         .{ .list = &[_]Sprite{
             .rock,
+            .hammerstone,
             .purple_rock,
             .aqua_stone,
             .flint,
@@ -761,7 +774,7 @@ const RULE_LIST = [_]SpriteRule{
             .big_mushroom,
             .small_tree,
 
-            .campfire,
+            .campfire_base,
             .forest_furnace,
             .lava_furnace,
             .basic_core,
@@ -818,6 +831,7 @@ const RULE_LIST = [_]SpriteRule{
             .list = &[_]Sprite{
                 .rock,
                 .purple_rock,
+                .campfire_base,
                 .aqua_stone,
                 .hammerstone,
                 .flint,
@@ -863,7 +877,7 @@ const RULE_LIST = [_]SpriteRule{
         .{ .anchor = .suspended },
     },
 
-    // Entity ID offsets for `asEntity()`
+    // Entity ID offsets for asEntity()
     .{
         .{ .range = .{ .quartz, .electrit } },
         .{ .entity_offset = @intCast(GEM_COUNT) },
@@ -1357,8 +1371,8 @@ comptime {
 
     // oreToBar() relies on the bar range sitting directly before the ore range with the same length,
     // so the mapping is a constant offset. Enforce that here.
-    if (ORE_START - BAR_START != GEM_START - ORE_START)
-        @compileError("Bar range is not parallel to the ore range; oreToBar() would be wrong.");
+    if (ORE_START - BAR_START != GEM_START - ORE_START or ORE_START - BAR_START != ORE_COUNT)
+        @compileError("Bar range is not parallel to the ore range or the correct length; oreToBar() would be wrong.");
 
     // Equal-length ranges are not enough: the two must also line up name-for-name, or a reordered ore
     // would smelt into someone else's bar. Catches an insertion into either range!
