@@ -26,14 +26,12 @@ pub const WorldCoord = u128;
 /// so anything wider would silently overflow one half of that split.
 pub const WORLD_COORD_BITS: comptime_int = 64 + 1 + @as(comptime_int, std.math.log2_int(u32, dw.CHUNK_SIZE));
 
-/// Folds a `WorldCoord` into the 64 bits a hash or a noise lattice consumes.
+/// Maps a `WorldCoord` to the 64-bit value used by hashes and noise lattices.
 ///
-/// A fold, NOT a truncation. Truncating repeats the field exactly every 2^64 units,
-/// which is the structural cycling this type exists to remove;
-/// folding instead sends each band of high bits to an unrelated part of the hash space.
-/// Nothing is discontinuous either way: a lattice needs its cell indices to be
-/// consistent between neighbors, not contiguous, so callers must fold each corner index
-/// separately (`+% 1` BEFORE the fold, never after).
+/// This folds the high bits into the low bits instead of simply truncating,
+/// avoiding repetition every 2^64 units.
+///
+/// Fold each corner index separately, applying `+% 1` before folding; not after.
 pub inline fn foldWorld(v: WorldCoord) u64 {
     const lo: u64 = @truncate(v);
     const hi: u64 = @truncate(v >> 64);
@@ -167,6 +165,87 @@ pub inline fn oddsNum(chance: comptime_float) u64 {
     return @intFromFloat(chance * POW_2_64 + 0.5);
 }
 
+/// A value and its relative frequency.
+/// For example, weights of 15 and 5 make the first value three times more likely.
+pub fn Weighted(comptime T: type) type {
+    return struct { value: T, weight: u32 };
+}
+
+/// Creates a picker for a fixed list of weighted values.
+/// For simplicity, the picker accepts a bias of up to ~1/2^32 and does not comptime-readjust weights to reduce bias.
+///
+/// Each entry defines only its own relative frequency,
+/// so adding or changing an entry does not require updating the others.
+///
+/// `pick()` maps a random value to one of the entries using Lemire's method,
+/// then selects the matching cumulative weight. Since the entries are known at compile-time,
+/// this reduces to one multiply and several comparisons.
+pub fn WeightedPicker(comptime T: type, comptime entries: []const Weighted(T)) type {
+    return struct {
+        /// The type of value a pick returns.
+        pub const Value = T;
+
+        /// Sum of every row's weight.
+        /// A row's share of picks is its own weight over this.
+        pub const total_weight: u64 = blk: {
+            var sum: u64 = 0;
+            for (entries) |e| sum += e.weight;
+            break :blk sum;
+        };
+
+        /// Running totals, so `thresholds[i]` is the exclusive upper bound of row `i`.
+        const thresholds: [entries.len]u64 = blk: {
+            var out: [entries.len]u64 = undefined;
+            var sum: u64 = 0;
+            for (entries, 0..) |e, i| {
+                sum += e.weight;
+                out[i] = sum;
+            }
+            break :blk out;
+        };
+
+        comptime {
+            if (entries.len == 0) @compileError("A WeightedPicker needs at least one entry.");
+            if (total_weight == 0) @compileError("A WeightedPicker needs at least one non-zero weight.");
+            // The multiply in pick() takes 32 bits of roll times the total, and must not overflow 64.
+            if (total_weight > std.math.maxInt(u32)) @compileError("Total weight must fit in 32 bits.");
+        }
+
+        /// Picks a row from a uniform 64-bit roll, reading its top 32 bits.
+        pub inline fn pick(roll: u64) T {
+            const scaled = ((roll >> 32) * total_weight) >> 32;
+            inline for (entries, thresholds) |e, limit| {
+                if (scaled < limit) return e.value;
+            }
+            // scaled < total_weight always holds, and the last threshold IS total_weight.
+            unreachable;
+        }
+    };
+}
+
+test "WeightedPicker splits rolls in proportion to the weights" {
+    const Picker = WeightedPicker(u8, &.{
+        .{ .value = 10, .weight = 1 },
+        .{ .value = 20, .weight = 3 },
+        .{ .value = 30, .weight = 4 },
+    });
+    try testing.expectEqual(@as(u64, 8), Picker.total_weight);
+
+    // Ends of the roll space land on the first and last rows.
+    try testing.expectEqual(@as(u8, 10), Picker.pick(0));
+    try testing.expectEqual(@as(u8, 30), Picker.pick(std.math.maxInt(u64)));
+
+    // A power-of-two total divides the 32-bit roll space exactly,
+    // so an even sweep of it gives exact counts and this test never has to talk about tolerances.
+    var counts = [_]u32{0} ** 3;
+    const steps = 1 << 16;
+    for (0..steps) |i| {
+        const roll = @as(u64, i) << 48; // sweeps the top 32 bits at a fixed stride
+        counts[(Picker.pick(roll) - 10) / 10] += 1;
+    }
+    try testing.expectEqual([_]u32{ steps / 8, steps * 3 / 8, steps * 4 / 8 }, counts);
+}
+
 /// Simple compile-time getter for hashing data, incrementing `y` over time.
 pub const HashState = struct {
     /// `getChance()` max margin of error is `2^-GET_CHANCE_MARGIN_BITS`.
@@ -292,6 +371,12 @@ pub const HashState = struct {
         const hi = (mid >> 32) +% a1b1 +% (carry1 << 32) +% carry0;
 
         return .{ .lo = lo, .hi = hi };
+    }
+
+    /// Picks one row of a comptime weighted table; see `WeightedPicker()`.
+    /// Consumes a whole fresh 64-bit word, of which the pick reads the top 32 bits.
+    pub inline fn getWeighted(self: *HashState, comptime Picker: type) Picker.Value {
+        return Picker.pick(self.getRaw());
     }
 
     /// Returns an integer of type `T` in the range `[0, limit)` for non-power-of-two limits.

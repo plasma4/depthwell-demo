@@ -211,9 +211,17 @@ fn isLitForMining() bool {
 /// Whether the player holds a special tool that can remove otherwise-unmineable installations
 /// (crafters, strength `UNMINEABLE_STRENGTH`) and the block structures rest on.
 ///
-/// TODO: I'll have to decide, do we make a pickaxe-strong-enough or hybrid upgrade system instead.
+/// TODO: implement hybrid upgrade system with tool types?
 pub var has_structure_tool: bool = false;
 const STRUCTURE_STRENGTH = 1000;
+
+/// The item that using `held` on a `target` block knaps, or null if that pair does nothing.
+/// If a sprite is returned, then the block physically at `target` should be replaced with the returned value.
+fn knapOutput(held: Sprite, target: Sprite) ?Sprite {
+    if (held == .rock and target == .rock) return .hammerstone;
+    if (held == .hammerstone and target == .flint) return .flint_hatchet_head;
+    return null;
+}
 
 /// Updates mining and placing blocks. Should be called from `handleTick()`.
 /// `logic_speed` should be 1 at a 60FPS default and is unrelated to frame drop correction.
@@ -232,8 +240,6 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
         return;
     }
 
-    mouse.updateMouseLocation(); // update to get correct mouse position data
-
     const sprite_type = inventory.selected_sprite;
     if (sprite_type == .unselected) {
         selected_hp = 255;
@@ -242,10 +248,34 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
 
     const mouse_block = mouse.getMouseBlock();
     if (mouse_block) |block| {
-        // Don't mine a block of the same type you're trying to place!
-        if (sprite_type != .none and block.id == sprite_type) {
+        // mouse_block returning non-null guarantees valid coords
+        const mouse_chunk_coord = mouse.mouse_chunk_coord.?;
+        const mouse_block_x = mouse.mouse_block_x;
+        const mouse_block_y = mouse.mouse_block_y;
+
+        if (knapOutput(sprite_type, block.id)) |output| {
+            // TODO: knap progress with 8-unit progress bar above the sprite; reset progress if block type changes
+            // replace the block at block.id with the new target
+            dw.logger.quick(output);
+            if (output.isInWorld()) {
+                // replace the item directly in the world
+                _ = world.modifyBlockType(
+                    mouse_chunk_coord,
+                    mouse_block_x,
+                    mouse_block_y,
+                    output,
+                    block, // pre-mined block seeds the ore's underlay/base
+                );
+            } else {
+                // give the item directly to the player
+                inventory.addToInventory(output, 1);
+            }
+
+            return;
+        } else if (sprite_type != .none and block.id == sprite_type) {
             selected_hp = 0;
             mining_progress = 0;
+            // don't mine a block of the same type you're trying to place!
             return;
         }
 
@@ -253,9 +283,9 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
         // Is this a structure? do NOT let either the structure or the anchor of the structure (usually the block below) be broken
         if (!inventory.isInCreative() and !has_structure_tool and !block.isEmpty() and
             restsOnProtectedInstallation(
-                mouse.mouse_chunk_coord.?,
-                mouse.mouse_block_x,
-                mouse.mouse_block_y,
+                mouse_chunk_coord,
+                mouse_block_x,
+                mouse_block_y,
             ))
         {
             is_protected = true;
@@ -271,9 +301,9 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                 @as(u64, @intFromFloat(@as(f64, @floatFromInt(mining_speed)) * logic_speed));
 
             const can_mine_block = in_creative or canBreak(
-                mouse.mouse_chunk_coord.?,
-                mouse.mouse_block_x,
-                mouse.mouse_block_y,
+                mouse_chunk_coord,
+                mouse_block_x,
+                mouse_block_y,
                 block,
             );
             const near_enough = in_creative or isLitForMining();
@@ -335,9 +365,14 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                                 // or the other "can't mine" sound if the player is too far away to reach
                                 if (unmineable)
                                     if (!is_protected and near_enough) 11 else 12
+                                else if (block.id == .wood)
+                                    // 5 wood sounds
+                                    @intCast((mining_frame / FRAMES_PER_SOUND) % 5 + 13)
                                 else if (block.isDigged())
+                                    // 3 digging sounds
                                     @intCast((mining_frame / FRAMES_PER_SOUND) % 3 + 4)
                                 else
+                                    // 3 default mining sounds
                                     @intCast((mining_frame / FRAMES_PER_SOUND) % 3 + 1),
                                 if (in_creative) 1 else (0.4 + 0.6 * @as(f32, @floatFromInt(mining_strength))),
                                 0.2,
@@ -354,11 +389,11 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
 
             if (in_creative or (strength != std.math.maxInt(u64) and mining_progress >= strength)) {
                 mining_progress = 0;
-                // sprite type being none check also prevents unneeded memory waste with data update
+                // sprite type being-none-check also prevents unneeded memory waste with modification updates
                 const was_deleted = block.isEmpty() or world.modifyBlockHp(
-                    mouse.mouse_chunk_coord.?, // mouse block successful, this must be valid then!
-                    mouse.mouse_block_x,
-                    mouse.mouse_block_y,
+                    mouse_chunk_coord, // mouse block successful, this must be valid then!
+                    mouse_block_x,
+                    mouse_block_y,
                     block,
                     // instantly mine (0 value special-case in modifyBlockHp()) if block type has no strength
                     if (!in_creative and strength > 0) mining_strength else 0,
@@ -379,7 +414,8 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                             }
                         }
 
-                        { // The block broke: burst of its own colors, larger with better pickaxes.
+                        {
+                            // the block broke: make a burst of its own colors, larger with better pickaxes
                             if (mouse.getMouseBlockCenterPx()) |center| {
                                 dw.particles.spawnSpriteBurst(block.id, center, .{
                                     .count = 20,
@@ -392,9 +428,9 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                         if (sprite_type.isInWorld()) {
                             if (inventory.removeFromInventory(sprite_type, inventory.placementUnits(sprite_type))) { // make sure it's possible to use
                                 switch (world.modifyBlockType(
-                                    mouse.mouse_chunk_coord.?, // mouse block successful already
-                                    mouse.mouse_block_x,
-                                    mouse.mouse_block_y,
+                                    mouse_chunk_coord,
+                                    mouse_block_x,
+                                    mouse_block_y,
                                     sprite_type,
                                     block, // pre-mined block seeds the ore's underlay/base
                                 )) {
@@ -403,7 +439,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                                         // The anchor cascade returned the item as a drop.
                                         inventory.selected_sprite = sprite_type;
                                     },
-                                    .rejected_softlock => {
+                                    .rejected => {
                                         // No world write happened, so return the consumed placement item directly.
                                         inventory.addToInventory(sprite_type, inventory.placementUnits(sprite_type));
                                         inventory.selected_sprite = sprite_type;
@@ -429,9 +465,9 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
             // placing into empty air!
             if (inventory.removeFromInventory(sprite_type, inventory.placementUnits(sprite_type))) {
                 switch (world.modifyBlockType(
-                    mouse.mouse_chunk_coord.?,
-                    mouse.mouse_block_x,
-                    mouse.mouse_block_y,
+                    mouse_chunk_coord,
+                    mouse_block_x,
+                    mouse_block_y,
                     sprite_type,
                     block, // empty here (placing into air), so ores fall back to a plain-stone underlay
                 )) {
@@ -445,7 +481,7 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
                         // The anchor cascade returned the item as a drop.
                         inventory.selected_sprite = sprite_type;
                     },
-                    .rejected_softlock => {
+                    .rejected => {
                         // No world write happened, so return the consumed placement item directly.
                         inventory.addToInventory(sprite_type, inventory.placementUnits(sprite_type));
                         inventory.selected_sprite = sprite_type;
@@ -463,15 +499,15 @@ pub fn handleMiningAndPlacing(logic_speed: f64) void {
             const needed: u64 = memory.Block.MAX_HP - block.hp;
             if (inventory.removeFromInventory(.water, needed)) {
                 switch (world.modifyBlockType(
-                    mouse.mouse_chunk_coord.?,
-                    mouse.mouse_block_x,
-                    mouse.mouse_block_y,
+                    mouse_chunk_coord,
+                    mouse_block_x,
+                    mouse_block_y,
                     sprite_type,
                     block,
                 )) {
                     .placed => dw.sound.playSound(9, 0.2, 0.1, 0.2),
                     .collapsed => inventory.selected_sprite = sprite_type,
-                    .rejected_softlock => {
+                    .rejected => {
                         inventory.addToInventory(.water, needed);
                         inventory.selected_sprite = sprite_type;
                     },

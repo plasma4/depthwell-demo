@@ -14,7 +14,19 @@ const TICK_RATE: f64 = 60.0;
 
 /// The root of ALL actions that need to be handled every logical tick.
 /// `logic_speed` should be 1 at a 60FPS default and is unrelated to frame drop correction.
+///
+/// Two knobs, and mixing them up is the standing trap here.
+/// `iterations` is a catch-up count after a stall.
+/// `logic_speed` is how many 60 FPS frames ONE iteration stands for.
+/// `logicLoop()` raises it when the tick rate drops.
+/// So a counter that advances per tick must scale its step by `logic_speed`.
+/// Otherwise it runs slower in real seconds at a low tick rate.
+/// A visual then interpolates its own last-to-current values with `chunks.current_dt`,
+/// which is what makes a long tick read as smooth motion instead of a jump.
 pub fn handleTick(logic_speed: f64, iterations: u32) void {
+    // Zeroed here so precacheChunks() at the bottom can see everything this tick generated.
+    dw.world.chunks_generated_this_tick = 0;
+
     var buffer: inventory.SlotBuffer = undefined;
     const active_slots = inventory.getSpritesInInventory(&buffer);
 
@@ -105,16 +117,23 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
     const changed_depth = just_increased_depth or just_decreased_depth;
 
     // update particles
-    dw.particles.tick(iterations);
+    dw.particles.tick(logic_speed * @as(f64, @floatFromInt(iterations)));
 
     // Iterations may be > 1 if FPS is low as a correction factor.
+    // Do note this is intentionally integeric to prevent logical misc imprecision issues.
     for (0..iterations) |_| {
-        dw.player.tickSoftlockFade();
+        dw.player.tickSoftlockFade(logic_speed);
         const descending = dw.portal.isActive(); // portal animation override stuff
-        memory.game.bg_time += (logic_speed / TICK_RATE) * dw.portal.backgroundRate();
+        // Published to the shader interpolated; see chunks.bg_time_step.
+        dw.chunks.bg_time_step = (logic_speed / TICK_RATE) * dw.portal.backgroundRate();
+        memory.game.bg_time += dw.chunks.bg_time_step;
+
+        // Sprite animation runs on real frames, not on ticks; see chunks.anim_frame.
+        dw.chunks.anim_frame_step = logic_speed;
+        dw.chunks.anim_frame += logic_speed;
 
         if (descending) {
-            dw.portal.tick();
+            dw.portal.tick(logic_speed);
         } else {
             // Smelting only advances while the furnace menu is open (paused otherwise).
             if (dw.indicators.menus.furnace) @import("../menus/furnace.zig").updateSmelting();
@@ -125,21 +144,24 @@ pub fn handleTick(logic_speed: f64, iterations: u32) void {
             if (!changed_depth) dw.mining.handleMiningAndPlacing(logic_speed);
 
             dw.player.move(logic_speed); // logic that moves the player/camera based on keys
-            dw.player.tickAnimation(); // advance player sprite animation + facing on the logic tick
+            dw.player.tickAnimation(logic_speed); // advance player sprite animation + facing on the logic tick
             dw.water.tickWater(); // fluid sim
 
-            inventory.tickDroppedItems(); // process item animation ticks and inventory collection!
+            inventory.tickDroppedItems(logic_speed); // process item animation ticks and inventory collection!
         }
+
+        // A press that lived through one iteration can now be released (see mouse.endTick()).
+        // Inside the loop so a sub-frame tap gets exactly one tick regardless of iteration count.
+        dw.mouse.endTick();
 
         memory.game.frame +%= 1;
     }
 
     // Generate chunks around the SimBuffer in the background.
-    // See the function doc comment for amount justification and context.
+    // The budget follows the frames this tick covered, not the tick count: at 15 FPS one tick
+    // moves the player four frames' worth, and a fixed budget would fall four times behind.
     dw.world.SimBuffer.precacheChunks(
         memory.game.getPlayerCoord(),
-        memory.game.player_velocity,
-        1,
-        1,
+        logic_speed * @as(f64, @floatFromInt(iterations)),
     );
 }
