@@ -282,10 +282,10 @@ pub fn verifySimInvariants() void {
     // (see world.captureLegacy()).
     var legacy_keys = dw.world.legacy_store.index.iterator();
     while (legacy_keys.next()) |kv| {
-        if (kv.key_ptr.depth >= dw.world.frontier()) {
+        if (kv.key_ptr.depth >= dw.world.getFrontier()) {
             logger.err(@src(), "legacy entry at depth {d} is not shallower than the frontier {d}", .{
                 kv.key_ptr.depth,
-                dw.world.frontier(),
+                dw.world.getFrontier(),
             });
             bad_entries += 1;
         }
