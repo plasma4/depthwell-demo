@@ -13,6 +13,9 @@ const SUBPIXELS_IN_CHUNK = dw.SUBPIXELS_IN_CHUNK;
 
 const Vec2i = dw.utils.Vec2i;
 const Vec2f = dw.utils.Vec2f;
+const Vec2f32 = dw.utils.Vec2f32;
+const Vec4f32 = dw.utils.Vec4f32;
+const palette = @import("../render/sprite_colors.zig");
 
 // ----
 // NOTE: for consistency and simplicity's sake, this specific file puts the units or qualifiers last, sorted by descending significance, so that the variable starts with the most significant word, and ends with the least significant word.
@@ -50,13 +53,95 @@ pub var GRAVITY: f64 = 0.24;
 /// Controls how strong the jump is.
 pub var JUMP_FORCE: f64 = 6.00;
 /// Size of the apex window, in velocity units.
-/// Inside it, with the jump key held, gravity is multiplied by 60%.
+/// Inside it, with the jump key held, gravity is scaled by `GRAVITY_MULT_APEX`.
 pub var REDUCED_GRAVITY_RANGE: f64 = 0.50;
 /// Decay rate of player movement (vertical), multiplies Y speed by (1.0 - this value).
 pub var DECAY_RATE_Y: f64 = 0.03;
+/// Decay rate of player movement (vertical) while the player slides down a wall.
+/// Held above `DECAY_RATE_Y` so a slide settles slower than a free fall.
+/// A damped fall settles at `GRAVITY * (1 - rate) / rate`.
+/// So a bigger rate is a slower slide.
+pub var DECAY_RATE_Y_SLIDE: f64 = 0.14;
 
+// Gravity multipliers, one per phase of the jump arc.
+// See the block that reads them in move().
+
+/// Gravity near the apex with the jump key still down.
+/// Under 1 to buy hang time over the top.
+pub var GRAVITY_MULT_APEX: f64 = 0.60;
+/// Gravity everywhere the arc needs no shaping.
+/// Exactly 1, so it must stay the neutral value.
+pub const GRAVITY_MULT_BASE: f64 = 1.00;
+/// Gravity on a slow fall after the jump key came up.
+/// Over 1 for a snappier drop.
+pub var GRAVITY_MULT_FALL_SNAP: f64 = 1.20;
+/// Gravity while still rising after the jump key came up.
+/// The main brake that ends a short jump.
+pub var GRAVITY_MULT_RISE_CUT: f64 = 1.80;
+
+/// Fall speed above which `GRAVITY_MULT_FALL_SNAP` stops applying.
+/// In world pixels per 60 FPS frame.
+/// Past it the fall is already fast enough that a snap would only read as a lurch.
+pub var VELOCITY_FALL_SNAP_MAX: f64 = 3.00;
+/// Speed cut taken off an upward velocity per 60 FPS frame once the jump key comes up.
+/// `GRAVITY_MULT_RISE_CUT` scales with the current speed, so this is the floor under it.
+pub var DECAY_Y_LINEAR: f64 = 0.20;
+/// Terminal fall speed in world pixels per 60 FPS frame, about 28 blocks per second.
+/// Decay alone settles just under it, quite intentionally!
+pub var VELOCITY_FALL_MAX: f64 = 7.50;
+
+comptime {
+    if (GRAVITY_MULT_BASE != 1.00)
+        @compileError("`GRAVITY_MULT_BASE` is the unshaped case and must leave gravity alone.");
+}
+
+// ----
+// Movement limits.
+//
+// world.SimBuffer.precacheChunks() sizes its per-tick budget from these,
+// so they must stay true when a tuning slider moves.
+// That is why they are functions and not constants:
+// with dev_menu off every knob below is a const and each one folds to a literal anyway.
+//
+// Every value is in world pixels per 60 FPS FRAME, the same unit as game.player_velocity,
+// and none of them depends on logic_speed. move() integrates the decay in closed form,
+// so its steady state is a fixed point of that map and one tick at speed 2 lands where two ticks at speed 1 do.
+// ----
+
+/// Fastest the player can ever travel horizontally.
+///
+/// `move()` is a damped linear system (fancy!): v = v * (1 - r) + input * (1 - r)`.
+/// Its fixed point is `input * (1 - r) / r`, so the top speed moves when either
+/// `PLAYER_ACCEL` or `DECAY_RATE_ACCEL_X` does.
+///
+/// Ghost mode feeds the SAME equation a `GHOST_SPEED_MULT` times larger input,
+/// so it sets the ceiling wherever the debug menu is compiled in.
+pub inline fn horizontalMovementMax() f64 {
+    const input = PLAYER_ACCEL * (if (dw.dev_menu) GHOST_SPEED_MULT else 1.0);
+    return input * (1.0 - DECAY_RATE_ACCEL_X) / DECAY_RATE_ACCEL_X;
+}
+
+/// Fastest the player can ever travel vertically.
+///
+/// Falling is capped outright by `VELOCITY_FALL_MAX`.
+/// Rising is NOT a steady state: a jump assigns `-JUMP_FORCE` in one tick, so the rise is
+/// bounded by the jump itself rather than by any decay.
+/// A ghost flies on the X constants (see `move()`), so it reuses that bound here.
+pub inline fn verticalMovementMax() f64 {
+    const flight = if (dw.dev_menu) horizontalMovementMax() else 0.0;
+    return @max(@max(VELOCITY_FALL_MAX, JUMP_FORCE), flight);
+}
+
+/// Why the prefetch cannot budget from the LIVE velocity, only from the two bounds above.
+///
+/// X reverses in about three ticks, so it is at least predictable.
+/// Y is not: a jump ASSIGNS `-JUMP_FORCE` in one tick rather than accelerating into it, and a
+/// grounded player at rest is always one keypress from that. So the worst case for the next
+/// tick is the global bound whatever the player is doing right now, and there is nothing to
+/// gain by scaling the budget down when they happen to be standing still.
+/// The live velocity does still pick the DIRECTION to prefetch first.
 /// The size of the player's width. The player is assumed to be centered at the bottom as a rectangle.
-pub const PLAYER_HITBOX_WIDTH = 160;
+pub const PLAYER_HITBOX_WIDTH = 128;
 /// The size of the player's height. The player is assumed to be centered at the bottom as a rectangle.
 pub const PLAYER_HITBOX_HEIGHT = 200;
 /// Prevent block-skipping with collisions when travelling quickly.
@@ -92,7 +177,12 @@ var is_grounded: bool = false;
 /// A value of 1 = only one jump, 2 = player can double jump, and so on.
 const MAX_JUMPS: u8 = 1;
 /// How many frames the player can still jump after leaving a ledge.
-const COYOTE_FRAMES: u8 = 5;
+///
+/// `moveSwept()` tests the ground once, after both axes have moved.
+/// So the tick that walks off a ledge already reads as airborne.
+/// The older axis-at-a-time order tested it mid-move and gave one extra forgiving tick.
+/// This value carries that tick instead.
+const COYOTE_FRAMES: u8 = 6;
 /// How many frames a jump button press is kept as soon as the ground is hit.
 const JUMP_LENIENCY_FRAMES: u8 = 10;
 
@@ -108,6 +198,14 @@ var jump_leniency_frames: f64 = 0;
 /// and `handleTick()` can run several ticks inside one frame.
 var up_was_held: bool = false;
 
+/// Which way the player ran into a wall on the last sweep: -1 left, +1 right, 0 nothing.
+/// `moveSwept()` writes it, and the NEXT tick's gravity reads it, because gravity is
+/// resolved before anything moves.
+var wall_contact_dir: i8 = 0;
+/// Whether the player slid down a wall on this tick.
+/// Read by the dust emitter.
+var is_wall_sliding: bool = false;
+
 /// Whether the player flies and goes through blocks.
 pub inline fn isGhost() bool {
     return dw.inventory.isInCreative();
@@ -121,12 +219,19 @@ inline fn currentSpeed() f64 {
 /// Drops the airborne/jump bookkeeping, for teleports that skip `move()` entirely.
 /// A portal descent freezes movement for its whole length,
 /// so without this the coyote window from before the descent survives it.
+///
+/// Motion only. Whoever moves the CAMERA re-seats the particle anchor,
+/// after the camera lands (see `particles.syncAnchor()`).
 pub fn resetMotionState() void {
     is_grounded = false;
     coyote_frames = 0;
     subpixel_accum = .{ 0.0, 0.0 };
     jumps_left = MAX_JUMPS;
     jump_leniency_frames = 0;
+    wall_contact_dir = 0;
+    is_wall_sliding = false;
+    dust_run_travel = 0.0;
+    dust_slide_travel = 0.0;
 }
 
 const Sprite = dw.Sprite;
@@ -199,6 +304,7 @@ const clips: std.EnumArray(AnimState, Clip) = .init(.{
         .player_walk2,
         .player_walk3,
         .player_walk4,
+        .player_walk5,
     }, .frame_ticks = 6 },
     .jump = .{ .frames = &.{
         .player_jump1,
@@ -234,7 +340,9 @@ fn desiredAnimState() AnimState {
 }
 
 /// Advances the player's animation by one logic tick and updates facing. Call once per logic tick.
-pub fn tickAnimation() void {
+/// `logic_speed` is how many 60 FPS frames the tick covers,
+/// so the walk cycle keeps its speed in SECONDS when the tick rate is lowered.
+pub fn tickAnimation(logic_speed: f64) void {
     const vx = memory.game.player_velocity[0];
     if (vx > 0) {
         facing_right = true;
@@ -250,13 +358,18 @@ pub fn tickAnimation() void {
     }
 
     const clip = clips.get(anim_state);
-    anim_timer += 1;
-    if (anim_timer >= clip.frame_ticks) {
-        anim_timer = 0;
+    // A slow tick is worth many frames, so the clip can owe more than one step. The loop pays them
+    // all, which keeps a 2 Hz tick on the same cycle as a 60 Hz one instead of holding each pose 30x.
+    anim_timer += @intFromFloat(@max(1.0, @round(logic_speed)));
+    while (anim_timer >= clip.frame_ticks) {
+        anim_timer -= clip.frame_ticks;
         if (anim_frame + 1 < clip.frames.len) {
             anim_frame += 1;
         } else if (clip.loop) {
             anim_frame = 0;
+        } else {
+            anim_timer = 0; // a clip that holds its last frame has nothing left to owe
+            break;
         }
     }
 }
@@ -294,13 +407,14 @@ pub fn startSoftlockFade() void {
 }
 
 /// Advances the visible correction pulse by one logical frame.
-pub fn tickSoftlockFade() void {
+pub fn tickSoftlockFade(logic_speed: f64) void {
     if (softlock_fade_frame == 0) return;
     if (softlock_fade_frame >= SOFTLOCK_FADE_TOTAL_FRAMES) {
         softlock_fade_frame = 0;
         return;
     }
-    softlock_fade_frame += 1;
+    // The pulse is 24 frames of fade, so it must stay 24 frames of REAL time at any tick rate.
+    softlock_fade_frame +|= @intFromFloat(@max(1.0, @round(logic_speed)));
 }
 
 /// Stops a correction pulse when a game is reset or loaded.
@@ -340,10 +454,10 @@ pub fn drawPlayerEntity() void {
 /// `logic_speed` should be 1 at a 60FPS default and is unrelated to frame drop correction.
 pub fn move(logic_speed: f64) void {
     const game = &memory.game;
-
-    // handle camera zoom (.pow is safe here despite being inconsistent on different devices)
+    // Handle camera zoom interpolation!
     const old_camera_scale = game.camera_scale;
     if (KeyBits.isSet(KeyBits.plus, game.keys_held_mask)) {
+        // .pow is safe here despite being inconsistent on different devices; it's mainly visual
         game.camera_scale = @min(game.camera_scale * std.math.pow(f64, CAMERA_CHANGE_SPEED, logic_speed), CAMERA_ZOOM_MAX);
     }
     if (KeyBits.isSet(KeyBits.minus, game.keys_held_mask)) {
@@ -359,9 +473,19 @@ pub fn move(logic_speed: f64) void {
     if (left_key_held) move_input -= speed;
     if (right_key_held) move_input += speed;
 
+    std.debug.assert(DECAY_RATE_ACCEL_X > 0 and DECAY_RATE_DECEL_X > 0 and DECAY_RATE_Y > 0 and DECAY_RATE_Y_SLIDE > 0);
     const decay_rate_x = if (left_key_held or right_key_held) DECAY_RATE_ACCEL_X else DECAY_RATE_DECEL_X;
+
+    // A wall slide is a heavier vertical damping, nothing else.
+    // wall_contact_dir is last tick's, because the sweep that sets it has not run yet.
+    // One tick of lag is invisible next to the ten or so ticks a slide lasts.
+    is_wall_sliding = !isGhost() and !is_grounded and
+        game.player_velocity[1] > 0 and
+        ((wall_contact_dir < 0 and left_key_held) or (wall_contact_dir > 0 and right_key_held));
+    const decay_rate_y = if (is_wall_sliding) DECAY_RATE_Y_SLIDE else DECAY_RATE_Y;
+
     const x_mult = 1.0 - decay_rate_x;
-    const y_mult = 1.0 - DECAY_RATE_Y;
+    const y_mult = 1.0 - decay_rate_y;
     const pow_fx = std.math.pow(f64, x_mult, logic_speed);
     const pow_fy = std.math.pow(f64, y_mult, logic_speed);
 
@@ -410,41 +534,39 @@ pub fn move(logic_speed: f64) void {
         // and about 3.0 blocks for a full hold. Two brakes do that, and both are off while
         // the key is held: a gravity multiplier, and a constant cut taken off upward speed.
 
-        // Decay first, then gravity. The (1 - pow_fy) / DECAY_RATE_Y factor integrates a constant
+        // Decay first, then gravity. The (1 - pow_fy) / decay_rate_y factor integrates a constant
         // acceleration under that decay, so one tick at logic_speed 2 lands where two ticks at 1 do.
         var y_vel = game.player_velocity[1] * pow_fy;
 
-        // Gravity strength by arc phase:
-        // - near the apex, key down    0.60  hang time over the top of the jump.
-        // - near the apex, key up      1.00  no brake through the turn, so the arc has no kink.
-        // - rising, key up             1.80  ends the rise early, which is the short jump.
-        // - falling under 3.0, key up  1.20  a snappier drop back to the ground.
-        // - everything else            1.00  key still down, or already falling fast.
+        // Gravity strength by arc phase. Each case names its own multiplier:
+        // - near the apex, key down    hang time over the top of the jump.
+        // - near the apex, key up      no brake through the turn, so the arc has no kink.
+        // - rising, key up             ends the rise early, which is the short jump.
+        // - falling slowly, key up     a snappier drop back to the ground.
+        // - everything else            key still down, or already falling fast.
         const gravity_mult: f64 = if (@abs(y_vel) < REDUCED_GRAVITY_RANGE)
-            (if (up_key_held) 0.6 else 1.0)
-        else if (up_key_held or y_vel > 3.0)
-            1.0
+            (if (up_key_held) GRAVITY_MULT_APEX else GRAVITY_MULT_BASE)
+        else if (up_key_held or y_vel > VELOCITY_FALL_SNAP_MAX)
+            GRAVITY_MULT_BASE
         else if (y_vel >= 0)
-            1.20
+            GRAVITY_MULT_FALL_SNAP
         else
-            1.8;
-        y_vel += (GRAVITY * y_mult * (1.0 - pow_fy) / DECAY_RATE_Y) * gravity_mult;
+            GRAVITY_MULT_RISE_CUT;
+        y_vel += (GRAVITY * y_mult * (1.0 - pow_fy) / decay_rate_y) * gravity_mult;
 
         // The second brake on a released jump. The multiplier above scales with current speed,
         // so additional linear logic helps keep a "baseline" that forces the player to fall faster.
-        const LINEAR_Y_DECAY = 0.2 * logic_speed;
-        if (y_vel <= -LINEAR_Y_DECAY and !up_key_held) {
-            y_vel += LINEAR_Y_DECAY;
+        if (y_vel < 0 and !up_key_held) {
+            y_vel = @min(y_vel + DECAY_Y_LINEAR * logic_speed, 0);
         }
 
-        // Terminal velocity, about 28 blocks per second.
-        // Decay alone would settle at ~7.76, so this cap only trims the last of that creep.
-        y_vel = @min(y_vel, 7.5);
+        y_vel = @min(y_vel, VELOCITY_FALL_MAX);
 
         game.player_velocity[1] = y_vel;
     }
 
-    // Physics displacement using average velocity!
+    // Displacement over the tick, taken at the END-of-tick velocity rather than the average.
+    // It undershoots slightly while accelerating; the jump arc is tuned around that, so leave it.
     const displacement = game.player_velocity * @as(Vec2f, @splat(logic_speed * dw.CHUNK_SIZE_FLOAT));
     subpixel_accum += displacement;
 
@@ -453,10 +575,12 @@ pub fn move(logic_speed: f64) void {
 
     game.last_player_pos = game.player_pos;
 
-    // Vertical first, then horizontal, with the ground test between them.
-    // So a player who walks off a ledge is still grounded for the tick that leaves it,
-    // and coyote time starts on the tick after.
-    moveAxis(1, total_move[1]);
+    const was_grounded = is_grounded;
+    const impact_velocity = game.player_velocity[1];
+    moveSwept(total_move);
+    const bumped_ceiling = impact_velocity < -DUST_CEILING_VELOCITY_MIN and
+        game.player_velocity[1] == 0 and
+        isColliding(game.player_pos[0], game.player_pos[1] - 1);
 
     is_grounded = isColliding(game.player_pos[0], game.player_pos[1] + 1);
 
@@ -467,18 +591,441 @@ pub fn move(logic_speed: f64) void {
         coyote_frames -= logic_speed; // this CAN be negative!
     }
 
-    std.debug.assert(jumps_left >= 0); // sanity check
     if (up_key_pressed and !jumped_this_frame) {
         jump_leniency_frames = JUMP_LENIENCY_FRAMES;
     } else if (jump_leniency_frames > 0) {
         jump_leniency_frames -= logic_speed; // this CAN be negative!
     }
 
-    moveAxis(0, total_move[0]);
-
     // Finally, tell SimBuffer and the camera to update.
     world.SimBuffer.sync(game.getPlayerCoord());
     updateCamera(logic_speed);
+
+    // After the camera, so dust measures against the camera it will be anchored to.
+    emitMovementDust(
+        is_grounded and !was_grounded,
+        jumped_this_frame and was_grounded,
+        bumped_ceiling,
+        impact_velocity,
+    );
+}
+
+// ----
+// Movement dust.
+//
+// Near-white puffs, anchored to the world, so the player runs out from under their own trail instead of dragging it along.
+// Every emitter spawns per DISTANCE travelled.
+//
+// A puff has one initial kick and one constant brake.
+// The brake cancels that kick exactly at the last frame of its life;
+// the puff flies out, coasts, and settles, with no per-frame drag term.
+// The particle tick integrates a constant acceleration in closed form.
+// That is what keeps the curve identical at any tick rate.
+// ----
+
+/// How much of the sampled block's own color survives into a puff.
+/// 0 is pure white dust and 1 is the raw block color.
+/// In between the puff is that color washed toward white, which reads as pulverized, not chipped.
+/// An `f64` only so the debug slider can reach it.
+pub var DUST_TINT: f64 = 0.75;
+/// Odds a puff takes the block's SECOND most common color instead of its primary.
+/// Both come from `sprite_colors.zig`, which counts texels per atlas tile.
+pub var DUST_SECONDARY_ODDS: f32 = 0.35;
+/// Lightness jitter, as a multiplier on the tinted lightness.
+/// This is what keeps a burst off one flat tone.
+pub var DUST_LIGHTNESS_MIN: f32 = 0.78;
+pub var DUST_LIGHTNESS_MAX: f32 = 1.18;
+/// Chroma jitter, as a multiplier on the tinted chroma.
+pub var DUST_CHROMA_MIN: f32 = 0.90;
+pub var DUST_CHROMA_MAX: f32 = 1.45;
+/// Chroma multiplier for dust that borrows a neighboring floor block.
+const DUST_ADJACENT_CHROMA_MULT: f32 = 0.60;
+/// Opacity band a puff picks from, before the pool's own fade curve.
+pub var DUST_ALPHA_MIN: f32 = 0.38;
+pub var DUST_ALPHA_MAX: f32 = 0.72;
+
+/// Spin band, in radians per 60 FPS frame.
+/// The sign is part of the range, so puffs turn both ways.
+const DUST_SPIN_MAX: f32 = 0.06;
+
+/// World pixels of running between two footfall puffs.
+const DUST_RUN_SPACING_PX: f64 = 5.0;
+/// Horizontal speed under which running raises no dust at all, in world pixels per frame.
+const DUST_RUN_VELOCITY_MIN: f64 = 0.60;
+/// World pixels of sliding between two wall puffs.
+const DUST_SLIDE_SPACING_PX: f64 = 0.6;
+/// Fall speed a landing must beat before it puffs, in world pixels per frame.
+const DUST_LAND_VELOCITY_MIN: f64 = 1.80;
+/// Upward speed a ceiling hit must beat before it puffs, in world pixels per frame.
+const DUST_CEILING_VELOCITY_MIN: f64 = 1.00;
+/// Smallest possible ceiling bump particle amount; float for easier math.
+const DUST_CEILING_COUNT_MIN: f32 = 6;
+/// Largest possible ceiling bump particle amount; float for easier math.
+const DUST_CEILING_COUNT_MAX: f32 = 18;
+/// Sink on a puff thrown off the ground, in viewport pixels per frame squared.
+/// Run and slide dust get none: it hangs where it was raised.
+const DUST_SINK: f32 = 0.005;
+
+/// Distance run since the last footfall puff, in world pixels.
+var dust_run_travel: f64 = 0.0;
+/// Distance slid down a wall since the last wall puff, in world pixels.
+var dust_slide_travel: f64 = 0.0;
+
+/// Uniform random float in [min, max), off the shared particle stream.
+/// Decoration only: nothing here feeds worldgen or the save.
+inline fn dustRand(min: f32, max: f32) f32 {
+    return min + (max - min) * dw.particles.seed.float(f32);
+}
+
+/// The world subpixel point the player passed through, `frac` of the way along this tick's move.
+/// `offset` is measured from the player position, which sits half a block above the feet.
+fn pathPointSub(frac: f64, offset: Vec2i) Vec2i {
+    const game = &memory.game;
+    const delta: Vec2f = @floatFromInt(game.player_pos - game.last_player_pos);
+    const base: Vec2f = @floatFromInt(game.last_player_pos + offset);
+    return @intFromFloat(base + delta * @as(Vec2f, @splat(frac)));
+}
+
+/// The block sprite at a world subpixel point in the player's frame.
+///
+/// `.none` means air or a point past the world edge.
+/// The point must be inside or next to the player hitbox, so its chunk is always resident and this generates nothing.
+fn blockSpriteAt(point: Vec2i) Sprite {
+    const shift: Vec2i = .{
+        @divFloor(point[0], SUBPIXELS_IN_CHUNK),
+        @divFloor(point[1], SUBPIXELS_IN_CHUNK),
+    };
+    const coord = memory.game.getPlayerCoord().move(shift) orelse return .none;
+    const chunk = world.getChunkPtr(coord);
+
+    // A mod against a positive divisor is never negative, so both indices land inside the chunk.
+    const lx: u4 = @intCast(@divFloor(@mod(point[0], SUBPIXELS_IN_CHUNK), CHUNK_SIZE_SQ));
+    const ly: u4 = @intCast(@divFloor(@mod(point[1], SUBPIXELS_IN_CHUNK), CHUNK_SIZE_SQ));
+    return chunk.blocks[@as(usize, ly) * CHUNK_SIZE + @as(usize, lx)].id;
+}
+
+/// The floor block directly under a point on the bottom edge of the hitbox.
+///
+/// One sample per puff, at the puff's OWN x, mixes two floor materials by area for free.
+/// A player half on green stone and half on plain stone throws each color in that ratio.
+/// No coverage arithmetic, and no bias toward whichever block the center happens to sit over.
+///
+/// Sets `adjacent` to `true` when `floorUnder()` uses a neighboring block.
+///
+/// Precondition: `foot_point` is ON the bottom edge of the hitbox, so the row below it is the floor.
+inline fn floorUnder(foot_point: Vec2i, adjacent: *bool) Sprite {
+    adjacent.* = false;
+    const floor_point = foot_point + Vec2i{ 0, 1 };
+    const floor = blockSpriteAt(floor_point);
+    if (!floor.isEmpty()) return floor;
+
+    // A burst can sample just past the edge of the floor while another foot is grounded.
+    // Keep that puff colored by the nearest material instead of treating air as a material.
+    const local_x = @mod(floor_point[0], CHUNK_SIZE_SQ);
+    const near_offset: i64 = if (local_x < CHUNK_SIZE_SQ / 2) -CHUNK_SIZE_SQ else CHUNK_SIZE_SQ;
+    const near = blockSpriteAt(floor_point + Vec2i{ near_offset, 0 });
+    if (!near.isEmpty()) {
+        adjacent.* = true;
+        return near;
+    }
+
+    const far = blockSpriteAt(floor_point + Vec2i{ -near_offset, 0 });
+    if (!far.isEmpty()) adjacent.* = true;
+    return far;
+}
+
+/// The ceiling block directly above a point on the top edge of the hitbox.
+inline fn ceilingAbove(head_point: Vec2i, adjacent: *bool) Sprite {
+    adjacent.* = false;
+    const ceil_point = head_point - Vec2i{ 0, 1 };
+    const ceil = blockSpriteAt(ceil_point);
+    if (!ceil.isEmpty()) return ceil;
+
+    const local_x = @mod(ceil_point[0], CHUNK_SIZE_SQ);
+    const near_offset: i64 = if (local_x < CHUNK_SIZE_SQ / 2) -CHUNK_SIZE_SQ else CHUNK_SIZE_SQ;
+    const near = blockSpriteAt(ceil_point + Vec2i{ near_offset, 0 });
+    if (!near.isEmpty()) {
+        adjacent.* = true;
+        return near;
+    }
+
+    const far = blockSpriteAt(ceil_point + Vec2i{ -near_offset, 0 });
+    if (!far.isEmpty()) adjacent.* = true;
+    return far;
+}
+
+/// The LCHA one puff draws at, taken from the block it was raised off.
+///
+/// A block gives up its two most common atlas colors, so a vein of one ore inside another throws dust in both.
+/// `DUST_TINT` then washes that color toward white.
+/// In OKLCH, washing toward white is a lightness toward 1 with the chroma going to 0.
+/// That keeps the block's hue and drops its saturation, unlike a straight blend with white.
+fn dustLcha(ground: Sprite, chroma_mult: f32) Vec4f32 {
+    const source: Vec4f32 = if (ground.isEmpty())
+        .{ 1.0, 0.0, 0.0, 1.0 }
+    else if (dw.particles.seed.float(f32) < DUST_SECONDARY_ODDS)
+        palette.secondaryColorOf(ground)
+    else
+        palette.primaryColorOf(ground);
+
+    const tint: f32 = @floatCast(DUST_TINT);
+    const lightness = 1.0 - (1.0 - source[0]) * tint;
+    const chroma = source[1] * tint * chroma_mult;
+    return .{
+        lightness * dustRand(DUST_LIGHTNESS_MIN, DUST_LIGHTNESS_MAX),
+        chroma * dustRand(DUST_CHROMA_MIN, DUST_CHROMA_MAX),
+        source[2],
+        dustRand(DUST_ALPHA_MIN, DUST_ALPHA_MAX),
+    };
+}
+
+/// Adds one puff that coasts to a stop over its own lifetime, colored by `ground`.
+///
+/// `kick` is in viewport pixels per frame.
+/// The brake cancels it on the last frame, so a puff never slides past where it was aimed.
+/// `sink` is whatever downward drift survives that.
+fn addDust(
+    origin: Vec2f32,
+    kick: Vec2f32,
+    size: f32,
+    life: f32,
+    sink: f32,
+    ground: Sprite,
+    ground_chroma_mult: f32,
+) void {
+    std.debug.assert(life > 0.0); // the brake divides by it
+    dw.particles.addParticle(.{
+        .position = origin,
+        .velocity = kick,
+        .accel = .{ -kick[0] / life, -kick[1] / life + sink },
+        .rotation = dustRand(0.0, std.math.tau),
+        .spin = dustRand(-DUST_SPIN_MAX, DUST_SPIN_MAX),
+        .size = size,
+        .lcha = dustLcha(ground, ground_chroma_mult),
+        .frames_left = life,
+        .lifetime = life,
+        .anchored = true,
+    });
+}
+
+/// Emits every movement puff this tick owes. Call after `updateCamera()`,
+/// so a spawn is measured against the camera the anchor already holds.
+fn emitMovementDust(landed: bool, jumped: bool, bumped_ceiling: bool, impact_velocity: f64) void {
+    @setFloatMode(.optimized);
+    const game = &memory.game;
+    if (isGhost()) {
+        // A ghost touches nothing, so nothing it did this tick has a trail to leave.
+        dust_run_travel = 0.0;
+        dust_slide_travel = 0.0;
+        return;
+    }
+
+    const zoom: f32 = @floatCast(game.camera_scale);
+    const moved: Vec2f = @floatFromInt(game.player_pos - game.last_player_pos);
+    const moved_px = moved / @as(Vec2f, @splat(dw.CHUNK_SIZE_FLOAT));
+
+    if (jumped) {
+        spawnJumpDust(zoom);
+        dust_run_travel = 0.0;
+    }
+    if (landed and impact_velocity > DUST_LAND_VELOCITY_MIN) spawnLandDust(zoom, impact_velocity);
+    if (bumped_ceiling) spawnCeilingDust(zoom, impact_velocity);
+
+    // One puff per fixed distance, placed back along the path!
+    if (is_grounded and @abs(game.player_velocity[0]) > DUST_RUN_VELOCITY_MIN) {
+        const run_px = @abs(moved_px[0]);
+        dust_run_travel += run_px;
+        while (dust_run_travel >= DUST_RUN_SPACING_PX) {
+            dust_run_travel -= DUST_RUN_SPACING_PX;
+            spawnRunDust(zoom, if (run_px > 0.0) 1.0 - @min(dust_run_travel / run_px, 1.0) else 1.0);
+        }
+    } else {
+        dust_run_travel = 0.0;
+    }
+
+    if (is_wall_sliding and wall_contact_dir != 0) {
+        const slide_px = @abs(moved_px[1]);
+        dust_slide_travel += slide_px;
+        while (dust_slide_travel >= DUST_SLIDE_SPACING_PX) {
+            dust_slide_travel -= DUST_SLIDE_SPACING_PX;
+            spawnSlideDust(zoom, if (slide_px > 0.0) 1.0 - @min(dust_slide_travel / slide_px, 1.0) else 1.0);
+        }
+    } else {
+        dust_slide_travel = 0.0;
+    }
+}
+
+/// One puff off the trailing foot, kicked back along the ground and faster the faster the run is.
+fn spawnRunDust(zoom: f32, frac: f64) void {
+    const game = &memory.game;
+    const dir: f32 = if (game.player_velocity[0] < 0) -1.0 else 1.0;
+    const speed: f32 = @floatCast(@abs(game.player_velocity[0]));
+
+    // The foot that just left the ground is behind the center, and the puff starts at ground level.
+    const foot: Vec2i = .{ @intFromFloat(@as(f64, -dir) * 44.0), CHUNK_SIZE_SQ / 2 };
+    const point = pathPointSub(frac, foot);
+    const origin = dw.particles.anchorScreenPx(point) +
+        Vec2f32{ dustRand(-1.6, 1.6), dustRand(-1.2, 0.6) } * @as(Vec2f32, @splat(zoom));
+    var adjacent_floor = false;
+    const ground = floorUnder(point, &adjacent_floor);
+
+    const life = dustRand(24.0, 44.0);
+    const kick: Vec2f32 = .{
+        -dir * dustRand(0.12, 0.34) * speed,
+        -dustRand(0.10, 0.34),
+    };
+    addDust(
+        origin,
+        kick * @as(Vec2f32, @splat(zoom)),
+        dustRand(0.8, 2.0) * zoom,
+        life,
+        0.0,
+        ground,
+        if (adjacent_floor) DUST_ADJACENT_CHROMA_MULT else 1.0,
+    );
+}
+
+/// A fan under the feet on the frame the jump leaves the ground.
+const DUST_JUMP_COUNT: usize = 12;
+
+fn spawnJumpDust(zoom: f32) void {
+    // At the START of the tick: the ground the jump pushed off, not where the rise ended.
+    const feet: Vec2i = .{ 0, CHUNK_SIZE_SQ / 2 };
+    const center = pathPointSub(0.0, feet);
+
+    for (0..DUST_JUMP_COUNT) |_| {
+        // Spread across the hitbox width first, so each puff can sample the floor it stands over.
+        const spread: i64 = @intFromFloat(dustRand(-PLAYER_HITBOX_WIDTH / 2, PLAYER_HITBOX_WIDTH / 2));
+        const point = center + Vec2i{ spread, 0 };
+        const origin = dw.particles.anchorScreenPx(point) +
+            Vec2f32{ 0.0, dustRand(-1.0, 1.0) * zoom };
+        var adjacent_floor = false;
+        const ground = floorUnder(point, &adjacent_floor);
+
+        // A downward half circle: the puff is the ground being pushed, not the player rising.
+        const angle = dustRand(0.20, std.math.pi - 0.20);
+        const speed = dustRand(0.40, 1.15);
+        const life = dustRand(20.0, 36.0);
+        const kick: Vec2f32 = .{ @cos(angle) * speed, @sin(angle) * speed * 0.5 };
+        addDust(
+            origin,
+            kick * @as(Vec2f32, @splat(zoom)),
+            dustRand(0.8, 2.2) * zoom,
+            life,
+            DUST_SINK * zoom,
+            ground,
+            if (adjacent_floor) DUST_ADJACENT_CHROMA_MULT else 1.0,
+        );
+    }
+}
+
+/// Smallest possible landing burst particle amount; float for easier math.
+const DUST_LAND_COUNT_MIN: f32 = 12;
+/// Largest possible landing burst particle amount; float for easier math.
+const DUST_LAND_COUNT_MAX: f32 = 40;
+
+/// A burst that splits left and right along the ground, sized by how hard the landing was.
+fn spawnLandDust(zoom: f32, impact_velocity: f64) void {
+    const strength: f32 = @floatCast(std.math.clamp(
+        (impact_velocity - DUST_LAND_VELOCITY_MIN) / (VELOCITY_FALL_MAX - DUST_LAND_VELOCITY_MIN),
+        0.0,
+        1.0,
+    ));
+    const count: usize = @intFromFloat(DUST_LAND_COUNT_MIN +
+        (DUST_LAND_COUNT_MAX - DUST_LAND_COUNT_MIN) * strength);
+
+    const feet: Vec2i = .{ 0, CHUNK_SIZE_SQ / 2 };
+    const center = memory.game.player_pos + feet;
+
+    for (0..count) |i| {
+        // Alternating sides rather than a random one, so a small burst still reads as a splash.
+        const side: f32 = if (i % 2 == 0) 1.0 else -1.0;
+        // Biased outward along its own side, so the splash samples the whole width it landed on.
+        const spread: i64 = @intFromFloat(side * dustRand(0.0, PLAYER_HITBOX_WIDTH / 2));
+        const point = center + Vec2i{ spread, 0 };
+        var adjacent_floor = false;
+        const ground = floorUnder(point, &adjacent_floor);
+
+        const life = dustRand(26.0, 50.0);
+        const kick: Vec2f32 = .{
+            side * dustRand(0.45, 1.05) * (0.6 + strength),
+            -dustRand(0.05, 0.45) * (0.4 + strength),
+        };
+        addDust(
+            dw.particles.anchorScreenPx(point) + Vec2f32{ 0.0, dustRand(-1.0, 0.5) * zoom },
+            kick * @as(Vec2f32, @splat(zoom)),
+            dustRand(0.9, 1.4 + 1.6 * strength) * zoom,
+            life,
+            DUST_SINK * zoom,
+            ground,
+            if (adjacent_floor) DUST_ADJACENT_CHROMA_MULT else 1.0,
+        );
+    }
+}
+
+/// One puff scraped off the wall the player is sliding down.
+/// It stays where it was scraped, so the falling player visibly outruns it.
+fn spawnSlideDust(zoom: f32, frac: f64) void {
+    const dir: f32 = @floatFromInt(wall_contact_dir);
+    const contact: Vec2i = .{
+        @intFromFloat(@as(f64, dir) * (PLAYER_HITBOX_WIDTH / 2)),
+        // Anywhere down the body that is touching, not just the feet.
+        @intFromFloat(dustRand(CHUNK_SIZE_SQ / 2 - PLAYER_HITBOX_HEIGHT, CHUNK_SIZE_SQ / 2)),
+    };
+    const point = pathPointSub(frac, contact);
+    const origin = dw.particles.anchorScreenPx(point);
+
+    const life = dustRand(22.0, 40.0);
+    const kick: Vec2f32 = .{
+        -dir * dustRand(0.06, 0.26),
+        -dustRand(0.05, 0.22),
+    };
+    // One subpixel further into the wall, which is the cell this puff was scraped off.
+    addDust(
+        origin,
+        kick * @as(Vec2f32, @splat(zoom)),
+        dustRand(0.6, 1.6) * zoom,
+        life,
+        0.0,
+        blockSpriteAt(point + Vec2i{ wall_contact_dir, 0 }),
+        1.0,
+    );
+}
+
+/// A downward shower off the ceiling when the player bumps their head while rising.
+fn spawnCeilingDust(zoom: f32, impact_velocity: f64) void {
+    const strength: f32 = @floatCast(std.math.clamp(
+        (@abs(impact_velocity) - DUST_CEILING_VELOCITY_MIN) / (JUMP_FORCE - DUST_CEILING_VELOCITY_MIN),
+        0.0,
+        1.0,
+    ));
+    const count: usize = @intFromFloat(DUST_CEILING_COUNT_MIN +
+        (DUST_CEILING_COUNT_MAX - DUST_CEILING_COUNT_MIN) * strength);
+
+    const head_y = CHUNK_SIZE_SQ / 2 - PLAYER_HITBOX_HEIGHT;
+    const center = memory.game.player_pos + Vec2i{ 0, head_y };
+
+    for (0..count) |_| {
+        const spread: i64 = @intFromFloat(dustRand(-PLAYER_HITBOX_WIDTH / 2, PLAYER_HITBOX_WIDTH / 2));
+        const point = center + Vec2i{ spread, 0 };
+        var adjacent_ceil = false;
+        const ground = ceilingAbove(point, &adjacent_ceil);
+
+        // Downward cone: dislodged particles shower downward and scatter slightly outward
+        const angle = dustRand(0.15 * std.math.pi, 0.85 * std.math.pi);
+        const speed = dustRand(0.30, 1.10) * (0.6 + strength * 0.5);
+        const life = dustRand(18.0, 36.0);
+        const kick: Vec2f32 = .{ @cos(angle) * speed, @sin(angle) * speed };
+        addDust(
+            dw.particles.anchorScreenPx(point) + Vec2f32{ 0.0, dustRand(0.0, 1.5) * zoom },
+            kick * @as(Vec2f32, @splat(zoom)),
+            dustRand(0.7, 1.2 + 0.8 * strength) * zoom,
+            life,
+            DUST_SINK * 1.5 * zoom,
+            ground,
+            if (adjacent_ceil) DUST_ADJACENT_CHROMA_MULT else 1.0,
+        );
+    }
 }
 
 /// Returns whether the player hitbox collides after one axis moves by `delta` subpixels.
@@ -490,38 +1037,119 @@ inline fn isCollidingOffset(comptime axis: u1, delta: i64) bool {
         isColliding(game.player_pos[0], game.player_pos[1] + delta);
 }
 
-/// Sweeps the player along one axis by `amount` subpixels and stops at the first contact.
+/// Moves the player along the tick's whole movement VECTOR and stops at the first contact.
 ///
-/// The sweep steps one block at a time, then one subpixel at a time to close the last gap.
-/// It cannot pass through a solid block, because `CCD_STEP_SIZE` is one block
-/// and the hitbox is never larger than one block on either axis.
-/// A contact takes this axis' velocity and its subpixel remainder,
-/// so a player held against a wall does not build speed into it.
-fn moveAxis(comptime axis: u1, amount: i64) void {
-    const game = &memory.game;
-    var remaining = @abs(amount);
-    const step: i64 = if (amount > 0) 1 else -1;
+/// One axis at a time is not enough.
+/// Take a move of 3 blocks down and 1 block left, resolved as all of the fall then all of the walk.
+/// It checks neither the cell the diagonal crosses nor the wall standing in it.
+/// So at a low tick rate the player lands under a floor they should have hit.
+/// This walks the vector in sub-steps of at most one block on EITHER axis.
+/// No cell on the path then goes unchecked.
+///
+/// Inside a sub-step the order is vertical, then horizontal.
+/// That is what an ordinary one-block-per-tick move already did.
+/// So at 60 FPS an ordinary move is one sub-step and lands exactly where it used to.
+/// An axis that makes contact loses its velocity and its subpixel remainder.
+/// It also stops for the rest of the tick, so a player held against a wall builds no speed into it.
+fn moveSwept(total: Vec2i) void {
+    wall_contact_dir = 0;
 
-    while (remaining > 0) {
-        const move_now = @min(remaining, CCD_STEP_SIZE);
-        if (!isCollidingOffset(axis, step * move_now)) {
-            game.player_pos[axis] += step * move_now;
-            if (handleLocalWrap(axis)) break;
-            remaining -= move_now;
-            continue;
-        }
+    const sub_steps = sweepSubStepCount(total);
+    if (sub_steps == 0) return;
 
-        // Something solid is inside this step. Walk up to it one subpixel at a time.
-        var sub_steps = move_now;
-        while (sub_steps > 0) : (sub_steps -= 1) {
-            if (isCollidingOffset(axis, step)) break;
-            game.player_pos[axis] += step;
-            if (handleLocalWrap(axis)) break;
+    var blocked_x = total[0] == 0;
+    var blocked_y = total[1] == 0;
+    var done: Vec2i = .{ 0, 0 };
+
+    var i: i64 = 1;
+    while (i <= sub_steps) : (i += 1) {
+        const target = sweepTarget(total, i, sub_steps);
+
+        if (!blocked_y and !stepAxis(1, target[1] - done[1])) blocked_y = true;
+        if (!blocked_x and !stepAxis(0, target[0] - done[0])) {
+            blocked_x = true;
+            wall_contact_dir = if (total[0] < 0) -1 else 1;
         }
-        game.player_velocity[axis] = 0;
-        subpixel_accum[axis] = 0;
-        break;
+        if (blocked_x and blocked_y) break;
+
+        // A blocked axis stops here, so only the axis that moved advances the running total.
+        if (!blocked_x) done[0] = target[0];
+        if (!blocked_y) done[1] = target[1];
     }
+}
+
+/// How many sub-steps `moveSwept()` splits a move into, or 0 when there is nothing to move.
+///
+/// A ceiling division on the longer axis.
+/// That holds every sub-step to one block or less on BOTH axes.
+/// It is the whole reason the sweep cannot skip a cell.
+fn sweepSubStepCount(total: Vec2i) i64 {
+    const span: i64 = @intCast(@max(@abs(total[0]), @abs(total[1])));
+    return @divFloor(span + CCD_STEP_SIZE - 1, CCD_STEP_SIZE);
+}
+
+/// The offset from the start of the move that `index` of `count` sub-steps has covered.
+///
+/// Measured from the whole move each time rather than summed per step.
+/// Rounding then never loses a subpixel, and the last sub-step lands exactly on `total`.
+inline fn sweepTarget(total: Vec2i, index: i64, count: i64) Vec2i {
+    std.debug.assert(count > 0 and index >= 1 and index <= count);
+    return .{ @divTrunc(total[0] * index, count), @divTrunc(total[1] * index, count) };
+}
+
+/// Moves one axis by at most one block and returns whether the whole move fit.
+///
+/// On a contact it lands the player against the obstacle and returns false.
+/// It also drops that axis' velocity and subpixel remainder.
+/// A world edge counts as a contact, because `isColliding()` reads past it as solid.
+fn stepAxis(comptime axis: u1, delta: i64) bool {
+    std.debug.assert(@abs(delta) <= CCD_STEP_SIZE);
+    const game = &memory.game;
+    if (delta == 0) return true;
+
+    if (!isCollidingOffset(axis, delta)) {
+        game.player_pos[axis] += delta;
+        // A refused carry is the world edge, which already zeroed the axis.
+        return !handleLocalWrap(axis);
+    }
+
+    const reach = lastClearOffset(axis, delta);
+    if (reach != 0) {
+        game.player_pos[axis] += reach;
+        _ = handleLocalWrap(axis);
+    }
+    game.player_velocity[axis] = 0;
+    subpixel_accum[axis] = 0;
+    return false;
+}
+
+/// Returns the largest part of `delta` the player can take on one axis before touching a solid.
+///
+/// A bisection, not a walk.
+/// Inside one block step, collision along the axis only ever turns ON.
+/// A corner that entered a solid needs a further whole block of travel to clear its far side.
+/// The sweep is at most one block.
+/// So the clear offsets are a prefix, and the midpoint test is exact.
+/// That is 8 collision tests instead of up to 256.
+///
+/// A player who starts INSIDE a solid breaks that argument.
+/// The bisection can then land them in the first clear pocket along the axis.
+/// A walk would crawl the same way and it unsticks them, so it is left alone.
+/// `escapeSolid()` owns the real case.
+///
+/// Precondition: `delta` is inside one `CCD_STEP_SIZE` and the player collides at it.
+fn lastClearOffset(comptime axis: u1, delta: i64) i64 {
+    std.debug.assert(@abs(delta) <= CCD_STEP_SIZE);
+
+    // Both bounds are magnitudes; the sign goes back on at the end.
+    const step: i64 = if (delta > 0) 1 else -1;
+    var clear: i64 = 0;
+    var blocked: i64 = @intCast(@abs(delta));
+    while (blocked - clear > 1) {
+        const middle = @divFloor(clear + blocked, 2);
+        if (isCollidingOffset(axis, step * middle)) blocked = middle else clear = middle;
+    }
+    return step * clear;
 }
 
 /// Carries `game.player_pos` into the neighboring chunk once it leaves `[0, SUBPIXELS_IN_CHUNK)`,
@@ -552,6 +1180,11 @@ fn handleLocalWrap(comptime axis: u1) bool {
             const subpixel_offset = carry * dw.SUBPIXELS_IN_CHUNK;
             game.last_player_pos[axis] -= subpixel_offset;
             game.camera_pos[axis] -= subpixel_offset;
+            // The particle anchor lives in the same frame as the camera, so it carries too.
+            // Without this, a carry reads as a teleport and every anchored particle jumps a chunk.
+            var anchor_shift: Vec2i = .{ 0, 0 };
+            anchor_shift[axis] = subpixel_offset;
+            dw.particles.rebaseAnchor(anchor_shift);
             return false;
         } else {
             // World edge was hit! snap back, and drop the momentum that was carrying us into it
@@ -980,12 +1613,13 @@ fn moveToEscapablePosition(pos: Vec2i) void {
     game.camera_pos = game.player_pos;
     game.last_camera_pos = game.player_pos;
     game.player_velocity = .{ 0.0, 0.0 };
+    dw.particles.syncAnchor(); // the camera jumped, so the particle anchor jumps with it
     resetMotionState();
 }
 
 /// Performs an AABB check (for the player's position) against the world grid.
 pub fn isColliding(px: i64, py: i64) bool {
-    // Ghost mode goes through everything (see the lift branch in `move()`).
+    // Ghost mode goes through everything (see the lift branch in move()).
     if (isGhost()) return false;
 
     const game = &memory.game;
@@ -993,7 +1627,7 @@ pub fn isColliding(px: i64, py: i64) bool {
 
     const player_coord = game.getPlayerCoord();
     var last_coord: ?world.Coordinate = null;
-    // Borrowed for the length of this loop only, which generates nothing (see `getChunkPtr()`).
+    // Borrowed for the length of this loop only, which generates nothing (see getChunkPtr()).
     var chunk: *const memory.Chunk = undefined;
 
     for (corners) |c| {
@@ -1052,6 +1686,49 @@ fn updateCamera(logic_speed: f64) void {
     const smooth_speed = 1.0 - std.math.pow(f64, 1.0 - CAMERA_SMOOTHING, logic_speed);
     game.camera_pos[0] += @intFromFloat(@as(f64, @floatFromInt(shift_x)) * smooth_speed);
     game.camera_pos[1] += @intFromFloat(@as(f64, @floatFromInt(shift_y)) * smooth_speed);
+}
+
+test "a swept move never advances more than one block on either axis" {
+    // The bug this guards: a fall of several blocks plus a step sideways, resolved one whole axis at a time,
+    // walks around the corner block the diagonal actually crosses.
+    // At two logical FPS the player fell past a floor by moving left first.
+    // Holding every sub-step to one block on both axes is what makes that impossible,
+    // since the hitbox is never wider than a block.
+    const cases = [_]Vec2i{
+        .{ 0, 0 },
+        .{ 1, 0 },
+        .{ 0, -1 },
+        .{ 255, 255 },
+        .{ 256, 256 },
+        .{ 257, -3 },
+        .{ -256, 768 }, // the reported case: one block left, three blocks down
+        .{ 4095, -7 },
+        .{ -7000, 7000 },
+        .{ 12345, -1 },
+    };
+
+    for (cases) |total| {
+        const count = sweepSubStepCount(total);
+        if (count == 0) {
+            try std.testing.expectEqual(Vec2i{ 0, 0 }, total);
+            continue;
+        }
+
+        var previous: Vec2i = .{ 0, 0 };
+        var i: i64 = 1;
+        while (i <= count) : (i += 1) {
+            const target = sweepTarget(total, i, count);
+            const delta = target - previous;
+            try std.testing.expect(@abs(delta[0]) <= CCD_STEP_SIZE);
+            try std.testing.expect(@abs(delta[1]) <= CCD_STEP_SIZE);
+            // No sub-step may overshoot and walk back, or a contact would land behind the player.
+            try std.testing.expect(@abs(target[0]) >= @abs(previous[0]));
+            try std.testing.expect(@abs(target[1]) >= @abs(previous[1]));
+            previous = target;
+        }
+        // The schedule must spend the whole move, to the subpixel.
+        try std.testing.expectEqual(total, previous);
+    }
 }
 
 test "bounded escape probe rejects diagonal-only routes" {
