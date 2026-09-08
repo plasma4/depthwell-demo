@@ -28,6 +28,32 @@ const CHUNK_SIZE_FLOAT = dw.CHUNK_SIZE_FLOAT;
 ///   Equivalently `old_scale * pow(change, current_dt + 1)`, but the raw form avoids recovering `old_scale`.
 pub var current_dt: f64 = 0.0;
 
+/// How far `game.bg_time` moved on the last logic tick, written by `handleTick()`.
+///
+/// The background's noise field is sampled at a clock, so the clock is a position.
+/// Takes the position curve.
+/// `bg_time + bg_time_step * current_dt` walks back toward the previous value.
+/// Not saved, because the first tick after a load rewrites it.
+pub var bg_time_step: f64 = 0.0;
+
+/// Sprite animation clock, counted in 60 FPS FRAMES rather than in ticks. NOT stored in the save file.
+/// A period shorter than one tick still strobes at a low tick rate.
+pub var anim_frame: f64 = 0.0;
+
+/// How far `anim_frame` moved on the last logic tick; see `bg_time_step`.
+pub var anim_frame_step: f64 = 0.0;
+
+/// `anim_frame` interpolated to THIS render frame.
+/// Every animated sprite must read this, not `game.frame`.
+///
+/// Takes the position curve (see `current_dt`).
+/// For example, 6 render frames of one 10 FPS tick show 6 animation frames,
+/// instead of one held frame and then a jump.
+/// Never negative, so a caller can convert it to an integer frame index directly.
+pub inline fn animFrame() f64 {
+    return @max(0.0, anim_frame + anim_frame_step * current_dt);
+}
+
 /// Grid-aligned player position in logical viewport pixels, at the center of the sprite.
 /// The viewport is 480x270, and this is recomputed every render frame.
 /// The player is drawn as a render entity, so the entity pass shares this.
@@ -76,8 +102,8 @@ const WARP_REACH_TILES: f64 = blk: {
 };
 
 comptime {
-    // rasterizeLayer() pads the visible chunk rectangle by CHUNK_MARGIN chunks a side, and the
-    // rectangle is chunk-aligned OUTWARD, so this is the padding it guarantees in tiles.
+    // rasterizeLayer() pads the visible chunk rectangle by CHUNK_MARGIN chunks a side,
+    // and the rectangle is chunk-aligned OUTWARD, so this is the padding it guarantees in tiles.
     const margin_tiles: f64 = @floatFromInt(dw.lighting.CHUNK_MARGIN * CHUNK_SIZE);
     if (margin_tiles < LIGHT_FILTER_REACH_TILES + WARP_REACH_TILES) @compileError(
         "The lighting margin no longer covers what the shader's light filter reads: " ++
@@ -124,6 +150,31 @@ fn updateShake(intensity: f32) void {
     warp.offset[1] += (target.offset[1] - warp.offset[1]) * SHAKE_RESPONSE;
     warp.rotation += (target.rotation - warp.rotation) * SHAKE_RESPONSE;
     warp.scale += (target.scale - warp.scale) * SHAKE_RESPONSE;
+}
+
+/// Applies the current screen warp to a viewport-pixel position.
+/// This matches `apply_warp()` in `src/shader.wgsl` while keeping entity coordinates logical.
+pub inline fn warpPosition(position: dw.utils.Vec2f32) dw.utils.Vec2f32 {
+    const center: dw.utils.Vec2f32 = .{ dw.SCREEN_WIDTH_HALF, dw.SCREEN_HEIGHT_HALF };
+    const delta = position - center;
+    const cosine = @cos(warp.rotation);
+    const sine = @sin(warp.rotation);
+    const spun: dw.utils.Vec2f32 = .{
+        delta[0] * cosine - delta[1] * sine,
+        delta[0] * sine + delta[1] * cosine,
+    };
+    return center + spun * @as(dw.utils.Vec2f32, @splat(warp.scale)) +
+        dw.utils.Vec2f32{ warp.offset[0], warp.offset[1] };
+}
+
+/// Returns the current uniform scale from the screen warp.
+pub inline fn warpScale() f32 {
+    return warp.scale;
+}
+
+/// Returns the current rotation from the screen warp.
+pub inline fn warpRotation() f32 {
+    return warp.rotation;
 }
 
 /// Wrap period, in chunks, for the FBM background camera coordinate.
@@ -208,6 +259,10 @@ pub const LayerPass = struct {
     player: [2]f64,
     /// Logical zoom for this layer, portal zoom multiplier already folded in.
     zoom: f64,
+    /// Opacity this layer's tiles are drawn at.
+    /// `render.zig` hands it straight to `handleVisibleChunks()`,
+    /// and a block-anchored entity fades with it so the two never disagree.
+    opacity: f64,
     source: Source,
 };
 
@@ -247,6 +302,7 @@ fn liveLayer(dt: f64) LayerPass {
         // A descent zooms the whole world in without touching camera_scale,
         // so the committed view (D+1 chunks) is still there to fall back to the moment it ends.
         .zoom = interpolated_zoom * dw.portal.zoomFactor(),
+        .opacity = dw.portal.worldOpacity() * @as(f64, dw.player.softlockFadeOpacity()),
         .source = .live,
     };
 }
@@ -269,6 +325,7 @@ fn overlayLayer() LayerPass {
         .cam = .{ cam_x, cam_y },
         .player = .{ cam_x, cam_y },
         .zoom = memory.game.camera_scale * dw.portal.overlayScale(),
+        .opacity = dw.portal.overlayOpacity(),
         .source = .preview,
     };
 }
@@ -276,22 +333,24 @@ fn overlayLayer() LayerPass {
 /// Adds visible chunk data for the live world to the scratch buffer, as well as properties.
 /// This is used in `render.prepareVisibleData()`.
 ///
-/// Returns whether anything was rasterized.
-/// False means `portal.liveLayerHidden()` hid the layer outright.
+/// Returns the opacity the layer's tiles must be drawn at.
+/// Null means `portal.liveLayerHidden()` hid the layer outright.
 /// The caller must then skip its draw calls, because nothing was published for them to read.
 /// The player is still placed, since the entity pass draws it over both layers.
-pub fn updateVisibleChunks(dt: f64, canvas_w: f64, canvas_h: f64) bool {
+pub fn updateVisibleChunks(dt: f64, canvas_w: f64, canvas_h: f64) ?f64 {
     current_dt = dt;
     // rolled once per render frame, before either pass, so both layers are handed the same warp!
     updateShake(dw.portal.shakeIntensity());
+    // Each layer drains its own entries before the next layer writes the scratch buffer.
+    dw.entity.resetBlockEntities();
 
     const pass = liveLayer(dt);
     if (dw.portal.liveLayerHidden()) {
         placePlayer(pass);
-        return false;
+        return null;
     }
     rasterizeLayer(pass, canvas_w, canvas_h);
-    return true;
+    return pass.opacity;
 }
 
 /// Adds the portal descent's D+1 preview to the scratch buffer, ready for a second tile draw call.
@@ -303,7 +362,8 @@ pub fn updateOverlayChunks(canvas_w: f64, canvas_h: f64) void {
 
 /// Rasterizes one layer into the scratch buffer and publishes its render properties.
 fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
-    const game = &memory.game;
+    // read once, so both layers of a portal descent animate on the same frame
+    const anim = animFrame();
     // calculate effective zoom
     const resolution_scale = canvas_w / @as(f64, dw.SCREEN_WIDTH);
     const interpolated_zoom = pass.zoom;
@@ -344,6 +404,7 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
     memory.scratchReset(); // scratch allocator always needs to be reset!
     const out = memory.scratchAllocSlice(memory.Block, wb * hb);
     const player_coord = pass.origin;
+    const place = tilePlacement(pass, interp_cam_x, interp_cam_y, min_cx, min_cy);
 
     for (0..ch) |gy| {
         const offset_y = @as(i64, @intCast(min_cy)) + @as(i64, @intCast(gy));
@@ -379,17 +440,34 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
                 for (0..CHUNK_SIZE) |ly| {
                     const row_start = (gy * CHUNK_SIZE + ly) * wb + gx * CHUNK_SIZE;
                     const chunk_row_start = ly * CHUNK_SIZE;
+                    const row_px = place.origin_px[1] +
+                        @as(f32, @floatFromInt(gy * CHUNK_SIZE + ly)) * place.step_px;
 
                     // iterate through each block in the row instead of doing a blind @memcpy
                     for (0..CHUNK_SIZE) |lx| {
                         var block = chunk.blocks[chunk_row_start + lx];
+
+                        // asked here, rather than in the later grid walk, because this loop
+                        // still knows which chunk cell the tile came from.
+                        if (dw.entity.blockOverlay(block, anim)) |overlay| {
+                            dw.entity.queueBlockEntity(
+                                overlay,
+                                .{
+                                    place.origin_px[0] +
+                                        @as(f32, @floatFromInt(gx * CHUNK_SIZE + lx)) * place.step_px,
+                                    row_px,
+                                },
+                                place.zoom,
+                                place.opacity,
+                            );
+                        }
 
                         if (!block.isFoundation() and !block.isLiquid()) {
                             // since decor aren't foundation/liquid blocks, they don't get edge flags
                             block.edge_flags = 0xFF;
                             block.id_edge_flags = 0xFF;
                         }
-                        // sprite variation (2x2 stone, liquid surfaces, seed picks, campfire animation)
+                        // sprite variation (2x2 stone, liquid surfaces, and seed picks)
                         // is applied AFTER lighting; see applyVariation() below.
                         // Lighting queries sprite properties by ID, so it must run on the base (unvaried) IDs first.
                         out[row_start + lx] = block;
@@ -411,20 +489,58 @@ fn rasterizeLayer(pass: LayerPass, canvas_w: f64, canvas_h: f64) void {
     const player_by: f32 = @floatCast(@as(f64, @floatFromInt(-min_cy * CHUNK_SIZE)) + pass.player[1] / subpixels_per_block);
     dw.lighting.applyLighting(out, wb, hb, player_bx, player_by);
 
-    applyVariation(out, wb, game.frame);
+    applyVariation(out, wb, anim);
     updateRenderProperties(pass, interp_cam_x, interp_cam_y, wb, hb, min_cx, min_cy, effective_zoom, interpolated_zoom);
     publishBackgroundGrid(effective_zoom, canvas_w, canvas_h);
+}
+
+/// Where a tile pass places the entities its blocks ask for; see `entity.queueBlockEntity()`.
+/// Every length is in viewport pixels, and the layer's own camera is already folded in,
+/// so a portal transition needs no special case downstream.
+const TilePlacement = struct {
+    /// Center of the tile at grid index (0, 0).
+    origin_px: dw.utils.Vec2f32,
+    /// Distance between neighboring tile centers.
+    step_px: f32,
+    /// Viewport pixels per world pixel (16 world pixels is one block).
+    zoom: f32,
+    /// Opacity this layer's tiles are drawn at.
+    opacity: f32,
+};
+
+/// Builds the tile grid's screen placement for this layer.
+///
+/// Same world-to-screen mapping `placePlayer()` uses.
+/// So a queued entity is pixel-aligned with the tile under it.
+/// One viewport pixel is `CHUNK_SIZE` subpixels, scaled by the layer's zoom.
+fn tilePlacement(pass: LayerPass, cam_x: f64, cam_y: f64, min_cx: i32, min_cy: i32) TilePlacement {
+    const subpixels_per_chunk: f64 = @floatFromInt(dw.SUBPIXELS_IN_CHUNK);
+    const subpixels_per_block: f64 = @floatFromInt(dw.CHUNK_SIZE_SQ);
+    const px_per_sub = pass.zoom / CHUNK_SIZE_FLOAT;
+
+    // Half a block over, because a tile's ANCHOR is its top-left but an entity's is its center.
+    const origin_sub_x = @as(f64, @floatFromInt(min_cx)) * subpixels_per_chunk + subpixels_per_block / 2.0;
+    const origin_sub_y = @as(f64, @floatFromInt(min_cy)) * subpixels_per_chunk + subpixels_per_block / 2.0;
+
+    return .{
+        .origin_px = .{
+            @floatCast(@as(f64, dw.SCREEN_WIDTH_HALF) + (origin_sub_x - cam_x) * px_per_sub),
+            @floatCast(@as(f64, dw.SCREEN_HEIGHT_HALF) + (origin_sub_y - cam_y) * px_per_sub),
+        },
+        .step_px = @floatCast(subpixels_per_block * px_per_sub),
+        .zoom = @floatCast(pass.zoom),
+        .opacity = @floatCast(pass.opacity),
+    };
 }
 
 /// Applies sprite variation/animation to the final visible buffer, in place, just before it is sent to the GPU.
 /// Runs AFTER lighting so the lighting pass sees base (unvaried) sprite IDs.
 ///
 /// Uses grid-relative tile coordinates, `i % wb` and `i / wb`.
-/// The grid origin is chunk-aligned, an even tile offset, so their parity matches
-/// absolute tile parity.
-/// A positional variant, such as 2x2 stone or checkerboard edge stone, then shows no
-/// join across the world, exactly as the old shader did.
-fn applyVariation(out: []memory.Block, wb: u32, frame: u32) void {
+/// The grid origin is chunk-aligned, an even tile offset, so their parity matches absolute tile parity.
+/// A positional variant, such as 2x2 stone or checkerboard edge stone,
+/// then shows no join across the world, exactly as the old shader did.
+fn applyVariation(out: []memory.Block, wb: u32, frame: f64) void {
     // Walked row by row rather than by flat index. The tile coordinates are the only thing
     // the index was ever for, and recovering them per block costs a divide and a modulo on
     // every cell of the screen.
@@ -545,7 +661,8 @@ fn updateRenderProperties(
     memory.setScratchProp(10, abs_cam_y);
     // The background's animation clock. Owned by the simulation rather than the host's wall clock so a
     // portal descent can ease it to a standstill (and so a save captures exactly where it stopped).
-    memory.setScratchProp(11, memory.game.bg_time);
+    // Interpolated on the position curve, or the field would step once per tick while the camera glides.
+    memory.setScratchProp(11, memory.game.bg_time + bg_time_step * current_dt);
 
     // Per-frame warp of this layer. The offset is authored in internal viewport pixels, so it is scaled
     // into canvas pixels here to match screen_pos in the shader (which is already resolution-scaled).
@@ -612,9 +729,19 @@ fn updateRenderProperties(
             .{ game.depth, game.player_pos },
         });
 
+        // "filled/budget": chunks the last tick precached, out of what its movement bounds allowed!
+        // See SimBuffer.precacheBudget() on caching details.
+        var precache_buf: [16]u8 = undefined;
+        const precache = std.fmt.bufPrint(&precache_buf, "{d}/{d}", .{
+            world.SimBuffer.precache_filled,
+            world.SimBuffer.precache_budget,
+        }) catch "?";
+
         logger.writeOnce(1, .{
             "{mh}Velocity",
             game.player_velocity,
+            "{mh}Chunks precached this tick",
+            precache,
             "{mh}Rendered entity count",
             dw.entity.entity_count,
         });
