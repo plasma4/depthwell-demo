@@ -513,7 +513,7 @@ pub fn triggerAscend(coord: Coordinate, bx: u4, by: u4) void {
 /// The portal that was clicked only decides where the dive is aimed.
 /// The route back is the recorded `AscentStep`, so any portal serves as the way down.
 ///
-/// Does nothing unless the player is shallower than their deepest depth.
+/// Does nothing unless the player is not at the frontier (shallower than the deepest depth visited).
 pub fn triggerReturn(coord: Coordinate, bx: u4, by: u4) void {
     if (isActive() or !world.canRetrace()) return;
     beginTransition(.returning, coord, bx, by);
@@ -1153,8 +1153,8 @@ fn spawnIntake() void {
     const surge = intensity * intensity * (INTAKE_PULSE_FLOOR + (1.0 - INTAKE_PULSE_FLOOR) * wave);
     const count: usize = @intFromFloat(3.0 + 46.0 * surge);
 
-    const cap: u16 = @intFromFloat(@round(24.0 - 14.0 * progress()));
-    if (cap > 2) {
+    const cap: f32 = @floatCast(@round(24.0 - 14.0 * progress()));
+    if (cap > 2.0) {
         dw.particles.spawnOrbitRing(effectOrigin(), effectColors(), .{
             .count = count,
             // Held in world scale so the ring keeps hugging the mouth as the view zooms.
@@ -1162,7 +1162,7 @@ fn spawnIntake() void {
             .radius_max = INTAKE_RADIUS_MAX * zoom,
             .size_min = INTAKE_SIZE_MIN * @sqrt(zoom),
             .size_max = INTAKE_SIZE_MAX * @sqrt(zoom),
-            .travel_min = @min(cap, 8),
+            .travel_min = @min(cap, 8.0),
             .travel_max = cap,
             // Tightens as the transition builds, so the swirl visibly winds up.
             .swirl = @floatCast(0.85 + 0.75 * intensity),
@@ -1178,28 +1178,35 @@ fn spawnIntake() void {
 
 /// Advances the running transition by one logical frame.
 /// Called once per tick iteration from `handleTick()`.
-pub fn tick() void {
+pub fn tick(logic_speed: f64) void {
     if (!isActive()) return;
 
+    // How many 60 FPS frames this tick stands for; see handleTick() in state/tick.zig.
+    // The animation is a wall-clock length, so its frame counter has to advance by the same amount,
+    // and the preview budget has to grow with it or the world is not ready when the dive lands.
+    const steps: u32 = @intFromFloat(@max(1.0, @round(logic_speed)));
+
     const g = &memory.game;
+    const before = g.portal_frame;
     if (isReturning()) {
-        tickReturn();
+        tickReturn(steps);
     } else {
         ensureReady();
-        g.portal_frame +|= 1;
+        g.portal_frame +|= steps;
 
         if (g.portal_frame >= TOTAL_FRAMES) {
             finish();
             return;
         }
 
-        fillPreview(chunksPerFrame());
+        fillPreview(chunksPerFrame() * steps);
         spawnIntake();
     }
 
     // Both a transition and a return pull the player in over the same PULL_FRAMES,
     // so the moment they are taken is punctuated the same way either way.
-    if (isActive() and ready and g.portal_frame == PULL_FRAMES) spawnSwallow();
+    // A step can jump over the exact frame, so this asks whether the tick CROSSED it.
+    if (isActive() and ready and before < PULL_FRAMES and g.portal_frame >= PULL_FRAMES) spawnSwallow();
 
     // The world is frozen, so pinning the previous-frame values keeps render interpolation from drifting with nothing moving.
     // The transition's own motion is an override.
@@ -1210,19 +1217,24 @@ pub fn tick() void {
 
 /// Advances the return fade, committing the retrace on the frame the screen is fully dark.
 ///
-/// Keyed to the exact midpoint frame rather than a range,
+/// Keyed to CROSSING the midpoint frame rather than to a range,
 /// so resuming a save taken after it cannot commit a second time (bad).
-fn tickReturn() void {
+/// A save resumed past the midpoint already has `portal_frame >= RETURN_DIVE_FRAMES`,
+/// which fails the `before` half of the test.
+fn tickReturn(steps: u32) void {
     const g = &memory.game;
     ensureReady();
-    g.portal_frame +|= 1;
+    const before = g.portal_frame;
+    g.portal_frame +|= steps;
 
     if (g.portal_frame < RETURN_DIVE_FRAMES) {
         // Budget the D+1 generation across the dive, exactly as a descent budgets its preview, rather
         // than regenerating the whole SimBuffer in the one frame the return commits on.
-        fillPreview(chunksPerFrame());
+        fillPreview(chunksPerFrame() * steps);
         spawnReturnIntake();
-    } else if (g.portal_frame == RETURN_DIVE_FRAMES) {
+    } else if (before < RETURN_DIVE_FRAMES) {
+        // The dive owes whatever preview a big step skipped, since commitReturn() adopts it.
+        fillPreview(chunksPerFrame() * steps);
         commitReturn();
     }
 
@@ -1262,7 +1274,7 @@ fn spawnReturnIntake() void {
     const zoom: f32 = @floatCast(memory.game.camera_scale * @min(zoomFactor(), @as(f64, dw.ZOOM_FACTOR)));
     const count: usize = @intFromFloat(4.0 + 34.0 * intensity);
 
-    const cap: u16 = @intFromFloat(@round(22.0 - 12.0 * t));
+    const cap: f32 = @floatCast(@round(22.0 - 12.0 * t));
     if (cap <= 2) return;
 
     dw.particles.spawnOrbitRing(effectOrigin(), effectColors(), .{
@@ -1271,7 +1283,7 @@ fn spawnReturnIntake() void {
         .radius_max = INTAKE_RADIUS_MAX * zoom,
         .size_min = INTAKE_SIZE_MIN * @sqrt(zoom),
         .size_max = INTAKE_SIZE_MAX * @sqrt(zoom),
-        .travel_min = @min(cap, 8),
+        .travel_min = @min(cap, 8.0),
         .travel_max = cap,
         .swirl = @floatCast(0.85 + 0.75 * intensity),
         .outward_ratio = DESCENT_OUTWARD_RATIO,
