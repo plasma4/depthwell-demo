@@ -41,6 +41,7 @@ const world = dw.world;
 const sprite = dw.sprite;
 const inventory = dw.inventory;
 const mining = dw.mining;
+const seeding = dw.seeding;
 const furnace = @import("../menus/furnace.zig");
 
 const Sprite = dw.Sprite;
@@ -279,6 +280,10 @@ fn writeSpriteTable(w: *Writer) !void {
 fn readSpriteTable(r: *Reader) !void {
     id_remap.clearRetainingCapacity();
     const n = try r.varint();
+    // A save can name at most one row per sprite id, so a larger count is a corrupt blob,
+    // not a bigger world. Refuse it BEFORE reserving: n is an untrusted varint and would otherwise size an allocation.
+    if (n > sprite.max_sprite_value + 1) return SaveError.BadData;
+    try id_remap.ensureTotalCapacity(save_alloc, @intCast(n));
     for (0..@intCast(n)) |_| {
         const old_id = try r.int(u16);
         const name = try r.str();
@@ -314,18 +319,63 @@ fn readHeaderCore(r: *Reader, section_len: usize) !void {
     g.keys_held_mask = 0;
 }
 
-/// Exports quad cache (fractal descent state; raw internal fields + the path lists)
-fn writeQuadCache(w: *Writer) !void {
-    const at = try w.beginSection(.quadcache, 1);
+/// Section version of `.quadcache`.
+/// The payload stores the descent paths and the material traces.
+const QUADCACHE_VERSION: u16 = 2;
+
+/// Rebuilds the quad-cache fields that the save does not need to store.
+///
+/// The seed recurrence is the same one used when a new depth is installed.
+/// The path lists are the durable record, so replaying them gives the same seeds.
+fn rebuildQuadCacheDerivedState() void {
+    const g = &memory.game;
     const qc = &world.quad_cache;
-    try w.bytes(std.mem.asBytes(&qc.path_hashes));
-    try w.bytes(std.mem.asBytes(&qc.origins_x));
-    try w.bytes(std.mem.asBytes(&qc.origins_y));
-    try w.bytes(std.mem.asBytes(&qc.historical_seeds));
-    try w.int(u8, @as(u8, @intFromBool(qc.most_top)) |
-        (@as(u8, @intFromBool(qc.most_bottom)) << 1) |
-        (@as(u8, @intFromBool(qc.most_left)) << 2) |
-        (@as(u8, @intFromBool(qc.most_right)) << 3));
+
+    qc.path_hashes = .{ .value = @splat(g.seed) };
+    @memset(&qc.origins_x, 0);
+    @memset(&qc.origins_y, 0);
+    @memset(std.mem.asBytes(&qc.historical_seeds), 0);
+
+    if (g.depth <= dw.HORIZON_DEPTH) return;
+
+    var seeds: seeding.ChunkSeeds = .{ .value = @splat(g.seed) };
+    var depth: u64 = dw.HORIZON_DEPTH + 1;
+    while (depth <= g.depth) : (depth += 1) {
+        const left_cell = qc.getOriginX(depth);
+        const top_cell = qc.getOriginY(depth);
+        var next: seeding.ChunkSeeds = undefined;
+
+        inline for (0..4) |quadrant| {
+            const cell_x: u3 = left_cell + @as(u3, @intFromBool(quadrant % 2 == 1));
+            const cell_y: u3 = top_cell + @as(u3, @intFromBool(quadrant >= 2));
+            const parent_quadrant: usize =
+                @as(usize, @intFromBool(cell_x >= dw.ZOOM_FACTOR)) +
+                @as(usize, @intFromBool(cell_y >= dw.ZOOM_FACTOR)) * 2;
+
+            next.value[quadrant] = seeding.mixCoordinateSeed(
+                seeds.value[parent_quadrant],
+                cell_x % dw.ZOOM_FACTOR,
+                cell_y % dw.ZOOM_FACTOR,
+                depth,
+            );
+        }
+
+        const ring: usize = @intCast(depth % world.QuadCache.HISTORY_LEN);
+        qc.origins_x[ring] = left_cell;
+        qc.origins_y[ring] = top_cell;
+        qc.historical_seeds[ring] = next;
+        seeds = next;
+    }
+
+    qc.path_hashes = seeds;
+}
+
+/// Writes the durable quad-cache paths.
+///
+/// `path_hashes`, `origins_x`, `origins_y`, and `historical_seeds` are rebuilt on load.
+fn writeQuadCache(w: *Writer) !void {
+    const at = try w.beginSection(.quadcache, QUADCACHE_VERSION);
+    const qc = &world.quad_cache;
 
     std.debug.assert(qc.left_path.len == qc.top_path.len);
     const len = qc.left_path.len;
@@ -340,17 +390,12 @@ fn writeQuadCache(w: *Writer) !void {
     w.endSection(at);
 }
 
-fn readQuadCache(r: *Reader) !void {
+fn readQuadCache(r: *Reader, section_version: u16) !void {
+    // An older payload has a different shape, and the fields after it are the descent path itself:
+    // reading them shifted gives a world that generates as neither save.
+    if (section_version < QUADCACHE_VERSION) return SaveError.UnsupportedVersion;
+
     const qc = &world.quad_cache;
-    try r.readInto(std.mem.asBytes(&qc.path_hashes));
-    try r.readInto(std.mem.asBytes(&qc.origins_x));
-    try r.readInto(std.mem.asBytes(&qc.origins_y));
-    try r.readInto(std.mem.asBytes(&qc.historical_seeds));
-    const edges = try r.int(u8);
-    qc.most_top = (edges & 1) != 0;
-    qc.most_bottom = (edges & 2) != 0;
-    qc.most_left = (edges & 4) != 0;
-    qc.most_right = (edges & 8) != 0;
 
     // prealloc-all-at-once pattern
     // we actually do NOT need to clear the old data, if applicable
@@ -381,12 +426,13 @@ fn readQuadCache(r: *Reader) !void {
         try r.readInto(std.mem.asBytes(qc.materials_path.at(i)));
     }
 
-    // Windows are derived, so none were saved; `finalizeLoad()` rebuilds them from these traces.
+    // Windows are derived, so none were saved; finalizeLoad() rebuilds them from these traces.
     qc.materials_windows.len = 0;
+    rebuildQuadCacheDerivedState();
 }
 
 /// Writes the ascent stack (the blocks the player has ascended past, deepest last).
-/// Present but empty when the player is at their deepest depth.
+/// Present but empty when the player is at their deepest depth visited (frontier).
 /// Its length is the route back down, and it recovers `max_depth_reached` for a save that predates it.
 fn writeAscentStack(w: *Writer) !void {
     const at = try w.beginSection(.ascent_stack, 1);
@@ -536,12 +582,12 @@ fn readMisc(r: *Reader) !void {
     dw.player.facing_right = try r.boolean();
 }
 
-// MOD_STORE record (section version 3), per modified chunk:
+// MOD_STORE record (section version 0), per modified chunk:
 //   key         : suffix[0] u64 | suffix[1] u64 | depth u64 | quadrant u32 (28 bytes)
 //   flags       : u8 (reserved, always 0)
 //   modified    : [CHUNK_SIZE_SQ / 64]u64  (32 bytes; which cells the player owns)
 //   cells       : PackedCell (u32), once per set bit, ascending            (4 bytes each)
-// The cell count is the population count of `modified`, so it is never stored twice.
+// The cell count is the population count of modified, so it is never stored twice.
 // Sprite IDs are remapped through SPRITE_TABLE on load based on enum names!
 
 /// Bytes one modified cell occupies on disk.
@@ -766,6 +812,15 @@ pub fn finalizeLoad() void {
     dw.particles.seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .particles));
     dw.chunks.shake_seed = dw.seeding.ChaCha12.init(&dw.seeding.mixBaseSeed(g.seed, .screen_shake));
 
+    // At or before the horizon the world is one suffix wide, so quadrant 0 is the only one there
+    // (see world.isInWorld()). An older build could leave a phantom quadrant at those depths.
+    // Nothing there reads the quadrant when it generates,
+    // so the same suffix in quadrant 0 lands the player on the terrain they left.
+    if (g.depth <= dw.HORIZON_DEPTH) {
+        g.player_quadrant = 0;
+        g.portal_quadrant = 0;
+    }
+
     world.max_possible_suffix = world.getMaxSuffixAtDepth(g.depth);
 
     // The live horizon window is derived from the loaded traces rather than stored
@@ -846,7 +901,6 @@ fn deserialize(buf: []const u8) !void {
         const tag_raw = try r.int(u16);
         if (tag_raw == @intFromEnum(SectionTag.end)) break;
         const section_version = try r.int(u16);
-        _ = section_version;
         const byte_len = try r.int(u64);
         const section_end = r.pos + @as(usize, @intCast(byte_len));
         if (section_end > buf.len) return SaveError.Truncated;
@@ -857,7 +911,7 @@ fn deserialize(buf: []const u8) !void {
         switch (tag) {
             .sprite_table => try readSpriteTable(&r),
             .header_core => try readHeaderCore(&r, @intCast(byte_len)),
-            .quadcache => try readQuadCache(&r),
+            .quadcache => try readQuadCache(&r, section_version),
             .inventory => try readInventory(&r),
             .menus => try readMenus(&r),
             .tools => try readTools(&r),
@@ -871,7 +925,7 @@ fn deserialize(buf: []const u8) !void {
         r.pos = section_end;
     }
 
-    // A save from before the frontier existed carries neither the counter nor a `legacy_store`,
+    // A save from before the frontier existed carries neither the counter nor a legacy_store,
     // which is exactly a world that has only ever had one timeline.
     // Retrace is the only descent from shallower than the frontier, so the ascent stack gives the right value.
     memory.game.max_depth_reached = @max(
@@ -948,6 +1002,11 @@ var snapshot_entries_len: [2]usize = .{ 0, 0 };
 /// `beginSnapshotInner()` precompute the section length even though entries grow as the player keeps editing.
 var shadow: std.AutoHashMapUnmanaged(ShadowKey, []u8) = .empty;
 
+/// Entries `shadow` is sized for at the start of a snapshot.
+/// A snapshot spans a few frames, so this is how many distinct chunks the player can edit inside one;
+/// well past what a hand on a mouse can reach.
+const SHADOW_RESERVE = 64;
+
 /// Drops every preserved payload. `shadow` owns its values, unlike the old whole-`Chunk` map.
 fn clearShadow() void {
     var it = shadow.valueIterator();
@@ -999,7 +1058,7 @@ pub fn beginSnapshot() i64 {
 fn openStoreSection(w: *Writer, id: StoreId, count: usize) !void {
     const slot = @intFromEnum(id);
     try w.int(u16, @intFromEnum(id.tag()));
-    try w.int(u16, 3); // section version
+    try w.int(u16, 0); // section version
     store_len_off[slot] = save_buf.items.len;
     try w.int(u64, store_payload_len[slot]);
     try w.varint(count);
@@ -1019,7 +1078,18 @@ fn beginSnapshotInner() !void {
     try writeMisc(&w);
     try writeAscentStack(&w);
 
-    // `mod_store` first, then `legacy_store`: the cursor crossing `mod_plan_len` is the section break.
+    // The plan is exactly one entry per modified chunk in each store, and both counts are known
+    // now, so it is sized once rather than doubled its way there while the player is mid-build.
+    try plan.ensureTotalCapacity(
+        save_alloc,
+        world.mod_store.index.count() + world.legacy_store.index.count(),
+    );
+    // shadow is filled LAZILY, only for planned entries the player touches before the snapshot
+    // encodes them. That is a handful, not the whole plan, so it gets a small fixed reserve:
+    // sizing it to the plan would allocate for thousands of chunks to hold about three.
+    try shadow.ensureTotalCapacity(save_alloc, SHADOW_RESERVE);
+
+    // mod_store first, then legacy_store: the cursor crossing mod_plan_len is the section break.
     inline for (.{ StoreId.mods, StoreId.legacy }) |id| {
         const store = id.store();
         snapshot_entries_len[@intFromEnum(id)] = store.entries.len;
@@ -1079,7 +1149,7 @@ fn preserve(key: ShadowKey, entry: *const world.ModEntry, size: usize) !void {
 
     var w: Writer = .{ .list = &list };
     try writeEntryPayload(&w, entry);
-    // The plan's precomputed section length counted exactly `size` bytes for this entry.
+    // The plan's precomputed section length counted exactly size bytes for this entry.
     std.debug.assert(list.items.len == size);
 
     try shadow.put(save_alloc, key, try list.toOwnedSlice(save_alloc));
@@ -1121,7 +1191,7 @@ pub fn writeBatch(max_chunks: usize) i64 {
 fn writeBatchInner(w: *Writer, max_chunks: usize) !void {
     const end = @min(plan_cursor + max_chunks, plan.items.len);
     while (plan_cursor < end) : (plan_cursor += 1) {
-        // The plan holds every `mod_store` entry first, so this is where that section ends.
+        // The plan holds every mod_store entry first, so this is where that section ends.
         if (plan_cursor == mod_plan_len) {
             assertStoreSectionLen(.mods);
             try openStoreSection(w, .legacy, plan.items.len - mod_plan_len);
@@ -1146,7 +1216,7 @@ fn assertStoreSectionLen(id: StoreId) void {
 }
 
 fn finalizeSnapshot(w: *Writer) !void {
-    // An empty `legacy_store` never reaches the break in `writeBatchInner()`, so open it here.
+    // An empty legacy_store never reaches the break in writeBatchInner(), so open it here.
     if (plan_cursor == mod_plan_len) {
         assertStoreSectionLen(.mods);
         try openStoreSection(w, .legacy, 0);
@@ -1191,7 +1261,7 @@ test "mod_store: encoding/decoding is correct" {
     // The precomputed size the snapshot plan budgets must match what the writer actually emits.
     try testing.expectEqual(entryPayloadBytes(entry), buf.items.len);
 
-    // Re-read into a fresh store, exactly as readModStore() does!
+    // Re-read into a fresh store!
     for ([_]Sprite{ .stone, .water, .none }) |s| {
         try id_remap.put(save_alloc, @intFromEnum(s), s);
     }
@@ -1222,4 +1292,60 @@ test "mod_store: encoding/decoding is correct" {
 
     for (cells) |c| try testing.expectEqual(c.cell, world.mod_store.getCell(key, c.i).?);
     try testing.expectEqual(@as(?world.ModCell, null), world.mod_store.getCell(key, 1));
+}
+
+test "quadcache: derived fields replay from saved paths" {
+    const saved_game = memory.game;
+    const saved_left_path = world.quad_cache.left_path;
+    const saved_top_path = world.quad_cache.top_path;
+    const saved_path_hashes = world.quad_cache.path_hashes;
+    const saved_origins_x = world.quad_cache.origins_x;
+    const saved_origins_y = world.quad_cache.origins_y;
+    const saved_historical_seeds = world.quad_cache.historical_seeds;
+    defer {
+        memory.game = saved_game;
+        world.quad_cache.left_path = saved_left_path;
+        world.quad_cache.top_path = saved_top_path;
+        world.quad_cache.path_hashes = saved_path_hashes;
+        world.quad_cache.origins_x = saved_origins_x;
+        world.quad_cache.origins_y = saved_origins_y;
+        world.quad_cache.historical_seeds = saved_historical_seeds;
+    }
+
+    memory.game = .{};
+    memory.game.seed.value = @splat(0x123456789abcdef0);
+    memory.game.depth = dw.HORIZON_DEPTH + 3;
+
+    world.quad_cache.left_path.len = 0;
+    world.quad_cache.top_path.len = 0;
+    world.quad_cache.left_path.append(world.alloc, 0 | (1 << 3) | (2 << 6)) catch unreachable;
+    world.quad_cache.top_path.append(world.alloc, 2 | (1 << 3) | (0 << 6)) catch unreachable;
+
+    world.quad_cache.path_hashes = .{ .value = @splat(.{ .value = @splat(0xfeed) }) };
+    @memset(&world.quad_cache.origins_x, 7);
+    @memset(&world.quad_cache.origins_y, 7);
+    @memset(std.mem.asBytes(&world.quad_cache.historical_seeds), 0x7f);
+
+    rebuildQuadCacheDerivedState();
+
+    var depth: u64 = dw.HORIZON_DEPTH + 1;
+    while (depth <= dw.HORIZON_DEPTH + 3) : (depth += 1) {
+        memory.game.depth = depth + 1;
+        const expected = world.computeParentLayer(
+            memory.game.getPlayerCoord(),
+            memory.game.player_pos,
+        ).path_hashes;
+        const ring: usize = @intCast(depth % world.QuadCache.HISTORY_LEN);
+
+        try testing.expectEqual(world.quad_cache.getOriginX(depth), world.quad_cache.origins_x[ring]);
+        try testing.expectEqual(world.quad_cache.getOriginY(depth), world.quad_cache.origins_y[ring]);
+        try testing.expectEqual(expected, world.quad_cache.historical_seeds[ring]);
+    }
+
+    memory.game.depth = dw.HORIZON_DEPTH + 4;
+    const expected_current = world.computeParentLayer(
+        memory.game.getPlayerCoord(),
+        memory.game.player_pos,
+    ).path_hashes;
+    try testing.expectEqual(expected_current, world.quad_cache.path_hashes);
 }
