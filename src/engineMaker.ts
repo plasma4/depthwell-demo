@@ -205,7 +205,7 @@ export async function create(
             {
                 binding: 5,
                 visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-                buffer: { type: "read-only-storage" },
+                buffer: { type: "read-only-storage", hasDynamicOffset: true },
             }, // entities
         ],
     });
